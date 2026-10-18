@@ -3,8 +3,21 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
+import { stripTypeScriptTypes } from 'node:module';
 
 const source = () => readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
+
+test('campaign money and counts preserve fractional amounts and distinguish absent values from zero', () => {
+  const appSource = source(), names = ['numeric', 'money', 'compact', 'budgetProgress'];
+  const declarations = names.map(name => appSource.match(new RegExp(`^const ${name} = .+;$`, 'm'))?.[0]);
+  assert.ok(declarations.every(Boolean));
+  const { money, compact, budgetProgress } = runInNewContext(stripTypeScriptTypes(declarations.join('\n')) + '; ({money, compact, budgetProgress})');
+  assert.equal(money(0.01, 'USD'), '$0.01'); assert.equal(money(25.75, 'USD'), '$25.75'); assert.equal(money(25, 'USD'), '$25'); assert.equal(money(25.125, 'KWD').includes('25.125'), true);
+  for (const missing of [undefined, null, NaN, Infinity, '0']) { assert.equal(money(missing), '—'); assert.equal(compact(missing), '—'); }
+  assert.equal(money(0, 'USD'), '$0'); assert.equal(compact(0), '0');
+  assert.equal(budgetProgress(0.1, 0.25), 40); assert.equal(budgetProgress(5, 2), 100); assert.equal(budgetProgress(1, 0), 0); assert.equal(budgetProgress(undefined, 25), 0);
+  assert.equal((appSource.match(/budgetProgress\(c\.spent, c\.budget\)/g) || []).length, 2, 'Both campaign bars use the shared fractional-budget calculation.');
+});
 
 test('post labels show a platform caption when shared content is empty and identify media-only posts', () => {
   const declaration = source().match(/^function postLabel\(post: Row\) \{[^\r\n]+\}$/m)?.[0];

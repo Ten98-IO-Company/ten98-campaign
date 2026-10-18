@@ -5,11 +5,15 @@ type Props = { projectId: string; role: string; isOperator: boolean; request: (p
 const label = (status: string) => ({ pending: 'Awaiting receipt', uncertain: 'Needs review', 'reviewed-applied': 'Operator reports applied', 'reviewed-not-applied': 'Operator reports not applied', complete: 'Request completed', failed: 'Failed' }[status] || status);
 export default function OperationRecovery({ projectId, role, isOperator, request, onReviewed }: Props) {
   const [receipts, setReceipts] = useState<Receipt[]>([]), [selected, setSelected] = useState<Receipt | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [showAll, setShowAll] = useState(false);
-  const version = useRef(0), allowed = isOperator && ['owner', 'admin'].includes(role), path = '/projects/' + encodeURIComponent(projectId) + '/operations';
-  async function load(generation = version.current) { const result = await request(path); if (!Array.isArray(result.operations)) throw new Error('The provider receipts could not be read.'); if (generation === version.current) setReceipts(result.operations); }
+  const version = useRef(0), readVersion = useRef(0), allowed = isOperator && ['owner', 'admin'].includes(role), path = '/projects/' + encodeURIComponent(projectId) + '/operations';
+  async function load(generation = version.current) {
+    const read = ++readVersion.current;
+    try { const result = await request(path); if (!Array.isArray(result.operations)) throw new Error('The provider receipts could not be read.'); if (generation === version.current && read === readVersion.current) setReceipts(result.operations); }
+    catch (err) { if (generation === version.current && read === readVersion.current) throw err; }
+  }
   useEffect(() => {
     const generation = ++version.current; setReceipts([]); setSelected(null); setError(''); setNotice(''); setBusy(false);
-    if (allowed) load(generation).catch(err => { if (generation === version.current) setError((err as Error).message); });
+    if (allowed) { const loading = load(generation), read = readVersion.current; loading.catch(err => { if (generation === version.current && read === readVersion.current) setError((err as Error).message); }); }
     return () => { version.current++; };
   }, [projectId, allowed]);
   async function refresh() {
@@ -19,7 +23,7 @@ export default function OperationRecovery({ projectId, role, isOperator, request
   async function review(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (busy || !selected || !allowed) return;
     const values = Object.fromEntries(new FormData(event.currentTarget)), generation = version.current;
-    setBusy(true); setError(''); setNotice('');
+    readVersion.current++; setBusy(true); setError(''); setNotice('');
     try {
       const result = await request(path + '/' + encodeURIComponent(selected.id) + '/review', 'POST', { resolution: values.resolution, note: values.note, reference: values.reference, confirmChecked: values.confirmChecked === 'on' });
       if (generation !== version.current) return;

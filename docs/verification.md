@@ -1,6 +1,26 @@
-# End-to-end verification — v0.8.2
+# End-to-end verification — v0.8.3
 
-## Current workflow audit
+## Current full-app audit
+
+Verified on 18 October 2026 using isolated databases, the production frontend and simulated providers. All **244 automated checks** pass. The production build and offline non-root container smoke check pass; `npm audit --omit=dev` reports zero vulnerabilities. No dependency or schema change was added. Ponytail simplicity review and [Paperthin](https://github.com/LilMGenius/paperthin) evidence and consistency checks were applied, with separate agents reviewing changes and a fresh-context review of this release summary.
+
+The [full coverage map](audit-coverage.md) records reviewed functions and UI action families, runnable evidence, fresh browser results and acceptance limits across all existing application areas. This release fixes:
+
+- Inbox reply-window checks now page through recent history before deciding whether a reply is allowed. Incomplete or repeated pagination sends nothing.
+- A local edit or deletion during initial social submission cannot be overwritten by an older provider receipt. Minimal creation receipts retain the submitted schedule and per-platform content.
+- Native Google read-only preflight failures remain safely retryable; uncertain writes still require review. Shopping mappings can be disconnected after credentials are cleared, and Demand Gen exposes its supported target-CPC option.
+- Older settings, Microsoft, invitation, approval and recovery reads cannot replace newer action results or errors.
+- Campaign amounts retain currency precision, fractional budgets display the correct progress, and missing metrics remain unknown. Failed page loading presents a reload screen. Invitation pages and optional publishing controls are more compact; ChatGPT uses a consistent display label.
+
+The fresh browser walkthrough covers paused Shopping, Microsoft and ChatGPT creation, reviewed ad drafting, Shopping bid readback, Microsoft reports, per-platform social approval/scheduling, Drive approval, Calendar planning, analytics, OOH booking/cancellation, replies, transactional email/SMS, WhatsApp scheduling/cancellation, and short links/QR tracking.
+
+![Shopping product bid confirmed after saving](shopping-cpc-audit.png)
+
+![SMS reply through the campaign's original sender](sms-reply-audit.png)
+
+All accounts, amounts, messages and delivery states are synthetic. No real publication, message, upload, activation, booking or spend occurred. Live credentials and provider permissions/approvals are still required for live acceptance. WhatsApp sends/replies, uploads, DNS diagnostics, OAuth consent and Google Maps setup were not repeated in this browser pass; applicable local automated checks remain in the coverage map. Standard native Google Video creation remains unsupported, while existing Video reporting and supported Zernio Demand Gen video creation remain available. Organic search performance stays in ten98 Discover.
+
+## Previous workflow audit — v0.8.2
 
 Verified on 18 October 2026 using isolated databases and the production build against simulated providers. All **229 automated checks** pass (`npm test`), including the existing ChatGPT ads, Shopping/CPC, Microsoft, social publishing, analytics, OOH, DAM, inbox, direct campaigns and tracking regressions. The production build, offline non-root container smoke check and `npm audit --omit=dev` pass, with no known production dependency vulnerabilities. Independent review reproduced an additional targeting inconsistency, which was fixed and checked before release. No dependency was added.
 

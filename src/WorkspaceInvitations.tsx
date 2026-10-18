@@ -4,23 +4,26 @@ type Invitation = { id: string; email: string; role: string; workspaceName: stri
 type Props = { workspaceId: string; role: string; request: (path: string, method?: string, body?: unknown) => Promise<any> };
 export default function WorkspaceInvitations({ workspaceId, role, request }: Props) {
   const [invitations, setInvitations] = useState<Invitation[]>([]), [link, setLink] = useState<{ id: string; url: string } | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
-  const version = useRef(0), linkInput = useRef<HTMLInputElement>(null), canManage = ['owner', 'admin'].includes(role);
+  const version = useRef(0), readVersion = useRef(0), linkInput = useRef<HTMLInputElement>(null), canManage = ['owner', 'admin'].includes(role);
   const roles = role === 'owner' ? ['editor', 'viewer', 'admin', 'owner'] : ['editor', 'viewer'];
   const path = `/workspaces/${encodeURIComponent(workspaceId)}/invitations`;
   async function load(generation = version.current) {
-    const result = await request(path);
-    if (!Array.isArray(result.invitations)) throw new Error('The invitation list could not be read.');
-    if (generation === version.current) setInvitations(result.invitations);
+    const read = ++readVersion.current;
+    try {
+      const result = await request(path);
+      if (!Array.isArray(result.invitations)) throw new Error('The invitation list could not be read.');
+      if (generation === version.current && read === readVersion.current) setInvitations(result.invitations);
+    } catch (err) { if (generation === version.current && read === readVersion.current) throw err; }
   }
   useEffect(() => {
     const generation = ++version.current; setInvitations([]); setLink(null); setError(''); setNotice(''); setBusy(false);
-    if (canManage) load(generation).catch(err => { if (generation === version.current) setError((err as Error).message); });
+    if (canManage) { const loading = load(generation), read = readVersion.current; loading.catch(err => { if (generation === version.current && read === readVersion.current) setError((err as Error).message); }); }
     return () => { version.current++; };
   }, [workspaceId, role]);
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (busy || !canManage) return;
     const form = event.currentTarget, values = Object.fromEntries(new FormData(form)), generation = version.current;
-    setBusy(true); setError(''); setNotice(''); setLink(null);
+    readVersion.current++; setBusy(true); setError(''); setNotice(''); setLink(null);
     try {
       const result = await request(path, 'POST', { email: values.email, role: values.role });
       if (generation !== version.current) return;
@@ -30,7 +33,7 @@ export default function WorkspaceInvitations({ workspaceId, role, request }: Pro
   }
   async function revoke(invitation: Invitation) {
     if (busy || !canManage) return;
-    const generation = version.current; setBusy(true); setError(''); setNotice('');
+    const generation = version.current; readVersion.current++; setBusy(true); setError(''); setNotice('');
     try {
       await request(path + '/' + encodeURIComponent(invitation.id), 'DELETE');
       if (generation !== version.current) return;

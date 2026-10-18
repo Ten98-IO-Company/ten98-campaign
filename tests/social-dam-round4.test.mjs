@@ -65,6 +65,55 @@ test('a social write accepted during a newer local status update remains uncerta
   } finally { globalThis.fetch = originalFetch; db.close(); }
 });
 
+test('a first publication cannot mark a newer local caption as published after the provider accepted the earlier caption', async () => {
+  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'publish-race-project', zernioProfileId: 'publish-race-profile' };
+  const account = { _id: 'publish-race-account', platform: 'facebook', profileId: project.zernioProfileId };
+  let post = { id: 'publish-race-local', content: 'Original caption', platforms: ['facebook'], accounts: [account._id], status: 'draft', updatedAt: 'same-timestamp' }, writes = 0;
+  const store = { get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(target);
+    if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
+    if (url.pathname === '/api/v1/tools/validate/post') return Response.json({ valid: true, warnings: [] });
+    assert.equal(url.pathname, '/api/v1/posts'); assert.equal(options.method, 'POST'); writes++;
+    const payload = JSON.parse(options.body); assert.equal(payload.content, 'Original caption');
+    post = { ...post, content: 'New unsent caption' };
+    return Response.json({ post: { ...payload, _id: 'publish-race-remote', status: 'published' } });
+  };
+  async function invoke(key) {
+    let response;
+    await handleIntegration({ req: { method: 'POST', headers: { 'idempotency-key': key } }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/social/publish`), body: { postId: post.id }, project, db, store, role: 'editor', config: { env: { ZERNIO_API_KEY: 'fixture-key' } }, send(status, data) { response = { status, data }; } });
+    return response;
+  }
+  try {
+    const result = await invoke('publish-race-original');
+    assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
+    assert.equal(post.content, 'New unsent caption'); assert.equal(post.status, 'draft'); assert.equal(post.externalId, undefined);
+    assert.equal((await invoke('publish-race-original')).status, 409);
+    assert.equal((await invoke('publish-race-new-key')).status, 409); assert.equal(writes, 1);
+  } finally { globalThis.fetch = originalFetch; db.close(); }
+});
+
+test('a minimal first publication receipt preserves the submitted schedule and platform variants', async () => {
+  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'minimal-publish-project', zernioProfileId: 'minimal-publish-profile' };
+  const account = { _id: 'minimal-publish-account', platform: 'facebook', profileId: project.zernioProfileId };
+  const original = { id: 'minimal-publish-local', content: 'Shared caption', platforms: ['facebook'], accounts: [account._id], status: 'scheduled', scheduledAt: '2070-01-01T10:00:00Z', platformOverrides: { facebook: { content: 'Facebook caption', options: { firstComment: 'First comment' } } } };
+  let post = structuredClone(original);
+  const store = { get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(target);
+    if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
+    if (url.pathname === '/api/v1/tools/validate/post') return Response.json({ valid: true, warnings: [] });
+    assert.equal(url.pathname, '/api/v1/posts'); assert.equal(options.method, 'POST');
+    return Response.json({ post: { _id: 'minimal-publish-remote', status: 'scheduled', platforms: [{ platform: account.platform, accountId: account._id, status: 'pending' }] } });
+  };
+  try {
+    let response;
+    await handleIntegration({ req: { method: 'POST', headers: { 'idempotency-key': 'minimal-publish-original' } }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/social/publish`), body: { postId: post.id }, project, db, store, role: 'editor', config: { env: { ZERNIO_API_KEY: 'fixture-key' } }, send(status, data) { response = { status, data }; } });
+    assert.equal(response.status, 200, JSON.stringify(response.data)); assert.equal(post.externalId, 'minimal-publish-remote');
+    for (const field of ['content', 'scheduledAt', 'platforms', 'accounts', 'platformOverrides']) assert.deepEqual(post[field], original[field]);
+  } finally { globalThis.fetch = originalFetch; db.close(); }
+});
+
 test('an empty Drive collection is readable and syncable without erasing existing assets', async () => {
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const project = { id: 'empty-drive-project', driveFolderId: 'empty-drive-folder' }, assets = [{ id: 'existing-asset', name: 'Retained creative' }];

@@ -267,3 +267,29 @@ test('WhatsApp replies round-trip delivery history, enforce the session and use 
     assert.equal((await f.request(route, 'POST', templateBody)).status, 403); assert.equal(f.calls.length, beforeViewer);
   } finally { await f.close(); }
 });
+
+test('reply-window checks find recent customer messages after paged outgoing history and reject incomplete scans', async () => {
+  const f = await fixture(), route = f.path + '/conversations/thread-1/reply'; let mode = 'open';
+  f.setHook((url, options) => {
+    if (!url.pathname.endsWith('/messages') || options.method !== 'GET') return;
+    const accountId = url.searchParams.get('accountId'), platform = f.accounts.find(row => row._id === accountId).platform, cursor = url.searchParams.get('cursor');
+    assert.equal(url.searchParams.get('sortOrder'), 'desc');
+    const common = { conversationId: 'thread-1', accountId, platform, createdAt: new Date(Date.now() - 3600000).toISOString() };
+    if (cursor && !['repeat', 'limit'].includes(mode)) return Response.json({ messages: [{ ...common, id: 'customer-message', direction: 'incoming', message: 'Please help', createdAt: new Date(Date.now() - (mode === 'closed' ? 25 : 2) * 3600000).toISOString() }], pagination: { hasMore: false, nextCursor: null }, sortOrderApplied: 'desc' });
+    return Response.json({ messages: Array.from({ length: 100 }, (_, index) => ({ ...common, id: 'business-' + index, direction: 'outgoing', message: 'Status update' })), pagination: { hasMore: true, nextCursor: mode === 'limit' ? String(Number(cursor || 0) + 1) : 'older-messages' }, sortOrderApplied: 'desc' });
+  });
+  try {
+    for (const accountId of ['fb', 'ig', 'wa']) {
+      const accepted = await f.request(route, 'POST', { accountId, message: 'Reply with a verified open window' });
+      assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.equal(accepted.data.sent, true);
+      assert.equal(f.calls.filter(call => call.options.method === 'GET' && call.url.pathname.endsWith('/messages') && call.url.searchParams.get('accountId') === accountId).length, 2);
+    }
+    mode = 'closed'; const before = f.writes().length;
+    assert.equal((await f.request(route, 'POST', { accountId: 'wa', message: 'Do not send outside the window' })).data.error.code, 'MESSAGING_WINDOW_CLOSED');
+    mode = 'repeat'; const repeated = await f.request(route, 'POST', { accountId: 'wa', message: 'Do not send after a repeated cursor' });
+    assert.equal(repeated.status, 502); assert.equal(f.writes().length, before);
+    mode = 'limit'; const reads = f.calls.length, incomplete = await f.request(route, 'POST', { accountId: 'wa', message: 'Do not send after incomplete history' });
+    assert.equal(incomplete.status, 503); assert.equal(incomplete.data.error.code, 'INCOMPLETE_PROVIDER_DATA'); assert.equal(f.writes().length, before);
+    assert.equal(f.calls.slice(reads).filter(call => call.options.method === 'GET' && call.url.pathname.endsWith('/messages')).length, 20);
+  } finally { await f.close(); }
+});

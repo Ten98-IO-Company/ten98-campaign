@@ -200,7 +200,7 @@ function dateRange(url) {
 }
 async function readCustomer(env, token, target, assertCurrent) {
   current(assertCurrent);
-  const result = await providerRequest(`${BASE}/customers/${customerId(target)}/googleAds:search`, { method: 'POST', headers: { ...headers(env, token), 'Content-Type': 'application/json' }, body: JSON.stringify({ query: 'SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone, customer.manager, customer.test_account FROM customer LIMIT 1' }) }, 'Google Ads');
+  const result = await providerRequest(`${BASE}/customers/${customerId(target)}/googleAds:search`, { method: 'POST', headers: { ...headers(env, token), 'Content-Type': 'application/json' }, body: JSON.stringify({ query: 'SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone, customer.manager, customer.test_account FROM customer LIMIT 1' }) }, 'Google Ads').catch(error => { if (error instanceof IntegrationError) error.uncertain = false; throw error; });
   current(assertCurrent);
   const rows = searchRows(result), account = rows[0]?.customer;
   if (rows.length !== 1 || String(account?.id) !== target || !/^[A-Z]{3}$/.test(account?.currencyCode) || account.manager === true || account.descriptiveName !== undefined && (typeof account.descriptiveName !== 'string' || account.descriptiveName.length > 1024) || account.timeZone !== undefined && (typeof account.timeZone !== 'string' || account.timeZone.length > 150)) fail(502, 'INVALID_GOOGLE_CUSTOMER', 'Google did not verify this advertising customer and its currency. Manager accounts cannot run Shopping campaigns.');
