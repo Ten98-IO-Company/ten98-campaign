@@ -134,7 +134,7 @@ test('SMS replies bind the selected conversation, block opted-out/viewer sends a
 
 test('SMS polling reads local data only and applies fresh STOP state without discarding older loaded conversations', async () => {
   const handler = section('const pollSms = async () =>', '    const timer = window.setInterval(pollSms').replace('const pollSms = ', '').trim().replace(/;$/, '');
-  const calls = [], states = [], current = [{ id: 'one', blocked: false }, { id: 'older', lastMessageAt: '2025-01-01' }], context = { checking: false, pending: { current: false }, revision: { current: 0 }, requester: { current: async (...args) => { calls.push(args); return args[0].endsWith('/messages') ? { conversation: { id: 'one', blocked: true }, messages: [] } : { conversations: [{ id: 'one', blocked: true, lastMessageAt: '2030-01-01' }], pagination: {} }; } }, path: '/projects/a/sms-inbox', selected: { id: 'one' }, closed: false, generation: 1, version: { current: 1 }, merge, setRows: update => states.push(update(current)), setPagination() {}, setSelected: value => states.push(value), setDetail() {} };
+  const calls = [], states = [], current = [{ id: 'one', blocked: false }, { id: 'older', lastMessageAt: '2025-01-01' }], context = { rows: current, checking: false, pending: { current: false }, revision: { current: 0 }, requester: { current: async (...args) => { calls.push(args); return args[0].endsWith('/messages') ? { conversation: { id: 'one', blocked: true }, messages: [] } : { conversations: [{ id: 'one', blocked: true, lastMessageAt: '2030-01-01' }], pagination: {} }; } }, path: '/projects/a/sms-inbox', selected: { id: 'one' }, closed: false, generation: 1, version: { current: 1 }, merge, setRows: update => states.push(update(current)), setPagination() {}, setSelected: value => states.push(value), setDetail() {} };
   await compile(handler, context)(); assert.equal(states[0][0].blocked, true); assert.equal(states[0][1].id, 'older'); assert.equal(states[1].blocked, true); assert.ok(calls.every(args => args.length === 1 && args[0].startsWith('/projects/a/sms-inbox/')));
 });
 
@@ -158,7 +158,7 @@ test('a failed SMS thread selection keeps the current poll alive while rejecting
     if (route.endsWith('/conversations')) { if (firstPoll) { firstPoll = false; return oldRead; } return { conversations: [{ ...selected, blocked: true }], pagination: {} }; }
     return { conversation: { ...selected, blocked: true }, messages: [] };
   } };
-  const common = { version, pending, revision, selected, requester, path: '/projects/p/sms-inbox', setRows() {}, setPagination() {}, setSelected: value => accepted.push(value), setDetail() {}, setMessage() {}, merge };
+  const common = { rows: [selected], version, pending, revision, selected, requester, path: '/projects/p/sms-inbox', setRows() {}, setPagination() {}, setSelected: value => accepted.push(value), setDetail() {}, setMessage() {}, merge };
   const smsAction = compile(part('async function smsAction(', '  async function smsList('), { ...common, setBusy() {}, setError: value => errors.push(value), setNotice() {} });
   const smsThread = compile(part('async function smsThread(', '  async function openSms('), common);
   const open = compile(part('async function openSms(', '  useEffect(() => {'), { ...common, smsAction, smsThread });
@@ -167,4 +167,25 @@ test('a failed SMS thread selection keeps the current poll alive while rejecting
   const earlier = poll(); await open({ id: 'unavailable-thread' }); oldResolve({ conversations: [{ ...selected, blocked: false }], pagination: {} }); await earlier;
   assert.deepEqual(accepted, [], 'A poll started before the selection must not overwrite a later action.'); assert.equal(pending.current, false); assert.match(errors.at(-1), /Transient/);
   await poll(); assert.equal(accepted.at(-1)?.blocked, true, 'A later STOP or message must still update the currently selected thread after the failed selection.');
+});
+
+test('SMS polling retains the oldest loaded page cursors while updating messages and opt-outs', async () => {
+  const handler = section('const pollSms = async () =>', '    const timer = window.setInterval(pollSms').replace('const pollSms = ', '').trim().replace(/;$/, '');
+  let pagination = { hasMore: true, nextCursor: '100' }, detail = { messages: [{ id: 'older' }, { id: 'overlap' }], pagination: { hasMore: true, nextCursor: '101' } };
+  const context = { rows: [{ id: 'thread' }], checking: false, pending: { current: false }, revision: { current: 0 }, path: '/projects/a/sms-inbox', selected: { id: 'thread' }, closed: false, generation: 1, version: { current: 1 }, merge, setRows() {}, setSelected() {},
+    setPagination: update => { pagination = typeof update === 'function' ? update(pagination) : update; }, setDetail: update => { detail = update(detail); },
+    requester: { current: async path => path.endsWith('/messages') ? { conversation: { id: 'thread', blocked: true }, messages: [{ id: 'newest' }, { id: 'overlap' }], pagination: { hasMore: true, nextCursor: '201' } } : { conversations: [{ id: 'thread' }], pagination: { hasMore: true, nextCursor: '200' } } },
+  };
+  await compile(handler, context)();
+  assert.equal(pagination.nextCursor, '100', 'Polling must not send Load older conversations back to page two.');
+  assert.equal(detail.pagination.nextCursor, '101', 'Polling must not send Load older messages back to page two.');
+  assert.deepEqual(detail.messages.map(item => item.id), ['older', 'overlap', 'newest']); assert.equal(detail.conversation.blocked, true);
+  for (const hasMore of [true, false]) {
+    pagination = { hasMore, nextCursor: hasMore ? '1' : null }; detail = { messages: [{ id: 'old-tail' }], pagination: { ...pagination } }; context.rows = [{ id: 'old-tail' }];
+    const messages = context.requester.current;
+    context.requester = { current: async path => path.endsWith('/messages') ? messages(path) : { conversations: [{ id: 'old-tail', lastMessageAt: '2030-01-01' }, { id: 'new-head' }], pagination: { hasMore: true, nextCursor: '200' } } };
+    await compile(handler, context)();
+    assert.equal(pagination.nextCursor, '200', 'New conversations remain reachable even when a known conversation moves to the newest page.');
+    assert.equal(detail.pagination.nextCursor, '201', 'A burst without overlap must expose the gap before older loaded messages.');
+  }
 });

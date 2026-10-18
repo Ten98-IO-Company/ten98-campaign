@@ -60,6 +60,26 @@ test('verified campaign replies persist once, preserve raw signature checks and 
   } finally { f.close(); }
 });
 
+test('a campaign acknowledgement cannot replace the sender established by its signed delivery callback', async () => {
+  const f = fixture();
+  try {
+    f.env.TWILIO_MESSAGING_SERVICE_SID = token('MG', 1);
+    f.contacts.save('a', { phone: '+12025550123', consents: { sms: true }, consentSource: 'Explicit service request' });
+    const draft = await f.request('direct/campaigns', 'POST', { name: 'Service notice', channel: 'sms', text: 'Your appointment is confirmed.' }), id = draft.data.campaign.id;
+    const preview = await f.request(`direct/campaigns/${id}/preview`, 'POST', {}); await f.request(`direct/campaigns/${id}/send`, 'POST', { confirmed: true, previewToken: preview.data.previewToken });
+    f.setHook(async (url, options) => {
+      assert.equal(options.method, 'POST'); const form = new URLSearchParams(options.body), callback = new URL(form.get('StatusCallback'));
+      f.callback(callback.pathname, { MessageSid: token('SM', 500), From: '+12025550200', To: form.get('To'), MessagingServiceSid: token('MG', 1), MessageStatus: 'delivered' });
+      return Response.json({ sid: token('SM', 500), account_sid: f.env.TWILIO_ACCOUNT_SID, from: '+12025550999', to: form.get('To'), messaging_service_sid: token('MG', 1), status: 'queued' });
+    });
+    await f.direct.processPending();
+    const result = await f.request(`direct/campaigns/${id}`), conversations = await f.request('sms-inbox/conversations');
+    assert.equal(result.data.deliveries[0].smsSender, '+12025550200'); assert.equal(result.data.deliveries[0].status, 'delivered');
+    assert.equal(conversations.data.conversations.length, 1); assert.equal(conversations.data.conversations[0].sender, '+12025550200');
+    assert.match(result.data.campaign.lastError, /acknowledgement/);
+  } finally { f.close(); }
+});
+
 test('shared-phone ambiguity fails closed and project-specific signed callbacks can attribute one copy only', async () => {
   const f = fixture();
   try {

@@ -707,11 +707,12 @@ export async function handleIntegration(context) {
         const token = await driveToken(env); const files = []; let pageToken;
         for (let page = 0; page < 20; page++) {
           const target = new URL(`${GOOGLE}/drive/v3/files`);
-          target.search = new URLSearchParams({ q: `'${project.driveFolderId}' in parents and trashed = false`, pageSize: '100', fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum,imageMediaMetadata(width,height),videoMediaMetadata(width,height,durationMillis))', supportsAllDrives: 'true', includeItemsFromAllDrives: 'true', ...(pageToken ? { pageToken } : {}) }).toString();
+          target.search = new URLSearchParams({ q: `'${project.driveFolderId}' in parents and trashed = false`, pageSize: '100', fields: 'kind,nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum,imageMediaMetadata(width,height),videoMediaMetadata(width,height,durationMillis))', supportsAllDrives: 'true', includeItemsFromAllDrives: 'true', ...(pageToken ? { pageToken } : {}) }).toString();
           const result = await driveRequest(target, { headers: { Authorization: `Bearer ${token}` } });
-          if (!Array.isArray(result.files) || result.files.length > 100) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not return a valid file page.');
+          const pageFiles = result.files === undefined && result.kind === 'drive#fileList' ? [] : result.files;
+          if (!Array.isArray(pageFiles) || pageFiles.length > 100) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not return a valid file page.');
           if (result.incompleteSearch) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'Google Drive could not complete the folder search. No assets were changed.');
-          files.push(...result.files);
+          files.push(...pageFiles);
           if (!result.nextPageToken) {
             if (req.method === 'GET') send(200, { files: [...new Map(files.map(driveAsset).filter(asset => asset.mimeType !== 'application/vnd.google-apps.folder').map(asset => [asset.driveId, asset])).values()], complete: true });
             else { const assets = saveDriveFiles(context.db, store, project.id, files, assertDrive); store.activity(project.id, `Synced ${assets.length} assets from Google Drive.`); send(200, { assets, synced: assets.length, complete: true }); }
@@ -914,14 +915,20 @@ export async function handleIntegration(context) {
           if (replacingVariants && divergent && body.confirmReplaceVariants !== true) fail(409, 'PROVIDER_VARIANT_CONFIRMATION_REQUIRED', 'Accounts on the same platform have different provider captions, media or options. Confirm replacing those copies with one shared customization for each platform.');
           const checkPayload = remoteRestrictionPayload(changed, remote, { content, mediaItems: replacingMedia ? commonMedia(changed, assets) : remote.mediaItems ?? model.mediaItems, ...(replacingVariants ? { overrides: changed.platformOverrides } : {}), assets });
           if (replacingMedia) payload.mediaItems = checkPayload.mediaItems;
-          if (replacingVariants) payload.platforms = checkPayload.platforms;
+          const rescheduling = scheduledAt && Date.parse(scheduledAt) !== Date.parse(remote.scheduledFor);
+          if (rescheduling) for (const target of checkPayload.platforms) if (target.scheduledFor) target.scheduledFor = scheduledAt;
+          if (replacingVariants || rescheduling && remote.platforms.some(target => target.scheduledFor)) payload.platforms = checkPayload.platforms;
           if (body.mode === 'scheduled') { validateRemotePayload(checkPayload, assets, changed); await assertTikTokCreatorRestrictions(api, checkPayload, Object.values(postRestrictions(changed, changed.platforms, assets).variants).flatMap(variant => variant.mediaItems)); assertPostRestrictions(await providerPostValidation(api, { ...checkPayload, scheduledFor: scheduledAt, timezone: 'UTC' })); }
           context.assertProviderPostEdit?.();
           if (payload.scheduledFor && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'The scheduled time passed during the provider checks. Choose a future time before submitting.');
           const result = await api(endpoint, {}, payload, key, 'PUT');
-          const updated = await savePostSnapshot(store, project.id, changed, result.post, { content: result.post?.content ?? content, scheduledAt }, remote.platforms);
+          assertPostResult(result.post, profileId, { id: post.externalId, targets: remote.platforms });
+          let confirmed;
+          try { confirmed = await scopedPost(api, profileId, post); }
+          catch { throw new IntegrationError(502, 'POST_RECONCILIATION_REQUIRED', 'The provider accepted this update, but its latest state could not be read. Check Zernio before repeating it.', true); }
+          const updated = await savePostSnapshot(store, project.id, changed, confirmed, { content: confirmed.content ?? content, scheduledAt }, remote.platforms);
           await store.activity(project.id, 'Updated an unpublished social post in Zernio.');
-          return { post: updated, provider: { id: post.externalId, status: result.post.status } };
+          return { post: updated, provider: { id: post.externalId, status: confirmed.status } };
         }
         if (path === 'social/retry') {
           if (body.confirmPublish !== true) fail(400, 'PUBLISH_CONFIRMATION_REQUIRED', 'Confirm that this failed post should publish immediately.');

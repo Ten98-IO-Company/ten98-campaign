@@ -174,7 +174,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret, store }) {
             try {
               const result = await sendDirect({ channel: campaign.channel, campaign: rendered, contact, delivery: { ...delivery, callbackUrl: `${appUrl}/api/webhooks/twilio/status/${delivery.id}` }, env: currentEnv, project, appUrl, unsubscribeUrl: `${appUrl}/api/direct/unsubscribe/${unsubscribeToken(campaign.projectId, contact.email)}`, assertMapping });
               const latest = deliveries(campaign.id).find(row => row.id === delivery.id);
-              if (latest.providerId && result.providerId !== latest.providerId) throw new IntegrationError(502, 'DELIVERY_MISMATCH', 'The provider acknowledgement conflicts with a delivery callback.', true);
+              if (latest.providerId && result.providerId !== latest.providerId || campaign.channel === 'sms' && latest.smsSender && result.sender && result.sender !== latest.smsSender) throw new IntegrationError(502, 'DELIVERY_MISMATCH', 'The provider acknowledgement conflicts with a delivery callback.', true);
               latest.providerId = result.providerId; latest.status = nextStatus(latest.status, result.status); if (campaign.channel === 'sms') { latest.smsSender = result.sender || latest.smsSender; latest.smsMessagingServiceSid = result.messagingServiceSid || latest.smsMessagingServiceSid; } putDelivery(latest);
               if (campaign.channel === 'sms') recordSms(campaign, latest);
               if (campaign.channel === 'sms' && result.errorCode === '21610') contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');

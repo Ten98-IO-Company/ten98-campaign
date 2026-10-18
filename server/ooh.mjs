@@ -66,8 +66,8 @@ async function provider(env, path, body, method = body === undefined ? 'GET' : '
   catch { fail(502, 'OOH_UNAVAILABLE', 'Broadsign did not confirm the request.', writing); }
   if (!response.ok) fail(response.status === 429 ? 429 : response.status >= 500 ? 502 : 400, 'OOH_PROVIDER_REJECTED', 'Broadsign could not complete this request. Check the connection and request details.', writing && (response.status >= 500 || [408, 409].includes(response.status)));
   try {
-    // The cancellation contract has no response body; a scoped GET below verifies the actual state.
-    if (method === 'POST' && path.endsWith('/cancel')) {
+    // Booking and cancellation acknowledge success without a JSON contract; scoped GETs verify their actual state.
+    if (method === 'POST' && (path.endsWith('/cancel') || path.startsWith('/api/v1/proposal/book_proposal/'))) {
       await response.body?.cancel();
       try { env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', true); }
       return {};
@@ -103,7 +103,7 @@ async function checkedProposal(env, connection, booking, strict = false) {
   if (strict && (!Array.isArray(proposal.proposal_item_id_list) || proposal.proposal_item_id_list.length !== 1 || Number(proposal.proposal_item_id_list[0]) !== booking.lineItemId)) fail(409, 'OOH_BOOKING_CHANGED', 'The provider line items changed. Review this booking in Broadsign.');
   let item;
   if (strict) {
-    item = await provider(env, `/api/v1/proposal/proposal_item/${booking.lineItemId}`);
+    item = await provider(env, `/api/v1/proposal/proposal_item/${booking.lineItemId}?include_screens=true`);
     const activeModes = Array.isArray(item.mode) ? item.mode.filter(mode => mode?.active === true) : [];
     if (Number(item.id) !== booking.lineItemId || Number(item.proposal_id) !== booking.proposalId || !Array.isArray(item.screens) || item.screens.length !== booking.screenIds.length || new Set(item.screens).size !== booking.screenIds.length || item.screens.some(id => !booking.screenIds.includes(id)) ||
         item.start_date !== booking.startDate || item.end_date !== booking.endDate || Number(item.price) !== booking.price || Number(proposal.price) !== booking.price || Number(item.slot_duration) !== booking.slotDuration || item.inventory_type !== booking.inventoryType ||
