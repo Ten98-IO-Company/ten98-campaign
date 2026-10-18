@@ -1,21 +1,27 @@
-# End-to-end verification — v0.7.2
+# End-to-end verification — v0.7.3
 
-## Integrity and workflow audit
+## Campaign workflow audit
 
-Verified on 18 October 2026. The full suite passes **164 automated tests** (`npm test`), including actual HTTP handlers, temporary databases and mocked providers. Independent source review found no remaining actionable defects in this change. Ponytail simplicity review and [Paperthin](https://github.com/LilMGenius/paperthin) consistency, evidence and cold-read checks were applied; no dependency was added.
+Verified on 18 October 2026 using actual HTTP handlers, temporary databases, mocked providers and the production frontend. All six campaign areas were traced from their user controls through provider requests and stored results. Ponytail simplicity review and [Paperthin](https://github.com/LilMGenius/paperthin) evidence, consistency and cold-read checks were applied. No dependency was added, and no real publishing, delivery, upload or media spending occurred.
 
 | Area | Verified behavior |
 | --- | --- |
-| Access during pending requests | Revoked sessions cannot finish password changes, expose pending provider reads or import Drive results. Role/operator changes block pending connection URLs and test results. DNS checks revalidate access before saving contact assessments. An upload accepted before access is revoked retains a record of its unconfirmed outcome and blocks a duplicate attempt, even with a new action key. |
-| Provider acknowledgements | Social publish/edit/retry reject malformed post data and foreign profile/account/platform targets before replacing local posts; documented minimal acknowledgements remain accepted. Shared provider requests reject non-object JSON. Calendar rejects malformed event rows and records invalid write acknowledgements as unconfirmed outcomes. |
-| Late UI results | Older saves/deletes preserve a newer editor. Calendar callbacks cannot replace a different month's view, and a departed Team settings panel cannot reload the current page. Regressions exercise the actual frontend handlers. |
-| Browser and keyboard | A local proxy holds a campaign creation response after the database commit. Close its editor and open another; releasing the first response leaves the new editor open and editable. The original campaign is saved once; the newer draft remains unsaved. The native dialog has an accessible name, initial keyboard focus, Escape dismissal and focus restoration. This is a focused accessibility check, not an assistive-technology certification. |
+| Ads | Boost geography is sent in the provider's targeting object. Daily budget editors reject lifetime allocations under both documented budget field names, including conflicting `budget`/`campaignBudget`/`adSetBudget` values. Valid daily updates and the existing format/control checks still pass. |
+| Social publishing | Failed-only retries work for partial posts, retain published copies and require a current approval when policy is enabled. Only failed destinations undergo retry preflight. Provider failure diagnostics are visible. Invalid preview data cannot poison stored posts. Missing account identities are resolved only when unambiguous; conflicting acknowledgements retain an unconfirmed outcome. |
+| Analytics | Object-valued platform labels are rejected before rendering. A browser loads 42 mock impressions, then receives a malformed refresh: the error remains readable and the last valid report stays visible. Missing metrics remain unknown. |
+| OOH | Booking checks enforce the exact unique screens and approved delivery terms. Cancellation receipts and placements survive a concurrent submission acknowledgement or its final readback. Malformed provider responses are controlled errors. A departed view cannot publish late inventory. |
+| Drive DAM | A folder receipt cannot complete a file upload with no asset; its unconfirmed outcome blocks a duplicate upload. Provider media metadata is validated before it enters previews and editable post data. Existing atomic import/upload, approval and delivery-URL workflows remain covered. |
+| Direct campaigns | SMS refresh rejects conflicting sender/service evidence before saving a delivery or changing its reply routing. Transactional email, SMS and WhatsApp audience, queue, consent, callback, cancellation and reply regressions pass with isolated providers. |
 
-![New campaign editor retained after the earlier save completes](draft-recovery-verification.png)
+The browser retried one failed LinkedIn destination while preserving the original Facebook post URL. Recorded requests show one retry and a preflight containing only LinkedIn. Both destinations then appear published. Native HTTP checks additionally cover required approval, incomplete retry receipts, duplicate actions and disconnected successful accounts.
 
-The browser fixture uses synthetic identity/data and blocks external provider requests. New regression cases reproduced the password, provider acknowledgement and late UI failures before their fixes; other new checks protect the shared access boundaries. Live provider acceptance still needs configured accounts and credentials. The production build, dependency and container results are recorded below.
+![Both destinations published after retrying only the failed copy](partial-retry-verification.png)
 
-Repeat the automated release checks from this release's checkout:
+![Malformed refresh preserves the last successful analytics report](analytics-recovery-verification.png)
+
+The full suite passes **176 automated tests** (`npm test`). Earlier session/role revocation, password, DNS persistence, Calendar/Team callbacks and newer-draft protection regressions also pass. The v0.7.2 delayed-save browser proof remains in [draft recovery](draft-recovery-verification.png). This audit and its screenshots use synthetic identities; they establish application behavior against simulated provider contracts, not live account acceptance.
+
+Use this release's checkout with Node.js 22.14+, installed npm dependencies, Docker and PowerShell to repeat the release checks:
 
 ```powershell
 npm test
@@ -43,7 +49,7 @@ Verified on 18 October 2026 with the production frontend bundle served by isolat
 
 ![Approved WhatsApp template reply](whatsapp-template-verification.png)
 
-The v0.7.2 production build and actual non-root Docker image smoke check pass; the production dependency audit reports no known vulnerabilities. The full suite also covers signed callbacks and restart recovery, durable opt-outs, duplicate/uncertain replies, original-sender attribution, expired WhatsApp windows and approved templates, malformed provider templates/warnings, stale account/project responses, link permissions and immutability, public URL validation, campaign isolation, project deletion, tracking privacy signals, CORS, intake limits and SPA page changes. Reply and tracking browser proof was recorded in v0.7.1 using synthetic contacts, one mocked SMS reply and two mocked WhatsApp replies; delivered/read states do not establish real carrier acceptance. Those regressions pass in this release.
+The v0.7.3 production build and actual non-root Docker image smoke check pass; the production dependency audit reports no known vulnerabilities. The full suite also covers signed callbacks and restart recovery, durable opt-outs, duplicate/uncertain replies, original-sender attribution, expired WhatsApp windows and approved templates, malformed provider templates/warnings, stale account/project responses, link permissions and immutability, public URL validation, campaign isolation, project deletion, tracking privacy signals, CORS, intake limits and SPA page changes. Reply and tracking browser proof was recorded in v0.7.1 using synthetic contacts, one mocked SMS reply and two mocked WhatsApp replies; delivered/read states do not establish real carrier acceptance. Those regressions pass in this release.
 
 Live provider acceptance still requires configured credentials, approved accounts and public HTTPS callbacks. Website-script browser verification used a separate loopback test instance; native checks cover branded HTTPS origins. DNS, TLS and reverse-proxy routes must be provisioned by the operator. The domain-check challenge does not independently verify ownership. Tracking measures requests/events, not unique people or independently verified ad conversions. See [setup and limits](tracking.md) and [inbox setup](inbox.md).
 

@@ -44,11 +44,11 @@ function postSnapshot(context, post) {
 const fingerprint = snapshot => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
 const latest = (db, projectId, postId) => db.prepare('SELECT * FROM post_approval_reviews WHERE project_id=? AND post_id=? ORDER BY rowid DESC LIMIT 1').get(projectId, postId);
 const submitted = post => Boolean(post.externalId || post.zernioPostId || ['published', 'submitted', 'partial'].includes(post.status));
-const fullyFailed = post => Boolean((post.externalId || post.zernioPostId) && post.status === 'failed' && Array.isArray(post.providerResults) && post.providerResults.length && post.providerResults.every(copy => copy.status === 'failed'));
+const retryableFailure = post => Boolean((post.externalId || post.zernioPostId) && ['failed', 'partial'].includes(post.status) && Array.isArray(post.providerResults) && post.providerResults.some(copy => copy.status === 'failed') && (post.status === 'partial') === post.providerResults.some(copy => copy.status === 'published') && post.providerResults.every(copy => ['failed', 'published', 'cancelled'].includes(copy.status)));
 function localPost(context, id) {
   const post = context.store.get(context.project.id, 'posts', id);
   if (!post) fail(404, 'APPROVAL_POST_NOT_FOUND', 'This post was not found in the current project.');
-  if (post.sample || (submitted(post) && !fullyFailed(post))) fail(409, 'APPROVAL_LOCAL_POST_REQUIRED', 'Request approval for a local draft or a fully failed provider post after refreshing its status.');
+  if (post.sample || (submitted(post) && !retryableFailure(post))) fail(409, 'APPROVAL_LOCAL_POST_REQUIRED', 'Request approval for a local draft or failed provider copies after refreshing every account’s status.');
   return post;
 }
 function assetApproved(snapshot) {
@@ -64,8 +64,8 @@ function fields(body, allowed) {
 }
 function queueItem(context, post) {
   const snapshot = postSnapshot(context, post), review = latest(context.db, context.project.id, post.id);
-  const status = submitted(post) && !fullyFailed(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
-  return { post: { id: post.id, status: post.status, providerFailed: fullyFailed(post), sample: Boolean(post.sample), content: snapshot.content, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
+  const status = submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
+  return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), content: snapshot.content, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
 }
 
 export function assertPublishingApproval(context, post) {

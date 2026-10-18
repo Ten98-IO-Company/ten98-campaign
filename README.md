@@ -2,7 +2,7 @@
 
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.7.2 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.7.3 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
 
@@ -110,7 +110,7 @@ A planned time is entered in your local timezone and submitted as a UTC instant.
 
 ## Social post lifecycle and approvals
 
-Submitted posts have provider controls in Publishing. Unpublished provider drafts and schedules can be updated or rescheduled; eligible unpublished copies can be cancelled with explicit confirmation. Only fully failed posts can be retried immediately, with a fresh provider status check to avoid duplicating partially published content.
+Submitted posts have provider controls in Publishing. Unpublished provider drafts and schedules can be updated or rescheduled; eligible unpublished copies can be cancelled with explicit confirmation. Failed and partially published posts can retry their failed account copies after a fresh provider status check. Preflight checks only the failed destinations; published and cancelled copies remain unchanged. A required approval must still match the complete current post. Malformed provider preview fields and unsupported publishing options are rejected before import; manage unsupported options in the native provider dashboard.
 
 | Published-copy action | Supported platforms, subject to Zernio and account permissions |
 | --- | --- |

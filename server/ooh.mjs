@@ -75,6 +75,7 @@ async function provider(env, path, body, method = body === undefined ? 'GET' : '
     const reader = response.body.getReader(), chunks = []; let size = 0;
     for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > 2 * 1024 * 1024) { await reader.cancel(); throw new Error(); } chunks.push(next.value); }
     const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (!object(result)) fail(502, 'INVALID_OOH_RESPONSE', 'Broadsign returned an invalid response.', writing);
     try { env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', writing); }
     return result;
   } catch (error) { if (error instanceof IntegrationError) throw error; fail(502, 'INVALID_OOH_RESPONSE', 'Broadsign returned an unreadable response.', writing); }
@@ -103,7 +104,11 @@ async function checkedProposal(env, connection, booking, strict = false) {
   let item;
   if (strict) {
     item = await provider(env, `/api/v1/proposal/proposal_item/${booking.lineItemId}`);
-    if (Number(item.id) !== booking.lineItemId || Number(item.proposal_id) !== booking.proposalId || !Array.isArray(item.screens) || item.screens.length !== booking.screenIds.length || item.screens.some(id => !booking.screenIds.includes(id)) || item.start_date !== booking.startDate || item.end_date !== booking.endDate || Number(item.price) !== booking.price || Number(proposal.price) !== booking.price) fail(409, 'OOH_BOOKING_CHANGED', 'The provider screens, dates, or quote changed. Review this booking in Broadsign before submission.');
+    const activeModes = Array.isArray(item.mode) ? item.mode.filter(mode => mode?.active === true) : [];
+    if (Number(item.id) !== booking.lineItemId || Number(item.proposal_id) !== booking.proposalId || !Array.isArray(item.screens) || item.screens.length !== booking.screenIds.length || new Set(item.screens).size !== booking.screenIds.length || item.screens.some(id => !booking.screenIds.includes(id)) ||
+        item.start_date !== booking.startDate || item.end_date !== booking.endDate || Number(item.price) !== booking.price || Number(proposal.price) !== booking.price || Number(item.slot_duration) !== booking.slotDuration || item.inventory_type !== booking.inventoryType ||
+        item.start_time !== '00:00:00' || item.end_time !== '23:59:59' || Number(item.dow_mask) !== 127 || Number(item.flight_duration) !== 1 || Number(item.flight_type) !== 0 || Number(item.multiplier) !== Math.round((Date.parse(booking.endDate) - Date.parse(booking.startDate)) / 86400000) + 1 ||
+        Number(item.saturation) !== 1 || activeModes.length !== 1 || activeModes[0].type !== 'ppl' || Number(activeModes[0].values?.saturation) !== 1 || Number(activeModes[0].values?.bs_saturation) !== 1) fail(409, 'OOH_BOOKING_CHANGED', 'The provider screens, delivery terms, dates, or quote changed. Review this booking in Broadsign before continuing.');
   }
   return { proposal, item };
 }
@@ -251,11 +256,15 @@ export async function handleOoh(context) {
           if (booking.stage !== 'draft') fail(409, 'OOH_ALREADY_SUBMITTED', 'This proposal has already been submitted or requires reconciliation.');
           const available = await availability(env, connection, booking);
           if (available.availability !== 'available') fail(409, 'OOH_UNAVAILABLE', 'The requested inventory is not available for booking.');
+          if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== row.data) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the availability check. Refresh before continuing.');
           await provider(env, `/api/v1/proposal/book_proposal/${booking.proposalId}`, {});
+          if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== row.data) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during submission. Review the provider outcome before continuing.', true);
           booking.stage = 'submitted'; saveBooking(db, project.id, booking);
+          const submittedSnapshot = JSON.stringify(booking);
           let proposal;
           try { ({ proposal } = await checkedProposal(env, connection, booking, true)); }
           catch { fail(409, 'OOH_STATUS_UNCONFIRMED', 'The provider accepted a booking request but its final status needs reconciliation in Broadsign.', true); }
+          if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== submittedSnapshot) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the delivery check. Review the provider outcome before continuing.', true);
           if (![3, 9, 10, 11].includes(Number(proposal.status))) fail(502, 'OOH_STATUS_UNCONFIRMED', 'Broadsign did not confirm booking submission. Reconcile the proposal before retrying.', true);
           booking.providerStatus = Number(proposal.status); saveBooking(db, project.id, booking); const placements = placementRecords(context, booking);
           store?.activity(project.id, 'Submitted an OOH proposal for Broadsign booking.'); return { booking, placements };
