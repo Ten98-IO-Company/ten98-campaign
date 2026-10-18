@@ -1,5 +1,5 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
-import { buildPlatformEntry, normalizeMediaItems, normalizePostVariants, resolveVariant, validatePostForPlatforms, wireMediaItems } from '../shared/social-posts.mjs';
+import { buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostVariants, resolveVariant, validatePostForPlatforms, wireMediaItems } from '../shared/social-posts.mjs';
 import { transaction } from './database.mjs';
 
 const ZERNIO = 'https://zernio.com/api/v1';
@@ -118,7 +118,7 @@ async function analyticsDashboard(api, profileId, dates) {
   const response = await api('/analytics/dashboard', { profileId, ...dates, compare: 'previous_period' }), result = response.data || response;
   if (!analyticsMetrics(result.totals) || result.previousTotals !== undefined && !analyticsMetrics(result.previousTotals) || !Array.isArray(result.daily) || result.daily.length > 366 || result.daily.some(row => !reportObject(row) || !reportDay(row.date, dates) || !analyticsMetrics(row)) || new Set(result.daily.map(row => row.date)).size !== result.daily.length) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return a readable analytics dashboard.');
   if (result.dateRange && (result.dateRange.fromDate !== dates.fromDate || result.dateRange.toDate !== dates.toDate)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned a different reporting window.');
-  for (const key of ['topPosts', 'recentPosts']) if (result[key] !== undefined && (!Array.isArray(result[key]) || result[key].length > 25 || result[key].some(row => !reportObject(row) || typeof row.postId !== 'string' || row.postId.length > 500 || row.publishedAt != null && (typeof row.publishedAt !== 'string' || !Number.isFinite(Date.parse(row.publishedAt))) || row.metrics !== undefined && !analyticsMetrics(row.metrics)))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable post performance rows.');
+  for (const key of ['topPosts', 'recentPosts']) if (result[key] !== undefined && (!Array.isArray(result[key]) || result[key].length > 25 || result[key].some(row => !reportObject(row) || typeof row.postId !== 'string' || row.postId.length > 500 || row.platform != null && typeof row.platform !== 'string' || row.publishedAt != null && (typeof row.publishedAt !== 'string' || !Number.isFinite(Date.parse(row.publishedAt))) || row.metrics !== undefined && !analyticsMetrics(row.metrics)))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable post performance rows.');
   const followerSets = [result.followers, result.previousFollowers].filter(value => value !== undefined);
   for (const value of followerSets) {
     if (!reportObject(value) || ['current', 'gained'].some(key => value[key] != null && (typeof value[key] !== 'number' || !Number.isFinite(value[key]) || key === 'current' && value[key] < 0))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable follower performance totals.');
@@ -259,7 +259,7 @@ function adBody(body, account, nativeAccount, boost = false) {
   if (body.targeting !== undefined) { result.targeting = adTargeting(body.targeting, platform, body.campaignType); if (result.targeting.countries) fail(400, 'INVALID_AUDIENCE', 'Set countries once using the target countries field.'); }
   for (const key of ['startDate', 'endDate']) if (body[key] !== undefined) { if (typeof body[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(body[key]) || Number.isNaN(Date.parse(body[key])) || new Date(body[key].slice(0, 10)).toISOString().slice(0, 10) !== body[key].slice(0, 10)) fail(400, 'INVALID_DATE', 'Use a valid date and time including its timezone.'); result[key] = google ? body[key] : new Date(body[key]).toISOString(); }
   if (google ? result.startDate && result.endDate && result.startDate.slice(0, 10) > result.endDate.slice(0, 10) : (result.endDate && Date.parse(result.endDate) <= Date.now()) || (result.startDate && result.endDate && Date.parse(result.startDate) >= Date.parse(result.endDate))) fail(400, 'INVALID_DATE', google ? 'The end day must be the same as or later than the start day, in the advertising account’s timezone.' : 'The end must be in the future and later than the start.');
-  if (boost) return result;
+  if (boost) { result.targeting = { countries: result.countries, ...result.targeting }; delete result.countries; return result; }
   const perNetwork = google ? ['campaignType', ...(advancedGoogle ? [body.campaignType === 'pmax' ? 'assetGroup' : 'demandGen'] : ['headline', 'body', 'linkUrl', ...(body.campaignType === 'search' ? ['additionalHeadlines', 'additionalDescriptions', 'keywords'] : ['businessName', 'images'])])] : ['headline', 'body', 'linkUrl', 'imageUrl', ...(meta ? ['video', 'carouselCards', 'callToAction', 'advantageAudience', 'promotedObject', 'leadGenFormId'] : platform === 'linkedin' ? ['video', 'callToAction', 'organizationId', 'leadGenFormId'] : platform === 'reddit' ? ['video', 'carouselCards', 'callToAction', 'promotedObject', 'creativeFormat'] : platform === 'pinterest' ? ['boardId'] : platform === 'openai' ? ['promotedObject', 'bidStrategy', 'bidAmount'] : platform === 'tiktok' ? ['promotedObject'] : [])];
   if (Object.keys(body).some(key => !common.includes(key) && !perNetwork.includes(key))) fail(400, 'UNSUPPORTED_AD_FIELD', 'Use the fields for this network and ad format.');
   if (google) {
@@ -525,15 +525,55 @@ function publishBody(post, accounts, assets = [], { validate = true } = {}) {
 function localStatus(status) {
   return ['published', 'failed', 'scheduled', 'draft', 'partial', 'cancelled'].includes(status) ? status : 'submitted';
 }
+function providerMediaItems(items) {
+  const fields = new Set(['type', 'url', 'title', 'altText', 'filename', 'size', 'bytes', 'mimeType', 'thumbnail', 'instagramThumbnail', 'subtitles', 'width', 'height', 'duration']);
+  return normalizeMediaItems(items.map(item => {
+    if (!reportObject(item)) throw new TypeError('Invalid provider media item.');
+    const value = Object.fromEntries(Object.entries(item).filter(([key]) => fields.has(key)));
+    if (Array.isArray(value.subtitles)) value.subtitles = value.subtitles.map(track => reportObject(track) ? { url: track.url, language: track.language } : track);
+    return value;
+  }));
+}
 function assertPostResult(remote, profileId, { id, targets, uncertain = true } = {}) {
   const validText = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f]/.test(value);
   const reference = value => value?._id || value;
   const invalid = () => { throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the expected post and publishing accounts.', uncertain); };
+  const optionalText = (value, max = 100000) => value == null || typeof value === 'string' && value.length <= max;
+  const optionalDate = value => value == null || value === '' || typeof value === 'string' && value.length <= 100 && Number.isFinite(Date.parse(value));
+  const media = items => {
+    if (items == null) return;
+    // Provider responses may add fields; validate the media fields consumed by our editor without rejecting those additions.
+    try { providerMediaItems(items); } catch { invalid(); }
+  };
+  const options = value => {
+    if (value == null) return;
+    if (!reportObject(value) || ['title', 'postType', 'mediaType', 'contentType', 'firstComment'].some(key => !optionalText(value[key]))) invalid();
+    if (value.threadItems != null) {
+      if (!Array.isArray(value.threadItems) || value.threadItems.length > 100) invalid();
+      for (const item of value.threadItems) { if (!reportObject(item) || !optionalText(item.content)) invalid(); media(item.mediaItems); }
+    }
+    if (value.poll != null) {
+      const poll = value.poll;
+      if (!reportObject(poll) || poll.question != null && !(typeof poll.question === 'string' || reportObject(poll.question) && optionalText(poll.question.text))) invalid();
+      if (poll.options != null && (!Array.isArray(poll.options) || poll.options.length > 100 || poll.options.some(item => typeof item !== 'string'))) invalid();
+      if (poll.answers != null && (!Array.isArray(poll.answers) || poll.answers.length > 100 || poll.answers.some(item => !reportObject(item) || !reportObject(item.poll_media) || typeof item.poll_media.text !== 'string'))) invalid();
+    }
+  };
   if (!reportObject(remote) || !validText(remote._id) || id && remote._id !== id || !validText(remote.status) || remote.content !== undefined && typeof remote.content !== 'string' || remote.profileId !== undefined && reference(remote.profileId) !== profileId) invalid();
+  if (!optionalDate(remote.scheduledFor) || !optionalDate(remote.publishedAt) || remote.isDraft !== undefined && typeof remote.isDraft !== 'boolean') invalid();
+  media(remote.mediaItems);
   if (remote.platforms !== undefined) {
     if (!Array.isArray(remote.platforms) || !remote.platforms.length) invalid();
     for (const target of remote.platforms) {
       if (!reportObject(target) || !target.platform && !target.accountId || target.platform !== undefined && !validText(target.platform) || target.accountId !== undefined && !validText(reference(target.accountId)) || target.customContent !== undefined && typeof target.customContent !== 'string') invalid();
+      if (!optionalText(target.status, 500) || !optionalText(target.platformPostUrl, 8192) || !optionalDate(target.scheduledFor) || ['errorMessage', 'errorCategory', 'errorSource'].some(key => !optionalText(target[key], 10000)) || target.error != null && !(typeof target.error === 'string' || reportObject(target.error) && optionalText(target.error.message, 10000))) invalid();
+      if (reportObject(target.accountId) && ['displayName', 'username', 'name'].some(key => !optionalText(target.accountId[key], 1000))) invalid();
+      if (target.platformSpecificData != null && !reportObject(target.platformSpecificData)) invalid();
+      media(target.customMedia);
+      try {
+        const configuration = targetConfiguration(target); options(configuration.options);
+        if (configuration.options) normalizePlatformOptions(target.platform, configuration.options);
+      } catch { throw new IntegrationError(502, 'UNSUPPORTED_PROVIDER_OPTIONS', 'Zernio returned unsupported provider publishing options. Manage or reconcile this copy in the native dashboard before continuing.', uncertain); }
       // Zernio's minimal create receipt may omit accountId or platform. Check every identity it does return.
       if (targets && !targets.some(expected => (target.platform === undefined || target.platform === expected.platform) && (target.accountId === undefined || reference(target.accountId) === reference(expected.accountId)))) invalid();
     }
@@ -559,7 +599,8 @@ export function targetConfiguration(target) {
     options = Object.fromEntries(Object.entries({ ...tiktokSettings, ...settings }).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]));
     if (isDraft === true) options.draft = true;
   }
-  return { ...(typeof target.customContent === 'string' ? { content: target.customContent } : {}), ...(Array.isArray(target.customMedia) ? { mediaItems: target.customMedia } : {}), ...(options && typeof options === 'object' ? { options } : {}) };
+  if (Array.isArray(options?.threadItems)) options = { ...options, threadItems: options.threadItems.map(item => reportObject(item) ? { ...item, ...(Array.isArray(item.mediaItems) ? { mediaItems: providerMediaItems(item.mediaItems) } : {}) } : item) };
+  return { ...(typeof target.customContent === 'string' ? { content: target.customContent } : {}), ...(Array.isArray(target.customMedia) ? { mediaItems: providerMediaItems(target.customMedia) } : {}), ...(options && typeof options === 'object' ? { options } : {}) };
 }
 async function remotePostModel(store, projectId, post, remote) {
   const assetIds = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map(item => item?.assetId)].filter(id => typeof id === 'string' && id))];
@@ -573,7 +614,7 @@ async function remotePostModel(store, projectId, post, remote) {
     try { if (previous) expected = targetConfiguration(buildPlatformEntry(post, platform, '', assets)); } catch { expected = null; }
     platformOverrides[platform] = previous && canonical(expected) === canonical(first) ? previous : first;
   }
-  return { ...post, ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: remote.mediaItems } : {}), platforms: [...new Set(remote.platforms.map(target => target.platform))], accounts: remote.platforms.map(target => String(target.accountId?._id || target.accountId)), platformOverrides, providerResults: redact(remote.platforms), scheduledAt: remote.status === 'draft' || remote.isDraft === true ? '' : remote.scheduledFor || '' };
+  return { ...post, ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: providerMediaItems(remote.mediaItems) } : {}), platforms: [...new Set(remote.platforms.map(target => target.platform))], accounts: remote.platforms.map(target => String(target.accountId?._id || target.accountId)), platformOverrides, providerResults: redact(remote.platforms), scheduledAt: remote.status === 'draft' || remote.isDraft === true ? '' : remote.scheduledFor || '' };
 }
 function remoteRestrictionPayload(post, remote, { content = remote.content ?? post.content, mediaItems = remote.mediaItems ?? post.mediaItems, overrides, assets = [] } = {}) {
   const platforms = remote.platforms.map(target => {
@@ -586,7 +627,7 @@ function remoteRestrictionPayload(post, remote, { content = remote.content ?? po
     const configuration = targetConfiguration(target);
     return { ...base, ...(typeof configuration.content === 'string' ? { customContent: configuration.content } : {}), ...(configuration.mediaItems ? { customMedia: wireMediaItems(configuration.mediaItems) } : {}), ...(configuration.options ? { platformSpecificData: configuration.options } : {}), ...(target.scheduledFor ? { scheduledFor: target.scheduledFor } : {}) };
   });
-  return { content: content || '', ...(mediaItems !== undefined ? { mediaItems: wireMediaItems(mediaItems) } : {}), platforms };
+  return { content: content || '', ...(mediaItems !== undefined ? { mediaItems: wireMediaItems(providerMediaItems(mediaItems)) } : {}), platforms };
 }
 function validateRemotePayload(payload, assets = [], post = {}) {
   for (const target of payload.platforms) {
@@ -694,7 +735,7 @@ export async function handleIntegration(context) {
           const boundary = `ten98-${randomUUID()}`;
           const multipart = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [project.driveFolderId] })}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`), bytes, Buffer.from(`\r\n--${boundary}--\r\n`)]);
           const file = await driveRequest(`${GOOGLE}/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum,imageMediaMetadata(width,height),videoMediaMetadata(width,height,durationMillis)`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart });
-          if (!file.id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not confirm the uploaded file.', true);
+          if (!file.id || file.mimeType === 'application/vnd.google-apps.folder') throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not confirm the uploaded file.', true);
           let asset;
           try { [asset] = saveDriveFiles(context.db, store, project.id, [file], assertDrive); }
           catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
@@ -841,7 +882,7 @@ export async function handleIntegration(context) {
       fields(body, allowed, 'post action');
       const postId = identifier(body.postId, 'post ID');
       const outcome = await operation(context, async key => {
-        const post = await store.get(project.id, 'posts', postId), remote = await scopedPost(api, profileId, post, ['social/retry', 'social/edit-published'].includes(path) || path === 'social/update' && body.mode === 'scheduled'), endpoint = `/posts/${encodeURIComponent(post.externalId)}`;
+        const post = await store.get(project.id, 'posts', postId), remote = await scopedPost(api, profileId, post, path === 'social/edit-published' || path === 'social/update' && body.mode === 'scheduled'), endpoint = `/posts/${encodeURIComponent(post.externalId)}`;
         if (sample(post)) fail(400, 'SAMPLE_RECORD', 'Sample posts cannot be sent to live providers.');
         if (path === 'social/cancel') {
           if (body.confirmCancellation !== true) fail(400, 'CANCELLATION_CONFIRMATION_REQUIRED', 'Confirm removal of this unpublished provider record.');
@@ -884,12 +925,26 @@ export async function handleIntegration(context) {
         }
         if (path === 'social/retry') {
           if (body.confirmPublish !== true) fail(400, 'PUBLISH_CONFIRMATION_REQUIRED', 'Confirm that this failed post should publish immediately.');
-          if (remote.status !== 'failed' || remote.platforms.some(item => ['published', 'publishing'].includes(item.status))) fail(409, 'POST_NOT_FAILED', 'Only a fully failed post can be retried. Manage partial results per account to avoid duplicate publishing.');
-          const model = await remotePostModel(store, project.id, post, remote), assets = await postAssets(store, project.id, model), payload = remoteRestrictionPayload(model, remote);
-          validateRemotePayload(payload, assets, model); await assertTikTokCreatorRestrictions(api, payload, Object.values(postRestrictions(model, model.platforms, assets).variants).flatMap(variant => variant.mediaItems)); assertPostRestrictions(await providerPostValidation(api, { ...payload, publishNow: true }));
+          const failed = remote.platforms.filter(item => item.status === 'failed');
+          if (!['failed', 'partial'].includes(remote.status) || !failed.length || (remote.status === 'partial') !== remote.platforms.some(item => item.status === 'published') || remote.platforms.some(item => !['failed', 'published', 'cancelled'].includes(item.status))) fail(409, 'POST_NOT_FAILED', 'Retry requires failed copies and a confirmed terminal outcome for every other account. Refresh provider status first.');
+          const accounts = await scopedAccounts(api, profileId);
+          if (failed.some(item => requireAccount(accounts, String(item.accountId?._id || item.accountId)).isActive === false)) fail(409, 'ACCOUNT_UNAVAILABLE', 'A failed publishing account needs reconnection before retrying.');
+          const model = await remotePostModel(store, project.id, post, remote), assets = await postAssets(store, project.id, model), payload = remoteRestrictionPayload(model, { ...remote, platforms: failed });
+          validateRemotePayload(payload, assets, model); await assertTikTokCreatorRestrictions(api, payload, Object.values(postRestrictions(model, failed.map(item => item.platform), assets).variants).flatMap(variant => variant.mediaItems)); assertPostRestrictions(await providerPostValidation(api, { ...payload, publishNow: true }));
           context.assertPublishingApproval?.(model);
           const result = await api(endpoint + '/retry', {}, {}, key);
-          const updated = await savePostSnapshot(store, project.id, post, result.post, {}, remote.platforms);
+          assertPostResult(result.post, profileId, { id: post.externalId, targets: remote.platforms });
+          // Minimal receipts may omit one identity. Resolve only an unambiguous original target, then keep omitted copies.
+          const copies = result.post.platforms && result.post.platforms.map(item => {
+            const matches = remote.platforms.filter(copy => (!item.platform || item.platform === copy.platform) && (!item.accountId || String(item.accountId?._id || item.accountId) === String(copy.accountId?._id || copy.accountId)));
+            if (matches.length !== 1) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not identify the retried account unambiguously.', true);
+            const copy = { ...matches[0], ...item, platform: matches[0].platform, accountId: matches[0].accountId };
+            if (item.status && item.status !== 'failed') for (const field of ['error', 'errorMessage', 'errorCategory', 'errorSource']) if (!Object.hasOwn(item, field)) delete copy[field];
+            return copy;
+          });
+          if (copies && new Set(copies.map(copy => String(copy.accountId?._id || copy.accountId))).size !== copies.length) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned duplicate retried account copies.', true);
+          const ordered = copies && remote.platforms.map(copy => copies.find(item => String(item.accountId?._id || item.accountId) === String(copy.accountId?._id || copy.accountId)) || copy);
+          const updated = await savePostSnapshot(store, project.id, model, { ...result.post, ...(ordered ? { platforms: ordered } : {}) }, {}, remote.platforms);
           await store.activity(project.id, 'Retried a failed social post through Zernio.');
           return { post: updated, provider: { id: post.externalId, status: result.post.status } };
         }
@@ -957,7 +1012,7 @@ export async function handleIntegration(context) {
       if (!adSet) fail(403, 'AD_SET_OUTSIDE_PROJECT', 'This ad set was not found in the selected project campaign.');
       const payload = { platform: body.platform };
       if (body.name !== undefined) payload.name = text(body.name, 'ad set name', 255);
-      if (body.budget !== undefined) { fields(body.budget, ['amount', 'type'], 'budget'); if (body.budget.type !== 'daily') fail(400, 'UNSUPPORTED_BUDGET', 'This editor changes daily budgets.'); if (body.platform === 'google' || campaign.budgetLevel === 'campaign') fail(422, 'CAMPAIGN_BUDGET_REQUIRED', 'This budget belongs to the campaign. Use the campaign budget editor.'); if (adSet.budget?.type === 'lifetime') fail(400, 'UNSUPPORTED_BUDGET', 'Keep lifetime budgets in the provider dashboard.'); payload.budget = { amount: adAmount(body.budget.amount, campaign.currency, body.platform === 'tiktok' ? 20 : body.platform === 'pinterest' ? 5 : 0), type: 'daily' }; }
+      if (body.budget !== undefined) { fields(body.budget, ['amount', 'type'], 'budget'); if (body.budget.type !== 'daily') fail(400, 'UNSUPPORTED_BUDGET', 'This editor changes daily budgets.'); if (body.platform === 'google' || campaign.budgetLevel === 'campaign') fail(422, 'CAMPAIGN_BUDGET_REQUIRED', 'This budget belongs to the campaign. Use the campaign budget editor.'); if (adSet.budget?.type === 'lifetime' || adSet.adSetBudget?.type === 'lifetime') fail(400, 'UNSUPPORTED_BUDGET', 'Keep lifetime budgets in the provider dashboard.'); payload.budget = { amount: adAmount(body.budget.amount, campaign.currency, body.platform === 'tiktok' ? 20 : body.platform === 'pinterest' ? 5 : 0), type: 'daily' }; }
       if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a name or daily budget to update.');
       const outcome = await operation(context, async key => {
         const result = await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}`, {}, payload, key, 'PUT');
@@ -980,7 +1035,7 @@ export async function handleIntegration(context) {
         fields(body.budget, ['amount', 'type'], 'budget');
         if (!['facebook', 'instagram', 'google', 'openai', 'reddit'].includes(body.platform)) fail(422, 'AD_SET_BUDGET_REQUIRED', 'Use the ad set budget editor for this network.');
         if (['facebook', 'instagram'].includes(body.platform) && campaign.budgetLevel !== 'campaign') fail(422, 'AD_SET_BUDGET_REQUIRED', 'This campaign uses ad set budgets. Use its ad set budget editor.');
-        if (body.budget.type !== 'daily' || campaign.budget?.type === 'lifetime') fail(400, 'UNSUPPORTED_BUDGET', 'Keep lifetime budgets in the provider dashboard.');
+        if (body.budget.type !== 'daily' || campaign.budget?.type === 'lifetime' || campaign.campaignBudget?.type === 'lifetime') fail(400, 'UNSUPPORTED_BUDGET', 'Keep lifetime budgets in the provider dashboard.');
         payload.budget = { amount: adAmount(body.budget.amount, campaign.currency), type: 'daily' };
       }
       if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a campaign name or daily budget to change.');

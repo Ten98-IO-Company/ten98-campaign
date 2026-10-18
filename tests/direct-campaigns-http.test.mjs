@@ -228,3 +228,21 @@ test('manual provider cancellation and refresh recheck the requester without req
     const denied = await refreshing; assert.equal(denied.status, 403); assert.equal(denied.data.deliveries, undefined, 'Revoked manual access must not expose an awaited provider receipt.');
   } finally { releaseCancel(); releaseSms(); await f.close(); }
 });
+
+test('SMS delivery refresh preserves the original sender and service when the provider returns conflicting routing', async () => {
+  const f = await fixture();
+  try {
+    await f.person(); const campaign = await f.draft(); await f.arm(campaign); await f.app.direct.processPending();
+    const original = (await f.request(f.path + '/campaigns/' + campaign.id)).data.deliveries[0];
+    for (const routing of [{ from: '+12025550999' }, { from: f.env.TWILIO_FROM_NUMBER, messaging_service_sid: 'MG' + '9'.repeat(32) }]) {
+      f.setHook(async (url, options) => { if (url.hostname === 'api.twilio.com' && options.method === 'GET') return Response.json({ ...f.messages.get(original.providerId), status: 'delivered', ...routing }); });
+      const result = await f.request(f.path + `/campaigns/${campaign.id}/refresh`, 'POST', {});
+      assert.equal(result.status, 502, 'A routing mismatch cannot reattribute a campaign delivery or create another reply thread.');
+      const saved = (await f.request(f.path + '/campaigns/' + campaign.id)).data.deliveries[0];
+      assert.deepEqual(saved, original);
+    }
+    f.setHook(async (url, options) => { if (url.hostname === 'api.twilio.com' && options.method === 'GET') return Response.json({ ...f.messages.get(original.providerId), from: f.env.TWILIO_FROM_NUMBER, status: 'delivered' }); });
+    const result = await f.request(f.path + `/campaigns/${campaign.id}/refresh`, 'POST', {});
+    assert.equal(result.status, 200); assert.equal(result.data.deliveries[0].status, 'delivered'); assert.equal(result.data.deliveries[0].smsSender, original.smsSender);
+  } finally { await f.close(); }
+});

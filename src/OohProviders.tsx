@@ -8,22 +8,26 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
   const [availability, setAvailability] = useState<Record<string, string>>({});
   const [refreshRequired, setRefreshRequired] = useState(false), refreshNeeded = useRef(false);
   const inventoryCallback = useRef(onInventory); inventoryCallback.current = onInventory;
-  const pendingKeys = useRef(new Map<string, string>());
+  const pendingKeys = useRef(new Map<string, string>()), active = useRef(true);
   const canWrite = ['owner', 'admin', 'editor'].includes(role), canMap = isOperator && ['owner', 'admin'].includes(role);
   const path = `/projects/${encodeURIComponent(projectId)}/ooh`;
   async function write(target: string, body: unknown) {
+    if (!active.current) throw new DOMException('The OOH view closed.', 'AbortError');
     if (refreshNeeded.current) throw new Error('Refresh provider details before making further changes.');
     const signature = JSON.stringify([target, body]);
     if (!pendingKeys.current.has(signature)) pendingKeys.current.set(signature, crypto.randomUUID());
     let result;
     try { result = await request(target, 'POST', body, pendingKeys.current.get(signature)); }
     catch (error) { if ((error as any).operation?.status === 'failed') pendingKeys.current.delete(signature); throw error; }
+    if (!active.current) throw new DOMException('The OOH view closed.', 'AbortError');
     try { await load(); await onChanged?.(); }
-    catch { refreshNeeded.current = true; setRefreshRequired(true); return result; }
+    catch (error) { if (!active.current) throw error; refreshNeeded.current = true; setRefreshRequired(true); return result; }
     pendingKeys.current.delete(signature); return result;
   }
   async function load() {
+    if (!active.current) throw new DOMException('The OOH view closed.', 'AbortError');
     const [connection, screens, saved] = await Promise.all([request(`${path}/status`), request(`${path}/inventory`), request(`${path}/bookings`)]);
+    if (!active.current) throw new DOMException('The OOH view closed.', 'AbortError');
     setStatus(connection); setInventory(screens.inventory); setBookings(saved.bookings); setSelected(previous => previous.filter(id => screens.inventory.some((screen: any) => screen.id === id))); inventoryCallback.current?.(screens.inventory);
   }
   async function refresh() {
@@ -32,16 +36,16 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
     });
   }
   useEffect(() => {
-    let active = true; setStatus(null); setInventory([]); setBookings([]); setSelected([]); setError(''); setNotice(''); setAvailability({});
+    active.current = true; let current = true; setStatus(null); setInventory([]); setBookings([]); setSelected([]); setError(''); setNotice(''); setAvailability({});
     Promise.all([request(`${path}/status`), request(`${path}/inventory`), request(`${path}/bookings`)]).then(([connection, screens, saved]) => {
-      if (active) { setStatus(connection); setInventory(screens.inventory); setBookings(saved.bookings); inventoryCallback.current?.(screens.inventory); }
-    }).catch(err => { if (active) setError(err.message || 'The OOH connection could not be loaded.'); });
-    return () => { active = false; };
+      if (current) { setStatus(connection); setInventory(screens.inventory); setBookings(saved.bookings); inventoryCallback.current?.(screens.inventory); }
+    }).catch(err => { if (current) setError(err.message || 'The OOH connection could not be loaded.'); });
+    return () => { current = false; active.current = false; };
   }, [path, request]);
   async function action(run: () => Promise<void>) {
-    if (busy) return; setBusy(true); setError(''); setNotice('');
-    try { await run(); } catch (err) { setError((err as Error).message || 'The OOH action could not be completed.'); }
-    finally { setBusy(false); }
+    if (busy || !active.current) return; setBusy(true); setError(''); setNotice('');
+    try { await run(); } catch (err) { if (active.current) setError((err as Error).message || 'The OOH action could not be completed.'); }
+    finally { if (active.current) setBusy(false); }
   }
   async function saveMapping(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const values = Object.fromEntries(new FormData(event.currentTarget));
@@ -94,7 +98,7 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
       </fieldset></form>
     </details>}
     {status?.connection && <>
-      <p><button type="button" className="button" disabled={busy || !canWrite || !status.configured} onClick={() => action(async () => { const result = await request(`${path}/sync`, 'POST', {}); setInventory(result.inventory); setSelected(previous => previous.filter(id => result.inventory.some((screen: any) => screen.id === id))); inventoryCallback.current?.(result.inventory); await onChanged?.(); setNotice(`Synced ${result.inventory.length} approved screens.`); })}>{busy ? 'Working…' : 'Sync provider inventory'}</button></p>
+      <p><button type="button" className="button" disabled={busy || !canWrite || !status.configured} onClick={() => action(async () => { const result = await request(`${path}/sync`, 'POST', {}); if (!active.current) return; setInventory(result.inventory); setSelected(previous => previous.filter(id => result.inventory.some((screen: any) => screen.id === id))); inventoryCallback.current?.(result.inventory); await onChanged?.(); setNotice(`Synced ${result.inventory.length} approved screens.`); })}>{busy ? 'Working…' : 'Sync provider inventory'}</button></p>
       {!inventory.length && <p className="helper-note">Sync the approved inventory to load locations and start a provider proposal.</p>}
       {inventory.length > 0 && <div className="table-scroll"><table><thead><tr><th>Select</th><th>Screen / face</th><th>Location</th><th>Resolution</th></tr></thead><tbody>{inventory.map(screen => <tr key={screen.id}>
         <td><input type="checkbox" aria-label={`Select ${screen.name}`} disabled={busy || !canWrite} checked={selected.includes(screen.id)} onChange={event => setSelected(event.target.checked ? [...selected, screen.id] : selected.filter(id => id !== screen.id))}/></td>
@@ -117,7 +121,7 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
       <h3>{booking.name}</h3><p>{booking.startDate} – {booking.endDate} · {booking.screenIds.length} screens · Quote {booking.price} in account currency</p>
       <p className="helper-note">Broadsign proposal {booking.proposalId || 'ID unconfirmed'} · {['creating', 'proposal-created'].includes(booking.stage) ? 'Incomplete draft: review in Broadsign before continuing.' : statuses[booking.providerStatus] || `Provider status ${booking.providerStatus}`}</p>
       {booking.stage === 'cancellation-requested' && <p className="helper-note" role="status">{booking.canRetryCancellation ? 'An operator reviewed this cancellation as not applied. This is a human review, not provider confirmation. You may explicitly request a fresh cancellation below; Broadsign’s current scope and status will be checked again.' : 'Cancellation requested; provider confirmation is pending. Delivery may continue. Refresh the delivery report before taking another action.'}</p>}
-      <div className="button-row"><button type="button" className="button" disabled={busy || !status?.configured || !booking.lineItemId || Number(booking.providerStatus) !== 1} onClick={() => action(async () => { const result = await request(`${path}/bookings/${encodeURIComponent(booking.id)}/availability`); setAvailability(previous => ({ ...previous, [booking.id]: `${result.availability} · ${result.bookableScreens ?? '—'} / ${result.requestedScreens ?? '—'} screens bookable` })); await onChanged?.(); })}>Check availability</button>
+      <div className="button-row"><button type="button" className="button" disabled={busy || !status?.configured || !booking.lineItemId || Number(booking.providerStatus) !== 1} onClick={() => action(async () => { const result = await request(`${path}/bookings/${encodeURIComponent(booking.id)}/availability`); if (!active.current) return; setAvailability(previous => ({ ...previous, [booking.id]: `${result.availability} · ${result.bookableScreens ?? '—'} / ${result.requestedScreens ?? '—'} screens bookable` })); await onChanged?.(); })}>Check availability</button>
         <button type="button" className="button" disabled={busy || !status?.configured || !booking.lineItemId} onClick={() => action(async () => { await request(`${path}/bookings/${encodeURIComponent(booking.id)}/report`); await load(); await onChanged?.(); })}>Refresh delivery report</button></div>
       {Number(booking.providerStatus) === 1 && availability[booking.id] && <p className="helper-note" role="status">{availability[booking.id]}</p>}
       {booking.report && <p>Actual impressions: {booking.report.actualImpressions ?? 'Not reported'} · Actual plays: {booking.report.actualPlays ?? 'Not reported'}{booking.report.updatedAt ? ` · Updated ${booking.report.updatedAt}` : ''}</p>}
