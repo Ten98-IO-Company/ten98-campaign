@@ -59,7 +59,13 @@ function targeting(value) {
   if (value.locationTargetingType !== undefined) { if (!['presence', 'presence_or_interest'].includes(value.locationTargetingType)) fail(400, 'INVALID_LOCATION', 'Choose presence or presence and interest.'); result.locationTargetingType = value.locationTargetingType; }
   return result;
 }
-function validTargeting(result) { const geo = row => object(row) && typeof row.geoTargetId === 'string' && label(row.name) && label(row.countryCode) && (row.negative === undefined || typeof row.negative === 'boolean'); return object(result) && ['locations', 'languages', 'devices'].every(key => Array.isArray(result[key]) && result[key].length <= 1000) && result.locations.every(geo) && (result.excludedLocations === undefined || Array.isArray(result.excludedLocations) && result.excludedLocations.length <= 1000 && result.excludedLocations.every(geo)) && result.languages.every(row => object(row) && typeof row.code === 'string' && label(row.name)) && result.devices.every(row => object(row) && ['MOBILE', 'DESKTOP', 'TABLET', 'CONNECTED_TV', 'OTHER', 'UNKNOWN'].includes(row.device) && typeof row.included === 'boolean' && count(row.bidModifier)) && (result.locationTargetingType === undefined || ['presence', 'presence_or_interest'].includes(result.locationTargetingType)); }
+function validTargeting(result) {
+  const geo = row => object(row) && typeof row.geoTargetId === 'string' && label(row.name) && label(row.countryCode) && (row.negative === undefined || typeof row.negative === 'boolean');
+  if (!object(result) || !['locations', 'languages', 'devices'].every(key => Array.isArray(result[key]) && result[key].length <= 1000) || !result.locations.every(geo)) return false;
+  const negativeIds = new Set(result.locations.filter(row => row.negative).map(row => row.geoTargetId));
+  if (result.excludedLocations !== undefined && (!Array.isArray(result.excludedLocations) || result.excludedLocations.length !== negativeIds.size || !result.excludedLocations.every(row => geo(row) && row.negative !== false && negativeIds.has(row.geoTargetId)) || new Set(result.excludedLocations.map(row => row.geoTargetId)).size !== negativeIds.size)) return false;
+  return result.languages.every(row => object(row) && typeof row.code === 'string' && label(row.name)) && result.devices.every(row => object(row) && ['MOBILE', 'DESKTOP', 'TABLET', 'CONNECTED_TV', 'OTHER', 'UNKNOWN'].includes(row.device) && typeof row.included === 'boolean' && count(row.bidModifier)) && (result.locationTargetingType === undefined || ['presence', 'presence_or_interest'].includes(result.locationTargetingType));
+}
 
 export async function handleGoogleAds(context, api, profileId, action) {
   const { req, url, body, send } = context, write = req.method === 'POST', values = write ? body : Object.fromEntries(url.searchParams);
@@ -137,7 +143,21 @@ export async function handleGoogleAds(context, api, profileId, action) {
       if (action === 'bidding') { const current = await api(endpoint, { accountId, adAccountId, platform: 'google' }); if (String(current.campaignId) !== campaignId || typeof current.biddingStrategyType !== 'string') fail(502, 'INVALID_PROVIDER_RESPONSE', 'Current campaign bidding could not be verified.'); if (current.stale === true) fail(409, 'STALE_GOOGLE_BIDDING', 'Google could not refresh the current bidding. Load it again before making a change.'); if (current.portfolio || current.bidSpec?.portfolioBidStrategyId) fail(409, 'SHARED_BIDDING', 'Detach the shared portfolio strategy in Google Ads before changing this campaign’s bidding.'); }
       const result = await api(action === 'bidding' ? `/ads/campaigns/${encodeURIComponent(campaignId)}` : endpoint, {}, payload, key, 'PUT');
       if (action === 'negatives') confirmed(result.stale !== true && Array.isArray(result.keywords) && sameKeywords(result.keywords, payload.keywords), 'Google did not confirm the complete campaign negative keyword set.');
-      if (action === 'targeting') confirmed(validTargeting(result) && result.stale !== true && String(result.campaignId) === campaignId && Array.isArray(result.updated) && Object.keys(payload.targeting).every(field => result.updated.includes(field)), 'Google did not confirm the updated campaign targeting.');
+      if (action === 'targeting') {
+        confirmed(validTargeting(result) && result.stale !== true && String(result.campaignId) === campaignId && Array.isArray(result.updated) && Object.keys(payload.targeting).every(field => result.updated.includes(field)), 'Google did not confirm the updated campaign targeting.');
+        const intended = payload.targeting, shifted = result.adGroupId != null;
+        confirmed(!shifted || (campaign.advertisingChannelType === undefined || campaign.advertisingChannelType === 'DEMAND_GEN') && typeof result.adGroupId === 'string' && campaign.adSets?.length === 1 && String(campaign.adSets[0].platformAdSetId) === result.adGroupId, 'Google returned targeting for an unconfirmed ad group.');
+        const same = (actual, expected) => actual.length === expected.length && new Set(actual).size === actual.length && expected.every(value => actual.includes(value));
+        if (intended.devices) confirmed(same(result.devices.filter(row => row.included).map(row => row.device), intended.devices), 'Google did not confirm the requested enabled devices.');
+        if (intended.locationTargetingType) confirmed(result.locationTargetingType === intended.locationTargetingType, 'Google did not confirm the requested location reach.');
+        // Demand Gen returns campaign-level empty sets after writing its single scoped ad group.
+        if (intended.languages && !shifted) confirmed(same(result.languages.map(row => row.code), intended.languages), 'Google did not confirm the requested language set.');
+        for (const field of ['locations', 'excludedLocations']) if (intended[field] !== undefined && !(shifted && field === 'locations')) {
+          const value = intended[field], countries = Array.isArray(value) ? value : value.countries || [], ids = new Set(Array.isArray(value) ? [] : Object.entries(value).filter(([key]) => key !== 'countries').flatMap(([, items]) => items));
+          const actual = result.locations.filter(row => field === 'locations' ? !row.negative : row.negative);
+          confirmed(new Set(actual.map(row => row.geoTargetId)).size === actual.length && actual.every(row => ids.has(row.geoTargetId) || row.type === 'Country' && countries.includes(row.countryCode)) && countries.every(code => actual.some(row => row.type === 'Country' && row.countryCode === code)) && [...ids].every(value => actual.some(row => row.geoTargetId === value)), 'Google did not confirm the requested location set.');
+        }
+      }
       if (action === 'bidding') {
         confirmed(result.bidStrategy === payload.bidStrategy && ['bidAmount', 'roasAverageFloor'].every(field => payload[field] === undefined || result[field] === payload[field]), 'Google did not acknowledge the requested bidding strategy.');
         let current; try { current = await api(endpoint, { accountId, adAccountId, platform: 'google' }); } catch (error) { error.uncertain = true; throw error; }

@@ -43,3 +43,33 @@ test('Shopping budget, bid and confirmation controls share campaign-specific Rea
   }
   assert.notEqual(controls[0].key, controls[1].key);
 });
+
+test('Shopping confirmed writes refresh the shared campaign plan, validation and failed provider writes do not', async () => {
+  const source = await readFile(new URL('../src/NativeGoogleAds.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function write('), end = source.indexOf('  async function create(', start);
+  assert.ok(start > 0 && end > start);
+  for (const mode of ['confirmed', 'validation', 'provider-error', 'refresh-error']) {
+    let refreshes = 0, error = '';
+    const result = { campaign: { id: 'shopping-a' } }, active = { current: true };
+    const context = { active, path: '/projects/project-a/native-google-ads', keys: { current: new Map() }, crypto, request: async () => { if (mode === 'provider-error') throw new Error('Provider unavailable'); return result; }, onChanged: async () => { refreshes++; if (mode === 'refresh-error') throw new Error('Plan unavailable'); }, setError: value => { error = value; } };
+    const write = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(start, end))});`)(...Object.values(context));
+    if (mode === 'provider-error') await assert.rejects(write({ campaignId: '123', status: 'PAUSED' }, 'campaign/update'), /Provider unavailable/);
+    else assert.equal(await write({ campaignId: '123', validateOnly: mode === 'validation' }, 'campaign/update'), result);
+    assert.equal(refreshes, ['confirmed', 'refresh-error'].includes(mode) ? 1 : 0);
+    assert.equal(Boolean(error), mode === 'refresh-error');
+    if (error) assert.match(error, /Google confirmed.*Reload the app/);
+  }
+});
+
+test('Microsoft status-only changes omit shared or unchanged budgets while explicit daily edits remain possible', async () => {
+  const source = await readFile(new URL('../src/MicrosoftAds.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function change('), end = source.indexOf('  async function requestReport(', start);
+  assert.ok(start > 0 && end > start);
+  for (const values of [{ status: 'Paused' }, { status: 'Paused', dailyBudget: '25' }, { status: 'Active', dailyBudget: '30' }]) {
+    const calls = [], rows = [{ id: 'campaign-a', dailyBudget: 25 }];
+    class FormValues { constructor() { return new Map(Object.entries(values)); } }
+    const context = { FormData: FormValues, window: { confirm: () => true }, path: '/projects/project-a/microsoft-ads', active: { current: true }, action: run => run(), write: async (...args) => { calls.push(args); return { campaign: rows[0] }; }, setCampaigns: update => update(rows), setNotice() {}, onChanged() {} };
+    const change = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(start, end))});`)(...Object.values(context));
+    await change({ preventDefault() {}, currentTarget: {} }, rows[0]);
+    assert.equal(calls[0][0], '/projects/project-a/microsoft-ads/campaigns/campaign-a');
+    assert.deepEqual(calls[0][1], { status: values.status, confirmed: true, ...(values.dailyBudget === '30' ? { dailyBudget: 30 } : {}) });
+  }
+});

@@ -26,7 +26,7 @@ async function fixture() {
     assert.equal(url.hostname, 'campaign.api.bingads.microsoft.com');
     const path = url.pathname.slice('/CampaignManagement/v13'.length), nextId = () => String(++counter);
     if (path === '/Campaigns/QueryByAccountId') { assert.equal(body.AccountId, '100'); return Response.json({ Campaigns: state.campaigns }); }
-    if (path === '/Campaigns' && options.method === 'PUT') { Object.assign(state.campaigns.find(row => row.Id === body.Campaigns[0].Id), body.Campaigns[0]); return Response.json({ PartialErrors: [] }); }
+    if (path === '/Campaigns' && options.method === 'PUT') { if (state.mode !== 'ignore-status-update') Object.assign(state.campaigns.find(row => row.Id === body.Campaigns[0].Id), body.Campaigns[0]); return Response.json({ PartialErrors: [] }); }
     // Microsoft's REST SDK defaults to MaxClicks, while accepting both that and the legacy SOAP name on reads:
     // https://github.com/BingAds/BingAds-Python-SDK/blob/main/openapi_client/models/campaign/bidding_scheme.py
     if (path === '/Campaigns') { assert.equal(body.Campaigns[0].Status, 'Paused'); assert.equal(body.Campaigns[0].CampaignType, 'Search'); assert.deepEqual(body.Campaigns[0].BiddingScheme, { Type: 'MaxClicks', MaxCpc: { Amount: 2 } }); const row = { Id: nextId(), BudgetId: '0', ...body.Campaigns[0] }; state.campaigns.push(row); return Response.json({ CampaignIds: [row.Id], PartialErrors: [] }); }
@@ -140,4 +140,30 @@ test('native Microsoft serializes campaign status and budget changes through pro
     assert.equal((await f.request(route, 'POST', { status: 'Active', confirmed: true }, key)).status, 200, 'A completed receipt can still replay.');
     assert.equal(f.state.campaigns[0].Status, 'Paused'); assert.equal(f.app.store.get(f.projectId, 'campaigns', created.data.campaign.id).status, 'paused');
   } finally { clearTimeout(timer); release?.(); await heldRequest?.catch(() => {}); await f.close(); }
+});
+
+test('Microsoft status-only controls work with shared and unknown budgets without editing a shared pool or trusting unreadable ownership', async () => {
+  const f = await fixture();
+  try {
+    await f.map(); const created = await f.request(f.prefix + '/campaigns', 'POST', input, randomUUID()); assert.equal(created.status, 200);
+    const campaign = f.state.campaigns[0], route = f.prefix + '/campaigns/' + campaign.Id, writes = () => f.calls.filter(row => row.method === 'PUT');
+    // BudgetId identifies sharing; DailyBudget on a shared campaign is the pool total, not a campaign allocation.
+    // https://learn.microsoft.com/en-us/advertising/campaign-management-service/campaign?view=bingads-13
+    campaign.BudgetId = '900'; campaign.DailyBudget = 500;
+    const active = await f.request(route, 'POST', { status: 'Active', confirmed: true }, randomUUID()); assert.equal(active.status, 200); assert.equal(active.data.campaign.sharedBudget, true);
+    assert.deepEqual(writes().at(-1).body.Campaigns, [{ Id: campaign.Id, Status: 'Active' }]);
+    assert.equal(f.app.store.get(f.projectId, 'campaigns', created.data.campaign.id).budget, input.dailyBudget, 'Changing a switch cannot copy a shared pool total into a local campaign allocation.');
+    let before = writes().length; assert.equal((await f.request(route, 'POST', { dailyBudget: 50, confirmed: true }, randomUUID())).status, 422); assert.equal(writes().length, before);
+    campaign.BudgetId = '0'; campaign.BudgetType = 'LifetimeBudgetStandard';
+    assert.equal((await f.request(route, 'POST', { status: 'Paused', confirmed: true }, randomUUID())).status, 200);
+    before = writes().length; assert.equal((await f.request(route, 'POST', { dailyBudget: 50, confirmed: true }, randomUUID())).status, 422); assert.equal(writes().length, before); campaign.BudgetType = 'DailyBudgetStandard';
+    for (const value of ['unreadable', {}, -1, 9007199254740992, '9223372036854775808']) {
+      campaign.BudgetId = value;
+      const result = await f.request(route, 'POST', { status: 'Active', confirmed: true }, randomUUID()); assert.equal(result.status, 200); assert.equal(result.data.campaign.sharedBudget, null);
+      before = writes().length; assert.equal((await f.request(route, 'POST', { dailyBudget: 50, confirmed: true }, randomUUID())).status, 422); assert.equal(writes().length, before);
+    }
+    f.state.mode = 'ignore-status-update'; const key = randomUUID(), body = { status: 'Paused', confirmed: true };
+    const unconfirmed = await f.request(route, 'POST', body, key); assert.equal(unconfirmed.status, 409); assert.equal(unconfirmed.data.operation.status, 'uncertain'); assert.equal(f.app.store.get(f.projectId, 'campaigns', created.data.campaign.id).status, 'active');
+    before = writes().length; for (const retry of [key, randomUUID()]) assert.equal((await f.request(route, 'POST', body, retry)).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(writes().length, before);
+  } finally { await f.close(); }
 });

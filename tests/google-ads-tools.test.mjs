@@ -13,7 +13,7 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
   const campaign = { platformCampaignId: '12345', platform: 'google', profileId, accountId, platformAdAccountId: adAccountId, campaignName: 'Search fixture', advertisingChannelType: 'SEARCH', adSets: [{ platformAdSetId: '67890', adSetName: 'Products' }] };
   let rows = [{ id: 'first-keyword', platformCriterionId: '1', profileId, accountId, adAccountId, platform: 'google', campaignId: '12345', adSetId: '67890', keyword: 'campaign tools', matchType: 'exact', status: 'active', negative: false }, { id: 'second-keyword', platformCriterionId: '2', profileId, accountId, adAccountId, platform: 'google', campaignId: '12345', adSetId: '67890', keyword: 'free', matchType: 'phrase', status: 'active', negative: true }];
   let negativeRows = [{ criterionId: '55', text: 'jobs', matchType: 'broad' }], badKeywordScope = false, badAck = false, failBidReadback = false, bidWrite = false, portfolio = false;
-  let bidSpec = { bidStrategy: 'LOWEST_COST_WITHOUT_CAP' }, cookie, repeatCursor = false, staleBidding = false, staleTargeting = false;
+  let bidSpec = { bidStrategy: 'LOWEST_COST_WITHOUT_CAP' }, cookie, repeatCursor = false, staleBidding = false, staleTargeting = false, targetingReply = {};
   const targets = { campaignId: '12345', devices: [{ device: 'MOBILE', included: true, bidModifier: 1 }, { device: 'DESKTOP', included: true, bidModifier: 1 }], locations: [{ geoTargetId: '2784', countryCode: 'AE', type: 'Country', name: 'United Arab Emirates', negative: false }], excludedLocations: [], languages: [{ code: 'en', name: 'English' }], locationTargetingType: 'presence', updated: [] };
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
@@ -41,7 +41,7 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
       assert.equal(url.searchParams.get('adAccountId'), adAccountId); assert.equal(url.searchParams.get('fromDate'), '2026-09-01'); assert.equal(url.searchParams.get('toDate'), '2026-09-30');
       result = { customerId: adAccountId, data: [{ searchTerm: 'campaign manager', campaignId: '12345', adGroupId: '67890', clicks: 5, costMicros: 1500000 }], paging: { ...(url.searchParams.has('pageToken') && !repeatCursor ? {} : { nextPageToken: 'opaque-cursor' }) }, stale: false };
     } else if (url.pathname.endsWith('/ideas') || url.pathname.endsWith('/historical-metrics')) { assert.equal(payload.adAccountId, adAccountId); result = { customerId: adAccountId, data: [{ text: 'campaign software', keywordIdeaMetrics: { avgMonthlySearches: '1400', lowTopOfPageBidMicros: '1000000', highTopOfPageBidMicros: '3500000' } }], ...(repeatCursor ? { paging: { nextPageToken: payload.pageToken } } : {}) }; }
-    else if (url.pathname.endsWith('/targeting')) { if (method === 'PUT') { targets.updated = badAck ? [] : Object.keys(payload.targeting); if (payload.targeting.languages) targets.languages = payload.targeting.languages.map(code => ({ code })); if (payload.targeting.locationTargetingType) targets.locationTargetingType = payload.targeting.locationTargetingType; } result = { ...targets, stale: staleTargeting }; }
+    else if (url.pathname.endsWith('/targeting')) { if (method === 'PUT') { targets.updated = badAck ? [] : Object.keys(payload.targeting); if (payload.targeting.languages) targets.languages = payload.targeting.languages.map(code => ({ code })); if (payload.targeting.locationTargetingType) targets.locationTargetingType = payload.targeting.locationTargetingType; } result = { ...targets, stale: staleTargeting, ...targetingReply }; }
     else if (url.pathname.endsWith('/bidding')) { if (failBidReadback && bidWrite) throw new Error('Read after accepted write failed.'); result = { campaignId: '12345', biddingStrategyType: 'MAXIMIZE_CONVERSIONS', bidSpec, ...(portfolio ? { portfolio: { id: 'shared-portfolio' } } : {}), stale: staleBidding }; }
     else if (url.pathname === '/api/v1/ads/campaigns/12345' && method === 'PUT') { bidWrite = true; bidSpec = { ...payload }; delete bidSpec.platform; result = { updated: 1, ...bidSpec }; }
     else throw new Error('Unexpected provider path: ' + method + ' ' + url.pathname);
@@ -82,6 +82,34 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
     repeatCursor = true; assert.equal((await request(route + 'search-terms?' + new URLSearchParams({ ...selection, ...reportDates, pageToken: 'opaque-cursor' }))).status, 502); assert.equal((await request(route + 'planner', { accountId, adAccountId, mode: 'ideas', keywords: ['campaign'], pageToken: 'planner-repeat' })).status, 502); repeatCursor = false;
     assert.equal((await request(route + 'planner', { accountId, adAccountId, mode: 'ideas', keywords: Array(21).fill('same') })).status, 400);
     result = await request(route + 'targeting', { ...selection, targeting: { languages: ['ar'], locationTargetingType: 'presence' }, confirmChange: true }); assert.equal(result.status, 200); assert.equal(result.data.result.languages[0].code, 'ar');
+    const targetChanges = [
+      [{ languages: ['de'] }, { languages: [{ code: 'en' }] }],
+      [{ devices: ['MOBILE'] }, {}],
+      [{ locationTargetingType: 'presence_or_interest' }, { locationTargetingType: 'presence' }],
+      [{ locations: ['SA'] }, {}],
+      [{ locations: { cities: ['102'] } }, { locations: [{ geoTargetId: '103', type: 'City', countryCode: 'AE' }] }],
+      [{ excludedLocations: [] }, { excludedLocations: [{ geoTargetId: '2682', type: 'Country', countryCode: 'SA', negative: true }] }],
+      [{ languages: ['it'] }, { adGroupId: '67890', languages: [] }],
+    ];
+    for (const [targeting, reply] of targetChanges) {
+      targetingReply = reply; const body = { ...selection, targeting, confirmChange: true }, before = writes.length;
+      result = await request(route + 'targeting', body, 'mismatched-targeting-' + before); assert.equal(result.status, 409, JSON.stringify(targeting)); assert.equal(result.data.operation.status, 'uncertain');
+      result = await request(route + 'targeting', body, 'fresh-targeting-' + before); assert.equal(result.status, 409); assert.equal(writes.length, before + 1, 'Mismatched readback cannot be retried under another key.');
+    }
+    const country = { geoTargetId: '2784', type: 'Country', countryCode: 'AE', negative: false }, city = { geoTargetId: '102', type: 'City', countryCode: 'AE', negative: false };
+    targetingReply = { locations: [country, city], excludedLocations: [], devices: [{ device: 'MOBILE', included: true, bidModifier: 1 }, { device: 'DESKTOP', included: false, bidModifier: 0 }] };
+    result = await request(route + 'targeting', { ...selection, targeting: { locations: { countries: ['AE'], cities: ['102'] }, excludedLocations: [], devices: ['MOBILE'], languages: [] }, confirmChange: true }); assert.equal(result.status, 200, JSON.stringify(result.data));
+    const excluded = { geoTargetId: '2682', type: 'Country', countryCode: 'SA', negative: true }; targetingReply = { adGroupId: null, locations: [country, excluded], excludedLocations: [excluded] };
+    result = await request(route + 'targeting', { ...selection, targeting: { locations: ['AE'], excludedLocations: { countries: ['SA'] } }, confirmChange: true }); assert.equal(result.status, 200, 'The provider locations list also includes negative criteria; they do not expand the targeted set.');
+    targetingReply = { adGroupId: null, locations: [country, excluded], excludedLocations: [] };
+    assert.equal((await request(route + 'targeting?' + query)).status, 502, 'Conflicting exclusion lists are unreadable, rather than displayed as no exclusions.');
+    result = await request(route + 'targeting', { ...selection, targeting: { excludedLocations: [], languages: ['sv'] }, confirmChange: true }, 'contradictory-exclusion-readback'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain', 'A dedicated empty exclusions array cannot hide negative criteria in the combined locations list.');
+    campaign.advertisingChannelType = 'DEMAND_GEN'; targetingReply = { adGroupId: '67890', locations: [], languages: [] };
+    result = await request(route + 'targeting', { ...selection, targeting: { locations: ['SA'], languages: ['es'] }, confirmChange: true }); assert.equal(result.status, 200, 'Demand Gen confirms its scoped ad group while campaign-level geo/language sets stay empty.');
+    delete campaign.advertisingChannelType;
+    result = await request(route + 'targeting', { ...selection, targeting: { locations: ['SA'], languages: ['nl'] }, confirmChange: true }); assert.equal(result.status, 200, 'A tree without optional channel metadata can still confirm the documented, single scoped ad-group receipt.');
+    targetingReply = { adGroupId: 'foreign-group', locations: [], languages: [] };
+    result = await request(route + 'targeting', { ...selection, targeting: { locations: ['AE'], languages: ['pt'] }, confirmChange: true }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); campaign.advertisingChannelType = 'SEARCH'; targetingReply = {};
     assert.equal((await request(route + 'targeting', { ...selection, targeting: { locations: [] }, confirmChange: true })).status, 400);
     assert.equal((await request(route + 'targeting', { ...selection, targeting: { locations: { countries: null } }, confirmChange: true })).status, 400);
     portfolio = true; const beforePortfolio = writes.length; result = await request(route + 'bidding', { ...selection, bidStrategy: 'COST_CAP', bidAmount: 10, confirmChange: true }); assert.equal(result.status, 409); assert.equal(writes.length, beforePortfolio); portfolio = false;

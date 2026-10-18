@@ -91,7 +91,7 @@ export function createWebhookService({ db, store, contacts = createContacts({ db
       const post = store.list(project.id, 'posts').find(item => item.externalId === payload.post.id && item.zernioProfileId === project.zernio_profile_id && !item.sample);
       if (!post) continue;
       found = true;
-      if (!newer(eventAt, post.providerEventAt)) continue;
+      if (post.providerDeletedAt || !newer(eventAt, post.providerEventAt)) continue;
       const statuses = ['scheduled', 'published', 'failed', 'partial', 'cancelled', 'publishing', 'draft'];
       const providerStatus = statuses.includes(payload.post.status) ? payload.post.status : payload.event.slice('post.'.length);
       const status = providerStatus === 'publishing' ? 'submitted' : statuses.includes(providerStatus) ? providerStatus : post.status;

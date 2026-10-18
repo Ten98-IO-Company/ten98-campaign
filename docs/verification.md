@@ -1,6 +1,28 @@
-# End-to-end verification — v0.8.1
+# End-to-end verification — v0.8.2
 
-## Campaign controls and interface audit
+## Current workflow audit
+
+Verified on 18 October 2026 using isolated databases and the production build against simulated providers. All **229 automated checks** pass (`npm test`), including the existing ChatGPT ads, Shopping/CPC, Microsoft, social publishing, analytics, OOH, DAM, inbox, direct campaigns and tracking regressions. The production build, offline non-root container smoke check and `npm audit --omit=dev` pass, with no known production dependency vulnerabilities. Independent review reproduced an additional targeting inconsistency, which was fixed and checked before release. No dependency was added.
+
+| Workflow | Current evidence |
+| --- | --- |
+| Shopping campaign plan | The browser creates a paused Shopping campaign, then opens Campaigns and sees its USD 25 daily budget without reloading the app. Confirmed writes refresh shared records; provider failures and validation-only requests do not. A plan-refresh failure preserves the confirmed provider result and gives a reload instruction. |
+| Microsoft shared budgets | The browser maps a test account, pauses its active shared-budget Search campaign and reads back Paused with the unchanged USD 100 shared amount. Recorded provider payload contains only the campaign ID and status. HTTP checks cover shared and unreadable ownership, status-only writes, blocked budget edits and mismatched readback; shared pool totals cannot overwrite local allocations. |
+| Google targeting | HTTP checks verify actual returned languages, enabled devices, location reach and target/exclusion sets. Mismatched replacements and contradictory exclusion lists fail; those unconfirmed writes remain uncertain and fresh-key repeats are blocked. Demand Gen can store language/location targets on its single ad group and return empty campaign-level lists; that documented response remains supported only for the campaign's verified group. |
+| Social publishing | Delayed refreshes cannot replace newer content or cancellation evidence, even within the same timestamp. A conflicting local change after an accepted provider write preserves the latest record and blocks repeats pending review. Queued signed webhooks cannot revive confirmed provider deletions. |
+| Interface | Provider cards show status first; connection fields and setup instructions expand when needed. A browser tests the saved Shopping connection, generates a draft, and opens Usage and cost using the keyboard. Draft review actions and charge evidence remain available. |
+
+![Compact provider overview](integrations-overview-verification.png)
+
+![Shopping creation appears in the shared campaign plan](shopping-plan-verification.png)
+
+![Microsoft shared-budget campaign paused without editing its allocation](microsoft-shared-budget-verification.png)
+
+Runnable regression evidence is in [campaign UI](../tests/ads-workflow-ui.test.mjs), [Microsoft](../tests/native-microsoft-ads.test.mjs), [Google tools](../tests/google-ads-tools.test.mjs), [social snapshots](../tests/social-dam-round4.test.mjs) and [webhooks](../tests/webhooks.test.mjs). The full suite reruns all other areas; older manual walkthroughs below remain evidence from their stated releases. The new Google targeting checks follow [Zernio's replacement and returned-state contract](https://docs.zernio.com/ad-campaigns/update-campaign-targeting).
+
+All accounts, provider states and amounts above are synthetic. No real publication, message, upload, activation, booking or ad spend occurred. Live provider acceptance still needs configured credentials, permissions and approvals. These checks establish application behavior against simulated contracts, not live provider delivery or placement.
+
+## Previous campaign controls audit — v0.8.1
 
 Verified on 18 October 2026 with isolated databases, simulated providers and the production frontend. All **223 automated checks** pass (`npm test`), covering ads, social publishing, analytics, OOH, DAM, inbox, replies and direct campaigns. The production build and offline non-root Docker smoke check pass. `npm audit --omit=dev` reports no known production dependency vulnerabilities. No dependency was added. Ponytail and Paperthin evidence, consistency and independent reviews were applied.
 

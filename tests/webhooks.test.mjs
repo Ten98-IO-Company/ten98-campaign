@@ -76,6 +76,18 @@ test('post lifecycle changes are profile scoped, reject ambiguous mappings and t
   } finally { f.cleanup(); }
 });
 
+test('a delayed post webhook cannot restore a provider record already cancelled locally', () => {
+  const f = fixture();
+  try {
+    const post = f.store.update('project-a', 'posts', f.post.id, { status: 'cancelled', providerStatus: 'cancelled', providerDeletedAt: '2026-10-10T12:10:00Z' });
+    const delayed = event('post.scheduled', { timestamp: '2026-10-10T12:09:00Z' });
+    assert.equal(signed(f.service, delayed).status, 202);
+    assert.deepEqual(f.service.processPending(), { processed: 1, pending: 0 });
+    assert.deepEqual(f.store.get('project-a', 'posts', f.post.id), post, 'Confirmed removal must survive a lifecycle event queued before cancellation.');
+    assert.equal(f.db.prepare('SELECT status FROM webhook_events WHERE id=?').get(delayed.id).status, 'processed');
+  } finally { f.cleanup(); }
+});
+
 test('queued post work survives restart and its effects commit atomically with event completion', () => {
   const f = fixture(); let reopened;
   try {
