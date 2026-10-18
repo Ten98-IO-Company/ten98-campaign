@@ -2,7 +2,7 @@
 
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.7.4 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.7.5 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
 
@@ -108,7 +108,7 @@ Each tab shows its effective caption/media preview and a character counter, incl
 
 Incomplete drafts can be saved locally. **Check with Zernio** explicitly checks the current draft without publishing it. Publishing, scheduling, scheduled updates, retries and supported published-copy edits run the applicable local restrictions and mandatory Zernio preflight against the exact outgoing copy; an unavailable, invalid or rejected provider check blocks the write. TikTok submissions also check creator permissions and explicit consent. Account access, delivered-file encoding and changing platform policies still require live provider acceptance with your configured credentials.
 
-A planned time is entered in your local timezone and submitted as a UTC instant. Saving a local draft does not submit it: choose **Publish** or **Schedule** from Publishing to send it to Zernio. Updating a provider schedule preserves its platform copies; replacing externally divergent copies on multiple accounts of one platform requires explicit confirmation.
+A planned time is entered in your local timezone and submitted as a UTC instant. Saving a local draft does not submit it: choose **Publish** or **Schedule** from Publishing to send it to Zernio. Changing a provider post's shared time applies the new time to every destination; an unchanged shared time preserves distinct account schedules. Caption, media and option copies remain intact unless edited; replacing externally divergent copies on multiple accounts of one platform requires explicit confirmation.
 
 ## Social post lifecycle and approvals
 

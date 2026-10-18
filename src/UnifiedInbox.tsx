@@ -54,13 +54,14 @@ function SmsInbox({ projectId, request, readOnly = false, initialSearch }: Props
       try {
         const [list, thread] = await Promise.all([requester.current(path + '/conversations'), selected ? requester.current(path + '/conversations/' + encodeURIComponent(selected.id) + '/messages') : Promise.resolve(null)]);
         if (closed || generation !== version.current || started !== revision.current) return;
-        setRows(previous => merge(previous, list.conversations || []).sort((a, b) => (Date.parse(b.lastMessageAt) || 0) - (Date.parse(a.lastMessageAt) || 0))); setPagination(list.pagination || null);
-        if (thread) { setSelected(thread.conversation); setDetail((previous: Row | null) => ({ ...thread, messages: merge(previous?.messages || [], thread.messages || []) })); }
+        const knownRows = new Set(rows.map(item => item.id)), gap = list.pagination?.hasMore && (list.conversations || []).some((item: Row) => !knownRows.has(item.id));
+        setRows(previous => merge(previous, list.conversations || []).sort((a, b) => (Date.parse(b.lastMessageAt) || 0) - (Date.parse(a.lastMessageAt) || 0))); setPagination(previous => gap ? list.pagination : previous || list.pagination || null);
+        if (thread) { setSelected(thread.conversation); setDetail((previous: Row | null) => { const known = new Set((previous?.messages || []).map((item: Row) => item.id)), gap = thread.pagination?.hasMore && !(thread.messages || []).some((item: Row) => known.has(item.id)); return { ...thread, pagination: gap ? thread.pagination : previous?.pagination || thread.pagination, messages: merge(previous?.messages || [], thread.messages || []) }; }); }
       } catch { /* Manual refresh is available; polling reads local SMS records only. */ }
       finally { checking = false; }
     };
     const timer = window.setInterval(pollSms, 5000); return () => { closed = true; window.clearInterval(timer); };
-  }, [projectId, selected?.id]);
+  }, [projectId, selected?.id, rows]);
   async function sendSms(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (readOnly || !selected || blocked || !status?.configured || !message.trim()) return;
     if (message.length > 1600) { setError('Keep the SMS reply within 1,600 characters.'); return; }
