@@ -21,6 +21,40 @@ test('actual inbox writer retains the same operation key after an uncertain repl
   await assert.rejects(compile(section('async function write(', '  async function loadAccounts('), { ...context, readOnly: true })('any', {}), /cannot send/); assert.equal(calls.length, 3);
 });
 
+test('full-history search uses the actual provider search loader, preserves page cursors and ignores previous-account results', async () => {
+  const calls = [], rows = [], version = { current: 3 }, filters = [], context = { tab: 'messages', accountId: 'account/one', historyFilter: { query: 'old invoice', direction: 'incoming' }, conversationStatus: 'active', requester: { current: async route => { calls.push(route); return { conversations: [{ id: 'older-thread', matchCount: 1, matches: [{ id: 'old', text: 'old invoice' }] }], pagination: { hasMore: true, nextCursor: 'opaque +/' }, meta: { accountsSkipped: [] } }; } }, path, version, merge, setRows: value => rows.push(typeof value === 'function' ? value([]) : value), setPagination() {}, setMeta() {}, setLoaded() {} };
+  const fetchList = compile(section('async function fetchList(', '  async function loadList('), context);
+  await fetchList(3, 'opaque +/'); const query = new URL(calls[0], 'https://app.example').searchParams; assert.equal(query.get('cursor'), 'opaque +/'); assert.equal(query.get('query'), 'old invoice'); assert.equal(query.get('direction'), 'incoming'); assert.equal(query.has('status'), false); assert.match(calls[0], /conversations\/search\?/); assert.equal(rows[0][0].matches[0].text, 'old invoice');
+  version.current = 4; await fetchList(3); assert.equal(rows.length, 1);
+  const search = compile(section('async function searchHistory(', '  async function prepareConversation('), { tab: 'messages', accountId: 'account/one', pending: { current: false }, historyQuery: '  old invoice  ', historyDirection: 'outgoing', version, setError() {}, action: async (_, run) => run(version.current), fetchList: async (...args) => filters.push(args), setHistoryFilter: value => filters.push(value), resetSelection: () => filters.push('selection cleared') });
+  await search(event); assert.deepEqual(filters[0], [4, '', { query: 'old invoice', direction: 'outgoing' }]); assert.deepEqual(filters[1], { query: 'old invoice', direction: 'outgoing' }); assert.equal(version.current, 4);
+});
+
+test('new-conversation preparation rejects stale results and does not overwrite an existing reply template draft', async () => {
+  const calls = [], recipients = [], opening = [], templates = [], version = { current: 1 }, context = { readOnly: false, capabilities: { start: true }, accountId: 'wa/account', account: { platform: 'whatsapp' }, action: async (_, run) => run(1), requester: { current: async route => { calls.push(route); return route.includes('/direct/templates') ? { templates: [{ name: 'approved', status: 'APPROVED' }, { name: 'draft', status: 'PENDING' }] } : { recipients: [{ id: 'permitted-contact' }] }; } }, path, projectId: 'project/one', version, setRecipients: value => recipients.push(value), setOpeningTemplates: value => templates.push(value), setStarting: value => opening.push(value), setConfirmSend() {} };
+  const prepare = changes => compile(section('async function prepareConversation(', '  async function startConversation('), { ...context, ...changes })();
+  await prepare(); assert.equal(new URL(calls[0], 'https://app.example').searchParams.get('accountId'), 'wa/account'); assert.equal(templates[0].length, 1); assert.deepEqual(opening, [true]); assert.equal(recipients[0][0].id, 'permitted-contact');
+  version.current = 2; await prepare(); assert.equal(recipients.length, 1); assert.equal(templates.length, 1); const count = calls.length; await prepare({ readOnly: true }); await prepare({ capabilities: { start: false } }); assert.equal(calls.length, count);
+});
+
+test('opening-message sends require review, retain failed drafts and separate accepted sends from a failed thread refresh', async () => {
+  const calls = [], changed = [], notices = [], errors = [], version = { current: 1 }, context = { readOnly: false, capabilities: { start: true, messageLimit: 10000 }, accountId: 'x-account', account: { platform: 'twitter' }, recipient: '@alex', openingMessage: 'Hello Alex', confirmSend: true, openingTemplate: null, openingTemplateComponents: [], templateRestriction: () => '', action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { conversationId: 'existing-or-new', platform: 'twitter' }; }, version, setStarting: value => changed.push(value), setRecipient: value => changed.push(value), setOpeningMessage: value => changed.push(value), setConfirmSend() {}, setOpeningTemplateKey() {}, setOpeningTemplateComponents() {}, setNotice: value => notices.push(value), fetchThread: async () => { throw new Error('Temporary read failure'); }, setError: value => errors.push(value) };
+  const send = changes => compile(section('async function startConversation(', '  async function fetchList('), { ...context, ...changes })(event);
+  for (const changes of [{ confirmSend: false }, { readOnly: true }, { recipient: '' }, { openingMessage: '' }]) await send(changes); assert.equal(calls.length, 0);
+  await assert.rejects(send({ write: async () => { throw new Error('Outcome uncertain'); } }), /uncertain/); assert.deepEqual(changed, [], 'An uncertain write retains recipient, text and reviewed state for recovery.');
+  await send(); assert.deepEqual(calls[0], ['conversations/start', { accountId: 'x-account', participantUsername: '@alex', message: 'Hello Alex', confirmSend: true }]); assert.deepEqual(changed, [false, '', '']); assert.match(notices[0], /accepted/); assert.match(errors.at(-1), /was accepted/);
+  const listed = []; await send({ historyFilter: null, conversationStatus: 'active', merge, fetchThread: async () => ({ id: 'existing-or-new', status: 'active', lastMessageAt: '2026-10-18T12:00:00Z' }), setRows: update => listed.push(update([{ id: 'old-thread' }])) }); assert.equal(listed[0][0].id, 'existing-or-new', 'A newly read-back conversation appears in the normal conversation list immediately.');
+  changed.length = 0; version.current = 2; await send(); assert.deepEqual(changed, [], 'A late send receipt cannot clear the next account’s opening draft.');
+});
+
+test('an old Zernio update read cannot overwrite a manual search and later polling continues normally', async () => {
+  const handler = section('const poll = async () =>', '    void poll();').replace('const poll = ', '').trim().replace(/;$/, ''), revision = { current: 0 }, refreshed = [];
+  let finish, first = true;
+  const context = { revision, checking: false, pending: { current: false }, requester: { current: async () => first ? (first = false, new Promise(resolve => { finish = resolve; })) : { cursor: 2, updates: [{ event: 'message.received' }] } }, path, accountId: 'account', cursor: undefined, closed: false, generation: 1, version: { current: 1 }, tab: 'messages', loaded: true, selected: null, focusedComment: '', action: async (_, run) => run(1), fetchList: async () => refreshed.push('current search'), fetchThread: async () => {}, setNotice() {} };
+  const poll = compile(handler, context), earlier = poll(); revision.current++; finish({ cursor: 1, updates: [{ event: 'message.received' }] }); await earlier; assert.deepEqual(refreshed, []);
+  await poll(); assert.deepEqual(refreshed, ['current search'], 'Rejecting an older update does not disable subsequent provider refreshes.');
+});
+
 test('actual reply handler uses scoped provider payloads, explicit review replacement approval and preserves failed drafts', async () => {
   const handler = section('async function reply(', '  async function conversationAction(');
   async function run(changes = {}) {
@@ -44,7 +78,7 @@ test('actual reply handler uses scoped provider payloads, explicit review replac
 
 test('actual list and thread loaders preserve opaque IDs, account scope and pagination without accepting stale project responses', async () => {
   const calls = [], state = { rows: [{ id: 'one', text: 'old' }] }, version = { current: 1 };
-  const context = { tab: 'messages', accountId: 'account/a', conversationStatus: 'archived', requester: { current: async url => { calls.push(url); return { conversations: [{ id: 'one', text: 'fresh' }, { id: 'two' }], pagination: { hasMore: false }, meta: {} }; } }, path, version, merge, setRows: value => { state.rows = typeof value === 'function' ? value(state.rows) : value; }, setPagination() {}, setMeta() {}, setLoaded() {} };
+  const context = { historyFilter: null, tab: 'messages', accountId: 'account/a', conversationStatus: 'archived', requester: { current: async url => { calls.push(url); return { conversations: [{ id: 'one', text: 'fresh' }, { id: 'two' }], pagination: { hasMore: false }, meta: {} }; } }, path, version, merge, setRows: value => { state.rows = typeof value === 'function' ? value(state.rows) : value; }, setPagination() {}, setMeta() {}, setLoaded() {} };
   const list = compile(section('async function fetchList(', '  async function loadList('), context);
   await list(1, 'opaque + cursor'); const query = new URL(calls[0], 'https://app.example').searchParams;
   assert.equal(query.get('accountId'), 'account/a'); assert.equal(query.get('status'), 'archived'); assert.equal(query.get('cursor'), 'opaque + cursor'); assert.deepEqual(state.rows, [{ id: 'one', text: 'fresh' }, { id: 'two' }]);
@@ -108,7 +142,7 @@ test('thread refresh preserves an unfinished reply and post-write read failures 
 test('webhook polling reads only the local update feed until new relevant activity arrives', async () => {
   const handler = section('const poll = async () =>', '    void poll();').replace('const poll = ', '').trim().replace(/;$/, ''), calls = [], refreshed = [];
   const responses = [{ updates: [], cursor: 8 }, { updates: [{ event: 'comment.received' }], cursor: 9 }, { updates: [{ event: 'message.received' }], cursor: 10 }];
-  const context = { checking: false, pending: { current: false }, requester: { current: async url => { calls.push(url); return responses.shift(); } }, path, accountId: 'account', cursor: undefined, closed: false, generation: 1, version: { current: 1 }, tab: 'messages', loaded: true, selected: { id: 'thread' }, focusedComment: '', action: async (_, run) => run(1), fetchList: async () => refreshed.push('list'), fetchThread: async () => refreshed.push('thread'), setNotice() {} };
+  const context = { revision: { current: 0 }, checking: false, pending: { current: false }, requester: { current: async url => { calls.push(url); return responses.shift(); } }, path, accountId: 'account', cursor: undefined, closed: false, generation: 1, version: { current: 1 }, tab: 'messages', loaded: true, selected: { id: 'thread' }, focusedComment: '', action: async (_, run) => run(1), fetchList: async () => refreshed.push('list'), fetchThread: async () => refreshed.push('thread'), setNotice() {} };
   const poll = compile(handler, context); await poll(); await poll(); assert.deepEqual(refreshed, []); await poll(); assert.deepEqual(refreshed, ['list', 'thread']);
   assert.equal(new URL(calls[0], 'https://app.example').searchParams.has('after'), false); assert.equal(new URL(calls[1], 'https://app.example').searchParams.get('after'), '8'); assert.ok(calls.every(url => url.startsWith(path + '/updates?')));
   await compile(handler, { ...context, pending: { current: true } })(); assert.equal(calls.length, 3);
@@ -116,7 +150,7 @@ test('webhook polling reads only the local update feed until new relevant activi
 
 test('the actual action lock rejects double clicks and stale operation results do not alter a new project', async () => {
   const pending = { current: false }, version = { current: 1 }, busy = [], errors = [];
-  const action = compile(section('async function action(', '  async function write('), { pending, version, setBusy: value => busy.push(value), setError: value => errors.push(value), setNotice() {} });
+  const action = compile(section('async function action(', '  async function write('), { pending, version, revision: { current: 0 }, setBusy: value => busy.push(value), setError: value => errors.push(value), setNotice() {} });
   let finish, sends = 0; const first = action('Replying', async () => { sends++; await new Promise(resolve => { finish = resolve; }); }); await action('Reply again', async () => { sends++; }); assert.equal(sends, 1);
   version.current = 2; finish(); await first; assert.deepEqual(busy, ['Replying']); assert.deepEqual(errors, ['']);
 });

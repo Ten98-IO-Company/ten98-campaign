@@ -1,6 +1,28 @@
-# End-to-end verification — v0.8.4
+# ten98 Campaign v0.8.5 — synthetic end-to-end verification
 
-## Current full-app audit
+## Zernio foundation and first expansion
+
+Verified on 18 October 2026 against the pinned Zernio OpenAPI 1.292.0, using isolated local databases, the production frontend and synthetic providers. **299 automated checks pass**, with no failures or skips. The production build, production container build and offline non-root container smoke check pass; the production dependency audit reports zero vulnerabilities. No dependency or application schema change was added. These checks establish application behavior; they do not establish acceptance by live providers.
+
+The implemented additions are bounded subsets of the [full Zernio plan](zernio-feature-plan.md):
+
+- Reddit creation and boosts require an explicitly selected pixel for all five goals. The composer can discover pixels owned by the selected advertising account. Website leads use the Lead event and a destination website; lifetime budgets require an end time. New ads start paused.
+- Snapchat connections, publishing and scheduling stop before an upstream publication request while Zernio app approval remains pending. Existing drafts remain readable and save locally. Google/Reddit advertising OAuth uses the documented standalone routes and validates already-connected account receipts.
+- Connection settings expose scoped account health, permissions, reconnection, display overrides, paid X background-read preferences and confirmed disconnect. WhatsApp token health remains distinct from its platform link and inbound webhook subscription. X settings remain unchanged unless explicitly enabled or disabled; provider usage charges apply.
+- Current mapped profile settings and project-owned account groups can be managed. Empty global and mixed-profile groups stay outside the project interface. Group membership does not move accounts or grant project access.
+- Meta, Google, TikTok, LinkedIn, Pinterest, X and OpenAI/ChatGPT support tracking-tag discovery, detail/installation-code display, event-definition reads and tag creation. Meta additionally supports rename and diagnostics. Reddit separately supports scoped pixel discovery and provider installation instructions, with pixel creation/events managed in Reddit Ads Manager. Installation code stays escaped; creating a tag does not install it on a website.
+- Inbox history search includes archived conversations, pagination, direction filters and skipped/failed-account feedback. New conversations support X, Bluesky and Reddit text, verified Slack members, approved supported WhatsApp templates and Zernio SMS recipients with recorded local channel permission. Record contact permissions in Direct campaigns; both permission and suppression are rechecked immediately before dispatch. Provider acceptance is distinct from delivery.
+- Publishing offers account-scoped Pinterest board, YouTube playlist and Reddit subreddit/rules/flair selection with manual-ID fallback. YouTube's saved default is an explicit choice; no playlist means none. Shared validation follows the provider's current Instagram ten-item carousel and Facebook sixty-second Reel limits.
+
+The fresh browser pass confirms a paused Reddit lifetime creation and website-lead boost, pixel discovery within the composer, Meta tag creation/rename/events/diagnostics, profile and group creation/update, account health/update/reconnect/disconnect, Snapchat draft save followed by blocked publication, a discovered Pinterest board carried through publication, saved YouTube/Reddit destination choices, archived-history pagination, and X/WhatsApp/SMS opening messages followed by thread readback. Fixture receipts show one opening request for each of those three messaging channels and no Snapchat publication request. Bluesky/Reddit/Slack opening paths have handler tests, rather than manual send walkthroughs.
+
+![Paused Reddit campaign and website-lead boost](zernio-reddit-verification.png)
+
+Ponytail and [Paperthin](https://github.com/LilMGenius/paperthin) read, evidence, consistency and fresh-reader checks were applied with independent code review. Those reviews caught and fixed misleading playlist-default copy, a lookup callback race, and lost action keys after gateway/pending responses. Regressions cover scopes and permissions, malformed/contradictory receipts, unknown outcomes, stale reads and retries. Follow the [runtime and dependency setup](../README.md#run-locally), then run `npm test` and `npm run build` from the repository root to reproduce the automated checks. `scripts/check-container.mjs` supplies the offline container smoke check; [container instructions](../README.md#deployment-and-operations) describe the runtime image.
+
+All browser accounts, provider receipts and sends are synthetic. No real publication, message, upload, account change, activation, booking or spend occurred. Live acceptance requires approved provider credentials and account permissions. The full plan is **not complete**: global provisioning/admin, remaining publishing formats and libraries, advanced measurement/audiences/creative/leads/catalogs, specialist reports, rich messaging, WhatsApp lifecycle/commerce, contacts/broadcast expansion and automations remain tracked work. Snapchat unavailability was checked on 18 October 2026 and must be rechecked against Zernio before re-enabling it. Voice remains excluded; organic SEO remains in ten98 Discover.
+
+## Previous full-app audit — v0.8.4
 
 Verified on 18 October 2026 using isolated local databases, the production frontend build served locally and simulated providers. All **255 automated checks** pass (`npm test`), with no failures or skipped checks. The production build (`npm run build`), container build and offline non-root container smoke check pass; `npm audit --omit=dev` reports zero vulnerabilities. No dependency or schema change was added. Ponytail simplicity review and [Paperthin](https://github.com/LilMGenius/paperthin) evidence and consistency checks were applied, with separate agents reviewing changes and a fresh-context review of this release summary.
 

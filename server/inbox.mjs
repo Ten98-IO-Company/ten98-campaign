@@ -19,7 +19,8 @@ const HIDE = new Set(['facebook', 'instagram', 'threads', 'twitter', 'tiktok']);
 const LIKE = new Set(['facebook', 'twitter', 'bluesky', 'reddit', 'linkedin']);
 const REVIEWS = new Set(['facebook', 'googlebusiness']);
 const WRITERS = new Set(['owner', 'admin', 'editor']);
-const conversationFields = ['id', 'platform', 'accountId', 'accountUsername', 'participantId', 'participantName', 'participantPicture', 'participantVerifiedType', 'businessScopedUserId', 'whatsappUsername', 'lastMessage', 'lastMessageAt', 'updatedTime', 'status', 'unreadCount', 'threadControl', 'folder', 'url', 'instagramProfile', 'metadata'];
+const START = new Set(['twitter', 'bluesky', 'reddit', 'slack', 'whatsapp', 'sms']);
+const conversationFields = ['id', 'platform', 'accountId', 'accountUsername', 'participantId', 'participantName', 'participantUsername', 'participantPicture', 'participantVerifiedType', 'businessScopedUserId', 'whatsappUsername', 'lastMessage', 'lastMessageAt', 'updatedTime', 'status', 'unreadCount', 'threadControl', 'folder', 'url', 'instagramProfile', 'metadata'];
 const messageFields = ['id', 'conversationId', 'accountId', 'platform', 'message', 'senderId', 'senderName', 'direction', 'createdAt', 'attachments', 'subject', 'storyReply', 'isStoryMention', 'noRenderableContent', 'isEdited', 'editedAt', 'isDeleted', 'deletedAt', 'deliveryStatus', 'reactions', 'sentVia'];
 const postFields = ['id', 'platform', 'accountId', 'accountUsername', 'content', 'picture', 'permalink', 'createdTime', 'commentCount', 'likeCount', 'cid', 'subreddit', 'isAd', 'adId', 'placement'];
 const commentFields = ['id', 'message', 'createdTime', 'from', 'likeCount', 'replyCount', 'platform', 'url', 'repliesHasMore', 'canReply', 'canDelete', 'canHide', 'canLike', 'isHidden', 'isLiked', 'likeUri', 'cid', 'parentId', 'rootUri', 'rootCid'];
@@ -41,7 +42,7 @@ function validateReview(row) {
 }
 
 export function inboxCapabilities(platform) {
-  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : platform === 'sms' ? ['image', 'video'] : platform === 'instagram' ? ['image', 'video', 'audio'] : ['image', 'video', 'audio', 'file'], archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
+  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : platform === 'sms' ? ['image', 'video'] : platform === 'instagram' ? ['image', 'video', 'audio'] : ['image', 'video', 'audio', 'file'], archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
 }
 function supported(account, feature) { if (!inboxCapabilities(account.platform)[feature] || account.isActive === false) fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'This account does not support this inbox action. Reconnect the account if its permissions changed.'); }
 function scoped(row, accounts, expectedAccount) {
@@ -69,12 +70,91 @@ function query(url, type) {
 function metadata(value, accounts) {
   if (!value) return {};
   if (!plain(value)) invalid();
+  renderFields(value, ['lastUpdated'], ['accountsQueried', 'accountsFailed']);
   const result = pick(value, ['lastUpdated', 'accountsQueried', 'accountsFailed']);
   for (const key of ['failedAccounts', 'accountsSkipped']) if (value[key] !== undefined) {
     if (!Array.isArray(value[key]) || value[key].some(row => !plain(row) || !accounts.some(account => account._id === row.accountId))) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned inbox diagnostics outside this project.');
+    for (const row of value[key]) { renderFields(row, ['accountId', 'platform', 'code'], ['retryAfter']); if (row.platform != null && row.platform !== accounts.find(account => account._id === row.accountId)?.platform) invalid(); }
     result[key] = value[key].map(row => ({ ...pick(row, ['accountId', 'platform', 'code', 'retryAfter']), ...(key === 'failedAccounts' ? { error: 'The provider could not read this account. Check its connection and permissions.' } : {}) }));
   }
   return result;
+}
+async function searchConversations(api, accounts, account, url) {
+  const term = str(url.searchParams.get('query')?.trim(), 'search query', 200);
+  if (term.length < 2) fail(400, 'INVALID_INBOX_FILTER', 'Enter at least two characters to search message history.');
+  const params = query(url, 'search'), direction = url.searchParams.get('direction');
+  if (params.limit > 50 || direction !== null && !['incoming', 'outgoing'].includes(direction)) fail(400, 'INVALID_INBOX_FILTER', 'Choose a valid search direction and a page size of at most 50.');
+  const result = await api('/inbox/conversations/search', { profileId: account.profileId?._id || account.profileId, accountId: account._id, query: term, ...params, ...(direction ? { direction } : {}) });
+  if (!Array.isArray(result.data) || result.data.length > params.limit) invalid();
+  const conversations = result.data.map(hit => {
+    if (!plain(hit) || !Number.isSafeInteger(hit.matchCount) || hit.matchCount < 0 || !Array.isArray(hit.matches) || hit.matches.length > 3 || hit.matchCount < hit.matches.length) invalid();
+    scoped(hit.conversation, accounts, account._id); validateConversation(hit.conversation);
+    const matches = hit.matches.map(match => {
+      renderFields(match, ['id', 'text', 'direction', 'timestamp']);
+      if (!valid(match.id) || !['incoming', 'outgoing'].includes(match.direction) || direction && match.direction !== direction || !Number.isFinite(Date.parse(match.timestamp))) invalid();
+      return pick(match, ['id', 'text', 'direction', 'timestamp']);
+    });
+    return { ...pick(hit.conversation, conversationFields), matchCount: hit.matchCount, matches };
+  });
+  return { conversations, pagination: pagination(result.pagination), meta: metadata(result.meta, [account]) };
+}
+async function slackMembers(api, account, search = '') {
+  if (account.platform !== 'slack') fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'Choose a Slack account to load workspace members.');
+  if (typeof search !== 'string' || search.length > 100 || /[\u0000-\u001f]/.test(search)) fail(400, 'INVALID_INBOX_FILTER', 'Use a member name or handle of at most 100 characters.');
+  const result = await api(`/accounts/${encodeURIComponent(account._id)}/slack-members`, { query: search, limit: 2000 });
+  if (!Array.isArray(result.members) || result.members.length > 2000) invalid();
+  const members = result.members.map(row => { renderFields(row, ['id', 'name', 'username', 'picture']); if (!/^U[A-Z0-9]+$/.test(row.id) || !row.name) invalid(); return pick(row, ['id', 'name', 'username']); });
+  if (new Set(members.map(row => row.id)).size !== members.length) invalid();
+  return members;
+}
+function permittedContact(context, channel, contactId) {
+  const contact = context.contacts?.get(context.project.id, id(contactId));
+  if (!contact || !/^\+[1-9]\d{6,14}$/.test(contact.phone || '') || contact.consents?.[channel] !== true || contact.suppression?.[channel]) fail(409, 'RECIPIENT_PERMISSION_REQUIRED', 'Choose a project contact with recorded permission for this channel and no suppression.');
+  return contact;
+}
+async function startConversation(context, api, account, env, assertMapping, key) {
+  const { body } = context;
+  supported(account, 'start'); fields(body, ['accountId', 'participantUsername', 'participantId', 'contactId', 'message', 'templateName', 'templateLanguage', 'templateComponents', 'confirmSend']);
+  if (body.confirmSend !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Review the recipient and message before confirming this send.');
+  const payload = { accountId: account._id };
+  if (['sms', 'whatsapp'].includes(account.platform)) {
+    if (body.participantId !== undefined || body.participantUsername !== undefined) fail(400, 'INVALID_RECIPIENT', 'Choose a contact rather than supplying an unverified phone number.');
+    payload.participantId = permittedContact(context, account.platform, body.contactId).phone.replace(/^\+/, '');
+  } else {
+    if (body.contactId !== undefined || Boolean(body.participantId) === Boolean(body.participantUsername)) fail(400, 'INVALID_RECIPIENT', 'Choose exactly one recipient identity.');
+    if (account.platform === 'slack') {
+      if (!body.participantId || body.participantUsername || !(await slackMembers(api, account)).some(member => member.id === body.participantId)) fail(422, 'RECIPIENT_UNAVAILABLE', 'Choose an eligible member of this connected Slack workspace.');
+      payload.participantId = body.participantId;
+    } else if (body.participantId) {
+      if (account.platform !== 'twitter' || typeof body.participantId !== 'string' || !/^\d{1,25}$/.test(body.participantId)) fail(400, 'INVALID_RECIPIENT', 'Use an X numeric user ID or a supported platform handle.');
+      payload.participantId = body.participantId;
+    } else {
+      const username = str(body.participantUsername, 'recipient handle', 253).trim().replace(account.platform === 'reddit' ? /^(?:u\/|@)/ : /^@/, '');
+      if (!(account.platform === 'twitter' ? /^[A-Za-z0-9_]{1,15}$/ : account.platform === 'reddit' ? /^[A-Za-z0-9_-]{3,20}$/ : /^(?:did:plc:[a-z0-9]+|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,})$/).test(username)) fail(400, 'INVALID_RECIPIENT', 'Enter a valid recipient handle for this platform.');
+      payload.participantUsername = username;
+    }
+  }
+  if (account.platform === 'whatsapp') {
+    if (body.message !== undefined) fail(400, 'TEMPLATE_REQUIRED', 'Use an approved template to start a WhatsApp conversation.');
+    const { templates } = await listWhatsAppTemplates({ env, project: context.project, accountId: account._id, assertMapping }), template = validateWhatsAppTemplate(body, templates.find(row => row.name === body.templateName && row.language === body.templateLanguage));
+    payload.templateName = template.name; payload.templateLanguage = template.language; payload.templateParams = [];
+    for (const part of [...(template.components || [])].sort((a, b) => ({ header: 0, body: 1, button: 2 }[a.type] - { header: 0, body: 1, button: 2 }[b.type]) || Number(a.index || 0) - Number(b.index || 0))) {
+      const media = part.type === 'header' && part.parameters[0]?.type !== 'text' ? part.parameters[0] : null;
+      if (media) payload.headerMedia = { type: media.type, ...media[media.type] };
+      else payload.templateParams.push(...part.parameters.map(parameter => parameter.text));
+    }
+  } else {
+    if (['templateName', 'templateLanguage', 'templateComponents'].some(field => body[field] !== undefined)) fail(400, 'INVALID_TEMPLATE', 'Templates are only available for WhatsApp.');
+    payload.message = str(body.message, 'opening message', inboxCapabilities(account.platform).messageLimit);
+  }
+  // Check the current local opt-out again after recipient/template lookups, immediately before dispatch.
+  if (['sms', 'whatsapp'].includes(account.platform) && permittedContact(context, account.platform, body.contactId).phone.replace(/^\+/, '') !== payload.participantId) fail(409, 'RECIPIENT_CHANGED', 'This contact’s phone number changed. Reload recipients and review the new destination.');
+  const result = await api('/inbox/conversations', {}, payload, key);
+  if (result.success !== true || !plain(result.data) || !valid(result.data.messageId) || !valid(result.data.conversationId)) invalid(true);
+  if (['participantId', 'participantName', 'participantUsername'].some(field => result.data[field] != null && typeof result.data[field] !== 'string')) invalid(true);
+  if (result.data.accountId !== undefined && result.data.accountId !== account._id || result.data.platform !== undefined && result.data.platform !== account.platform) invalid(true);
+  if (payload.participantId && ['twitter', 'slack'].includes(account.platform) && result.data.participantId != null && result.data.participantId !== payload.participantId) invalid(true);
+  return { sent: true, ...pick(result.data, ['messageId', 'conversationId', 'participantId', 'participantName', 'participantUsername']), accountId: account._id, platform: account.platform };
 }
 function conversationContact(context, row, incoming = false) {
   if (row.platform !== 'facebook' || !valid(row.participantId)) return undefined;
@@ -178,11 +258,11 @@ export async function handleInbox(context) {
   const { req, url, project, role, send, body = {} } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/inbox`;
   if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
   const path = url.pathname.slice(prefix.length).replace(/^\//, '');
-  const route = path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status))?$/), action = path.match(/^(comments|reviews)\/(reply|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
-  if (!['status', 'accounts', 'updates', 'conversations', 'comments', 'comments/thread', 'reviews'].includes(path) && !route && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
+  const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status))?$/), action = path.match(/^(comments|reviews)\/(reply|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
+  if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews'].includes(path) && !route && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
   try {
     if (!['GET', 'POST'].includes(req.method)) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available inbox controls.');
-    const mutation = Boolean(route && ['reply', 'read', 'status'].includes(route[2]) || action);
+    const mutation = Boolean(path === 'conversations/start' || route && ['reply', 'read', 'status'].includes(route[2]) || action);
     if (req.method !== (mutation ? 'POST' : 'GET')) fail(405, 'METHOD_NOT_ALLOWED', 'This inbox action does not support that method.');
     if (mutation && !WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this inbox action.');
     const env = { ...(context.config?.env || process.env), ...(context.config || {}) }, profileId = project.zernioProfileId, assertMapping = () => context.assertProjectMapping?.(profileId);
@@ -199,6 +279,14 @@ export async function handleInbox(context) {
     if (['status', 'accounts'].includes(path)) { send(200, { configured: true, mapped: true, webhookConfigured: Boolean(env.ZERNIO_WEBHOOK_SECRET), accounts: accounts.filter(account => { const c = inboxCapabilities(account.platform); return c.messages || c.comments || c.reviews; }).map(account => ({ id: account._id, platform: account.platform, name: account.displayName || account.username || account.name || account.platform, capabilities: inboxCapabilities(account.platform) })) }); return true; }
     const accountId = id(req.method === 'GET' ? url.searchParams.get('accountId') : body.accountId), account = requireAccount(accounts, accountId);
     const run = async key => {
+      if (path === 'conversations/search') { supported(account, 'messages'); return searchConversations(api, accounts, account, url); }
+      if (path === 'conversations/start') return startConversation(context, api, account, env, assertMapping, key);
+      if (path === 'conversations/recipients') {
+        supported(account, 'start');
+        if (account.platform === 'slack') return { recipients: await slackMembers(api, account, url.searchParams.get('query') || '') };
+        if (['sms', 'whatsapp'].includes(account.platform)) return { recipients: (context.contacts?.list(project.id) || []).filter(contact => contact.consents?.[account.platform] === true && !contact.suppression?.[account.platform] && /^\+[1-9]\d{6,14}$/.test(contact.phone || '')).map(contact => ({ id: contact.id, name: contact.name || contact.phone, phone: contact.phone })) };
+        return { recipients: [] };
+      }
       if (path === 'conversations') {
         supported(account, 'messages'); const result = await aggregate(api, accounts, account, 'conversations', query(url, 'conversations'));
         return { conversations: result.rows.map(row => ({ ...pick(row, conversationFields), ...(conversationContact(context, row) ? { contact: conversationContact(context, row) } : {}) })), pagination: result.pagination, meta: result.meta };
