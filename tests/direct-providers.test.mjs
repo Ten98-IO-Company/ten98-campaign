@@ -123,6 +123,35 @@ test('approved WhatsApp media headers and dynamic URL buttons have exact wire pa
   assert.throws(() => validateWhatsAppTemplate(draft, undefined), error => error.code === 'TEMPLATE_NOT_APPROVED');
 });
 
+test('WhatsApp template reads reject malformed rendered fields before either inbox or campaigns can consume them', async () => {
+  const original = globalThis.fetch, options = { env, project, campaign, idempotencyKey: 'malformed-template-check' };
+  let components = [], writes = 0;
+  globalThis.fetch = async (target, request) => {
+    const url = new URL(target); assert.equal(url.hostname, 'zernio.com');
+    if (request.method !== 'GET') { writes++; assert.fail('Malformed template reads must not send provider writes.'); }
+    if (url.pathname.endsWith('/accounts')) return Response.json({ accounts: [{ _id: campaign.accountId, profileId: project.zernioProfileId, platform: 'whatsapp', isActive: true }] });
+    assert.ok(url.pathname.endsWith('/whatsapp/templates')); return Response.json({ success: true, templates: [{ ...template, components }] });
+  };
+  try {
+    for (const malformed of [
+      [{ type: 'BODY', text: { unexpected: true } }],
+      [{ type: 'HEADER', format: ['TEXT'] }],
+      [{ type: 'BUTTONS', buttons: { unexpected: true } }],
+      [{ type: 'BUTTONS', buttons: [null] }],
+      [{ type: 'BUTTONS', buttons: [{ type: 'URL', text: { unexpected: true }, url: 'https://example.com/' }] }],
+      [{ type: 'BUTTONS', buttons: [{ type: 'URL', text: 'View details', url: { unexpected: true } }] }],
+      [{ type: 'BUTTONS', buttons: [{ type: 'PHONE_NUMBER', phone_number: { unexpected: true } }] }],
+    ]) {
+      components = malformed;
+      await reject(listWhatsAppTemplates(options), 'INVALID_PROVIDER_RESPONSE');
+      await reject(createWhatsAppBroadcast(options), 'INVALID_PROVIDER_RESPONSE');
+    }
+    components = [{ type: 'CAROUSEL', cards: [{ components: [{ type: 'BODY', text: 'Advanced format' }] }] }, { type: 'BUTTONS', buttons: [{ type: 'FLOW', text: 'Continue', flow_id: 'flow-123' }] }];
+    assert.deepEqual((await listWhatsAppTemplates(options)).templates[0].components, components, 'Valid advanced definitions remain available for the UI to label unsupported.');
+    assert.equal(writes, 0);
+  } finally { globalThis.fetch = original; }
+});
+
 test('Cloudflare suppression reads follow cursors including short pages, preserve expiry/scope and reject partial scans', async () => {
   const original = globalThis.fetch; let requests = 0, loop = false;
   globalThis.fetch = async (target, options) => { const url = new URL(target); assert.equal(options.method, 'GET'); assert.equal(url.hostname, 'api.cloudflare.com'); requests++; if (!url.searchParams.has('cursor')) return Response.json({ success: true, result: [], result_info: { next_cursor: 'opaque-cursor' } }); return Response.json({ success: true, result: [{ id: 'suppression-1', email: contact.email, reason: 'hard_bounce', expires_at: null, scope: { type: 'account' } }], result_info: { next_cursor: loop ? 'opaque-cursor' : null } }); };

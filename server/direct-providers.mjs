@@ -118,7 +118,10 @@ export async function listWhatsAppTemplates(options) {
   const api = await whatsapp(options), data = await api('/whatsapp/templates', { accountId: options.accountId || options.campaign?.accountId, status: 'APPROVED' });
   if (data?.success !== true || !Array.isArray(data.templates) || data.templates.length > 10000) invalid('Zernio');
   const templates = data.templates.filter(row => row?.status === 'APPROVED').map(row => {
-    if (!validId(row.id) || !/^[a-z0-9_]{1,512}$/.test(row.name || '') || !/^[A-Za-z]{2,3}(?:_[A-Za-z0-9]{2,8})?$/.test(row.language || '') || !['AUTHENTICATION', 'MARKETING', 'UTILITY'].includes(row.category) || !Array.isArray(row.components) || row.components.length > 20 || row.components.some(component => !plain(component))) invalid('Zernio');
+    if (!validId(row.id) || typeof row.name !== 'string' || !/^[a-z0-9_]{1,512}$/.test(row.name) || typeof row.language !== 'string' || !/^[A-Za-z]{2,3}(?:_[A-Za-z0-9]{2,8})?$/.test(row.language) || !['AUTHENTICATION', 'MARKETING', 'UTILITY'].includes(row.category) || !Array.isArray(row.components) || row.components.length > 20 || row.components.some(component => !plain(component))) invalid('Zernio');
+    for (const component of row.components) {
+      if (['type', 'format', 'text'].some(field => component[field] != null && typeof component[field] !== 'string') || component.buttons != null && (!Array.isArray(component.buttons) || component.buttons.some(button => !plain(button) || ['type', 'text', 'url', 'phone_number'].some(field => button[field] != null && typeof button[field] !== 'string')))) invalid('Zernio');
+    }
     return { id: row.id, name: row.name, language: row.language, status: row.status, category: row.category, components: row.components };
   });
   if (new Set(templates.map(row => `${row.name}:${row.language}`)).size !== templates.length) invalid('Zernio');

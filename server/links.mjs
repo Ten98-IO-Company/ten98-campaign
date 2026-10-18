@@ -14,7 +14,7 @@ function publicUrl(value) {
   if (typeof value !== 'string' || value.length > 4096 || /[\u0000-\u0020\u007f]/.test(value)) fail(400, 'Use a public HTTPS URL without credentials.');
   let url; try { url = new URL(value); } catch { fail(400, 'Use a public HTTPS URL.'); }
   const hostname = url.hostname.replace(/\.$/, '');
-  if (url.protocol !== 'https:' || url.username || url.password || isIP(hostname) || hostname.includes(':') || !hostname.includes('.') || /(?:^|\.)(?:localhost|local|internal|invalid|home\.arpa)$/.test(hostname) || hostname.split('.').some(part => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part))) fail(400, 'Use a public HTTPS domain without credentials or private addresses.');
+  if (url.protocol !== 'https:' || url.username || url.password || hostname.length > 253 || isIP(hostname) || hostname.includes(':') || !hostname.includes('.') || /(?:^|\.)(?:localhost|local|internal|invalid|home\.arpa)$/.test(hostname) || hostname.split('.').some(part => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part))) fail(400, 'Use a public HTTPS domain without credentials or private addresses.');
   return url;
 }
 function origin(value, appOrigin) {

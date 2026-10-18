@@ -1,25 +1,26 @@
-# End-to-end verification — v0.7.0
+# End-to-end verification — v0.7.1
 
 ## Replies, short links and tracking
 
-Verified on 18 October 2026 with the production frontend, an isolated local database, synthetic contacts and mocked providers. External provider requests were blocked except for the recorded mock contracts. No real SMS, WhatsApp or email was sent, and no DNS or TLS configuration was changed.
+Verified on 18 October 2026 with the production frontend bundle served by isolated local apps, private test databases and synthetic contacts. Provider API calls were intercepted in process by local mocks; all other non-loopback requests were blocked. No real SMS, WhatsApp or email was sent, and no DNS or TLS configuration was changed.
 
 | Area | Result |
 | --- | --- |
-| SMS replies | Open replies from the selected campaign, read its verified incoming message, submit one reply from the original Twilio sender, and read back the queued receipt. |
-| WhatsApp replies | Open the campaign's scoped account and incoming conversation, reply inside the service window, and read back the provider acknowledgement/history. |
-| Short links | Save a branded HTTPS origin and website allowlist, create a campaign-associated URL with UTM parameters, and render its QR preview. Save shortened social and SMS drafts without publishing. |
-| Campaign association | A new direct draft requires its first save before shortening. Browser save → shorten → save retained the campaign ID and the exact Wikipedia destination with balanced parentheses. |
-| QR and tracking | Decode the actual HTTP SVG with an independent QR decoder; verify its exact URL and fixed redirect destination. Submit one ordinary visit, one QR-tagged visit, one pageview and one named event. Repeating the event ID counted once; the report showed each counter as one and omitted query strings/fragments. |
+| SMS replies | Open replies from a selected campaign, read its signed incoming message, submit one reply from the original Twilio sender, then process a signed delivery receipt. A signed STOP displays the opt-out and disables reply controls. Native HTTP checks create the originating contact/campaign, preview and send it, then verify interrupted replies across a real database restart. |
+| WhatsApp replies | Open the campaign's scoped account, send one free-text reply inside the service window and read it back. An expired-window attempt preserves its draft. Switch to an approved template, verify required-field validation, fill the name and URL suffix, send once and read back the template text. Recorded requests contain the exact account, template name, language and numbered parameters. |
+| Short links | Create a named campaign-associated URL in the browser, render its QR preview, verify its immutable destination and separate campaign report. Automated checks also exercise branded-domain changes, archive/restore, a valid 253-character hostname and rejection above that limit. Deleting a project invalidates its redirects/scripts/event intake and removes its counters while another project remains operational. |
+| QR and tracking | Independently decode the actual HTTP SVG and verify its exact QR-tagged URL. One ordinary request and one QR request each count once; HEAD, DNT and GPC requests add nothing. A real browser loads the production tracking script, visits the initial page, changes path and goes back: three pageviews. Query-only replacement adds none. A button emits one enquiry event. The UI and HTTP report show one ordinary click, one QR visit, three pageviews and one event, with no private query or fragment content. Campaign filtering retains link counts and excludes unassociated website events. |
 | Email reply routing | Native provider checks verify Cloudflare's configured `reply_to` field. Receiving and forwarding remain external Cloudflare Email Routing configuration. |
 
 ![Campaign QR and measured activity](tracking-verification.png)
 
 ![Two-way SMS replies](sms-replies-verification.png)
 
-The full native suite passes **149** checks. The v0.7.0 production build and actual non-root Docker image smoke check pass; the production dependency audit reports no known vulnerabilities. Regression coverage includes signed incoming/status callbacks, durable instance-wide hashed SMS opt-outs across future projects, HTTP 400 Twilio opt-out receipts, duplicate/uncertain replies, original-sender attribution, contact imports, stale asynchronous editors and provider reconciliation, link permissions and immutability, redirect host/destination checks, tracking privacy signals, CORS, intake limits and SPA page changes.
+![Approved WhatsApp template reply](whatsapp-template-verification.png)
 
-Live provider acceptance still requires configured credentials, approved accounts and public HTTPS callbacks. The branded domain was fictional in QA: DNS, TLS and reverse-proxy routes must be provisioned by the operator. The domain-check challenge does not independently verify ownership. Tracking measures requests/events, not unique people or independently verified ad conversions. See [setup and limits](tracking.md) and [inbox setup](inbox.md).
+The full suite passes **155 automated tests** under Node's built-in test runner (`npm test`). The v0.7.1 production build and actual non-root Docker image smoke check pass; the production dependency audit reports no known vulnerabilities. Regression coverage includes signed callbacks and restart recovery, durable opt-outs, duplicate/uncertain replies, original-sender attribution, expired WhatsApp windows and approved templates, malformed provider templates/warnings, stale account/project responses, link permissions and immutability, public URL validation, campaign isolation, project deletion, tracking privacy signals, CORS, intake limits and SPA page changes. Browser proof used synthetic contacts, one mocked SMS reply and two mocked WhatsApp replies; delivered/read states do not establish real carrier acceptance.
+
+Live provider acceptance still requires configured credentials, approved accounts and public HTTPS callbacks. Website-script browser verification used a separate loopback test instance; native checks cover branded HTTPS origins. DNS, TLS and reverse-proxy routes must be provisioned by the operator. The domain-check challenge does not independently verify ownership. Tracking measures requests/events, not unique people or independently verified ad conversions. See [setup and limits](tracking.md) and [inbox setup](inbox.md).
 
 The browser walkthroughs below were recorded in earlier releases with the same isolated-provider approach. Their native regressions also pass in this release.
 

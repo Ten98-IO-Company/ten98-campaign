@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import WhatsAppTemplate, { templateRestriction, templatePreviewText } from './WhatsAppTemplate';
 import './direct-campaigns.css';
 
 type Row = { id: string; [key: string]: any };
@@ -19,29 +20,6 @@ function campaignBody(draft: Draft, audienceMode: string) {
 }
 const when = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : 'Not scheduled';
 const contactName = (contact: any = {}) => contact.name || contact.email || contact.phone || contact.id || 'Contact';
-function templateRestriction(template: any) {
-  for (const component of template.components || []) {
-    const type = String(component.type || '').toUpperCase();
-    if (!['HEADER', 'BODY', 'FOOTER', 'BUTTONS'].includes(type) || type === 'HEADER' && component.format && !['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT'].includes(String(component.format).toUpperCase())) return 'This template uses an advanced component that is unavailable here.';
-    const variables = [...String(component.text || '').matchAll(/\{\{([^}]+)\}\}/g)].map(match => match[1]);
-    if (variables.some(value => !/^[1-9]\d*$/.test(value))) return 'This template uses named values. Choose a template with numbered text values.';
-    const positions = [...new Set(variables.map(Number))].sort((a, b) => a - b);
-    if (positions.some((value, index) => value !== index + 1)) return 'This template has unsupported value positions. Choose consecutive numbered text values.';
-    for (const button of component.buttons || []) if (!['URL', 'PHONE_NUMBER', 'QUICK_REPLY'].includes(String(button.type).toUpperCase()) || String(button.type).toUpperCase() === 'URL' && /\{\{/.test(button.url || '') && (!/\{\{1\}\}$/.test(button.url || '') || String(button.url).match(/\{\{/g)?.length !== 1)) return 'This template uses an unsupported button. URL buttons can have one numbered suffix at the end.';
-  }
-  return '';
-}
-function templatePreviewText(template: any, components: any[]) {
-  return (template?.components || []).map((part: any) => {
-    const values = components.find(item => item.type?.toLowerCase() === String(part.type || '').toLowerCase())?.parameters || [];
-    const mediaType = String(part.format || '').toLowerCase(), media = values[0]?.[mediaType];
-    const buttons = (part.buttons || []).map((button: any, index: number) => {
-      const supplied = components.find(item => item.type === 'button' && String(item.index) === String(index))?.parameters?.[0]?.text;
-      return [button.text, button.url ? String(button.url).replace('{{1}}', supplied || '{{1}}') : button.phone_number || ''].filter(Boolean).join(': ');
-    });
-    return [media?.link ? `${mediaType} header: ${media.link}${media.filename ? ` (${media.filename})` : ''}` : '', String(part.text || '').replace(/\{\{(\d+)\}\}/g, (placeholder, index) => values[Number(index) - 1]?.text || placeholder), ...buttons].filter(Boolean).join('\n');
-  }).filter(Boolean).join('\n\n');
-}
 const statusLabel = (value?: string) => ({ draft: 'Draft', scheduled: 'Scheduled', sending: 'Sending', completed: 'Completed', cancelled: 'Cancelled', attention: 'Needs attention', accepted: 'Accepted by provider', delivered: 'Delivered', failed: 'Failed', suppressed: 'Suppressed', pending: 'Queued', uncertain: 'Outcome needs review' }[value || ''] || value || 'Not reported');
 function HtmlPreview({ html }: { html: string }) {
   const document = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; form-action 'none'; base-uri 'none'"></head><body>${html}</body></html>`;
@@ -136,13 +114,6 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
       setTemplates((result.templates || []).filter((item: any) => String(item.status || '').toLowerCase() === 'approved')); setTemplateAccount(accountId); setNotice('Approved templates loaded. Choose the language and fill every required value.');
     });
   }
-  function templateParameter(type: string, index: number, value: string, buttonIndex?: number, mediaType?: string, mediaField = 'link') {
-    const components = [...draft.templateComponents], position = components.findIndex(item => item.type?.toLowerCase() === type && (buttonIndex === undefined || String(item.index) === String(buttonIndex)));
-    const component: any = position < 0 ? { type, ...(buttonIndex === undefined ? {} : { sub_type: 'url', index: String(buttonIndex) }), parameters: [] } : { ...components[position], parameters: [...(components[position].parameters || [])] };
-    while (component.parameters.length <= index) component.parameters.push({ type: 'text', text: '' });
-    component.parameters[index] = mediaType ? { type: mediaType, [mediaType]: { ...component.parameters[index]?.[mediaType], [mediaField]: value } } : { type: 'text', text: value };
-    position < 0 ? components.push(component) : components[position] = component; setDraft({ ...draft, templateComponents: components });
-  }
   async function send(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!ready || !confirmed || !['send', 'schedule'].includes(confirmationMode) || draft.channel === 'email' && !transactionalConfirmed) return;
     const campaignId = editingId, mode = confirmationMode;
@@ -224,12 +195,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
             <label className="field"><span>Connected WhatsApp account *</span><select required value={draft.accountId} onChange={event => { setDraft({ ...draft, accountId: event.target.value, templateName: '', templateComponents: [] }); setTemplates([]); setTemplateAccount(''); }}><option value="">Choose an account</option>{(status?.accounts || []).map((account: any) => <option key={account.id || account._id} value={account.id || account._id}>{account.name || account.displayName || account.username || account.id || account._id}</option>)}</select></label>
             <button className="button" type="button" disabled={!!busy || !draft.accountId} onClick={loadTemplates}>Load approved templates</button>
             <div className="form-grid"><label className="field"><span>Approved template *</span><select required value={draft.templateName ? draft.templateName + ':' + draft.templateLanguage : ''} onChange={event => { const chosen = templates.find(item => `${item.name}:${item.language || item.languageCode}` === event.target.value); setDraft({ ...draft, templateName: chosen?.name || '', templateLanguage: chosen?.language || chosen?.languageCode || 'en', templateComponents: [] }); }}><option value="">Choose a template</option>{draft.templateName && !templates.some(item => item.name === draft.templateName && (item.language || item.languageCode) === draft.templateLanguage) && <option value={draft.templateName + ':' + draft.templateLanguage}>{draft.templateName} · {draft.templateLanguage} (saved; verify before sending)</option>}{templates.map(item => <option key={item.name + ':' + (item.language || item.languageCode)} disabled={!!templateRestriction(item)} value={item.name + ':' + (item.language || item.languageCode)}>{item.name} · {item.language || item.languageCode}{templateRestriction(item) ? ' · Unsupported components' : ''}</option>)}</select></label><label className="field"><span>Template language</span><input value={draft.templateLanguage} readOnly/></label></div>
-            {selectedTemplate && templateRestriction(selectedTemplate) && <p className="form-error">{templateRestriction(selectedTemplate)}</p>}
-            {selectedTemplate?.components?.map((component: any, componentIndex: number) => {
-              const type = String(component.type || '').toLowerCase(), placeholders = [...new Set([...String(component.text || '').matchAll(/\{\{(\d+)\}\}/g)].map(match => Number(match[1]) - 1))].sort((a, b) => a - b), supplied = draft.templateComponents.find(item => item.type?.toLowerCase() === type);
-              const mediaType = String(component.format || '').toLowerCase();
-              return <section key={componentIndex} className="direct-template-section">{component.text && <p className="direct-template-text">{component.text}</p>}{['header', 'body'].includes(type) && placeholders.map(index => <label className="field" key={index}><span>{type === 'header' ? 'Header' : 'Message'} value {index + 1} *</span><input required value={supplied?.parameters?.[index]?.text || ''} onChange={event => templateParameter(type, index, event.target.value)}/></label>)}{type === 'header' && ['image', 'video', 'document'].includes(mediaType) && <><label className="field"><span>Template {mediaType} public HTTPS URL *</span><input type="url" pattern="https://.+" required value={supplied?.parameters?.[0]?.[mediaType]?.link || ''} onChange={event => templateParameter(type, 0, event.target.value, undefined, mediaType)}/></label>{mediaType === 'document' && <label className="field"><span>Document filename (optional)</span><input maxLength={200} value={supplied?.parameters?.[0]?.document?.filename || ''} onChange={event => templateParameter(type, 0, event.target.value, undefined, mediaType, 'filename')}/></label>}</>}{component.buttons?.map((button: any, index: number) => String(button.type).toUpperCase() === 'URL' && /\{\{1\}\}$/.test(button.url || '') ? <label className="field" key={index}><span>{button.text || 'Website button'} URL suffix *</span><input required value={draft.templateComponents.find(item => item.type === 'button' && String(item.index) === String(index))?.parameters?.[0]?.text || ''} onChange={event => templateParameter('button', 0, event.target.value, index)}/><small>Appended to {String(button.url).replace('{{1}}', '')}. Enter only the suffix.</small></label> : <p key={index}>Button: {button.text || button.type}</p>)}</section>;
-            })}
+            {selectedTemplate && <WhatsAppTemplate template={selectedTemplate} components={draft.templateComponents} onChange={templateComponents => setDraft({ ...draft, templateComponents })}/>}
             <p className="field-help direct-help">Template values are shared by every recipient. Approved text values, image/video/document headers and website-button suffixes are supported. Header files must use direct public HTTPS links: JPEG/PNG images up to 5 MB; MP4/3GPP video up to 16 MB with H.264/AAC; documents up to 100 MB. Drive preview links cannot be sent. Flows, carousels and named variables require a separate provider workflow. WhatsApp permission and an international phone number are required.</p>
           </>}
           {onShortenText && draft.channel !== 'whatsapp' && <><button className="button" type="button" disabled={!!busy || readOnly || !editable || !editingId || !draft.text.trim()} onClick={shortenText}>Use short links in message</button>{!editingId && <p className="field-help direct-help">Save this draft first to associate short links with its campaign report.</p>}</>}{draft.channel !== 'whatsapp' && <p className="field-help direct-help">Personalisation fields: {'{{name}}, {{email}}, {{phone}}, {{company}}'}. URLs containing these fields stay unchanged when shortening. The audience preview uses the first eligible contact. SMS includes an opt-out footer.</p>}
