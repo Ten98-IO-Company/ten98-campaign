@@ -1,0 +1,54 @@
+import { useEffect, useRef, useState } from 'react';
+
+type Location = { id: string; name: string; location?: string; latitude?: number | null; longitude?: number | null; status?: string; sample?: boolean; locationSource?: string };
+type Props = { locations: Location[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; projectId: string; onSelect: (item: Location) => void };
+declare global { interface Window { google?: any; __ten98MapsReady?: () => void; gm_authFailure?: () => void } }
+let loader: Promise<any> | undefined;
+function maps(key: string) {
+  if (window.google?.maps?.marker) return Promise.resolve(window.google.maps);
+  if (!loader) loader = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    const timer = setTimeout(() => reject(new Error('Google Maps did not load. Check the key restrictions and Maps JavaScript API configuration.')), 20000);
+    window.__ten98MapsReady = () => { clearTimeout(timer); resolve(window.google.maps); };
+    window.gm_authFailure = () => { clearTimeout(timer); reject(new Error('Google Maps could not authorize this site. Check billing and HTTP referrer restrictions.')); };
+    script.onerror = () => { clearTimeout(timer); reject(new Error('The map could not load. Check your connection.')); };
+    script.src = 'https://maps.googleapis.com/maps/api/js?' + new URLSearchParams({ key, v: 'quarterly', loading: 'async', libraries: 'marker', callback: '__ten98MapsReady', auth_referrer_policy: 'origin' });
+    script.nonce = document.querySelector('script[nonce]')?.getAttribute('nonce') || ''; script.async = true; script.referrerPolicy = 'strict-origin-when-cross-origin'; document.head.append(script);
+  }).catch(error => { loader = undefined; throw error; });
+  return loader;
+}
+export default function OohMap({ locations, request, projectId, onSelect }: Props) {
+  const container = useRef<HTMLDivElement>(null), mapRef = useRef<any>(null), markers = useRef<any[]>([]), select = useRef(onSelect);
+  select.current = onSelect;
+  const [config, setConfig] = useState<any>(null), [error, setError] = useState(''), [ready, setReady] = useState(false);
+  const located = locations.filter(row => typeof row.latitude === 'number' && Number.isFinite(row.latitude) && Math.abs(row.latitude) <= 90 && typeof row.longitude === 'number' && Number.isFinite(row.longitude) && Math.abs(row.longitude) <= 180);
+  useEffect(() => {
+    let active = true; setConfig(null); setError(''); setReady(false);
+    request(`/projects/${projectId}/maps/config`).then(async value => {
+      if (!active) return; setConfig(value); if (!value.configured) return;
+      const google = await maps(value.browserKey); if (!active || !container.current) return;
+      mapRef.current = new google.Map(container.current, { center: { lat: 25.2048, lng: 55.2708 }, zoom: 10, mapId: value.mapId || 'DEMO_MAP_ID', streetViewControl: false, mapTypeControl: true, fullscreenControl: true });
+      setReady(true);
+    }).catch(err => { if (active) setError(err.message); });
+    return () => { active = false; markers.current.forEach(marker => { marker.map = null; }); markers.current = []; mapRef.current = null; };
+  }, [projectId]);
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    markers.current.forEach(marker => { marker.map = null; }); markers.current = [];
+    const google = window.google!.maps, bounds = new google.LatLngBounds();
+    for (const location of located) {
+      const position = { lat: location.latitude, lng: location.longitude };
+      const pin = new google.marker.PinElement({ background: location.status === 'live' ? '#258268' : '#5943ce', borderColor: '#fff', glyphColor: '#fff' });
+      const marker = new google.marker.AdvancedMarkerElement({ map: mapRef.current, position, title: `${location.name}${location.sample ? ' (sample)' : ''}`, content: pin.element });
+      marker.addListener('click', () => select.current(location)); markers.current.push(marker); bounds.extend(position);
+    }
+    if (located.length > 1) mapRef.current.fitBounds(bounds, 60);
+    else if (located.length === 1) { mapRef.current.setCenter({ lat: located[0].latitude, lng: located[0].longitude }); mapRef.current.setZoom(14); }
+  }, [locations, ready]);
+  return <section className="panel ooh-map-panel"><div className="panel-heading"><div><h2>OOH locations</h2><p>{located.length} mapped locations · {locations.length - located.length} still need coordinates</p></div><span className="subtle-tag">Google Maps</span></div>
+    {error && <p className="alert error" role="alert">{error}</p>}
+    {config && !config.configured && <div className="empty"><h3>Put your placements on the map</h3><p>Your instance administrator can enable Google Maps with a browser API key. Add coordinates to each booking to show its location.</p></div>}
+    <div ref={container} className="ooh-map" role="region" aria-label="Google map of outdoor advertising locations" style={{ display: config?.configured ? 'block' : 'none' }}/>
+    <div className="map-location-list">{located.map(location => <button key={location.id} onClick={() => onSelect(location)}><span className={'status-dot ' + (location.status === 'live' ? 'green' : '')}/><strong>{location.name}</strong><small>{location.location || `${location.latitude}, ${location.longitude}`}{location.sample ? ' · Sample' : location.locationSource === 'provider' ? ' · Provider coordinates' : ' · Team-entered location'}</small></button>)}</div>
+  </section>;
+}

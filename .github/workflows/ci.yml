@@ -1,0 +1,28 @@
+name: Checks
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "docs/**"]
+  pull_request:
+    paths-ignore: ["README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "docs/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci --prefer-offline --no-audit --no-fund
+      - run: npm run build
+      - run: npm test
