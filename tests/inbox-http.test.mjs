@@ -198,3 +198,55 @@ test('membership changes while a provider read is pending stop writes and preven
     revoke = 'removed'; const hidden = await f.request(f.path + '/conversations?accountId=fb'); assert.equal(hidden.status, 404); assert.equal(JSON.stringify(hidden.data).includes('participant-a'), false);
   } finally { await f.close(); }
 });
+
+test('WhatsApp replies round-trip delivery history, enforce the session and use exact approved templates outside it', async () => {
+  const f = await fixture(), route = f.path + '/conversations/thread-1/reply';
+  const template = { id: 'appointment-template', name: 'appointment_update', language: 'en', status: 'APPROVED', category: 'UTILITY', components: [{ type: 'BODY', text: 'Your appointment is now on {{1}}.' }] };
+  let sent, deliveryStatus = 'sent', mode = 'normal';
+  f.setHook((url, options) => {
+    if (url.pathname.endsWith('/whatsapp/templates')) { assert.equal(url.searchParams.get('accountId'), 'wa'); assert.equal(url.searchParams.get('status'), 'APPROVED'); return Response.json({ success: true, templates: [template] }); }
+    if (!url.pathname.endsWith('/messages')) return;
+    if (options.method === 'POST') {
+      sent = JSON.parse(options.body);
+      if (mode === 'timeout') throw new Error('Synthetic provider acknowledgement lost');
+      return Response.json({ success: true, data: { messageId: 'wamid.sent-reply', conversationId: 'thread-1' }, warnings: mode === 'bad-warning' ? [{ message: { unexpected: true } }] : [{ code: 'test_warning', message: 'Synthetic provider warning', apiKey: 'never-return-this' }] });
+    }
+    if (sent) return Response.json({ messages: [{ id: 'wamid.sent-reply', accountId: 'wa', platform: 'whatsapp', conversationId: 'thread-1', message: sent.message || 'Your appointment is now on Friday.', direction: 'outgoing', senderId: 'business-account', createdAt: new Date().toISOString(), deliveryStatus }], pagination: { hasMore: false, nextCursor: null }, sortOrderApplied: 'desc' });
+  });
+  try {
+    const status = await f.request(f.path + '/status'); assert.equal(status.data.accounts.find(row => row.id === 'wa').capabilities.reply, true);
+    const conversations = await f.request(f.path + '/conversations?accountId=wa'); assert.equal(conversations.data.conversations[0].accountId, 'wa');
+    assert.equal((await f.request(f.path + '/conversations/thread-1/messages?accountId=wa')).data.messages[0].direction, 'incoming');
+    const body = { accountId: 'wa', message: 'Friday works for your appointment.' }, key = randomUUID();
+    const accepted = await f.request(route, 'POST', body, key); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.equal(accepted.data.sent, true);
+    assert.deepEqual(accepted.data.warnings, [{ code: 'test_warning', message: 'Synthetic provider warning' }]);
+    assert.deepEqual(sent, body); assert.equal(f.writes().at(-1).options.headers['Idempotency-Key'], key);
+    const beforeReplay = f.writes().length; assert.equal((await f.request(route, 'POST', body, key)).status, 200); assert.equal(f.writes().length, beforeReplay);
+    deliveryStatus = 'read'; const readBack = await f.request(f.path + '/conversations/thread-1/messages?accountId=wa'); assert.equal(readBack.data.messages[0].message, body.message); assert.equal(readBack.data.messages[0].deliveryStatus, 'read');
+
+    sent = undefined; f.setIncoming(Date.now());
+    const mediaBody = { accountId: 'wa', message: 'Appointment details', attachmentUrl: 'https://cdn.example.com/appointment.jpg', attachmentType: 'image' };
+    assert.equal((await f.request(route, 'POST', mediaBody)).status, 200); assert.deepEqual(sent, mediaBody);
+    sent = undefined; f.setIncoming(Date.now() - 25 * 3600000);
+    const beforeClosed = f.writes().length, closed = await f.request(route, 'POST', { accountId: 'wa', message: 'Closed session must not send' });
+    assert.equal(closed.status, 409); assert.equal(closed.data.error.code, 'MESSAGING_WINDOW_CLOSED'); assert.equal(f.writes().length, beforeClosed);
+    const templateBody = { accountId: 'wa', templateName: 'appointment_update', templateLanguage: 'en', templateComponents: [{ type: 'body', parameters: [{ type: 'text', text: 'Friday' }] }] };
+    const missing = await f.request(route, 'POST', { ...templateBody, templateComponents: [] }); assert.equal(missing.status, 400); assert.equal(f.writes().length, beforeClosed);
+    assert.equal((await f.request(route, 'POST', templateBody)).status, 200);
+    assert.deepEqual(sent, { accountId: 'wa', template: { elements: [{ name: 'appointment_update', language: 'en', components: templateBody.templateComponents }] } });
+    const beforeInvalid = f.writes().length;
+    assert.equal((await f.request(route, 'POST', { ...templateBody, templateLanguage: 'en_US' })).data.error.code, 'TEMPLATE_NOT_APPROVED'); assert.equal(f.writes().length, beforeInvalid);
+
+    sent = undefined; f.setIncoming(Date.now()); mode = 'bad-warning';
+    const uncertainBody = { accountId: 'wa', message: 'Warning acknowledgement requires review' }, uncertainKey = randomUUID(), beforeUncertain = f.writes().length;
+    const malformed = await f.request(route, 'POST', uncertainBody, uncertainKey); assert.equal(malformed.status, 409); assert.equal(malformed.data.operation.status, 'uncertain');
+    assert.equal((await f.request(route, 'POST', uncertainBody, uncertainKey)).status, 409); assert.equal((await f.request(route, 'POST', uncertainBody)).status, 409); assert.equal(f.writes().length, beforeUncertain + 1);
+    const recovery = await f.request(`/api/projects/${f.projectId}/operations/${malformed.data.operation.id}/review`, 'POST', { resolution: 'applied', confirmChecked: true, note: 'Verified the synthetic message was accepted in the provider fixture.', reference: 'wamid.sent-reply' }); assert.equal(recovery.status, 200);
+    assert.equal((await f.request(route, 'POST', uncertainBody)).status, 409); assert.equal(f.writes().length, beforeUncertain + 1);
+
+    sent = undefined; mode = 'timeout'; const lostBody = { accountId: 'wa', message: 'Different message with a lost acknowledgement' }, beforeTimeout = f.writes().length;
+    assert.equal((await f.request(route, 'POST', lostBody)).data.operation.status, 'uncertain'); assert.equal((await f.request(route, 'POST', lostBody)).status, 409); assert.equal(f.writes().length, beforeTimeout + 1);
+    f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const beforeViewer = f.calls.length;
+    assert.equal((await f.request(route, 'POST', templateBody)).status, 403); assert.equal(f.calls.length, beforeViewer);
+  } finally { await f.close(); }
+});

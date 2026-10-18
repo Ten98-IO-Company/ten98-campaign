@@ -68,6 +68,22 @@ test('custom domain settings require operator administration and saved QR codes 
   } finally { await f.close(); }
 });
 
+test('unresolvable overlong domains cannot create broken QR links or tracking settings', async () => {
+  const f = await fixture(); try {
+    const maximumHost = [...Array(3).fill('a'.repeat(63)), 'b'.repeat(61)].join('.');
+    assert.equal(maximumHost.length, 253);
+    for (const host of [maximumHost + 'b', Array(40).fill('a'.repeat(60)).join('.') + '.com']) {
+      const address = 'https://' + host;
+      assert.equal((await f.api('/settings', 'PUT', { shortBaseUrl: address })).status, 400);
+      assert.equal((await f.api('/settings', 'PUT', { allowedWebsiteOrigins: [address] })).status, 400);
+      assert.equal((await f.api('', 'POST', { name: 'Invalid host', destination: address })).status, 400);
+    }
+    assert.equal((await f.api('/settings', 'PUT', { shortBaseUrl: 'https://' + maximumHost })).status, 200);
+    const link = (await f.api('', 'POST', { name: 'Longest valid host', destination: 'https://example.com/offer' })).data.link;
+    assert.equal((await f.request(link.qrSvgUrl)).status, 200);
+  } finally { await f.close(); }
+});
+
 test('redirects count QR-tagged and ordinary requests separately, excluding HEAD and opt-outs', async () => {
   const f = await fixture(); try {
     const link = (await f.api('', 'POST', { name: 'Visit', destination: 'https://example.com/offer?utm_source=ooh', campaignId: 'campaign-one' })).data.link, path = '/s/' + link.code;
@@ -110,5 +126,32 @@ test('tracking browser script respects privacy signals, omits credentials and tr
     context.navigator.globalPrivacyControl = true; context.window.ten98Track('signup'); assert.equal(calls.length, 3);
     const optedOut = { ...context, window: {}, navigator: { doNotTrack: '1' } }; runInNewContext(script.text, optedOut); assert.equal(calls.length, 3);
     runInNewContext(script.text, context); assert.equal(calls.length, 3);
+  } finally { await f.close(); }
+});
+
+test('campaign reports and public tokens remain isolated through archive and project deletion', async () => {
+  const f = await fixture(); try {
+    const settings = (await f.api('/settings', 'PUT', { allowedWebsiteOrigins: ['https://www.example.com'] })).data.settings;
+    const link = (await f.api('', 'POST', { name: 'One', destination: 'https://example.com/one', campaignId: 'campaign-one' })).data.link;
+    const other = (await f.request('/api/projects/two/links', 'POST', { name: 'Two', destination: 'https://example.com/two', campaignId: 'campaign-two' })).data.link;
+    await f.request('/s/' + link.code); await f.request('/s/' + other.code + '?source=qr');
+    const event = '/api/tracking/' + settings.siteToken + '/events', origin = { Origin: 'https://www.example.com' };
+    await f.request(event, 'POST', { eventId: randomUUID(), name: 'pageview', path: '/one' }, origin);
+    const report = (await f.api('/analytics?campaignId=campaign-one')).data;
+    assert.deepEqual(report.totals, { clicks: 1, qrScans: 0, pageviews: 0, events: 0 });
+    assert.deepEqual(report.links.map(item => item.id), [link.id]);
+    assert.equal((await f.api('/analytics?campaignId=campaign-two')).status, 400);
+    assert.equal((await f.request('/api/projects/two/links/' + link.id + '/qr.svg')).status, 404);
+    await f.api('/' + link.id, 'PATCH', { archived: true });
+    assert.equal((await f.api('/analytics')).data.totals.clicks, 1);
+    f.db.prepare("DELETE FROM projects WHERE id='one'").run();
+    assert.equal((await f.request('/s/' + link.code)).status, 404);
+    assert.equal((await f.request(new URL(settings.scriptUrl).pathname)).status, 404);
+    assert.equal((await f.request(event, 'POST', { eventId: randomUUID(), name: 'pageview', path: '/one' }, origin)).status, 404);
+    assert.equal(f.db.prepare("SELECT count(*) AS count FROM campaign_link_daily WHERE link_id=?").get(link.id).count, 0);
+    assert.equal(f.db.prepare("SELECT count(*) AS count FROM website_daily WHERE project_id='one'").get().count, 0);
+    assert.equal(f.db.prepare("SELECT count(*) AS count FROM website_event_ids WHERE project_id='one'").get().count, 0);
+    assert.equal((await f.request('/s/' + other.code)).status, 302);
+    assert.deepEqual((await f.request('/api/projects/two/links/analytics')).data.totals, { clicks: 1, qrScans: 1, pageviews: 0, events: 0 });
   } finally { await f.close(); }
 });

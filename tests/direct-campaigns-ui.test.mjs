@@ -4,12 +4,14 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 
 const source = await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8');
-const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+const templateSource = await readFile(new URL('../src/WhatsAppTemplate.tsx', import.meta.url), 'utf8');
+const section = (start, end, text = source) => text.slice(text.indexOf(start), text.indexOf(end, text.indexOf(start)));
 function compile(code, context = {}) { return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context)); }
 const event = { preventDefault() {} };
 const campaignBody = compile(section('function campaignBody(', 'const when ='));
-const templateRestriction = compile(section('function templateRestriction(', 'function templatePreviewText('));
-const templatePreviewText = compile(section('function templatePreviewText(', 'const statusLabel ='));
+const templateRestriction = compile(section('function templateRestriction(', 'export function templatePreviewText(', templateSource));
+const templatePreviewText = compile(section('function templatePreviewText(', 'export function templateParameter(', templateSource));
+const templateParameter = compile(section('function templateParameter(', 'export default function WhatsAppTemplate(', templateSource));
 const blankDraft = { name: 'Launch notice', channel: 'email', subject: 'Receipt for {{name}}', text: 'Your receipt', html: '<p>Receipt</p>', accountId: 'wa-account', templateName: 'receipt', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [] };
 
 test('actual campaign serialization keeps channel fields separate and never broadens an empty explicit audience', () => {
@@ -21,9 +23,9 @@ test('actual campaign serialization keeps channel fields separate and never broa
   assert.throws(() => campaignBody(blankDraft, 'tags'), /Enter at least one audience tag/);
 });
 
-test('actual WhatsApp field handler preserves media details and the real button index, with readable template previews', () => {
+test('shared WhatsApp field helper preserves media details and the real button index, with readable template previews', () => {
   let draft = { ...blankDraft, templateComponents: [] };
-  function input(...values) { compile(section('function templateParameter(', '  async function send('), { draft, setDraft: value => { draft = value; } })(...values); }
+  function input(...values) { const previous = structuredClone(draft.templateComponents), current = draft.templateComponents; draft = { ...draft, templateComponents: templateParameter(current, ...values) }; assert.deepEqual(current, previous, 'Template fields must not mutate the previous draft.'); }
   input('header', 0, 'https://cdn.example.com/invoice.pdf', undefined, 'document');
   input('header', 0, 'invoice.pdf', undefined, 'document', 'filename');
   input('body', 1, '42'); input('body', 0, 'Alex'); input('button', 0, 'invoice-42', 1);

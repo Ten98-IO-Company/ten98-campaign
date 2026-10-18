@@ -25,7 +25,7 @@ test('actual reply handler uses scoped provider payloads, explicit review replac
   const handler = section('async function reply(', '  async function conversationAction(');
   async function run(changes = {}) {
     const calls = [], messages = [], targets = [], notices = [], errors = [];
-    const context = { readOnly: false, canReply: true, message: 'Hello there', messageLimit: 10000, accountId: 'account', tab: 'messages', selected: { id: 'opaque/thread ?' }, replyTarget: null, confirmReplace: false, messageTag: 'HUMAN_AGENT', attachmentUrl: '', attachmentType: 'image', attachmentName: '', action: async (_, perform) => perform(1), write: async (...args) => calls.push(args), version: { current: 1 }, setMessage: value => messages.push(value), setAttachmentUrl() {}, setAttachmentName() {}, setMessageTag() {}, setReplyTarget: value => targets.push(value), setConfirmReplace() {}, setNotice: value => notices.push(value), setError: value => errors.push(value), refreshAfterWrite: async () => {}, ...changes };
+    const context = { account: {}, templateMode: false, selectedTemplate: null, templateComponents: [], templateRestriction: () => '', resetTemplate() {}, readOnly: false, canReply: true, message: 'Hello there', messageLimit: 10000, accountId: 'account', tab: 'messages', selected: { id: 'opaque/thread ?' }, replyTarget: null, confirmReplace: false, messageTag: 'HUMAN_AGENT', attachmentUrl: '', attachmentType: 'image', attachmentName: '', action: async (_, perform) => perform(1), write: async (...args) => calls.push(args), version: { current: 1 }, setMessage: value => messages.push(value), setAttachmentUrl() {}, setAttachmentName() {}, setMessageTag() {}, setReplyTarget: value => targets.push(value), setConfirmReplace() {}, setNotice: value => notices.push(value), setError: value => errors.push(value), refreshAfterWrite: async () => {}, ...changes };
     await compile(handler, context)(event); return { calls, messages, targets, notices, errors };
   }
   const dm = await run(); assert.deepEqual(dm.calls[0], ['conversations/opaque%2Fthread%20%3F/reply', { accountId: 'account', message: 'Hello there', messageTag: 'HUMAN_AGENT' }]); assert.deepEqual(dm.messages, ['']);
@@ -52,6 +52,23 @@ test('actual list and thread loaders preserve opaque IDs, account scope and pagi
   const threads = [], details = []; const thread = compile(section('async function fetchThread(', '  async function openItem('), { tab: 'comments', accountId: 'account/a', requester: { current: async url => { threads.push(url); return { comments: [{ id: 'new' }], parent: { id: 'parent' }, pagination: {} }; } }, path, version, merge, setSelected() {}, setFocusedComment() {}, setDetail: update => details.push(update({ comments: [{ id: 'old' }] })) });
   await thread({ id: 'urn:li:share:123/opaque' }, 2, 'next', 'comment/parent'); const threadQuery = new URL(threads[0], 'https://app.example').searchParams;
   assert.equal(threadQuery.get('postId'), 'urn:li:share:123/opaque'); assert.equal(threadQuery.get('commentId'), 'comment/parent'); assert.deepEqual(details[0].comments.map(item => item.id), ['old', 'new']);
+});
+
+test('approved WhatsApp reply templates use their exact account/language and exclude free text or attachment drafts', async () => {
+  const calls = [], notices = [], errors = [], resets = [], selectedTemplate = { name: 'service_update', language: 'en_GB' }, templateComponents = [{ type: 'body', parameters: [{ type: 'text', text: 'Jordan' }] }];
+  const context = { readOnly: false, canReply: true, account: { platform: 'whatsapp' }, templateMode: true, selectedTemplate, templateComponents, templateRestriction: () => '', message: 'Preserved text draft', attachmentUrl: 'https://example.com/file.pdf', attachmentType: 'file', attachmentName: 'draft.pdf', messageLimit: 0, messageTag: 'HUMAN_AGENT', accountId: 'whatsapp-account', tab: 'messages', selected: { id: 'closed/thread' }, replyTarget: null, confirmReplace: false, action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { sent: true }; }, version: { current: 1 }, setMessage() {}, setAttachmentUrl() {}, setAttachmentName() {}, setMessageTag() {}, setReplyTarget() {}, setConfirmReplace() {}, resetTemplate: () => resets.push(true), setNotice: value => notices.push(value), setError: value => errors.push(value), refreshAfterWrite: async () => {} };
+  const reply = changes => compile(section('async function reply(', '  async function conversationAction('), { ...context, ...changes })(event);
+  await reply(); assert.deepEqual(calls[0], ['conversations/closed%2Fthread/reply', { accountId: 'whatsapp-account', templateName: 'service_update', templateLanguage: 'en_GB', templateComponents }]); assert.match(notices[0], /accepted/); assert.equal(resets.length, 1);
+  await reply({ selectedTemplate: null }); await reply({ templateRestriction: () => 'Unsupported' }); await reply({ readOnly: true }); assert.equal(calls.length, 1); assert.equal(errors.length, 2);
+  await assert.rejects(reply({ write: async () => { throw new Error('Outcome uncertain'); } }), /uncertain/); assert.equal(resets.length, 1, 'A rejected/uncertain send preserves the selected template and parameter draft.');
+  await reply({ version: { current: 2 } }); assert.equal(resets.length, 1, 'A stale reply cannot clear another project draft.');
+});
+
+test('reply template loading keeps only approved scoped definitions and ignores stale account responses', async () => {
+  const calls = [], templates = [], notices = [], version = { current: 1 }, context = { readOnly: false, account: { platform: 'whatsapp' }, accountId: 'account/one', selected: { id: 'thread' }, projectId: 'project/one', action: async (_, run) => run(1), requester: { current: async path => { calls.push(path); return { templates: [{ name: 'ready', status: 'APPROVED' }, { name: 'draft', status: 'PENDING' }] }; } }, version, setTemplates: value => templates.push(value), setTemplateKey() {}, setTemplateComponents() {}, setNotice: value => notices.push(value) };
+  const load = changes => compile(section('async function loadReplyTemplates(', '  async function reply('), { ...context, ...changes })();
+  await load(); assert.equal(calls[0], '/projects/project%2Fone/direct/templates?accountId=account%2Fone'); assert.deepEqual(templates[0], [{ name: 'ready', status: 'APPROVED' }]);
+  version.current = 2; await load(); assert.equal(templates.length, 1); await load({ readOnly: true }); await load({ account: { platform: 'facebook' } }); assert.equal(calls.length, 2);
 });
 
 test('read/archive are explicit writes and destructive public changes require confirmation', async () => {
@@ -81,7 +98,7 @@ test('private reply limits follow account capabilities and attachment caption re
 
 test('thread refresh preserves an unfinished reply and post-write read failures never claim the confirmed write failed', async () => {
   const cleared = [], selected = { id: 'thread' }, errors = [];
-  const context = { selected, focusedComment: '', tab: 'messages', version: { current: 1 }, action: async (_, run) => run(1), fetchThread: async () => {}, setReplyTarget() {}, setMessage: value => cleared.push(value), setConfirmReplace() {}, setMessageTag() {}, setAttachmentUrl() {}, setAttachmentName() {} };
+  const context = { selected, focusedComment: '', tab: 'messages', version: { current: 1 }, action: async (_, run) => run(1), fetchThread: async () => {}, resetTemplate() {}, setReplyTarget() {}, setMessage: value => cleared.push(value), setConfirmReplace() {}, setMessageTag() {}, setAttachmentUrl() {}, setAttachmentName() {} };
   const open = compile(section('async function openItem(', '  async function refreshAfterWrite('), context);
   await open(selected); assert.deepEqual(cleared, []); await open({ id: 'different-thread' }); assert.deepEqual(cleared, ['']);
   const refresh = compile(section('async function refreshAfterWrite(', '  function prepareReply('), { tab: 'messages', selected, focusedComment: '', version: { current: 1 }, fetchThread: async () => { throw new Error('Provider read failed'); }, setError: value => errors.push(value) });

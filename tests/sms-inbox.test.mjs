@@ -194,24 +194,35 @@ test('Cloudflare Reply-To is optional, validated, saved and sent using the offic
   } finally { f.close(); }
 });
 
-test('actual HTTP routes authenticate SMS inbox access, accept project callbacks and send one scoped reply', async () => {
+test('actual HTTP campaign sends, signed replies and receipts survive restart without replaying an interrupted reply', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-sms-http-')), origin = 'https://campaign.example.test', env = { TWILIO_ACCOUNT_SID: token('AC', 1), TWILIO_AUTH_TOKEN: 'sms-http-fixture-secret', TWILIO_FROM_NUMBER: '+12025550100' }, originalFetch = globalThis.fetch;
-  const app = createApp({ dataDir, env, appUrl: origin, directScheduler: false }); let cookie, writes = 0;
-  globalThis.fetch = async (target, options = {}) => { const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options); assert.equal(url.hostname, 'api.twilio.com'); writes++; const body = new URLSearchParams(options.body); return Response.json({ sid: token('SM', 500), account_sid: env.TWILIO_ACCOUNT_SID, from: body.get('From'), to: body.get('To'), status: 'queued' }); };
+  let app = createApp({ dataDir, env, appUrl: origin, directScheduler: false }), cookie, base, writes = 0;
+  globalThis.fetch = async (target, options = {}) => { const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options); assert.equal(url.hostname, 'api.twilio.com'); writes++; const body = new URLSearchParams(options.body); assert.equal(body.get('From'), env.TWILIO_FROM_NUMBER); assert.equal(body.get('To'), '+12025550123'); return Response.json({ sid: token('SM', 499 + writes), account_sid: env.TWILIO_ACCOUNT_SID, from: body.get('From'), to: body.get('To'), status: 'queued' }); };
+  async function listen() { await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`; }
   try {
-    await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); const base = `http://127.0.0.1:${app.server.address().port}`;
+    await listen();
     async function request(path, method = 'GET', body, options = {}) { const result = await fetch(base + path, { method, headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...options.headers }, ...(body ? { body: JSON.stringify(body) } : {}) }); return { status: result.status, data: await result.json(), cookie: result.headers.get('set-cookie')?.split(';')[0] }; }
     const setup = await request('/api/auth/setup', 'POST', { name: 'SMS owner', email: 'sms-owner@example.test', password: 'sms fixture long passphrase', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
     const projectId = setup.data.projectId, path = `/api/projects/${projectId}/sms-inbox`;
-    app.smsInbox.recordOutbound({ id: randomUUID(), projectId, accountSid: env.TWILIO_ACCOUNT_SID, sender: env.TWILIO_FROM_NUMBER, recipient: '+12025550123', providerId: token('SM', 100), message: 'Campaign', status: 'queued' });
+    assert.equal((await request(`/api/projects/${projectId}/direct/contacts`, 'POST', { name: 'SMS test recipient', phone: '+12025550123', consents: { sms: true }, consentSource: 'Isolated test opt-in' })).status, 201);
+    const draft = await request(`/api/projects/${projectId}/direct/campaigns`, 'POST', { name: 'HTTP campaign', channel: 'sms', text: 'Your requested service update.' }); assert.equal(draft.status, 201);
+    const campaignPath = `/api/projects/${projectId}/direct/campaigns/${draft.data.campaign.id}`, preview = await request(campaignPath + '/preview', 'POST', {}); assert.equal(preview.data.audience.eligible, 1);
+    assert.equal((await request(campaignPath + '/send', 'POST', { confirmed: true, previewToken: preview.data.previewToken })).status, 200); await app.direct.processPending(); assert.equal(writes, 1);
     async function callback(path, fields) { const body = new URLSearchParams({ AccountSid: env.TWILIO_ACCOUNT_SID, ...fields }), signature = createHmac('sha1', env.TWILIO_AUTH_TOKEN).update(origin + path + [...body.keys()].sort().map(key => key + body.get(key)).join('')).digest('base64'); return originalFetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Twilio-Signature': signature }, body }); }
     const inbound = await callback(`/api/webhooks/twilio/inbound/${projectId}`, { MessageSid: token('SM', 200), From: '+12025550123', To: env.TWILIO_FROM_NUMBER, Body: 'Please help', NumMedia: '0' }); assert.equal(inbound.status, 200);
     const conversation = (await request(path + '/conversations')).data.conversations[0]; assert.equal(conversation.lastMessage, 'Please help'); assert.equal((await request(path + `/conversations/${conversation.id}/messages`)).data.messages.length, 2);
     assert.equal((await request(path + '/conversations', 'GET', undefined, { headers: { Cookie: '' } })).status, 401);
-    app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(path + `/conversations/${conversation.id}/reply`, 'POST', { message: 'Cannot send' }, { headers: { 'Idempotency-Key': randomUUID() } })).status, 403); assert.equal(writes, 0); app.db.prepare("UPDATE memberships SET role='owner'").run();
-    const key = randomUUID(), reply = await request(path + `/conversations/${conversation.id}/reply`, 'POST', { message: 'One reply' }, { headers: { 'Idempotency-Key': key } }); assert.equal(reply.status, 200); assert.equal(writes, 1);
-    assert.equal((await request(path + `/conversations/${conversation.id}/reply`, 'POST', { message: 'One reply' }, { headers: { 'Idempotency-Key': key } })).status, 200); assert.equal(writes, 1);
-    assert.equal((await callback(`/api/webhooks/twilio/status/${reply.data.message.id}`, { MessageSid: token('SM', 500), MessageStatus: 'delivered', From: env.TWILIO_FROM_NUMBER, To: '+12025550123' })).status, 200);
+    app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(path + `/conversations/${conversation.id}/reply`, 'POST', { message: 'Cannot send' }, { headers: { 'Idempotency-Key': randomUUID() } })).status, 403); assert.equal(writes, 1); app.db.prepare("UPDATE memberships SET role='owner'").run();
+    const key = randomUUID(), reply = await request(path + `/conversations/${conversation.id}/reply`, 'POST', { message: 'One reply' }, { headers: { 'Idempotency-Key': key } }); assert.equal(reply.status, 200); assert.equal(writes, 2);
+    assert.equal((await request(path + `/conversations/${conversation.id}/reply`, 'POST', { message: 'One reply' }, { headers: { 'Idempotency-Key': key } })).status, 200); assert.equal(writes, 2);
+    // Simulate a crash after the provider accepted the request but before its acknowledgement was saved.
+    app.db.prepare("UPDATE sms_messages SET provider_id=NULL,data=json_set(data,'$.providerId',NULL,'$.status','sending','$.deliveryStatus','sending') WHERE id=?").run(reply.data.message.id);
+    app.db.prepare("UPDATE integration_operations SET status='pending',response=NULL,http_status=NULL WHERE request_key=?").run(key);
+    await app.close(); app = createApp({ dataDir, env, appUrl: origin, directScheduler: false }); await listen();
+    const restored = await request(path + `/conversations/${conversation.id}/messages`); assert.equal(restored.status, 200); assert.equal(restored.data.messages.length, 3); assert.equal(restored.data.messages[0].status, 'uncertain');
+    for (const retryKey of [key, randomUUID()]) assert.equal((await request(path + `/conversations/${conversation.id}/reply`, 'POST', { message: 'One reply' }, { headers: { 'Idempotency-Key': retryKey } })).status, 409);
+    assert.equal(writes, 2);
+    assert.equal((await callback(`/api/webhooks/twilio/status/${reply.data.message.id}`, { MessageSid: token('SM', 501), MessageStatus: 'delivered', From: env.TWILIO_FROM_NUMBER, To: '+12025550123' })).status, 200);
     assert.equal((await request(path + `/conversations/${conversation.id}/messages`)).data.messages[0].status, 'delivered');
   } finally { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); }
 });
