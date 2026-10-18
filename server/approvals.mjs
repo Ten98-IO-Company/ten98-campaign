@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { IntegrationError, targetConfiguration } from './integrations.mjs';
+import { IntegrationError, targetConfiguration, zernioClient } from './integrations.mjs';
 import { resolveVariant } from '../shared/social-posts.mjs';
+import { queueList, reviewedQueue } from './zernio-queues.mjs';
 
 const initialized = new WeakSet(), administrators = new Set(['owner', 'admin']);
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
@@ -39,7 +40,7 @@ function postSnapshot(context, post) {
     const scheduledFor = typeof target.scheduledFor === 'string' && Date.parse(target.scheduledFor) !== Date.parse(post.scheduledAt || post.scheduledFor) ? target.scheduledFor : '';
     return JSON.stringify(actual) === JSON.stringify(expected) && !scheduledFor ? [] : [{ platform: target.platform, accountId: String(target.accountId?._id || target.accountId), ...actual, ...(scheduledFor ? { scheduledFor } : {}) }];
   });
-  return { content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null };
+  return { ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null };
 }
 const fingerprint = snapshot => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
 const latest = (db, projectId, postId) => db.prepare('SELECT * FROM post_approval_reviews WHERE project_id=? AND post_id=? ORDER BY rowid DESC LIMIT 1').get(projectId, postId);
@@ -62,10 +63,21 @@ function publicReview(db, row) {
 function fields(body, allowed) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_APPROVAL_FIELDS', 'Use only the fields shown in the approval form.');
 }
-function queueItem(context, post) {
+function queueItem(context, post, queue = null) {
   const snapshot = postSnapshot(context, post), review = latest(context.db, context.project.id, post.id);
   const status = submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
-  return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), content: snapshot.content, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
+  return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: snapshot.queueId || '', queueVersion: snapshot.queueVersion || '', content: snapshot.content, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
+}
+async function publishingQueues(context) {
+  const env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) }, profileId = String(context.project.zernioProfileId || '');
+  if (!env.ZERNIO_API_KEY || !profileId) fail(409, 'QUEUE_UNAVAILABLE', 'Configure Zernio and this project’s profile before reviewing a queued post.');
+  return (await queueList(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping?.(profileId)), profileId)).queues;
+}
+function queueSummary(post, queues, unavailable = false) {
+  if (!post.queueId || submitted(post)) return null;
+  const queue = queues?.find(row => row._id === post.queueId);
+  try { if (unavailable) fail(503, 'QUEUE_UNAVAILABLE', 'The publishing queue could not be verified. Refresh before reviewing this post.'); reviewedQueue(post, queues || []); return { ...queue, ready: true }; }
+  catch (error) { return { ...(queue || { _id: post.queueId }), ready: false, message: error instanceof IntegrationError ? error.message : 'The publishing queue could not be verified.' }; }
 }
 
 export function assertPublishingApproval(context, post) {
@@ -96,27 +108,43 @@ export async function handleApprovals(context) {
       db.prepare('INSERT INTO project_approval_policy VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET require_approval=excluded.require_approval,updated_by=excluded.updated_by,updated_at=excluded.updated_at').run(project.id, Number(body.requireApproval), user.id, new Date().toISOString());
       store.activity(project.id, `Publishing approval ${body.requireApproval ? 'required' : 'made optional'} by ${user.name || user.id}.`); send(200, policy(db, project.id)); return true;
     }
-    if (req.method === 'GET' && path === 'posts') { send(200, { ...policy(db, project.id), posts: store.list(project.id, 'posts').map(post => queueItem(context, post)) }); return true; }
+    if (req.method === 'GET' && path === 'posts') {
+      const posts = store.list(project.id, 'posts'); let queues, unavailable = false;
+      if (posts.some(post => post.queueId && !submitted(post))) {
+        try { queues = await publishingQueues(context); } catch { unavailable = true; }
+        context.assertIntegrationSettings?.(); if (project.zernioProfileId) context.assertProjectMapping?.(String(project.zernioProfileId));
+      }
+      send(200, { ...policy(db, project.id), posts: posts.map(post => queueItem(context, post, queueSummary(post, queues, unavailable))) }); return true;
+    }
     const match = path.match(/^posts\/([^/]+)\/(request|review)$/);
     if (!match || req.method !== 'POST') fail(404, 'APPROVAL_ACTION_NOT_FOUND', 'This approval action was not found.');
     if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'APPROVAL_WRITE_REQUIRED', 'Editing permission is required to request content review.');
     const post = localPost(context, match[1]), snapshot = postSnapshot(context, post), hash = fingerprint(snapshot), review = latest(db, project.id, post.id);
     if (match[2] === 'request') {
       fields(body, []);
+      const queue = post.queueId ? reviewedQueue(post, await publishingQueues(context)) : null;
+      const currentReview = latest(db, project.id, post.id);
+      if (fingerprint(postSnapshot(context, localPost(context, post.id))) !== hash || currentReview?.id !== review?.id || currentReview?.status !== review?.status) fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before requesting review.');
       if (!review || review.fingerprint !== hash || review.status === 'rejected') {
         db.prepare("INSERT INTO post_approval_reviews(id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES(?,?,?,?,?,'pending',?,?)").run(randomUUID(), project.id, post.id, hash, JSON.stringify(snapshot), user.id, new Date().toISOString());
         store.activity(project.id, `Content review requested by ${user.name || user.id}.`);
       }
-      send(200, { item: queueItem(context, post) }); return true;
+      send(200, { item: queueItem(context, post, queue ? { ...queue, ready: true } : null) }); return true;
     }
     if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
     fields(body, ['decision', 'note', 'reviewId']);
     const note = body.note === undefined ? '' : body.note;
     if (!['approved', 'rejected'].includes(body.decision) || typeof note !== 'string' || note.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(note) || typeof body.reviewId !== 'string') fail(400, 'INVALID_APPROVAL_REVIEW', 'Choose approve or reject and use a review note of at most 2,000 characters.');
     if (!review || review.id !== body.reviewId || review.status !== 'pending' || review.fingerprint !== hash) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
-    if (body.decision === 'approved') assetApproved(snapshot);
+    let queue = null;
+    if (body.decision === 'approved') {
+      if (post.queueId) queue = reviewedQueue(post, await publishingQueues(context));
+      const currentReview = latest(db, project.id, post.id);
+      if (fingerprint(postSnapshot(context, localPost(context, post.id))) !== hash || currentReview?.id !== review.id || currentReview?.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before approving it.');
+      assetApproved(snapshot);
+    }
     db.prepare('UPDATE post_approval_reviews SET status=?,reviewed_by=?,reviewed_at=?,note=? WHERE id=?').run(body.decision, user.id, new Date().toISOString(), note.trim(), review.id);
-    store.activity(project.id, `Content ${body.decision} by ${user.name || user.id}.`); send(200, { item: queueItem(context, post) }); return true;
+    store.activity(project.id, `Content ${body.decision} by ${user.name || user.id}.`); send(200, { item: queueItem(context, post, queue ? { ...queue, ready: true } : queueSummary(post, [], true)) }); return true;
   } catch (error) {
     send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'APPROVAL_ERROR', message: error instanceof IntegrationError ? error.message : 'The content approval action could not be completed.' } }); return true;
   }

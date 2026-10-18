@@ -1,15 +1,15 @@
 # Zernio coverage: stores, administration and additional channels
 
-Snapshot: 18 October 2026, compared with application v0.8.4 and Zernio OpenAPI 1.292.0. This is an implementation backlog, not a claim that the missing features work. The [main breakdown](zernio-feature-plan.md) defines status and acceptance rules; the [operation inventory](zernio-api-inventory.csv) lists the API surface without treating every operation as a separate user feature.
+Snapshot: 18 October 2026, compared with the v0.8.6 expansion and Zernio OpenAPI 1.292.0. This is an implementation backlog, not a claim that the missing features work. The [main breakdown](zernio-feature-plan.md) defines status and acceptance rules; the [operation inventory](zernio-api-inventory.csv) lists the API surface without treating every operation as a separate user feature.
 
 ## Stores and articles
 
-The existing router in [server/index.mjs](../server/index.mjs) and [server/integrations.mjs](../server/integrations.mjs) has no Blogs or Commerce workflow. [IntegrationSettings](../src/IntegrationSettings.tsx) maps a Zernio profile but does not provide store onboarding. A public URL attached to an ad or an asset is not store integration.
+[Connection setup](../src/ZernioConnection.tsx) and [scoped handlers](../server/zernio-connections.mjs) now provide Shopify and WordPress onboarding. Blog articles and commerce resources still have no complete application workflow. Connecting a store does not implement content or product management.
 
 | Feature family | Current app | Required workflow |
 | --- | --- | --- |
-| Shopify connection | Missing | Collect store domain, start OAuth or accept the supported Admin token securely; verify the returned account belongs to this project. Reconnection must preserve identity. [Shopify](https://docs.zernio.com/platforms/shopify) |
-| WordPress connection | Missing | WordPress.com selection or self-hosted HTTPS site/Application Password flow, verified site scope, reconnect and disconnect. [WordPress](https://docs.zernio.com/platforms/wordpress) |
+| Shopify connection | Implemented setup | Hosted authorization or merchant custom-app token, normalized store domain and verified returned project account. [Shopify](https://docs.zernio.com/platforms/shopify) |
+| WordPress connection | Implemented setup | WordPress.com authorization or self-hosted HTTPS site/Application Password, with verified site/profile identity. Ordinary account controls provide disconnect; reconnect can use the matching setup path. [WordPress](https://docs.zernio.com/platforms/wordpress) |
 | Blogs and articles | Missing | Blog selection/management where supported; draft, preview, schedule, update and delete articles with title, body, author, tags, image and platform-supported metadata. Do not put store accounts in the social post selector. [Blogs](https://docs.zernio.com/blogs/list-blogs) |
 | Store permissions | Missing | Read store capabilities and missing grants before rendering controls; provide a deliberate merchant permission handoff. Recheck after reconnect or grant changes. [Store capabilities](https://docs.zernio.com/commerce/get-commerce-store) |
 | Products | Missing | Search/paginate, view, draft/create, edit, duplicate, change state and bulk tags. Give partial bulk outcomes per product. Keep decimal store amounts and currency intact. [Product creation](https://docs.zernio.com/commerce/create-commerce-product) |

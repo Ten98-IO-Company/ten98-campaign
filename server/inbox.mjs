@@ -6,6 +6,7 @@ import { publicMediaUrl } from '../shared/social-posts.mjs';
 const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 const id = value => { if (typeof value !== 'string' || !value || value.length > 2000 || /[\s\u0000-\u001f\u007f]/.test(value)) fail(400, 'INVALID_INBOX_ID', 'Choose a valid inbox item.'); return value; };
+const decodedId = value => { try { return id(decodeURIComponent(value)); } catch (error) { if (error instanceof IntegrationError) throw error; fail(400, 'INVALID_INBOX_ID', 'Choose a valid inbox item.'); } };
 const str = (value, label, max = 10000) => { if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) fail(400, 'INVALID_INBOX_CONTENT', `Enter a valid ${label} of at most ${max} characters.`); return value; };
 const fields = (body, allowed) => { if (!plain(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_INBOX_FIELD', 'Use only the fields shown for this inbox action.'); };
 const pick = (row, keys) => Object.fromEntries(keys.filter(key => row?.[key] !== undefined).map(key => [key, redact(row[key])]));
@@ -20,8 +21,9 @@ const LIKE = new Set(['facebook', 'twitter', 'bluesky', 'reddit', 'linkedin']);
 const REVIEWS = new Set(['facebook', 'googlebusiness']);
 const WRITERS = new Set(['owner', 'admin', 'editor']);
 const START = new Set(['twitter', 'bluesky', 'reddit', 'slack', 'whatsapp', 'sms']);
+const EDIT_MESSAGE = new Set(['telegram', 'imessage']), DELETE_MESSAGE = new Set(['telegram', 'twitter', 'bluesky', 'reddit', 'imessage']), REACT_MESSAGE = new Set(['telegram', 'whatsapp', 'facebook', 'instagram', 'slack', 'imessage']);
 const conversationFields = ['id', 'platform', 'accountId', 'accountUsername', 'participantId', 'participantName', 'participantUsername', 'participantPicture', 'participantVerifiedType', 'businessScopedUserId', 'whatsappUsername', 'lastMessage', 'lastMessageAt', 'updatedTime', 'status', 'unreadCount', 'threadControl', 'folder', 'url', 'instagramProfile', 'metadata'];
-const messageFields = ['id', 'conversationId', 'accountId', 'platform', 'message', 'senderId', 'senderName', 'direction', 'createdAt', 'attachments', 'subject', 'storyReply', 'isStoryMention', 'noRenderableContent', 'isEdited', 'editedAt', 'isDeleted', 'deletedAt', 'deliveryStatus', 'reactions', 'sentVia'];
+const messageFields = ['id', 'conversationId', 'accountId', 'platform', 'message', 'senderId', 'senderName', 'direction', 'createdAt', 'attachments', 'subject', 'storyReply', 'isStoryMention', 'noRenderableContent', 'isEdited', 'editedAt', 'editCount', 'editHistory', 'isDeleted', 'deletedAt', 'deliveryStatus', 'reactions', 'sentVia'];
 const postFields = ['id', 'platform', 'accountId', 'accountUsername', 'content', 'picture', 'permalink', 'createdTime', 'commentCount', 'likeCount', 'cid', 'subreddit', 'isAd', 'adId', 'placement'];
 const commentFields = ['id', 'message', 'createdTime', 'from', 'likeCount', 'replyCount', 'platform', 'url', 'repliesHasMore', 'canReply', 'canDelete', 'canHide', 'canLike', 'isHidden', 'isLiked', 'likeUri', 'cid', 'parentId', 'rootUri', 'rootCid'];
 const reviewFields = ['id', 'platform', 'accountId', 'accountUsername', 'locationId', 'locationName', 'reviewer', 'rating', 'recommendationType', 'text', 'created', 'hasReply', 'hasPhotos', 'photoCount', 'photos', 'reply', 'reviewUrl'];
@@ -42,7 +44,7 @@ function validateReview(row) {
 }
 
 export function inboxCapabilities(platform) {
-  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : platform === 'sms' ? ['image', 'video'] : platform === 'instagram' ? ['image', 'video', 'audio'] : ['image', 'video', 'audio', 'file'], archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
+  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : platform === 'sms' ? ['image', 'video'] : platform === 'instagram' ? ['image', 'video', 'audio'] : ['image', 'video', 'audio', 'file'], archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
 }
 function supported(account, feature) { if (!inboxCapabilities(account.platform)[feature] || account.isActive === false) fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'This account does not support this inbox action. Reconnect the account if its permissions changed.'); }
 function scoped(row, accounts, expectedAccount) {
@@ -175,12 +177,110 @@ async function history(api, account, conversationId, params = {}, resolvedId = c
   if (!Array.isArray(result.messages) || result.messages.length > 100) invalid();
   for (const row of result.messages) if (!plain(row) || !valid(row.id) || row.accountId !== undefined && row.accountId !== account._id || row.platform !== undefined && row.platform !== account.platform || row.conversationId !== undefined && ![conversationId, resolvedId].includes(row.conversationId) || !['incoming', 'outgoing'].includes(row.direction) || row.attachments !== undefined && (!Array.isArray(row.attachments) || row.attachments.length > 100 || row.attachments.some(item => !plain(item) || typeof item.type !== 'string' || item.url !== undefined && typeof item.url !== 'string')) || row.reactions !== undefined && (!Array.isArray(row.reactions) || row.reactions.some(item => !plain(item) || typeof item.emoji !== 'string'))) invalid();
   for (const row of result.messages) {
-    renderFields(row, messageFields.filter(key => !['attachments', 'storyReply', 'reactions', 'isStoryMention', 'noRenderableContent', 'isEdited', 'isDeleted'].includes(key)), [], ['isStoryMention', 'noRenderableContent', 'isEdited', 'isDeleted']);
+    renderFields(row, messageFields.filter(key => !['attachments', 'storyReply', 'reactions', 'editCount', 'editHistory', 'isStoryMention', 'noRenderableContent', 'isEdited', 'isDeleted'].includes(key)), ['editCount'], ['isStoryMention', 'noRenderableContent', 'isEdited', 'isDeleted']);
     for (const attachment of row.attachments || []) renderFields(attachment, ['id', 'type', 'originalType', 'mimeType', 'url', 'refreshUrl', 'name', 'filename', 'previewUrl']);
     for (const reaction of row.reactions || []) renderFields(reaction, ['emoji', 'reactedAt'], [], ['fromMe']);
+    if (row.editHistory !== undefined) {
+      if (!Array.isArray(row.editHistory) || row.editHistory.length > 1000) invalid();
+      row.editHistory = row.editHistory.map(entry => { renderFields(entry, ['text', 'editedAt']); if (!Array.isArray(entry.attachments) || entry.attachments.length > 100) invalid(); entry.attachments.forEach(item => renderFields(item, ['type', 'url'])); return { ...pick(entry, ['text', 'editedAt']), attachments: entry.attachments.map(item => pick(item, ['type', 'url'])) }; });
+    }
     if (row.storyReply != null) renderFields(row.storyReply, ['storyId', 'storyUrl']);
   }
   return { messages: result.messages.map(row => pick(row, messageFields)), pagination: pagination(result.pagination), sortOrderApplied: result.sortOrderApplied || 'desc' };
+}
+async function recentHistory(api, account, conversationId, resolvedId) {
+  const result = await history(api, account, conversationId, {}, resolvedId), seen = new Set();
+  // ponytail: scan at most 2,000 recent messages; use the provider dashboard for longer reply-window history.
+  for (let page = 1; !result.messages.some(message => message.direction === 'incoming' && Number.isFinite(Date.parse(message.createdAt))) && result.pagination.hasMore; page++) {
+    if (page >= 20) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This conversation exceeds the reply-window history limit. Open it in the provider dashboard.');
+    const cursor = result.pagination.nextCursor; if (seen.has(cursor)) invalid(); seen.add(cursor);
+    const next = await history(api, account, conversationId, { cursor }, resolvedId); result.messages.push(...next.messages); result.pagination = next.pagination;
+  }
+  return result.messages;
+}
+const incomingTime = messages => Math.max(...messages.filter(message => message.direction === 'incoming').map(message => Date.parse(message.createdAt)).filter(Number.isFinite));
+const incomingAge = messages => Date.now() - incomingTime(messages);
+export const inboxMessageVersion = (message, accountId) => createHash('sha256').update(JSON.stringify([accountId, message.id, message.direction, message.message ?? null, message.createdAt ?? null, message.editedAt ?? null, message.isDeleted || message.deliveryStatus === 'deleted', message.attachments || [], message.reactions || []])).digest('hex');
+function messageActions(account, message, windowAge = Infinity) {
+  const age = Date.now() - Date.parse(message.createdAt), own = message.direction === 'outgoing', live = account.isActive !== false && !message.isDeleted && message.deliveryStatus !== 'deleted', apple = account.platform === 'imessage';
+  return { canEdit: live && own && EDIT_MESSAGE.has(account.platform) && typeof message.message === 'string' && !!message.message.trim() && !message.attachments?.length && (!apple || age >= 0 && age < 15 * 60000), canDelete: live && own && DELETE_MESSAGE.has(account.platform) && (!apple || age >= 0 && age < 2 * 60000), canReact: live && REACT_MESSAGE.has(account.platform) && (!['facebook', 'instagram'].includes(account.platform) || windowAge >= 0 && windowAge <= 86400000), canUnreact: live && REACT_MESSAGE.has(account.platform) && (message.reactions || []).some(reaction => reaction.fromMe === true) && (!['facebook', 'instagram'].includes(account.platform) || windowAge >= 0 && windowAge <= 86400000), deleteScope: ['bluesky', 'reddit'].includes(account.platform) ? 'self' : apple ? 'unsend' : 'platform', ...(apple ? { editUntil: Number.isFinite(age) ? new Date(Date.parse(message.createdAt) + 15 * 60000).toISOString() : null, deleteUntil: Number.isFinite(age) ? new Date(Date.parse(message.createdAt) + 2 * 60000).toISOString() : null } : {}) };
+}
+async function findMessage(api, account, conversationId, resolvedId, messageId) {
+  let cursor; const seen = new Set();
+  // ponytail: verify at most 2,000 messages; use the provider dashboard for older actions.
+  for (let page = 0; page < 20; page++) {
+    const result = await history(api, account, conversationId, cursor ? { cursor } : {}, resolvedId), target = result.messages.find(message => message.id === messageId);
+    if (target) return target;
+    if (!result.pagination.hasMore) return null;
+    cursor = result.pagination.nextCursor; if (seen.has(cursor)) invalid(); seen.add(cursor);
+  }
+  fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This message is beyond the verified history window. Open it in the provider dashboard.');
+}
+function emoji(value, platform) {
+  if (typeof value !== 'string' || !value || value.length > 64 || (platform === 'slack' ? !/^:[a-z0-9_+\-]{1,60}:$/i.test(value) : [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(value)].length !== 1 || !/[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(value))) fail(400, 'INVALID_REACTION', platform === 'slack' ? 'Use a Slack emoji name such as :thumbsup:.' : 'Choose one standard emoji reaction.');
+  return value;
+}
+async function changeMessage(context, api, account, conversationId, resolvedId, messageId, verb, key) {
+  const { body } = context;
+  supported(account, verb === 'edit' ? 'messageEdit' : verb === 'delete' ? 'messageDelete' : 'messageReact');
+  fields(body, ['accountId', 'expectedMessageVersion', ...(verb === 'edit' ? ['text'] : verb === 'delete' ? ['confirmMessageId'] : verb === 'react' ? ['emoji'] : [])]);
+  const target = await findMessage(api, account, conversationId, resolvedId, messageId);
+  if (!target) fail(403, 'MESSAGE_OUTSIDE_CONVERSATION', 'This message was not found in the selected account and conversation.');
+  if (body.expectedMessageVersion !== inboxMessageVersion(target, account._id)) fail(409, 'MESSAGE_CHANGED', 'This message changed. Refresh the thread before changing it.');
+  const age = ['facebook', 'instagram'].includes(account.platform) ? incomingAge(await recentHistory(api, account, conversationId, resolvedId)) : Infinity, eligibility = messageActions(account, target, age);
+  if (!eligibility[{ edit: 'canEdit', delete: 'canDelete', react: 'canReact', unreact: 'canUnreact' }[verb]]) fail(409, 'MESSAGE_ACTION_UNAVAILABLE', 'This message cannot be changed now. Check ownership, the edit/unsend or reply window, and whether your account has a reaction to remove.');
+  const endpoint = `/inbox/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`;
+  let payload, result;
+  if (verb === 'edit') { payload = { accountId: account._id, text: str(body.text, 'message text', inboxCapabilities(account.platform).messageLimit) }; if (payload.text === target.message) fail(400, 'MESSAGE_UNCHANGED', 'Change the message text before saving.'); result = await api(endpoint, {}, payload, key, 'PATCH'); }
+  else if (verb === 'delete') { if (body.confirmMessageId !== messageId) fail(400, 'MESSAGE_CONFIRMATION_REQUIRED', 'Confirm the selected message before deleting it.'); result = await api(endpoint, { accountId: account._id }, undefined, key, 'DELETE'); }
+  else { payload = { accountId: account._id, ...(verb === 'react' ? { emoji: emoji(body.emoji, account.platform) } : {}) }; result = await api(endpoint + '/reactions', verb === 'unreact' ? payload : {}, verb === 'react' ? payload : undefined, key, verb === 'react' ? 'POST' : 'DELETE'); }
+  if (result.success !== true || verb === 'edit' && !(valid(result.data?.messageId) || Number.isSafeInteger(result.data?.messageId)) || ['react', 'unreact'].includes(verb) && (!valid(result.messageId) || result.platformMessageId !== messageId)) invalid(true);
+  let fresh;
+  try { fresh = await findMessage(api, account, conversationId, resolvedId, messageId); }
+  catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+  if (verb === 'edit' && (!fresh || fresh.isDeleted || fresh.message !== payload.text) || verb === 'delete' && fresh && fresh.isDeleted !== true && fresh.deliveryStatus !== 'deleted') fail(502, 'MESSAGE_CHANGE_NOT_CONFIRMED', 'The latest history has not confirmed this message change. Review the thread before another attempt.', true);
+  return { messageId, action: verb, accepted: true, observed: verb === 'edit' || verb === 'delete' || Boolean(fresh) && (verb === 'react' ? (fresh.reactions || []).some(reaction => reaction.fromMe === true && reaction.emoji === payload.emoji) : !(fresh.reactions || []).some(reaction => reaction.fromMe === true)), ...(fresh ? { message: { ...fresh, version: inboxMessageVersion(fresh, account._id), actions: messageActions(account, fresh, age) } } : {}), ...(verb === 'delete' ? { deleteScope: eligibility.deleteScope } : {}) };
+}
+const controlActions = account => account.isActive === false ? [] : account.platform === 'whatsapp' ? ['take', 'release'] : account.platform === 'facebook' ? ['take', 'request', 'pass', 'release'] : account.platform === 'instagram' ? account.metadata?.loginMethod === 'facebook_login' ? ['take', 'request', 'pass', 'release'] : ['pass', 'release'] : [];
+export const inboxConversationVersion = row => createHash('sha256').update(JSON.stringify([row.id, row.accountId, row.platform, row.participantId ?? null, row.lastMessage ?? null, row.lastMessageAt ?? row.updatedTime ?? null, row.threadControl ?? null])).digest('hex');
+const conversationView = (account, row) => ({ ...row, version: inboxConversationVersion(row), controlActions: controlActions(account) });
+async function changeControl(context, api, accounts, account, conversationId, row, key) {
+  const { body } = context;
+  supported(account, 'threadControl'); fields(body, ['accountId', 'action', 'targetAppId', 'metadata', 'expectedConversationVersion', 'confirmControl']);
+  if (body.confirmControl !== true || body.expectedConversationVersion !== inboxConversationVersion(row)) fail(409, 'CONTROL_CONFIRMATION_REQUIRED', 'Refresh the conversation and review who will answer before changing control.');
+  if (!controlActions(account).includes(body.action)) fail(422, 'CONTROL_ACTION_UNSUPPORTED', 'This account does not support that control action. Instagram take/request requires Facebook Login; WhatsApp supports take/release only.');
+  if (account.platform === 'whatsapp' && body.action === 'release' && row.threadControl !== 'app') fail(409, 'CONTROL_NOT_HELD', 'The app must hold this conversation before releasing it to the business agent.');
+  if (body.action === 'pass' ? typeof body.targetAppId !== 'string' || !/^\d{1,32}$/.test(body.targetAppId) : body.targetAppId !== undefined) fail(400, 'INVALID_CONTROL_TARGET', 'Choose the receiving Meta app only when transferring control.');
+  if (body.metadata !== undefined && (typeof body.metadata !== 'string' || body.metadata.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body.metadata))) fail(400, 'INVALID_CONTROL_NOTE', 'Use a handover note of at most 2000 characters.');
+  const payload = { accountId: account._id, action: body.action, ...(body.targetAppId ? { targetAppId: body.targetAppId } : {}), ...(body.metadata ? { metadata: body.metadata } : {}) }, response = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/thread-control`, {}, payload, key), control = response.control;
+  if (response.success !== true || !plain(control) || !['app', 'ai_agent', 'other'].includes(control.owner) || control.ownerAppId != null && (typeof control.ownerAppId !== 'string' || !/^\d{1,32}$/.test(control.ownerAppId)) || body.action === 'take' && control.owner !== 'app' || body.action === 'pass' && (control.owner !== 'other' || control.ownerAppId !== body.targetAppId) || account.platform === 'whatsapp' && body.action === 'release' && control.owner !== 'ai_agent') invalid(true);
+  let fresh;
+  try { fresh = await conversation(api, accounts, account, conversationId); }
+  catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+  if (body.action !== 'request' && fresh.threadControl !== control.owner) fail(502, 'CONTROL_CHANGE_NOT_CONFIRMED', 'The latest conversation has not confirmed its new owner. Refresh and review before another transfer.', true);
+  return { action: body.action, accepted: true, requested: body.action === 'request', control: pick(control, ['owner', 'ownerAppId']), conversation: conversationView(account, fresh) };
+}
+async function acceptRequest(context, api, accounts, account, conversationId, row, key) {
+  const { body } = context;
+  supported(account, 'acceptRequest'); fields(body, ['accountId', 'message', 'expectedConversationVersion', 'confirmSend']);
+  if (body.confirmSend !== true || body.expectedConversationVersion !== inboxConversationVersion(row)) fail(409, 'REQUEST_CONFIRMATION_REQUIRED', 'Refresh this request and review the reply before sending it.');
+  let cursor, found = false; const seen = new Set();
+  for (let page = 0; page < 20; page++) {
+    const requests = await aggregate(api, accounts, account, 'conversations', { folder: 'requests', status: 'active', limit: 100, ...(cursor ? { cursor } : {}) });
+    if (requests.rows.some(item => item.id === conversationId && item.folder === 'requests')) { found = true; break; }
+    if (!requests.pagination.hasMore) break;
+    cursor = requests.pagination.nextCursor; if (!cursor || seen.has(cursor)) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This request could not be verified in the provider request folder. Refresh or use the provider dashboard.'); seen.add(cursor);
+  }
+  if (!found) fail(409, 'REQUEST_NO_LONGER_PENDING', 'This conversation is no longer a pending message request. Refresh before replying.');
+  const age = incomingAge(await recentHistory(api, account, conversationId, row.id));
+  if (!(age >= 0 && age <= 86400000)) fail(409, 'MESSAGING_WINDOW_CLOSED', 'A request acceptance reply must be within the standard 24-hour messaging window.');
+  const payload = { accountId: account._id, message: str(body.message, 'request acceptance reply', inboxCapabilities(account.platform).messageLimit) }, response = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/accept`, {}, payload, key);
+  if (response.success !== true || !valid(response.data?.messageId) || response.data?.accountId !== undefined && response.data.accountId !== account._id || response.data?.platform !== undefined && response.data.platform !== account.platform) invalid(true);
+  let sent;
+  try { sent = await findMessage(api, account, conversationId, row.id, response.data.messageId); }
+  catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+  if (!sent || sent.direction !== 'outgoing' || sent.message !== payload.message) fail(502, 'REQUEST_REPLY_NOT_CONFIRMED', 'The latest history has not confirmed this acceptance reply. Review the conversation before another send.', true);
+  return { accepted: true, sent: true, messageId: response.data.messageId };
 }
 async function aggregate(api, accounts, account, kind, params) {
   const result = await api(`/inbox/${kind}`, { profileId: account.profileId?._id || account.profileId, accountId: account._id, ...params });
@@ -258,11 +358,11 @@ export async function handleInbox(context) {
   const { req, url, project, role, send, body = {} } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/inbox`;
   if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
   const path = url.pathname.slice(prefix.length).replace(/^\//, '');
-  const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status))?$/), action = path.match(/^(comments|reviews)\/(reply|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
-  if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews'].includes(path) && !route && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
+  const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status|thread-control|accept))?$/), messageAction = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/(edit|delete|react|unreact)$/), action = path.match(/^(comments|reviews)\/(reply|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
+  if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews'].includes(path) && !route && !messageAction && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
   try {
     if (!['GET', 'POST'].includes(req.method)) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available inbox controls.');
-    const mutation = Boolean(path === 'conversations/start' || route && ['reply', 'read', 'status'].includes(route[2]) || action);
+    const mutation = Boolean(path === 'conversations/start' || route && ['reply', 'read', 'status', 'thread-control', 'accept'].includes(route[2]) || messageAction || action);
     if (req.method !== (mutation ? 'POST' : 'GET')) fail(405, 'METHOD_NOT_ALLOWED', 'This inbox action does not support that method.');
     if (mutation && !WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this inbox action.');
     const env = { ...(context.config?.env || process.env), ...(context.config || {}) }, profileId = project.zernioProfileId, assertMapping = () => context.assertProjectMapping?.(profileId);
@@ -291,13 +391,21 @@ export async function handleInbox(context) {
         supported(account, 'messages'); const result = await aggregate(api, accounts, account, 'conversations', query(url, 'conversations'));
         return { conversations: result.rows.map(row => ({ ...pick(row, conversationFields), ...(conversationContact(context, row) ? { contact: conversationContact(context, row) } : {}) })), pagination: result.pagination, meta: result.meta };
       }
+      if (messageAction) {
+        supported(account, 'messages'); const conversationId = decodedId(messageAction[1]), row = await conversation(api, accounts, account, conversationId);
+        return changeMessage(context, api, account, conversationId, row.id, decodedId(messageAction[2]), messageAction[3], key);
+      }
       if (route) {
-        supported(account, 'messages'); const conversationId = id(decodeURIComponent(route[1])), row = await conversation(api, accounts, account, conversationId);
-        if (!route[2]) return { conversation: row, contact: conversationContact(context, row) };
+        supported(account, 'messages'); const conversationId = decodedId(route[1]), row = await conversation(api, accounts, account, conversationId);
+        if (!route[2]) return { conversation: conversationView(account, row), contact: conversationContact(context, row) };
         if (route[2] === 'messages') {
           const result = await history(api, account, conversationId, query(url, 'messages'), row.id), incoming = result.messages.some(message => message.direction === 'incoming' && message.senderId === row.participantId);
-          return { ...result, conversation: row, contact: conversationContact(context, row, incoming) };
+          let windowAge = Infinity;
+          if (['facebook', 'instagram'].includes(account.platform)) try { windowAge = incomingAge(await recentHistory(api, account, conversationId, row.id)); } catch (error) { assertMapping(); if (!(error instanceof IntegrationError) || error.code === 'INVALID_PROVIDER_SCOPE') throw error; /* History remains readable when reaction eligibility cannot be verified. */ }
+          return { ...result, messages: result.messages.map(message => ({ ...message, version: inboxMessageVersion(message, accountId), actions: messageActions(account, message, windowAge) })), conversation: conversationView(account, row), contact: conversationContact(context, row, incoming) };
         }
+        if (route[2] === 'thread-control') return changeControl(context, api, accounts, account, conversationId, row, key);
+        if (route[2] === 'accept') return acceptRequest(context, api, accounts, account, conversationId, row, key);
         if (route[2] === 'status') {
           fields(body, ['accountId', 'status']); if (!['active', 'archived'].includes(body.status)) fail(400, 'INVALID_INBOX_STATUS', 'Choose active or archived.');
           const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}`, {}, { accountId, status: body.status }, key, 'PUT');
@@ -333,15 +441,8 @@ export async function handleInbox(context) {
         }
         if (!payload.message && !payload.attachmentUrl && !payload.template) fail(400, 'EMPTY_MESSAGE', 'Enter a message or choose an attachment or approved template.');
         if (['facebook', 'instagram', 'whatsapp', 'tiktok'].includes(account.platform) && !payload.template) {
-          const messages = await history(api, account, conversationId, {}, row.id), seen = new Set();
-          // ponytail: scan at most 2,000 recent messages; use the provider dashboard for longer reply-window history.
-          for (let page = 1; !messages.messages.some(message => message.direction === 'incoming' && Number.isFinite(Date.parse(message.createdAt))) && messages.pagination.hasMore; page++) {
-            if (page >= 20) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This conversation exceeds the reply-window history limit. Open it in the provider dashboard.');
-            const cursor = messages.pagination.nextCursor; if (seen.has(cursor)) invalid(); seen.add(cursor);
-            const next = await history(api, account, conversationId, { cursor }, row.id); messages.messages.push(...next.messages); messages.pagination = next.pagination;
-          }
-          const lastIncoming = messages.messages.filter(message => message.direction === 'incoming').map(message => Date.parse(message.createdAt)).filter(Number.isFinite).sort((a, b) => b - a)[0], age = Date.now() - lastIncoming;
-          if (account.platform === 'tiktok' && (!(age >= 0 && age <= 2 * 86400000) || messages.messages.filter(message => message.direction === 'outgoing' && Date.parse(message.createdAt) >= lastIncoming).length >= 10)) fail(409, 'MESSAGING_WINDOW_CLOSED', 'TikTok permits up to ten replies within 48 hours of the customer’s last message.');
+          const messages = await recentHistory(api, account, conversationId, row.id), lastIncoming = incomingTime(messages), age = Date.now() - lastIncoming;
+          if (account.platform === 'tiktok' && (!(age >= 0 && age <= 2 * 86400000) || messages.filter(message => message.direction === 'outgoing' && Date.parse(message.createdAt) >= lastIncoming).length >= 10)) fail(409, 'MESSAGING_WINDOW_CLOSED', 'TikTok permits up to ten replies within 48 hours of the customer’s last message.');
           if (body.messageTag) {
             const tags = account.platform === 'instagram' ? ['HUMAN_AGENT'] : account.platform === 'facebook' ? ['CONFIRMED_EVENT_UPDATE', 'POST_PURCHASE_UPDATE', 'ACCOUNT_UPDATE', 'HUMAN_AGENT'] : [];
             if (!tags.includes(body.messageTag) || body.messageTag === 'HUMAN_AGENT' && !(age >= 0 && age <= 7 * 86400000)) fail(400, 'INVALID_MESSAGE_TAG', 'Choose a supported message tag within its permitted reply window.');
@@ -413,7 +514,7 @@ export async function handleInbox(context) {
       }
       fail(404, 'INBOX_ROUTE_NOT_FOUND', 'This inbox action was not found.');
     };
-    if (mutation) { const result = await operation(context, run); send(result.status, result.data); } else send(200, await run());
+    if (mutation) { const result = await operation(context, run, messageAction || route ? ['inbox', accountId, decodedId((messageAction || route)[1])] : undefined); send(result.status, result.data); } else send(200, await run());
   } catch (error) { if (!(error instanceof IntegrationError)) throw error; send(error.status, { error: { code: error.code, message: error.message } }); }
   return true;
 }

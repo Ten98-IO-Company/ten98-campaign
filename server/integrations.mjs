@@ -6,6 +6,12 @@ import { handleZernioAccounts } from './zernio-accounts.mjs';
 import { handleZernioMeasurement } from './zernio-measurement.mjs';
 import { handleZernioAdmin } from './zernio-admin.mjs';
 import { handleZernioPublishing } from './zernio-publishing.mjs';
+import { handleZernioConnections } from './zernio-connections.mjs';
+import { handleZernioInsights } from './zernio-insights.mjs';
+import { handleZernioLeads } from './zernio-leads.mjs';
+import { handleZernioWhatsAppTemplates } from './zernio-whatsapp-templates.mjs';
+import { handleZernioRecycling, assertRecyclingSeedEditable } from './zernio-recycling.mjs';
+import { handleZernioQueues, applyQueueIntent, assertQueueReceipt } from './zernio-queues.mjs';
 
 const ZERNIO = 'https://zernio.com/api/v1';
 const GOOGLE = 'https://www.googleapis.com';
@@ -444,7 +450,7 @@ export async function operation(context, action, resourceKey) {
   const resource = resourceKey ? canonical([project.id, resourceKey]) : null;
   if (resource && active.has(resource)) fail(409, 'PROVIDER_RESOURCE_BUSY', 'Another change to this campaign is in progress. Wait for it to finish, refresh, then try again.');
   const id = randomUUID();
-  const known = new Set(['accounts', 'health', 'reconnect', 'disconnect', 'measurement', 'tags', 'diagnostics', 'ad-accounts', 'admin', 'profile', 'groups','native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
+  const known = new Set(['recycling', 'posts', 'apply', 'stop', 'review', 'leads', 'forms', 'import', 'archive', 'test-leads', 'whatsapp-templates', 'templates', 'library', 'connections', 'credentials', 'code', 'react', 'unreact', 'thread-control', 'accept','queues', 'preview', 'accounts', 'health', 'reconnect', 'disconnect', 'measurement', 'tags', 'diagnostics', 'ad-accounts', 'admin', 'profile', 'groups','native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
   const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
   db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString(), actionPath, operation.runId);
   active.add(id); if (resource) active.add(resource);
@@ -502,7 +508,7 @@ function postRestrictions(post, platforms, assets) {
 function assertPostRestrictions(result) {
   if (!result.valid) fail(422, 'POST_RESTRICTIONS', result.errors.map(item => `${item.platform}: ${item.message}`).join(' ').slice(0, 4000));
 }
-async function providerPostValidation(api, payload) {
+export async function providerPostValidation(api, payload) {
   let result;
   try { result = await api('/tools/validate/post', {}, payload); }
   catch (error) { if (error instanceof IntegrationError) error.uncertain = false; throw error; }
@@ -572,12 +578,13 @@ function providerMediaItems(items) {
     return value;
   }));
 }
+export const validProviderInstant = value => typeof value === 'string' && value.length <= 100 && /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/i.test(value) && Number.isFinite(Date.parse(value)) && new Date(value.slice(0, 10)).toISOString().slice(0, 10) === value.slice(0, 10);
 function assertPostResult(remote, profileId, { id, targets, uncertain = true } = {}) {
   const validText = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f]/.test(value);
   const reference = value => value?._id || value;
   const invalid = () => { throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the expected post and publishing accounts.', uncertain); };
   const optionalText = (value, max = 100000) => value == null || typeof value === 'string' && value.length <= max;
-  const optionalDate = value => value == null || value === '' || typeof value === 'string' && value.length <= 100 && Number.isFinite(Date.parse(value));
+  const optionalDate = value => value == null || value === '' || validProviderInstant(value);
   const media = items => {
     if (items == null) return;
     // Provider responses may add fields; validate the media fields consumed by our editor without rejecting those additions.
@@ -617,7 +624,7 @@ function assertPostResult(remote, profileId, { id, targets, uncertain = true } =
     }
   }
 }
-async function scopedPost(api, profileId, post, activeOnly = false) {
+export async function scopedPost(api, profileId, post, activeOnly = false) {
   if (!post?.externalId || post.zernioProfileId !== profileId) fail(404, 'POST_NOT_SUBMITTED', 'No submitted post was found for this project.');
   if (post.providerDeletedAt) fail(409, 'POST_CANCELLED', 'This provider record was removed. Create a new draft to publish again.');
   const result = await api(`/posts/${encodeURIComponent(post.externalId)}`), accounts = await scopedAccounts(api, profileId);
@@ -640,7 +647,7 @@ export function targetConfiguration(target) {
   if (Array.isArray(options?.threadItems)) options = { ...options, threadItems: options.threadItems.map(item => reportObject(item) ? { ...item, ...(Array.isArray(item.mediaItems) ? { mediaItems: providerMediaItems(item.mediaItems) } : {}) } : item) };
   return { ...(typeof target.customContent === 'string' ? { content: target.customContent } : {}), ...(Array.isArray(target.customMedia) ? { mediaItems: providerMediaItems(target.customMedia) } : {}), ...(options && typeof options === 'object' ? { options } : {}) };
 }
-async function remotePostModel(store, projectId, post, remote) {
+export async function remotePostModel(store, projectId, post, remote) {
   const assetIds = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map(item => item?.assetId)].filter(id => typeof id === 'string' && id))];
   const assets = (await Promise.all(assetIds.map(id => store.get(projectId, 'assets', id)))).filter(Boolean), platformOverrides = {};
   for (const platform of new Set(remote.platforms.map(target => target.platform))) {
@@ -654,7 +661,7 @@ async function remotePostModel(store, projectId, post, remote) {
   }
   return { ...post, ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: providerMediaItems(remote.mediaItems) } : {}), platforms: [...new Set(remote.platforms.map(target => target.platform))], accounts: remote.platforms.map(target => String(target.accountId?._id || target.accountId)), platformOverrides, providerResults: redact(remote.platforms), scheduledAt: remote.status === 'draft' || remote.isDraft === true ? '' : remote.scheduledFor || '' };
 }
-function remoteRestrictionPayload(post, remote, { content = remote.content ?? post.content, mediaItems = remote.mediaItems ?? post.mediaItems, overrides, assets = [] } = {}) {
+export function remoteRestrictionPayload(post, remote, { content = remote.content ?? post.content, mediaItems = remote.mediaItems ?? post.mediaItems, overrides, assets = [] } = {}) {
   const platforms = remote.platforms.map(target => {
     const base = { platform: target.platform, accountId: String(target.accountId?._id || target.accountId) };
     if (overrides !== undefined) {
@@ -667,7 +674,7 @@ function remoteRestrictionPayload(post, remote, { content = remote.content ?? po
   });
   return { content: content || '', ...(mediaItems !== undefined ? { mediaItems: wireMediaItems(providerMediaItems(mediaItems)) } : {}), platforms };
 }
-function validateRemotePayload(payload, assets = [], post = {}) {
+export function validateRemotePayload(payload, assets = [], post = {}) {
   for (const target of payload.platforms) {
     const variant = resolveVariant(post, target.platform, assets), known = [...variant.mediaItems, ...commonMedia(post, assets), ...(variant.options.threadItems || []).flatMap(item => item.mediaItems || [])];
     const metadata = items => items.map(item => ({ ...known.find(existing => existing.type === item.type && existing.url === item.url), ...item }));
@@ -678,7 +685,7 @@ function validateRemotePayload(payload, assets = [], post = {}) {
     assertPostRestrictions(postRestrictions(single, [target.platform], assets));
   }
 }
-async function savePostSnapshot(store, projectId, post, remote, extra = {}, targets, source = post) {
+export async function savePostSnapshot(store, projectId, post, remote, extra = {}, targets, source = post) {
   assertPostResult(remote, post.zernioProfileId, { id: post.externalId, targets });
   // Creation receipts can omit the submitted platform configuration; retain the draft until a full status read.
   const model = source.externalId && Array.isArray(remote.platforms) && remote.platforms.every(target => target.platform && target.accountId) ? await remotePostModel(store, projectId, post, remote) : {};
@@ -789,9 +796,15 @@ export async function handleIntegration(context) {
     if (!env.ZERNIO_API_KEY) fail(503, 'ZERNIO_NOT_CONFIGURED', 'Configure a Zernio API key to connect providers.');
     if (!project.zernioProfileId) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
     const profileId = String(project.zernioProfileId); const api = zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping?.(profileId));
+    if (path.startsWith('connections/') && await handleZernioConnections(context, api, profileId, path.slice('connections/'.length))) return true;
+    if (path.startsWith('insights/') && await handleZernioInsights(context, api, profileId, path.slice('insights/'.length))) return true;
+    if ((path === 'leads' || path.startsWith('leads/')) && await handleZernioLeads(context, api, profileId, path.slice('leads'.length).replace(/^\//, ''))) return true;
+    if ((path === 'whatsapp-templates' || path.startsWith('whatsapp-templates/')) && await handleZernioWhatsAppTemplates(context, api, profileId, path.slice('whatsapp-templates'.length).replace(/^\//, ''))) return true;
+    if ((path === 'recycling' || path.startsWith('recycling/')) && await handleZernioRecycling(context, api, profileId, path.slice('recycling'.length).replace(/^\//, ''))) return true;
     if (path.startsWith('measurement/') && await handleZernioMeasurement(context, api, profileId, path.slice('measurement/'.length))) return true;
     if (path.startsWith('admin/') && await handleZernioAdmin(context, api, profileId, path.slice('admin/'.length))) return true;
     if (path.startsWith('publishing/') && await handleZernioPublishing(context, api, profileId, path.slice('publishing/'.length))) return true;
+    if ((path === 'queues' || path.startsWith('queues/')) && await handleZernioQueues(context, api, profileId, path.slice('queues'.length).replace(/^\//, ''))) return true;
     if (path.startsWith('accounts/')) { if (await handleZernioAccounts(context, api, profileId, path.slice('accounts/'.length))) return true; }
     if (req.method === 'POST' && path === 'connect/openai-ads') {
       if (!['owner', 'admin'].includes(role)) fail(403, 'ADMIN_PERMISSION_REQUIRED', 'Only a workspace administrator can connect provider accounts.');
@@ -903,33 +916,39 @@ export async function handleIntegration(context) {
       send(200, { valid: result.valid, ...(typeof result.error === 'string' ? { error: result.error.slice(0, 2000) } : {}), contentType: result.contentType || null, size: result.size ?? null }); return true;
     }
     if (req.method === 'POST' && path === 'social/validate') {
-      fields(body, ['content', 'platforms', 'accounts', 'mediaItems', 'assetId', 'platformOverrides', 'status', 'scheduledAt', 'campaignId'], 'post validation');
+      fields(body, ['content', 'platforms', 'accounts', 'mediaItems', 'assetId', 'platformOverrides', 'status', 'scheduledAt', 'campaignId', 'queueId', 'queueVersion'], 'post validation');
       const assets = await postAssets(store, project.id, body), accounts = await scopedAccounts(api, profileId);
       const payload = publishBody(body, accounts, assets, { validate: false }), local = postRestrictions(body, [...new Set(payload.platforms.map(item => item.platform))], assets);
+      await applyQueueIntent(api, profileId, body, payload);
       if (local.valid) await assertTikTokCreatorRestrictions(api, payload, Object.values(local.variants).flatMap(variant => variant.mediaItems));
       const provider = await providerPostValidation(api, payload);
       send(200, { valid: local.valid && provider.valid, errors: [...local.errors, ...provider.errors], warnings: [...local.warnings, ...provider.warnings], local, provider }); return true;
     }
     if (req.method === 'POST' && path === 'social/publish') {
+      fields(body, ['postId', 'queueId'], 'post publication');
       const postId = identifier(body.postId, 'post ID'); const post = await store.get(project.id, 'posts', postId);
       if (!post) fail(404, 'POST_NOT_FOUND', 'The post was not found in this project.');
       const assets = await postAssets(store, project.id, post), accounts = await scopedAccounts(api, profileId), payload = publishBody(post, accounts, assets);
       const publishingPost = { ...post, ...(post.assetId && !Array.isArray(post.mediaItems) ? { mediaItems: commonMedia(post, assets) } : {}), platformOverrides: Object.fromEntries(Object.entries(post.platformOverrides || {}).map(([platform, variant]) => [platform, { ...variant, ...(variant.assetId && !Array.isArray(variant.mediaItems) ? { mediaItems: resolveVariant(post, platform, assets).mediaItems } : {}) }])) };
-      const outcome = await operation(context, async key => {
+      const outcome = await operation({ ...context, body: { postId } }, async key => {
         const current = await store.get(project.id, 'posts', post.id);
         if (!current) fail(404, 'POST_NOT_FOUND', 'The post was removed before it could be submitted.');
+        if (body.queueId !== undefined && body.queueId !== current.queueId) fail(409, 'POST_QUEUE_CHANGED', 'Save and review this post’s queue selection before submitting it.');
         if (current.externalId) fail(409, 'POST_ALREADY_SUBMITTED', 'This post has already been submitted. Refresh its provider status.');
         if (current.updatedAt && current.updatedAt !== post.updatedAt) fail(409, 'POST_CHANGED', 'The post changed while preparing publication. Review it and submit again.');
+        await applyQueueIntent(api, profileId, post, payload);
         if (current.status === 'scheduled' && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'This scheduled time has passed. Choose a new time before scheduling the post.');
         await assertTikTokCreatorRestrictions(api, payload, Object.values(postRestrictions(post, payload.platforms.map(item => item.platform), assets).variants).flatMap(variant => variant.mediaItems));
         assertPostRestrictions(await providerPostValidation(api, payload));
         context.assertPublishingApproval?.(publishingPost);
         if (payload.scheduledFor && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'The scheduled time passed during the provider checks. Choose a future time before submitting.');
+        if (post.queueId) await applyQueueIntent(api, profileId, post, payload);
         const result = await api('/posts', {}, payload, key);
         assertPostResult(result.post, profileId, { targets: payload.platforms });
-        const updated = await savePostSnapshot(store, project.id, { ...post, externalId: result.post._id, zernioProfileId: profileId }, result.post, { externalId: result.post._id, zernioProfileId: profileId }, payload.platforms, post);
+        assertQueueReceipt(result.post, post, profileId);
+        const updated = await savePostSnapshot(store, project.id, { ...post, externalId: result.post._id, zernioProfileId: profileId }, result.post, { externalId: result.post._id, zernioProfileId: profileId, ...(post.queueId ? { scheduledAt: result.post.scheduledFor, queueId: '', queueVersion: '' } : {}) }, payload.platforms, post);
         await store.activity(project.id, 'Submitted a social post to Zernio.');
-        return { post: updated, provider: { id: result.post._id, status: result.post.status } };
+        return { post: updated, provider: { id: result.post._id, status: result.post.status, ...(post.queueId ? { queueId: post.queueId } : {}) } };
       }); send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'GET' && path === 'social/status') {
@@ -946,6 +965,7 @@ export async function handleIntegration(context) {
       const postId = identifier(body.postId, 'post ID');
       const outcome = await operation(context, async key => {
         const post = await store.get(project.id, 'posts', postId), remote = await scopedPost(api, profileId, post, path === 'social/edit-published' || path === 'social/update' && body.mode === 'scheduled'), endpoint = `/posts/${encodeURIComponent(post.externalId)}`;
+        if (['social/update', 'social/edit-published'].includes(path)) assertRecyclingSeedEditable(remote, context);
         if (sample(post)) fail(400, 'SAMPLE_RECORD', 'Sample posts cannot be sent to live providers.');
         if (path === 'social/cancel') {
           if (body.confirmCancellation !== true) fail(400, 'CANCELLATION_CONFIRMATION_REQUIRED', 'Confirm removal of this unpublished provider record.');
@@ -1037,7 +1057,8 @@ export async function handleIntegration(context) {
         const updated = await savePostSnapshot(store, project.id, post, confirmed);
         await store.activity(project.id, editing ? 'Edited the text of a published social copy.' : 'Removed a published social copy through Zernio.');
         return { post: updated, provider: { id: post.externalId, status: confirmed.status, accountId, action: editing ? 'edited' : 'unpublished' } };
-      }); send(outcome.status, outcome.data); return true;
+      // ponytail: serialize seed edits with recycling per project; split into post/account locks if concurrent editing needs it.
+      }, ['social/update', 'social/edit-published'].includes(path) ? 'publishing-recycling' : undefined); send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && path === 'ads/status') {
       fields(body, ['campaignId', 'platform', 'status']);

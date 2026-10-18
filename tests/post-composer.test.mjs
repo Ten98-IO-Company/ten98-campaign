@@ -34,7 +34,7 @@ test('late browser and provider media inspections cannot restore removed media o
 });
 const expression = source.match(/const values = useMemo\(\(\) => \((.+)\), \[content,/)[1];
 function draft(changes = {}) {
-  const state = { content: 'Shared caption', platforms: ['facebook', 'instagram'], post: undefined, selectedAccounts: [], accountsTouched: false, accounts: [], baseMode: 'asset', assetId: 'shared-creative', campaignId: '', scheduledAt: '', baseMedia: [], overrides: { instagram: { content: '', mediaItems: [], options: { contentType: 'story' } } }, ...changes };
+  const state = { content: 'Shared caption', platforms: ['facebook', 'instagram'], post: undefined, selectedAccounts: [], accountsTouched: false, accounts: [], baseMode: 'asset', assetId: 'shared-creative', campaignId: '', scheduledAt: '', queueId: '', queueVersion: '', baseMedia: [], overrides: { instagram: { content: '', mediaItems: [], options: { contentType: 'story' } } }, ...changes };
   return new Function(...Object.keys(state), 'PLATFORM_RULES', `return (${expression});`)(...Object.values(state), PLATFORM_RULES);
 }
 
@@ -53,6 +53,17 @@ test('composer saves separate captions/media, explicit empty overrides, DAM rese
   assert.equal(draft({ platforms: ['facebook'] }).platformOverrides.instagram, undefined, 'Unselected platform overrides are not submitted.');
   assert.equal(draft({ scheduledAt: '2030-10-18T17:00' }).scheduledAt, new Date('2030-10-18T17:00').toISOString());
   assert.equal(draft({ scheduledAt: '2030-10-18T17:00' }).status, 'scheduled');
+});
+
+test('composer saves a reviewed queue as local intent and explicitly clears it when choosing a fixed time', () => {
+  const intent = { queueId: 'queue-launch', queueVersion: 'a'.repeat(64) }, queued = draft(intent);
+  assert.equal(queued.queueId, intent.queueId); assert.equal(queued.queueVersion, intent.queueVersion);
+  assert.equal(queued.scheduledAt, '', 'Queue previews must not become a fixed scheduled date in the saved draft.');
+  assert.equal(queued.status, 'draft', 'Saving a queue choice leaves publication as a separate action.');
+  const fixed = draft({ post: intent, scheduledAt: '2030-10-18T17:00' });
+  assert.equal(fixed.queueId, ''); assert.equal(fixed.queueVersion, '');
+  assert.equal(fixed.scheduledAt, new Date('2030-10-18T17:00').toISOString()); assert.equal(fixed.status, 'scheduled');
+  assert.equal(Object.hasOwn(draft(), 'queueId'), false, 'Ordinary drafts retain their existing shape.');
 });
 
 test('an empty custom-media editor and an empty asset selector retain their selected editing mode', () => {

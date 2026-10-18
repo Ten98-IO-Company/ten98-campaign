@@ -81,6 +81,8 @@ test('social lifecycle updates, cancellation, failed retry, published-copy edits
     result = await invoke('social/unpublish', { postId: local.id, accountId: account._id, confirmRemoval: true }); assert.equal(result.status, 200); assert.equal(result.data.post.providerResults[0].status, 'cancelled');
     remote.status = 'scheduled'; remote.platforms[0].status = 'pending'; remapOnWrite = true;
     result = await invoke('social/update', { postId: local.id, content: 'Old mapping write', mode: 'draft' }); assert.equal(result.data.operation.status, 'uncertain'); assert.notEqual(records.get(local.id).content, 'Old mapping write');
+    assert.equal(remote.content, 'Old mapping write');
+    db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?").run(result.data.operation.id);
     mappedProfile = project.zernioProfileId; remapOnWrite = false; remote.status = 'published'; remote.platforms[0].status = 'published';
     const beforeFailedReadback = globalThis.fetch;
     globalThis.fetch = async (target, options) => { const response = await beforeFailedReadback(target, options); if (new URL(target).pathname.endsWith('/edit')) failedReadback = true; return response; };

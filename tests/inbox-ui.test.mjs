@@ -2,12 +2,96 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { transformWithOxc } from 'vite';
 
 const source = await readFile(new URL('../src/UnifiedInbox.tsx', import.meta.url), 'utf8');
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 function compile(code, context = {}) { return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context)); }
 const event = { preventDefault() {} }, path = '/projects/project-a/integrations/inbox';
 const merge = (before, after) => [...new Map([...before, ...after].map(row => [row.id, row])).values()];
+
+test('message action handlers submit the reviewed snapshot, retain failures and reject a stale or read-only target', async () => {
+  const calls = [], cleared = [], notices = [], version = { current: 1 }, item = { id: 'message/opaque', version: 'message-version', message: 'Original', actions: { canEdit: true, canDelete: true } }, target = { kind: 'edit', item, conversationId: 'thread/opaque', accountId: 'account-a' };
+  const context = { readOnly: false, selected: { id: 'thread/opaque' }, accountId: 'account-a', messageActionTarget: target, actionText: 'Edited message', actionEmoji: '👍', confirmMessageAction: true, action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { observed: true }; }, version, setMessageActionTarget: value => cleared.push(value), setNotice: value => notices.push(value), refreshAfterWrite: async () => {} };
+  const submit = changes => compile(section('async function submitMessageAction(', '  async function submitControl('), { ...context, ...changes })(event);
+  for (const changes of [{ readOnly: true }, { selected: { id: 'other' } }, { accountId: 'other' }, { messageActionTarget: { ...target, kind: 'delete' }, confirmMessageAction: false }]) await submit(changes); assert.equal(calls.length, 0);
+  await assert.rejects(submit({ write: async () => { throw new Error('Unknown outcome'); } }), /Unknown/); assert.deepEqual(cleared, []);
+  await submit(); assert.deepEqual(calls[0], ['conversations/thread%2Fopaque/messages/message%2Fopaque/edit', { accountId: 'account-a', expectedMessageVersion: 'message-version', text: 'Edited message' }]); assert.deepEqual(cleared, [null]); assert.match(notices[0], /confirmed in message history/);
+  await submit({ messageActionTarget: { ...target, kind: 'react' }, write: async () => ({ observed: false }) }); assert.match(notices.at(-1), /not yet confirmed/);
+  const count = cleared.length; version.current = 2; await submit(); assert.equal(cleared.length, count, 'A late action cannot close the next project or account’s draft.');
+});
+
+test('handover and request-acceptance handlers require review and retain drafts until confirmed', async () => {
+  const calls = [], controls = [], notices = [], cleared = [], threads = [], selected = { id: 'thread', version: 'conversation-version', folder: 'requests', controlActions: ['pass', 'request'] }, version = { current: 1 };
+  const context = { readOnly: false, selected, accountId: 'account-a', controlAction: 'pass', targetAppId: '263902037430900', controlNote: 'Customer asked for support', confirmControl: selected.version, confirmAccept: selected.version, capabilities: { acceptRequest: true }, message: 'Thanks for your request', action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { conversation: { ...selected, threadControl: 'other' }, requested: false }; }, version, setSelected: update => controls.push(update(selected)), setConfirmControl: value => cleared.push(value), setControlAction() {}, setNotice: value => notices.push(value), refreshAfterWrite: async () => {}, setMessage: value => cleared.push(value), setConfirmAccept: value => cleared.push(value), setRows: update => cleared.push(update([selected])), fetchThread: async item => threads.push(item), setError() {} };
+  const control = changes => compile(section('async function submitControl(', '  async function submitAccept('), { ...context, ...changes })(event);
+  await control({ confirmControl: false }); await control({ readOnly: true }); assert.equal(calls.length, 0);
+  await assert.rejects(control({ write: async () => { throw new Error('Outcome uncertain'); } }), /uncertain/); assert.deepEqual(cleared, []);
+  await control(); assert.deepEqual(calls[0], ['conversations/thread/thread-control', { accountId: 'account-a', action: 'pass', expectedConversationVersion: 'conversation-version', confirmControl: true, targetAppId: '263902037430900', metadata: 'Customer asked for support' }]); assert.equal(controls[0].threadControl, 'other');
+  await control({ controlAction: 'request', write: async () => ({ requested: true, conversation: selected }) }); assert.match(notices.at(-1), /must still transfer/);
+  const accept = changes => compile(section('async function submitAccept(', '  async function commentAction('), { ...context, ...changes })(event);
+  const count = calls.length; await accept({ confirmAccept: false }); await accept({ selected: { ...selected, folder: undefined } }); assert.equal(calls.length, count);
+  await accept(); assert.deepEqual(calls.at(-1), ['conversations/thread/accept', { accountId: 'account-a', message: 'Thanks for your request', expectedConversationVersion: 'conversation-version', confirmSend: true }]); assert.equal(threads[0].folder, undefined, 'Accepted requests cannot regain their old request-folder flag during refresh.'); assert.equal(controls.at(-1).folder, undefined); assert.ok(cleared.some(value => Array.isArray(value) && value.length === 0));
+});
+
+test('conversation confirmations retain the reviewed version across refreshes and uncertain retries', async () => {
+  let selected = { id: 'thread', version: 'reviewed-version', folder: 'requests', controlActions: ['pass'] }, confirmControl = false, confirmAccept = false, uncertain = true;
+  const calls = [], keys = { current: new Map() }, version = { current: 1 };
+  const confirm = (kind, checked) => {
+    const marker = `onChange={event => setConfirm${kind}(`, start = source.indexOf(marker) + 'onChange={'.length;
+    assert.ok(start > 'onChange={'.length);
+    const handler = source.slice(start, source.indexOf('}', start));
+    compile(handler, { selected, setConfirmControl: value => { confirmControl = value; }, setConfirmAccept: value => { confirmAccept = value; } })({ target: { checked } });
+  };
+  confirm('Control', true); confirm('Accept', true);
+  assert.equal(confirmControl, selected.version); assert.equal(confirmAccept, selected.version);
+  const fetchThread = compile(section('async function fetchThread(', '  async function openItem('), {
+    tab: 'messages', accountId: 'account', path, version, merge,
+    requester: { current: async () => ({ conversation: { ...selected, version: 'refreshed-version', threadControl: 'other' }, messages: [] }) },
+    setSelected: value => { selected = value; }, setFocusedComment() {}, setDetail() {},
+  });
+  await fetchThread(selected, 1);
+  const write = compile(section('async function write(', '  async function loadAccounts('), {
+    readOnly: false, path, keys, crypto, requester: { current: async (...args) => {
+      calls.push(args); if (uncertain) throw Object.assign(new Error('Outcome uncertain'), { status: 409, code: 'OPERATION_UNCERTAIN' });
+      return { operation: { status: 'complete' }, accepted: true, conversation: selected, control: { owner: 'other' } };
+    } },
+  });
+  const submit = kind => compile(section(`async function submit${kind}(`, kind === 'Control' ? '  async function submitAccept(' : '  async function commentAction('), {
+    readOnly: false, selected, accountId: 'account', controlAction: 'pass', targetAppId: '263902037430900', controlNote: '', confirmControl, confirmAccept,
+    capabilities: { acceptRequest: true }, message: 'Acceptance reply', action: async (_, run) => run(1), write, version,
+    setSelected() {}, setConfirmControl: value => { confirmControl = value; }, setControlAction() {}, setNotice() {}, refreshAfterWrite() {},
+    setMessage() {}, setConfirmAccept() {}, setRows() {}, fetchThread() {}, setError() {},
+  })(event);
+  await submit('Control'); await submit('Accept');
+  assert.equal(calls.length, 0, 'A refreshed conversation cannot inherit either earlier review confirmation.');
+  confirm('Control', true);
+  await assert.rejects(submit('Control'), /uncertain/);
+  assert.equal(confirmControl, 'refreshed-version'); assert.equal(keys.current.size, 1);
+  uncertain = false; await submit('Control');
+  assert.equal(calls[0][2].expectedConversationVersion, 'refreshed-version');
+  assert.deepEqual(calls[0], calls[1], 'Retrying the unchanged reviewed snapshot keeps its request body and action key.');
+  assert.equal(keys.current.size, 0);
+});
+
+test('new action receipts are validated before their operation keys are released', async () => {
+  const keys = { current: new Map() }, calls = [], suffix = 'conversations/thread/messages/message/react'; let response = { operation: { status: 'complete' }, accepted: true, action: 'react', messageId: 'wrong' };
+  const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, requester: { current: async (...args) => { calls.push(args); return response; } } });
+  await assert.rejects(write(suffix, { accountId: 'account' }), /retained/); assert.equal(keys.current.size, 1);
+  response = { ...response, messageId: 'message' }; await write(suffix, { accountId: 'account' }); assert.equal(keys.current.size, 0); assert.equal(calls[0][3], calls[1][3]);
+});
+
+test('rendered message controls preserve deletion scope, reactions, history and reader permissions', async () => {
+  const { code } = await transformWithOxc(section('function MessageActions(', 'function ZernioInbox('), 'MessageActions.tsx', { jsx: { runtime: 'classic' } });
+  const Component = new Function('React', 'when', `${code}; return MessageActions;`)(React, value => value || 'Unknown');
+  const props = { item: { id: 'message', message: 'Text', direction: 'outgoing', reactions: [{ emoji: '👍', fromMe: true }, { emoji: '❤️', fromMe: false }], editHistory: [{ text: '<previous>', editedAt: '2026-10-18' }], actions: { canEdit: true, canDelete: true, canReact: true, canUnreact: true, deleteScope: 'self' } }, platform: 'reddit', busy: false, readOnly: false, onAction() {} };
+  const rendered = renderToStaticMarkup(React.createElement(Component, props)); assert.match(rendered, /Remove from my view/); assert.match(rendered, /Your reaction/); assert.match(rendered, /Contact reaction/); assert.match(rendered, /Previous message versions/); assert.match(rendered, /&lt;previous&gt;/);
+  const reader = renderToStaticMarkup(React.createElement(Component, { ...props, readOnly: true })); assert.doesNotMatch(reader, /<button/); assert.match(reader, /Your reaction/);
+  const unknown = renderToStaticMarkup(React.createElement(Component, { ...props, item: { ...props.item, reactions: [{ emoji: '🔥' }] } })); assert.match(unknown, /Sender not reported/); assert.doesNotMatch(unknown, /Contact reaction/);
+  const apple = renderToStaticMarkup(React.createElement(Component, { ...props, platform: 'imessage', item: { ...props.item, actions: { ...props.item.actions, deleteScope: 'unsend' } } })); assert.match(apple, /Unsend message/); assert.match(apple, /15 minutes/);
+});
 
 test('actual inbox writer retains the same operation key after an uncertain reply and blocks viewers', async () => {
   const keys = { current: new Map() }, calls = [];
@@ -78,7 +162,7 @@ test('actual reply handler uses scoped provider payloads, explicit review replac
 
 test('actual list and thread loaders preserve opaque IDs, account scope and pagination without accepting stale project responses', async () => {
   const calls = [], state = { rows: [{ id: 'one', text: 'old' }] }, version = { current: 1 };
-  const context = { historyFilter: null, tab: 'messages', accountId: 'account/a', conversationStatus: 'archived', requester: { current: async url => { calls.push(url); return { conversations: [{ id: 'one', text: 'fresh' }, { id: 'two' }], pagination: { hasMore: false }, meta: {} }; } }, path, version, merge, setRows: value => { state.rows = typeof value === 'function' ? value(state.rows) : value; }, setPagination() {}, setMeta() {}, setLoaded() {} };
+  const context = { historyFilter: null, folder: 'inbox', tab: 'messages', accountId: 'account/a', conversationStatus: 'archived', requester: { current: async url => { calls.push(url); return { conversations: [{ id: 'one', text: 'fresh' }, { id: 'two' }], pagination: { hasMore: false }, meta: {} }; } }, path, version, merge, setRows: value => { state.rows = typeof value === 'function' ? value(state.rows) : value; }, setPagination() {}, setMeta() {}, setLoaded() {} };
   const list = compile(section('async function fetchList(', '  async function loadList('), context);
   await list(1, 'opaque + cursor'); const query = new URL(calls[0], 'https://app.example').searchParams;
   assert.equal(query.get('accountId'), 'account/a'); assert.equal(query.get('status'), 'archived'); assert.equal(query.get('cursor'), 'opaque + cursor'); assert.deepEqual(state.rows, [{ id: 'one', text: 'fresh' }, { id: 'two' }]);
@@ -108,12 +192,12 @@ test('reply template loading keeps only approved scoped definitions and ignores 
 test('read/archive are explicit writes and destructive public changes require confirmation', async () => {
   const calls = [], rows = [], selected = { id: 'thread/opaque', status: 'active', unreadCount: 2 };
   const context = { selected, readOnly: false, conversationStatus: 'active', accountId: 'account', version: { current: 1 }, action: async (_, run) => run(1), write: async (...args) => calls.push(args), setSelected() {}, setRows: update => rows.push(update([selected])), setNotice() {} };
-  const change = compile(section('async function conversationAction(', '  async function commentAction('), context);
+  const change = compile(section('async function conversationAction(', '  function prepareMessageAction('), context);
   await change('read'); assert.deepEqual(calls[0], ['conversations/thread%2Fopaque/read', { accountId: 'account' }]); assert.equal(rows[0][0].unreadCount, 0);
   await change('status'); assert.deepEqual(calls[1][1], { accountId: 'account', status: 'archived' }); assert.deepEqual(rows[1], []);
   const reopened = [], archiveContext = { ...context, selected: { ...selected, status: 'archived' }, setRows: update => reopened.push(update([])) };
-  await compile(section('async function conversationAction(', '  async function commentAction('), archiveContext)('status'); assert.equal(reopened[0][0].id, selected.id); assert.equal(reopened[0][0].status, 'active');
-  const readArchived = []; await compile(section('async function conversationAction(', '  async function commentAction('), { ...archiveContext, setRows: update => readArchived.push(update([])) })('read'); assert.deepEqual(readArchived[0], [], 'Marking the archived selected thread read must not insert it into the active list.');
+  await compile(section('async function conversationAction(', '  function prepareMessageAction('), archiveContext)('status'); assert.equal(reopened[0][0].id, selected.id); assert.equal(reopened[0][0].status, 'active');
+  const readArchived = []; await compile(section('async function conversationAction(', '  function prepareMessageAction('), { ...archiveContext, setRows: update => readArchived.push(update([])) })('read'); assert.deepEqual(readArchived[0], [], 'Marking the archived selected thread read must not insert it into the active list.');
   let confirmed = false; const comment = compile(section('async function commentAction(', '  async function deleteReviewReply('), { ...context, window: { confirm: () => confirmed }, refreshAfterWrite: async () => {} });
   await comment('delete', { id: 'comment' }); assert.equal(calls.length, 4); confirmed = true; await comment('delete', { id: 'comment' }); assert.deepEqual(calls[4], ['comments/delete', { accountId: 'account', postId: selected.id, commentId: 'comment' }]);
   const remove = compile(section('async function deleteReviewReply(', '  return <div className="unified-inbox">'), { ...context, window: { confirm: () => confirmed }, setReplyTarget() {}, setMessage() {}, refreshAfterWrite: async () => {} });
@@ -132,7 +216,7 @@ test('private reply limits follow account capabilities and attachment caption re
 
 test('thread refresh preserves an unfinished reply and post-write read failures never claim the confirmed write failed', async () => {
   const cleared = [], selected = { id: 'thread' }, errors = [];
-  const context = { selected, focusedComment: '', tab: 'messages', version: { current: 1 }, action: async (_, run) => run(1), fetchThread: async () => {}, resetTemplate() {}, setReplyTarget() {}, setMessage: value => cleared.push(value), setConfirmReplace() {}, setMessageTag() {}, setAttachmentUrl() {}, setAttachmentName() {} };
+  const context = { selected, focusedComment: '', tab: 'messages', version: { current: 1 }, action: async (_, run) => run(1), fetchThread: async () => {}, resetTemplate() {}, setReplyTarget() {}, setMessage: value => cleared.push(value), setConfirmReplace() {}, setMessageTag() {}, setAttachmentUrl() {}, setAttachmentName() {}, setMessageActionTarget() {}, setControlAction() {}, setTargetAppId() {}, setControlNote() {}, setConfirmControl() {}, setConfirmAccept() {} };
   const open = compile(section('async function openItem(', '  async function refreshAfterWrite('), context);
   await open(selected); assert.deepEqual(cleared, []); await open({ id: 'different-thread' }); assert.deepEqual(cleared, ['']);
   const refresh = compile(section('async function refreshAfterWrite(', '  function prepareReply('), { tab: 'messages', selected, focusedComment: '', version: { current: 1 }, fetchThread: async () => { throw new Error('Provider read failed'); }, setError: value => errors.push(value) });
