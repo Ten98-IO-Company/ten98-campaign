@@ -8,11 +8,19 @@ function commentsWithDepth(rows: Row[], depth = 0): Row[] { return depth > 12 ? 
 
 export default function EngagementInbox({ projectId, kind, canWrite, request }: Props) {
   const [status, setStatus] = useState<Row | null>(null), [accounts, setAccounts] = useState<Row[]>([]), [accountId, setAccountId] = useState(''), [rows, setRows] = useState<Row[]>([]), [pagination, setPagination] = useState<Row | null>(null), [loaded, setLoaded] = useState(false);
-  const [post, setPost] = useState<Row | null>(null), [comments, setComments] = useState<Row[]>([]), [threadPage, setThreadPage] = useState<Row | null>(null), [focused, setFocused] = useState(''), [replyTarget, setReplyTarget] = useState<Row | null>(null);
+  const [post, setPost] = useState<Row | null>(null), [comments, setComments] = useState<Row[]>([]), [threadParent, setThreadParent] = useState<Row | null>(null), [threadPage, setThreadPage] = useState<Row | null>(null), [focused, setFocused] = useState(''), [replyTarget, setReplyTarget] = useState<Row | null>(null);
+  const [updatesRevision, setUpdatesRevision] = useState<number | null>(null), [seenRevision, setSeenRevision] = useState<number | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), keys = useRef(new Map<string, string>()), active = useRef('');
   const path = `/projects/${encodeURIComponent(projectId)}/engagement`, identity = path + ':' + kind; active.current = identity;
   const account = accounts.find(row => row.id === accountId), supported = accounts.filter(row => row[kind] === true), connected = status?.configured && status?.mapped;
   useEffect(() => { let valid = true; setStatus(null); setAccounts([]); setAccountId(''); setRows([]); setPagination(null); setLoaded(false); setPost(null); setComments([]); setThreadPage(null); setFocused(''); setReplyTarget(null); setError(''); setNotice(''); setBusy(false); keys.current.clear(); request(`${path}/status`).then(result => { if (valid) setStatus(result); }).catch(err => { if (valid) setError(err.message); }); return () => { valid = false; }; }, [identity, request]);
+  useEffect(() => {
+    let valid = true; setUpdatesRevision(null); setSeenRevision(null);
+    if (!accountId) return;
+    const poll = () => request(`${path}/updates?${new URLSearchParams({ accountId, kind })}`).then(result => { if (valid) { setUpdatesRevision(result.revision); setSeenRevision(previous => previous ?? result.revision); } }).catch(() => {});
+    void poll(); const timer = window.setInterval(poll, 8000);
+    return () => { valid = false; window.clearInterval(timer); };
+  }, [identity, accountId, request]);
   async function action(run: (valid: () => boolean) => Promise<void>) {
     if (busy) return; const started = identity, valid = () => active.current === started;
     setBusy(true); setError(''); setNotice('');
@@ -23,12 +31,12 @@ export default function EngagementInbox({ projectId, kind, canWrite, request }: 
     try { const result = await request(`${path}/${suffix}`, 'POST', body, keys.current.get(signature)); keys.current.delete(signature); return result; }
     catch (err) { const failure = err as Error & { status?: number; code?: string }; if (failure.status && failure.code !== 'OPERATION_UNCERTAIN') keys.current.delete(signature); throw err; }
   }
-  function chooseAccount(value: string) { setAccountId(value); setRows([]); setPagination(null); setLoaded(false); setPost(null); setComments([]); setThreadPage(null); setFocused(''); setReplyTarget(null); setError(''); setNotice(''); }
+  function chooseAccount(value: string) { setAccountId(value); setRows([]); setPagination(null); setLoaded(false); setPost(null); setComments([]); setThreadParent(null); setThreadPage(null); setFocused(''); setReplyTarget(null); setError(''); setNotice(''); }
   async function loadRows(nextCursor = '') {
-    await action(async valid => { const result = await request(`${path}/${kind}?${new URLSearchParams({ accountId, ...(nextCursor ? { cursor: nextCursor } : {}) })}`); if (!valid()) return; const items = result[kind === 'comments' ? 'posts' : 'reviews']; setRows(previous => nextCursor ? merge(previous, items) : items); setPagination(result.pagination); setLoaded(true); if (!nextCursor) { setPost(null); setComments([]); setThreadPage(null); setReplyTarget(null); } });
+    await action(async valid => { const result = await request(`${path}/${kind}?${new URLSearchParams({ accountId, ...(nextCursor ? { cursor: nextCursor } : {}) })}`); if (!valid()) return; const items = result[kind === 'comments' ? 'posts' : 'reviews']; setRows(previous => nextCursor ? merge(previous, items) : items); setPagination(result.pagination); setLoaded(true); if (!nextCursor) { setSeenRevision(updatesRevision); setPost(null); setComments([]); setThreadParent(null); setThreadPage(null); setReplyTarget(null); } });
   }
   async function loadThread(selected: Row, commentId = '', nextCursor = '') {
-    await action(async valid => { const result = await request(`${path}/comments/thread?${new URLSearchParams({ accountId, postId: selected.id, ...(commentId ? { commentId } : {}), ...(nextCursor ? { cursor: nextCursor } : {}) })}`); if (!valid()) return; setPost(selected); setFocused(commentId); setComments(previous => nextCursor ? merge(previous, result.comments) : result.comments); setThreadPage(result.pagination); setReplyTarget(null); });
+    await action(async valid => { const result = await request(`${path}/comments/thread?${new URLSearchParams({ accountId, postId: selected.id, ...(commentId ? { commentId } : {}), ...(nextCursor ? { cursor: nextCursor } : {}) })}`); if (!valid()) return; setPost(selected); setFocused(commentId); setComments(previous => nextCursor ? merge(previous, result.comments) : result.comments); setThreadParent(result.parent); setThreadPage(result.pagination); setReplyTarget(null); });
   }
   async function reply(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const values = new FormData(event.currentTarget), target = replyTarget;
@@ -40,10 +48,11 @@ export default function EngagementInbox({ projectId, kind, canWrite, request }: 
       if (kind === 'reviews') setRows(previous => previous.map(row => row.id === result.reviewId ? result.review : row));
     });
   }
-  const threadRows = commentsWithDepth(comments);
+  const threadRows = threadParent && focused ? [{ ...threadParent, depth: 0 }, ...commentsWithDepth(comments, 1)] : commentsWithDepth(comments);
   return <section className="panel settings-panel">
     <div className="section-heading"><div><h2>{kind === 'comments' ? 'Comments' : 'Reviews'}</h2><p>{kind === 'comments' ? 'Read organic post threads and reply through your connected social accounts.' : 'Read and reply to Facebook and Google Business Profile reviews.'}</p></div></div>
     {error && <p className="alert" role="alert">{error}</p>}{notice && <p role="status" className="helper-note">{notice}</p>}
+    {updatesRevision !== null && seenRevision !== null && updatesRevision > seenRevision && <div className="alert" role="status">New {kind === 'comments' ? 'comments' : 'or updated reviews'} arrived through your webhook. <button className="button" disabled={busy} onClick={() => loadRows()}>Reload {kind}</button></div>}
     {!connected && status && <p className="helper-note">Configure Zernio and map this project’s profile in Integrations settings to continue.</p>}
     <div className="button-row"><button className="button" disabled={busy || !connected} onClick={() => action(async valid => { const result = await request(`${path}/accounts`); if (!valid()) return; setAccounts(result.accounts); const first = result.accounts.find((row: Row) => row[kind]); chooseAccount(first?.id || ''); })}>Load connected accounts</button>{supported.length > 0 && <><label className="field"><span>Connected account</span><select value={accountId} disabled={busy} onChange={event => chooseAccount(event.target.value)}>{supported.map(row => <option key={row.id} value={row.id}>{row.name} · {row.platform}{row.active ? '' : ' · reconnect needed'}</option>)}</select></label><button className="button" disabled={busy || !accountId} onClick={() => loadRows()}>Load {kind}</button></>}</div>
     {accounts.length > 0 && !supported.length && <p className="helper-note">No connected account supports {kind}. Connect a supported account, then reload accounts.</p>}

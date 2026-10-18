@@ -66,6 +66,7 @@ export async function handleCalendar(context) {
       if (!currentMapping()) fail(409, 'The calendar mapping changed. Refresh this project.');
       const result = await providerRequest(base + suffix, { method, headers: { Authorization: `Bearer ${token}`, ...(payload ? { 'Content-Type': 'application/json' } : {}) }, ...(payload ? { body: JSON.stringify(payload) } : {}) }, 'Google Calendar');
       if (!currentMapping()) throw new IntegrationError(409, 'CALENDAR_MAPPING_CHANGED', 'The calendar mapping changed while the request was in progress. Review the provider outcome.', method !== 'GET');
+      if (payload && result?.id !== payload.id) throw new IntegrationError(502, 'CALENDAR_UNCERTAIN', 'Google did not confirm the expected calendar event. Review the provider outcome before retrying.', true);
       return result;
     };
     async function list(managedOnly = false) {
@@ -106,7 +107,6 @@ export async function handleCalendar(context) {
       const id = eventId || 'ten98' + createHash('sha256').update(project.id + ':' + key).digest('hex');
       const event = { id, summary: text(body.summary), description: body.description ? text(body.description, 8000) : '', ...range(body), visibility: 'private', extendedProperties: { private: { ten98ProjectId: project.id, ten98Collection: 'events' } } };
       const saved = await call(eventId ? '/' + eventId + '?sendUpdates=none' : '?sendUpdates=none', eventId ? 'PATCH' : 'POST', event);
-      if (!saved.id) throw new IntegrationError(502, 'CALENDAR_UNCERTAIN', 'Google did not confirm the calendar event.', true);
       store.activity(project.id, 'Google Calendar event saved.'); return { event: eventView(saved) };
     }); send(result.status, result.data); return true;
   } catch (error) { send(error instanceof IntegrationError ? error.status : 500, { error: { code: error.code || 'CALENDAR_ERROR', message: error instanceof IntegrationError ? error.message : 'The calendar action could not be completed.' } }); return true; }

@@ -28,7 +28,7 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
     const mapFailure = (event: Event) => { if (!mapsTested.current) return; cancelMapProbe.current?.(); setResults(items => ({ ...items, googleMaps: { ok: false, status: 'failed', message: String((event as CustomEvent).detail || 'Google Maps rejected this site.'), checkedAt: new Date().toISOString() } })); };
     window.addEventListener('ten98-maps-error', mapFailure);
     if (isOperator) request('/settings/integrations').then(data => { if (current) { setProviders(data.providers); setLoaded(true); } }).catch(err => { if (current) setError(err.message); });
-    request(`/projects/${project.id}/calendar/status`).then(data => { if (current) { setMapping({ zernioProfileId: project.zernioProfileId || '', driveFolderId: project.driveFolderId || '', calendarId: data.calendarId || '' }); setCalendarLoaded(true); } }).catch(err => { if (current) setError(err.message); });
+    request(`/projects/${project.id}/calendar/status`).then(data => { if (current) { setMapping(items => ({ ...items, calendarId: data.calendarId || '' })); setCalendarLoaded(true); } }).catch(err => { if (current) setError(err.message); });
     return () => { current = false; active.current = false; cancelMapProbe.current?.(); window.removeEventListener('ten98-maps-error', mapFailure); };
   }, [project.id, isOperator]);
   function change(provider: string, field: string, value: string | null) { setDrafts(items => ({ ...items, [provider]: { ...items[provider], [field]: value } })); }

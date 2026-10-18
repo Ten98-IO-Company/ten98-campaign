@@ -227,6 +227,14 @@ export function createApp(options = {}) {
         if (projectRoute) {
           const project = projectAccess(projectRoute[1], user.id), role = project.role;
           if (mutating && role === 'viewer') throw new HttpError(403, 'Your workspace role is view only.');
+          if (projectRoute[2] === 'sample-data' && req.method === 'DELETE') {
+            if (!['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only a workspace owner or administrator can remove sample data.');
+            const samples = collections.flatMap(collection => store.list(project.id, collection).filter(record => record.sample).map(record => ({ collection, record })));
+            for (const { collection, record } of samples) checkDependants(store, project.id, collection, record.id, true);
+            let activityRemoved;
+            transaction(db, () => { for (const { collection, record } of samples) store.remove(project.id, collection, record.id); activityRemoved = db.prepare('DELETE FROM activity WHERE project_id=? AND sample=1').run(project.id).changes; store.activity(project.id, 'Sample data removed.'); });
+            return send(200, { removed: samples.length, activityRemoved });
+          }
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
           if (projectRoute[2] === 'inbox/cache' && req.method === 'GET') return send(200, { conversations: store.list(project.id, 'conversations') });
           const requestRevision = integrationSettings.revision;
@@ -261,7 +269,7 @@ export function createApp(options = {}) {
             if (id && ['PATCH', 'DELETE'].includes(req.method)) {
               const previous = store.get(project.id, collection, id); if (!previous) throw new HttpError(404, 'Record not found.');
               if ((collection === 'conversations' && previous.source === 'zernio') || (collection === 'placements' && previous.source === 'broadsign') || (collection === 'campaigns' && previous.externalId) || (collection === 'posts' && (previous.externalId || previous.status === 'published'))) bad('Provider-managed records must be changed through their connected provider controls.');
-              if (req.method === 'DELETE') { store.remove(project.id, collection, id); store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
+              if (req.method === 'DELETE') { checkDependants(store, project.id, collection, id); store.remove(project.id, collection, id); store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
               rejectProviderFields(body, collection);
               if (collection === 'posts' && (body.status === 'published' || previous.status === 'published' || previous.externalId)) bad('Provider posts must be managed through their connected provider.');
               const data = validateRecord(collection, { ...previous, ...body, ...(collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { locationSource: 'manual' } : {}) }); checkReferences(store, project.id, data);
@@ -296,6 +304,11 @@ function projectInput(data) {
 }
 function checkReferences(store, projectId, data) {
   for (const [key, collection] of [['campaignId', 'campaigns'], ['assetId', 'assets'], ['providerId', 'providers']]) if (data[key] && !store.get(projectId, collection, data[key])) bad(`${key} does not belong to this project.`);
+}
+function checkDependants(store, projectId, collection, id, realOnly = false) {
+  const field = { campaigns: 'campaignId', assets: 'assetId', providers: 'providerId' }[collection];
+  // ponytail: scan local project records for references; use indexed relationships if project size makes deletion checks slow.
+  if (field && collections.some(name => store.list(projectId, name).some(record => record[field] === id && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
 }
 function rejectProviderFields(body, collection = '') {
   if (['externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'modifiedTime', 'md5Checksum', 'approvalStatus', 'approvedBy', 'reviewedBy', 'providerDeletedAt', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key) && !(collection === 'assets' && key === 'deliveryUrl'))) bad('Provider identifiers and publication evidence are managed by integrations.');

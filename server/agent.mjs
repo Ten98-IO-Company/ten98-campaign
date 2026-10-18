@@ -52,7 +52,7 @@ export async function handleAgent(context) {
   const steps = Math.min(8, Math.max(1, Number(env.OPENROUTER_MAX_STEPS) || 4));
   try {
     if (path === 'status' && req.method === 'GET') { send(200, { configured, model: env.OPENROUTER_MODEL || '', maxSteps: steps }); return true; }
-    if (path === 'history' && req.method === 'GET') { send(200, { runs: db.prepare('SELECT * FROM agent_runs WHERE project_id=? AND user_id=? ORDER BY rowid DESC LIMIT 20').all(project.id, user.id).map(row => publicRun(db, row)) }); return true; }
+    if (path === 'history' && req.method === 'GET') { send(200, { runs: db.prepare("SELECT * FROM agent_runs WHERE project_id=? AND user_id=? ORDER BY CASE WHEN status IN ('running','uncertain') THEN 0 ELSE 1 END,rowid DESC LIMIT 20").all(project.id, user.id).map(row => publicRun(db, row)) }); return true; }
     if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'Editing permission is required to use the agent.');
     const apply = path.match(/^actions\/([^/]+)\/apply$/);
     if (apply && req.method === 'POST') {

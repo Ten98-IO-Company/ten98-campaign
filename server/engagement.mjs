@@ -39,6 +39,13 @@ export async function handleEngagement(context) {
     if (!['GET', 'POST'].includes(req.method)) fail(405, 'METHOD_NOT_ALLOWED', 'This engagement action does not support that method.');
     if (req.method === 'POST' && !WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required to reply.');
     if (path === 'status' && req.method === 'GET') { send(200, { configured: Boolean(env.ZERNIO_API_KEY), mapped: Boolean(project.zernioProfileId) }); return true; }
+    if (path === 'updates' && req.method === 'GET') {
+      const accountId = id(url.searchParams.get('accountId'), 'account ID'), kind = url.searchParams.get('kind');
+      if (!['comments', 'reviews'].includes(kind)) fail(400, 'INVALID_ENGAGEMENT_INPUT', 'Choose comments or reviews.');
+      const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='webhook_engagement_updates'").get();
+      const row = exists && project.zernioProfileId ? db.prepare('SELECT revision,last_event_at FROM webhook_engagement_updates WHERE project_id=? AND profile_id=? AND account_id=? AND kind=?').get(project.id, project.zernioProfileId, accountId, kind) : null;
+      send(200, { revision: row?.revision || 0, lastEventAt: row?.last_event_at || null }); return true;
+    }
     if (!env.ZERNIO_API_KEY) fail(503, 'ZERNIO_NOT_CONFIGURED', 'Configure Zernio in Integrations settings.');
     if (!project.zernioProfileId) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
     const profileId = String(project.zernioProfileId), assertMapping = () => { context.assertIntegrationSettings?.(); context.assertProjectMapping?.(profileId); };

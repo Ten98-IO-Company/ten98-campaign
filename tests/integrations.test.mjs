@@ -196,7 +196,7 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     result = await invoke('inbox/conversation-a/messages?accountId=account-a');
     assert.deepEqual(result.data.messages.map(item => item.id), ['message-1', 'message-2']);
     assert.equal(result.data.pagination.nextCursor, 'older');
-    provider = async url => ({ data: [], pagination: { hasMore: true, nextCursor: 'same-cursor' } });
+    provider = async url => url.pathname.endsWith('/accounts') ? { accounts: [account] } : { data: [], pagination: { hasMore: true, nextCursor: 'same-cursor' } };
     result = await invoke('inbox');
     assert.equal(result.data.error.code, 'INCOMPLETE_PROVIDER_DATA');
 

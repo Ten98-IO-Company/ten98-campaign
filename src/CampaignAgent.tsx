@@ -13,7 +13,7 @@ export default function CampaignAgent({ projectId, canWrite, request, onSaved }:
     if (!key.current || key.current.input !== input) key.current = { input, value: crypto.randomUUID() };
     await run(async () => {
       try { const result = await request(path + '/run', 'POST', { message, includeInbox }, key.current!.value); if (active.current) { setRuns(rows => [result.run, ...rows.filter(r => r.id !== result.run.id)]); setMessage(''); key.current = null; } }
-      catch (error) { const failure = error as any; if (failure.status && failure.run?.status !== 'uncertain') key.current = null; await history(); throw error; }
+      catch (error) { const failure = error as any; if (failure.status && failure.run?.status !== 'uncertain') key.current = null; await history().catch(() => {}); throw error; }
     });
   }
   return <div className="agent-layout"><section className="panel agent-compose"><div className="panel-heading"><div><h2>Your campaign assistant</h2><p>Plan a launch, draft content, explore assets, or review tracked results.</p></div><span className="subtle-tag">OpenRouter</span></div>

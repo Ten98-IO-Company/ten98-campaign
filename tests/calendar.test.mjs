@@ -13,7 +13,7 @@ test('Google Calendar mapping, managed event boundaries, stable writes, sync dat
   db.prepare('INSERT INTO workspaces VALUES(?,?)').run('workspace-a', 'Team');
   for (const id of ['project-a', 'project-b']) db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run(id, 'workspace-a', id);
   const env = { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'calendar-service@example.test', GOOGLE_PRIVATE_KEY: privateKey };
-  const calls = []; let remote = [], seq = 0, loseResponse = false;
+  const calls = []; let remote = [], seq = 0, loseResponse = false, invalidWriteResponse = false;
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); calls.push({ url, options });
     assert.equal(url.protocol, 'https:'); assert.equal(options.redirect, 'error');
@@ -34,6 +34,7 @@ test('Google Calendar mapping, managed event boundaries, stable writes, sync dat
     const event = JSON.parse(options.body); assert.equal(event.extendedProperties.private.ten98ProjectId, 'project-a');
     assert.equal(event.visibility, 'private'); remote = [...remote.filter(item => item.id !== event.id), event];
     if (loseResponse) { loseResponse = false; throw new Error('A private upstream diagnostic must not escape.'); }
+    if (invalidWriteResponse) { invalidWriteResponse = false; return Response.json({ id: 'unexpected-event' }); }
     return new Response(JSON.stringify(event));
   };
   async function invoke(suffix, { method = 'GET', body = {}, role = 'owner', operator = true, projectId = 'project-a', key = `calendar-key-${++seq}` } = {}) {
@@ -79,6 +80,10 @@ test('Google Calendar mapping, managed event boundaries, stable writes, sync dat
     const synced = await invoke('sync', { method: 'POST', key: 'sync-plan-0001' }); assert.equal(synced.data.created, 2); assert.equal(synced.data.updated, 0);
     assert.deepEqual(await invoke('sync', { method: 'POST', key: 'sync-plan-0001' }), synced);
     const again = await invoke('sync', { method: 'POST', key: 'sync-plan-0002' }); assert.equal(again.data.created, 0); assert.equal(again.data.updated, 2);
+    invalidWriteResponse = true; const beforeInvalidSync = eventWrites().length;
+    const invalidSync = await invoke('sync', { method: 'POST', key: 'sync-invalid-0001' }); assert.equal(invalidSync.data.error.code, 'OPERATION_UNCERTAIN');
+    await invoke('sync', { method: 'POST', key: 'sync-invalid-0002' });
+    assert.equal(eventWrites().length, beforeInvalidSync + 1, 'A plan write without confirmation of its expected event must stop and block automatic retries.');
     loseResponse = true; const uncertainBody = { ...body, summary: 'Check uncertain event' }, before = eventWrites().length;
     const uncertain = await invoke('events', { method: 'POST', body: uncertainBody, key: 'uncertain-create-001' }); assert.equal(uncertain.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(JSON.stringify(uncertain).includes('private upstream'), false);
     await invoke('events', { method: 'POST', body: uncertainBody, key: 'uncertain-create-001' }); await invoke('events', { method: 'POST', body: uncertainBody, key: 'uncertain-create-002' });

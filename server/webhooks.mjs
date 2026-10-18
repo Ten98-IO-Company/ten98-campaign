@@ -4,6 +4,7 @@ import { transaction } from './database.mjs';
 export const WEBHOOK_MAX_BYTES = 1024 * 1024;
 const messageEvents = new Set(['message.received', 'message.sent', 'message.edited', 'message.deleted', 'message.delivered', 'message.read', 'message.played', 'message.failed']);
 const conversationEvents = new Set(['conversation.started', 'conversation.control_changed']);
+const engagementEvents = new Set(['comment.received', 'review.new', 'review.updated']);
 const postEvents = new Set(['post.scheduled', 'post.published', 'post.failed', 'post.partial', 'post.cancelled', 'post.recycled', 'post.platform.published', 'post.platform.failed', 'post.platform.deleted', 'post.tiktok.url_resolved']);
 const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f]/.test(value);
 const iso = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
@@ -33,7 +34,11 @@ export function createWebhookService({ db, store, env = process.env }) {
     CREATE TABLE IF NOT EXISTS webhook_messages (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,account_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,message_id TEXT NOT NULL,sent_at TEXT NOT NULL,data TEXT NOT NULL,
-    PRIMARY KEY(project_id,account_id,conversation_id,message_id));`);
+    PRIMARY KEY(project_id,account_id,conversation_id,message_id));
+    CREATE TABLE IF NOT EXISTS webhook_engagement_updates (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,kind TEXT NOT NULL,revision INTEGER NOT NULL,last_event_at TEXT NOT NULL,
+    PRIMARY KEY(project_id,profile_id,account_id,kind));`);
   const eventById = db.prepare('SELECT * FROM webhook_events WHERE id=?');
   const projectByProfile = db.prepare('SELECT id,zernio_profile_id FROM projects WHERE zernio_profile_id=?');
   const messageById = db.prepare('SELECT data FROM webhook_messages WHERE project_id=? AND account_id=? AND conversation_id=? AND message_id=?');
@@ -64,12 +69,17 @@ export function createWebhookService({ db, store, env = process.env }) {
       if (!validId(account?.accountId || account?.id) || !validId(conversation?.id) || !validId(account?.platform) || (account?.accountId && account?.id && account.accountId !== account.id) || (messageEvents.has(payload.event) && (!validId(message?.id) || (message.conversationId && message.conversationId !== conversation.id)))) return response(400, 'INVALID_INBOX_EVENT');
     }
     if (postEvents.has(payload.event) && payload.test !== true && !validId(payload.post?.id)) return response(400, 'INVALID_POST_EVENT');
+    if (engagementEvents.has(payload.event) && payload.test !== true) {
+      const account = payload.account;
+      if (!validId(account?.accountId || account?.id) || !validId(account?.platform) || (account?.accountId && account?.id && account.accountId !== account.id)) return response(400, 'INVALID_ENGAGEMENT_EVENT');
+      if (payload.event === 'comment.received' ? !validId(payload.comment?.id) || !validId(payload.comment?.platformPostId) || payload.comment?.platform !== account.platform || (payload.post?.platformPostId && payload.post.platformPostId !== payload.comment.platformPostId) : !validId(payload.review?.id)) return response(400, 'INVALID_ENGAGEMENT_EVENT');
+    }
     const hash = createHash('sha256').update(bytes).digest('hex');
     try {
       return transaction(db, () => {
         const existing = eventById.get(payload.id);
         if (existing) return existing.body_hash === hash ? response(200) : response(409, 'EVENT_ID_CONFLICT');
-        const ignored = payload.test === true || (!inbox && !postEvents.has(payload.event));
+        const ignored = payload.test === true || (!inbox && !postEvents.has(payload.event) && !engagementEvents.has(payload.event));
         const now = new Date().toISOString();
         db.prepare('INSERT INTO webhook_events(id,event,payload,body_hash,status,received_at,processed_at) VALUES(?,?,?,?,?,?,?)').run(payload.id, payload.event, JSON.stringify(payload), hash, ignored ? 'ignored' : 'pending', now, ignored ? now : null);
         return response(202);
@@ -95,12 +105,15 @@ export function createWebhookService({ db, store, env = process.env }) {
     if (messageEvents.has(payload.event)) {
       const input = payload.message, row = messageById.get(project.id, accountId, conversationId, input.id);
       const message = row ? JSON.parse(row.data) : { id: input.id, externalId: input.id, createdAt: iso(input.sentAt) ? new Date(input.sentAt).toISOString() : eventAt, content: '', direction: input.direction === 'outgoing' ? 'outgoing' : 'incoming' };
+      if (validId(input.platformMessageId)) {
+        if (message.platformMessageId && message.platformMessageId !== input.platformMessageId) blocked('MESSAGE_IDENTITY_MISMATCH');
+        message.platformMessageId = input.platformMessageId;
+      }
       if (iso(input.sentAt) && Date.parse(input.sentAt) < Date.parse(message.createdAt)) message.createdAt = new Date(input.sentAt).toISOString();
       const contentAt = payload.event === 'message.edited' && iso(payload.editedAt) ? new Date(payload.editedAt).toISOString() : payload.event === 'message.received' || payload.event === 'message.sent' ? message.createdAt : eventAt;
       if (['message.received', 'message.sent', 'message.edited'].includes(payload.event) && !message.deletedAt && newer(contentAt, message.contentAt)) {
         message.content = display(input.text, 50000); message.attachments = attachments(input.attachments); message.contentAt = contentAt;
         message.direction = input.direction === 'outgoing' || payload.event === 'message.sent' ? 'outgoing' : 'incoming';
-        if (validId(input.platformMessageId)) message.platformMessageId = input.platformMessageId;
         message.sender = { id: display(input.sender?.id), name: display(input.sender?.name), username: display(input.sender?.username) };
         if (payload.event === 'message.edited') message.editedAt = contentAt;
       }
@@ -144,6 +157,17 @@ export function createWebhookService({ db, store, env = process.env }) {
     }
     if (!found) blocked('POST_NOT_LINKED');
   }
+  function updateEngagement(payload) {
+    // Comments/reviews omit account.profileId: their signed profiles array is the routing evidence.
+    if (!Array.isArray(payload.profiles) || payload.profiles.length !== 1) blocked('PROFILE_CONTEXT_MISMATCH');
+    const profileId = payload.profiles[0]?.id, project = projectFor(profileId), account = payload.account;
+    if (account.profileId && account.profileId !== profileId) blocked('PROFILE_CONTEXT_MISMATCH');
+    if (payload.event === 'comment.received' && payload.comment.ad) return; // Advertising threads use the provider dashboard, not the organic comment feed.
+    const kind = payload.event === 'comment.received' ? 'comments' : 'reviews';
+    db.prepare(`INSERT INTO webhook_engagement_updates VALUES(?,?,?,?,1,?)
+      ON CONFLICT(project_id,profile_id,account_id,kind) DO UPDATE SET revision=revision+1,last_event_at=MAX(last_event_at,excluded.last_event_at)`)
+      .run(project.id, profileId, account.accountId || account.id, kind, new Date(payload.timestamp).toISOString());
+  }
   function processPending({ limit = 25, now = Date.now() } = {}) {
     const rows = db.prepare("SELECT id FROM webhook_events WHERE status='pending' AND next_attempt<=? ORDER BY rowid LIMIT ?").all(now, Math.min(100, Math.max(1, Number.isInteger(limit) ? limit : 25)));
     let processed = 0, pending = 0;
@@ -153,7 +177,7 @@ export function createWebhookService({ db, store, env = process.env }) {
           const event = eventById.get(id);
           if (!event || event.status !== 'pending' || event.next_attempt > now) return;
           const payload = JSON.parse(event.payload);
-          if (postEvents.has(payload.event)) updatePost(payload); else updateInbox(payload);
+          if (postEvents.has(payload.event)) updatePost(payload); else if (engagementEvents.has(payload.event)) updateEngagement(payload); else updateInbox(payload);
           db.prepare("UPDATE webhook_events SET status='processed',attempts=attempts+1,last_error=NULL,processed_at=? WHERE id=?").run(new Date().toISOString(), id);
           processed++;
         });

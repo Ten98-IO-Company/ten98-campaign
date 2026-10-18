@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, createStore } from '../server/database.mjs';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from '../server/webhooks.mjs';
+import { handleEngagement } from '../server/engagement.mjs';
 
 const env = { ZERNIO_WEBHOOK_SECRET: 'webhook-test-secret-with-enough-entropy' };
 const signature = bytes => createHmac('sha256', env.ZERNIO_WEBHOOK_SECRET).update(bytes).digest('hex');
@@ -75,7 +76,7 @@ test('raw signed delivery is durable, isolated, idempotent, and strictly authent
     signed(f.service, mismatch); f.service.processPending();
     assert.equal(f.db.prepare('SELECT last_error FROM webhook_events WHERE id=?').get(mismatch.id).last_error, 'PROFILE_CONTEXT_MISMATCH');
     signed(f.service, event('message.received', { test: true, message: { id: 'test-message', text: 'Fake DM' } }));
-    signed(f.service, event('comment.received'));
+    signed(f.service, event('unsupported.example'));
     f.service.processPending();
     assert.equal(f.store.list('project-a', 'conversations')[0].messages.length, 1, 'Test and non-DM events must not create live DMs.');
     assert.equal(f.db.prepare("SELECT count(*) AS count FROM webhook_events WHERE status='ignored'").get().count, 2);
@@ -114,6 +115,27 @@ test('message edits, deletions, receipts and post statuses tolerate out-of-order
   } finally { f.cleanup(); }
 });
 
+test('receipt-first and delete-first messages retain immutable native identity for REST reconciliation', () => {
+  const f = fixture();
+  try {
+    for (const name of ['message.read', 'message.deleted']) {
+      const payload = event(name, { timestamp: '2026-10-18T12:01:00Z' });
+      payload.message = { ...payload.message, id: name, platformMessageId: `native-${name}`, text: 'Pre-delete content', direction: 'outgoing' };
+      signed(f.service, payload); assert.deepEqual(f.service.processPending(), { processed: 1, pending: 0 });
+      const find = () => f.store.list('project-a', 'conversations')[0].messages.find(row => row.id === name);
+      assert.equal(find().platformMessageId, payload.message.platformMessageId, 'Lifecycle events must match the native REST message ID before any content event arrives.');
+      signed(f.service, { ...payload, id: randomUUID(), event: 'message.sent', timestamp: '2026-10-18T12:00:00Z' }); f.service.processPending();
+      assert.equal(find().platformMessageId, payload.message.platformMessageId);
+      if (name === 'message.deleted') { assert.equal(find().content, ''); assert.ok(find().deletedAt); }
+      else assert.equal(find().deliveryStatus, 'read');
+      const conflict = { ...payload, id: randomUUID(), message: { ...payload.message, platformMessageId: 'different-native-message' } };
+      signed(f.service, conflict); f.service.processPending();
+      assert.equal(f.db.prepare('SELECT last_error FROM webhook_events WHERE id=?').get(conflict.id).last_error, 'MESSAGE_IDENTITY_MISMATCH');
+      assert.equal(find().platformMessageId, payload.message.platformMessageId, 'Conflicting native identity stays pending without changing the cached message.');
+    }
+  } finally { f.cleanup(); }
+});
+
 test('queued work survives restart and its effects commit atomically with event completion', () => {
   const f = fixture();
   let reopened;
@@ -136,4 +158,34 @@ test('queued work survives restart and its effects commit atomically with event 
     if (reopened) reopened.close(); else { try { f.db.close(); } catch {} }
     rmSync(f.dir, { recursive: true, force: true });
   }
+});
+
+test('comment and review webhook updates are durable, scoped and readable without provider polling', async () => {
+  const f = fixture(), originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('Webhook update checks must never call a paid provider.'); };
+  const comment = { id: randomUUID(), event: 'comment.received', timestamp: '2026-10-18T12:00:00Z', profiles: [{ id: 'profile-a', externalId: 'project-b' }], account: { id: 'account-a', platform: 'facebook' }, comment: { id: 'comment-a', platformPostId: 'post-a', platform: 'facebook', text: 'A comment' }, post: { platformPostId: 'post-a' } };
+  async function updates(projectId = 'project-a', profile = 'profile-a', kind = 'comments') {
+    let response;
+    await handleEngagement({ req: { method: 'GET' }, url: new URL(`http://localhost/api/projects/${projectId}/engagement/updates?accountId=account-a&kind=${kind}`), project: { id: projectId, zernioProfileId: profile }, role: 'viewer', db: f.db, store: f.store, config: { env: {} }, send(status, data) { response = { status, data }; } }); return response;
+  }
+  try {
+    assert.deepEqual((await updates()).data, { revision: 0, lastEventAt: null });
+    assert.equal(signed(f.service, { ...comment, comment: { ...comment.comment, platform: 'instagram' } }).status, 400);
+    assert.equal(signed(f.service, comment).status, 202); assert.equal(signed(f.service, comment).status, 200);
+    assert.deepEqual(f.service.processPending(), { processed: 1, pending: 0 });
+    assert.deepEqual((await updates()).data, { revision: 1, lastEventAt: '2026-10-18T12:00:00.000Z' });
+    assert.equal((await updates('project-b', 'profile-b')).data.revision, 0); assert.equal((await updates('project-a', 'new-profile')).data.revision, 0);
+    signed(f.service, { ...comment, id: randomUUID(), timestamp: '2026-10-18T11:00:00Z' }); f.service.processPending();
+    assert.deepEqual((await updates()).data, { revision: 2, lastEventAt: '2026-10-18T12:00:00.000Z' }, 'Late delivery increments the receipt revision without moving the latest event backward.');
+    signed(f.service, { ...comment, id: randomUUID(), comment: { ...comment.comment, ad: { id: 'paid-ad' } } }); f.service.processPending();
+    assert.equal((await updates()).data.revision, 2, 'Ad comments cannot advertise a change in the organic-only feed.');
+    for (const name of ['review.new', 'review.updated']) { signed(f.service, { id: randomUUID(), event: name, timestamp: '2026-10-18T12:01:00Z', profiles: [{ id: 'profile-a' }], account: { id: 'account-a', platform: 'googlebusiness' }, review: { id: 'accounts/a/locations/b/reviews/c', text: 'A review' } }); f.service.processPending(); }
+    assert.equal((await updates('project-a', 'profile-a', 'reviews')).data.revision, 2);
+    assert.equal(f.store.list('project-a', 'conversations').length, 0, 'Engagement events never create direct messages.');
+    signed(f.service, { ...comment, id: randomUUID(), profiles: [{ id: 'profile-a' }, { id: 'profile-b' }] }); f.service.processPending();
+    assert.equal((await updates()).data.revision, 2, 'Ambiguous profile context stays pending instead of broadcasting to tenants.');
+    assert.equal((await updates('project-a', 'profile-a', 'unsupported')).status, 400);
+    const reopened = createWebhookService({ db: f.db, store: f.store, env }); assert.deepEqual(reopened.processPending(), { processed: 0, pending: 0 });
+    assert.equal((await updates()).data.revision, 2, 'Restarting the worker preserves revisions.');
+  } finally { globalThis.fetch = originalFetch; f.cleanup(); }
 });

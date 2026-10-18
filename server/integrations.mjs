@@ -97,13 +97,15 @@ function requireAccount(accounts, accountId) {
   if (!account) fail(403, 'ACCOUNT_OUTSIDE_PROJECT', 'This account is not connected to this project.');
   return account;
 }
-async function conversations(api, profileId) {
+async function conversations(api, profileId, accounts) {
+  accounts ||= await scopedAccounts(api, profileId);
   const all = []; let cursor; let meta;
   // ponytail: cap at 1,000 conversations; add background indexed sync for larger inboxes.
   for (let page = 0; page < 10; page++) {
     const result = await api('/inbox/conversations', { profileId, limit: 100, cursor });
     if (!Array.isArray(result.data)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return conversations.');
     if (result.meta?.accountsFailed) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'Some messaging accounts could not be read. Reconnect them before continuing.');
+    if (result.data.some(row => { const account = accounts.find(item => item._id === row?.accountId); return !account || (row.platform && row.platform !== account.platform) || (row.profileId && String(row.profileId?._id || row.profileId) !== profileId) || sample(row); })) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned inbox data outside this project’s connected accounts.');
     all.push(...result.data); meta = result.meta;
     if (!result.pagination?.hasMore) return { conversations: all, pagination: { hasMore: false, nextCursor: null }, meta };
     const next = result.pagination.nextCursor;
@@ -372,7 +374,7 @@ export async function operation(context, action) {
   }
   if (db.prepare("SELECT id FROM integration_operations WHERE project_id = ? AND request_hash = ? AND status IN ('pending', 'uncertain', 'reviewed-applied')").get(project.id, hash)) fail(409, 'OPERATION_UNCERTAIN', 'This action has an unresolved or externally applied provider outcome. Review its receipt before trying again.');
   const id = randomUUID();
-  const known = new Set(['integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'inbox', 'reply', 'resolve', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'ooh', 'bookings', 'submit', 'engagement', 'comments', 'reviews', 'thread']);
+  const known = new Set(['integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'inbox', 'reply', 'resolve', 'reopen', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'ooh', 'bookings', 'submit', 'engagement', 'comments', 'reviews', 'thread']);
   const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
   db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString(), actionPath, operation.runId);
   active.add(id);
@@ -694,12 +696,12 @@ export async function handleIntegration(context) {
         return { post: updated, provider: { id: post.externalId, status: confirmed.status, accountId, action: editing ? 'edited' : 'unpublished' } };
       }); send(outcome.status, outcome.data); return true;
     }
-    const inboxMatch = /^inbox\/([^/]+)\/(messages|reply|resolve)$/.exec(path);
+    const inboxMatch = /^inbox\/([^/]+)\/(messages|reply|resolve|reopen)$/.exec(path);
     if (inboxMatch) {
       const conversationId = identifier(decodeURIComponent(inboxMatch[1]), 'conversation ID');
       const accountId = identifier(req.method === 'GET' ? url.searchParams.get('accountId') : body.accountId, 'account ID');
       const accounts = await scopedAccounts(api, profileId); requireAccount(accounts, accountId);
-      const listed = await conversations(api, profileId);
+      const listed = await conversations(api, profileId, accounts);
       if (!listed.conversations.some(item => item.id === conversationId && item.accountId === accountId)) fail(403, 'CONVERSATION_OUTSIDE_PROJECT', 'This conversation is not in this project.');
       const endpoint = `/inbox/conversations/${encodeURIComponent(conversationId)}`;
       if (req.method === 'GET' && inboxMatch[2] === 'messages') {
@@ -709,9 +711,15 @@ export async function handleIntegration(context) {
         if (!Array.isArray(messages)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return conversation messages.');
         send(200, { messages: redact([...messages].reverse()), pagination: redact(result.pagination || result.data?.pagination || {}), sortOrder: 'asc' }); return true;
       }
-      if (req.method === 'POST' && ['reply', 'resolve'].includes(inboxMatch[2])) {
+      if (req.method === 'POST' && ['reply', 'resolve', 'reopen'].includes(inboxMatch[2])) {
+        fields(body, inboxMatch[2] === 'reply' ? ['accountId', 'message'] : ['accountId'], 'inbox action');
         const message = inboxMatch[2] === 'reply' ? text(body.message, 'message', 10000) : undefined;
-        const outcome = await operation(context, async key => ({ result: redact(await api(inboxMatch[2] === 'reply' ? `${endpoint}/messages` : endpoint, {}, inboxMatch[2] === 'reply' ? { accountId, message } : { accountId, status: 'archived' }, key, inboxMatch[2] === 'reply' ? 'POST' : 'PUT')) }));
+        const status = inboxMatch[2] === 'reopen' ? 'active' : 'archived';
+        const outcome = await operation(context, async key => {
+          const result = await api(inboxMatch[2] === 'reply' ? `${endpoint}/messages` : endpoint, {}, inboxMatch[2] === 'reply' ? { accountId, message } : { accountId, status }, key, inboxMatch[2] === 'reply' ? 'POST' : 'PUT');
+          if (result.success !== true || (inboxMatch[2] !== 'reply' && (result.data?.accountId !== accountId || result.data?.status !== status))) throw new IntegrationError(502, 'INBOX_ACTION_NOT_CONFIRMED', 'Zernio did not confirm the inbox action. Check the provider conversation before repeating it.', true);
+          return { result: redact(result) };
+        });
         send(outcome.status, outcome.data); return true;
       }
       fail(405, 'METHOD_NOT_ALLOWED', 'This inbox action does not support that method.');

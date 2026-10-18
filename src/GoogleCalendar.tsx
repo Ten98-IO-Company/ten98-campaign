@@ -12,21 +12,22 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
   const [from, setFrom] = useState(fromDate || dateInput(new Date(today.getFullYear(), today.getMonth(), 1))), [to, setTo] = useState(toDate || dateInput(new Date(today.getFullYear(), today.getMonth() + 1, 0)));
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [editing, setEditing] = useState<string | null>(null);
   const blank = { summary: '', description: '', start: from + 'T12:00', end: from + 'T13:00', allDay: false };
-  const [draft, setDraft] = useState(blank), keys = useRef(new Map<string, string>()), callback = useRef(onEvents);
+  const [draft, setDraft] = useState(blank), keys = useRef(new Map<string, string>()), callback = useRef(onEvents), active = useRef(true), scope = useRef('');
   callback.current = onEvents;
   const path = `/projects/${encodeURIComponent(projectId)}/calendar`, connected = Boolean(status?.configured && status?.mapped);
+  const view = `${path}:${from}:${to}`; scope.current = view;
   useEffect(() => {
-    let active = true; setStatus(null); setEvents([]); setLoaded(false); setError(''); setNotice(''); setEditing(null); keys.current.clear();
-    request(`${path}/status`).then(result => { if (active) setStatus(result); }).catch(err => { if (active) setError(err.message || 'The calendar connection could not be read.'); });
-    return () => { active = false; };
+    active.current = true; let current = true; setStatus(null); setEvents([]); setLoaded(false); setError(''); setNotice(''); setEditing(null); keys.current.clear();
+    request(`${path}/status`).then(result => { if (current) setStatus(result); }).catch(err => { if (current) setError(err.message || 'The calendar connection could not be read.'); });
+    return () => { current = false; active.current = false; };
   }, [path, request]);
   useEffect(() => { if (fromDate) setFrom(fromDate); if (toDate) setTo(toDate); }, [fromDate, toDate]);
   useEffect(() => { setEvents([]); setLoaded(false); callback.current?.([]); }, [from, to]);
   function updateEvents(items: CalendarEvent[]) { setEvents(items); callback.current?.(items); }
   async function action(run: () => Promise<void>) {
     if (busy) return; setBusy(true); setError(''); setNotice('');
-    try { await run(); } catch (err) { setError((err as Error).message || 'The calendar action could not be completed.'); }
-    finally { setBusy(false); }
+    try { await run(); } catch (err) { if (active.current && scope.current === view) setError((err as Error).message || 'The calendar action could not be completed.'); }
+    finally { if (active.current) setBusy(false); }
   }
   async function write(suffix: string, method: string, body?: unknown) {
     const fingerprint = `${method}:${path}/${suffix}:${JSON.stringify(body)}`;
@@ -35,21 +36,23 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
     catch (err) { const failure = err as Error & { status?: number; code?: string }; if (failure.status && failure.code !== 'OPERATION_UNCERTAIN') keys.current.delete(fingerprint); throw err; }
   }
   async function load() {
+    if (!active.current || scope.current !== view) return;
     const result = await request(`${path}/events?${new URLSearchParams({ fromDate: from, toDate: to })}`);
+    if (!active.current || scope.current !== view) return;
     if (!Array.isArray(result.events)) throw new Error('The Google Calendar event list could not be read.');
     updateEvents(result.events); setLoaded(true);
   }
   async function mapCalendar(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const calendarId = String(new FormData(event.currentTarget).get('calendarId') || '').trim();
-    await action(async () => { await request(`${path}/connection`, 'POST', { calendarId }); setStatus(await request(`${path}/status`)); updateEvents([]); setLoaded(false); setNotice(calendarId ? 'Shared calendar connected to this project.' : 'Calendar disconnected.'); });
+    await action(async () => { await request(`${path}/connection`, 'POST', { calendarId }); setStatus(await request(`${path}/status`)); updateEvents([]); setLoaded(false); setEditing(null); setDraft(blank); setNotice(calendarId ? 'Shared calendar connected to this project.' : 'Calendar disconnected.'); });
   }
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await action(async () => {
       const body = { ...draft, start: draft.allDay ? draft.start : new Date(draft.start).toISOString(), end: draft.allDay ? draft.end : new Date(draft.end).toISOString() };
-      const result = await write('events' + (editing ? '/' + encodeURIComponent(editing) : ''), editing ? 'PATCH' : 'POST', body);
-      updateEvents([...events.filter(item => item.id !== result.event.id), result.event].sort((a, b) => (a.start.dateTime || a.start.date || '').localeCompare(b.start.dateTime || b.start.date || '')));
+      await write('events' + (editing ? '/' + encodeURIComponent(editing) : ''), editing ? 'PATCH' : 'POST', body);
       setEditing(null); setDraft(blank); setNotice('Event saved to Google Calendar.');
+      await load();
     });
   }
   function edit(event: CalendarEvent) {
@@ -65,7 +68,7 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
     </details>}
     {connected && <>
       <div className="form-grid"><label className="field"><span>From date</span><input type="date" value={from} required disabled={busy} onChange={event => setFrom(event.target.value)}/></label><label className="field"><span>Through date</span><input type="date" value={to} min={from} required disabled={busy} onChange={event => setTo(event.target.value)}/></label></div>
-      <div className="button-row"><button type="button" className="button" disabled={busy || !from || !to || to < from} onClick={() => action(load)}>{busy ? 'Working…' : 'Load Google events'}</button>{canWrite && <button type="button" className="button" disabled={busy} onClick={() => action(async () => { const result = await write('sync', 'POST', {}); setNotice(`Published campaign plan: ${result.created} events created, ${result.updated} updated.`); })}>Publish campaign plan to Google</button>}</div>
+      <div className="button-row"><button type="button" className="button" disabled={busy || !from || !to || to < from} onClick={() => action(load)}>{busy ? 'Working…' : 'Load Google events'}</button>{canWrite && <button type="button" className="button" disabled={busy} onClick={() => action(async () => { const result = await write('sync', 'POST', {}); setNotice(`Published campaign plan: ${result.created} events created, ${result.updated} updated.`); await load(); })}>Publish campaign plan to Google</button>}</div>
       <p className="helper-note">Publishing the plan creates or updates dated campaigns, OOH placements, and scheduled posts. Existing unrelated events remain read-only. Calendar events do not publish social posts.</p>
       {loaded && !events.length && <p>No Google events in this date range.</p>}
       {events.length > 0 && <div className="table-scroll"><table><thead><tr><th>Google event</th><th>Start</th><th>End</th><th>Actions</th></tr></thead><tbody>{events.map(event => { const managed = event.managed && event.projectId === projectId, link = providerLink(event.htmlLink); return <tr key={event.id}>
