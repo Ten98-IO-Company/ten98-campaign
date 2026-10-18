@@ -1,6 +1,37 @@
-# ten98 Campaign v0.8.5 — synthetic end-to-end verification
+# ten98 Campaign v0.8.6 — verification
 
-## Zernio foundation and first expansion
+## Expansion checks and acceptance limits
+
+Verified on 18 October 2026 against the pinned Zernio OpenAPI 1.292.0. All **367 automated checks pass**, with no failures or skipped checks. The production frontend build, production container build and offline non-root container startup pass. The production dependency audit reports **zero vulnerabilities**. No dependency was added. New bookkeeping tables bind Telegram codes, lead associations, template provenance and recurring-post approvals; existing application records and the instance session secret were preserved during the local update.
+
+The [full Zernio plan](zernio-feature-plan.md) remains incomplete. These are the newly implemented subsets:
+
+- **Connections:** Bluesky app passwords, Telegram bot codes/direct chat, Shopify authorization/custom-app tokens, WordPress.com/self-hosted credentials and Whop tracking-account setup. Credentials are not stored by this app; scoped readback confirms account identity.
+- **Publishing:** weekly provider queues, timezone previews, defaults and edits, exact saved queue intent in approvals, enqueue/status/replay and recurring-post review/apply/stop. Changes to an active recurring seed require stopping its cycle; seed edits and cycle changes share concurrency and unresolved-outcome protection. Stopping a cycle leaves its existing copies unchanged.
+- **Reports:** follower snapshots, posting times, Instagram follower history/demographics/online hours/active Stories, Facebook demographics and selected YouTube-video retention. Missing values, provider periods, provisional data and permission/add-on requirements are explicit. Account reports no longer carry the unrelated local-summary cards and export action above them.
+- **Inbox:** supported text edits/deletion, reactions/removal, conversation handover and Meta request acceptance. Message and conversation versions bind every review; reaction acceptance is separate from observed placement.
+- **Leads:** Meta/LinkedIn form/response browsing, basic typed creation/archive, project-owned Meta test leads and explicit local-contact imports. Creation proves a fresh ID and requested settings. Imports preserve consent and suppression; reading leads creates no contacts.
+- **WhatsApp templates:** all-status variant discovery, positional utility/marketing creation/content edits, delivery windows, exact library lookup/import and specific-variant deletion. Every existing-variant mutation requires a freshly verified instance operator and explicit business-account/variant review, including locally created templates. Creation ownership is provenance, not exclusive control over a shared WABA resource.
+
+### What was exercised
+
+| Surface | Evidence from this increment |
+| --- | --- |
+| Connection UI | Browser: Bluesky, WordPress, Shopify token and Whop setup confirmed in the project account list; Telegram code generation, pending status and connected readback; hosted WordPress.com authorization link. Handler tests cover Shopify authorization and direct Telegram setup too. |
+| Queues | Browser: create/default, timezone preview, save a queue on a post, request and approve the exact queue settings. Running-app HTTP: one approved enqueue, same-key replay without a second post, and fresh scheduled status. The final inline enqueue review has component interaction tests. |
+| Account reports | Browser: Instagram snapshots, posting times, follower history, demographics, online hours and Story source; selected YouTube retention with a 150% rewatch point and provisional-data notice. Authenticated HTTP also covers scope, malformed reports and add-on/permission failures. |
+| Inbox controls | Running-app HTTP: Telegram edit, reaction add/remove and deletion tombstone; Messenger pass/take control and reviewed request acceptance with message-history readback. Actual UI handlers cover stale confirmation, unsupported actions and retained uncertain keys. |
+| Leads, templates, recurring posts | Authenticated router/handler fixtures and actual UI controls cover creation/edit/stop/delete, role and scope changes, shared WABA impact, reviewed snapshots, lost/malformed receipts, reconciliation and retries. Independent review reproduced and fixed recurring/source-edit overlap and template/lead readback defects. Manual browser walkthroughs of these new screens remain pending. |
+
+The in-app browser stalled on a native queue confirmation and stopped dispatching input. The new enqueue, lead and template confirmations use inline reviews. The blocked prompt still needs dismissal before the remaining browser walkthroughs can be completed; this is not recorded as a successful manual browser run. Queue and inbox HTTP acceptance used the running isolated app and persisted synthetic provider state, in addition to the automated suite.
+
+![Selected YouTube retention report from the synthetic browser run](zernio-insights-verification.png)
+
+Relevant runnable checks include [connections](../tests/zernio-connections.test.mjs), [queues](../tests/zernio-queues.test.mjs), [recurring posts](../tests/zernio-recycling.test.mjs), [reports](../tests/zernio-insights.test.mjs), [leads](../tests/zernio-leads.test.mjs), [templates](../tests/zernio-whatsapp-templates.test.mjs), [inbox HTTP](../tests/inbox-http.test.mjs) and [UI checks](../tests/inbox-ui.test.mjs). Run npm test and npm run build from the repository root. The container smoke check remains scripts/check-container.mjs.
+
+Ponytail and [Paperthin](https://github.com/LilMGenius/paperthin) read, evidence, consistency and fresh-reader checks were applied. All provider accounts and actions in these checks were synthetic. No real message, publication, upload, account change, booking, activation or spend occurred. Live provider acceptance requires approved credentials, eligibility and permissions. Remaining advanced ads/measurement/audiences/catalogs, publishing/media/bulk/per-account variants, rich messaging, advanced WhatsApp, provider contact mapping/automations, stores/additional channels and administration remain in the feature plan. Voice is excluded; organic SEO stays in ten98 Discover.
+
+## Previous foundation release — v0.8.5
 
 Verified on 18 October 2026 against the pinned Zernio OpenAPI 1.292.0, using isolated local databases, the production frontend and synthetic providers. **299 automated checks pass**, with no failures or skips. The production build, production container build and offline non-root container smoke check pass; the production dependency audit reports zero vulnerabilities. No dependency or application schema change was added. These checks establish application behavior; they do not establish acceptance by live providers.
 

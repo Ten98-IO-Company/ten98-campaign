@@ -61,6 +61,159 @@ async function fixture() {
   return { app, projectId, path, calls, comments, review, accounts, request, writes: () => calls.filter(call => call.options.method !== 'GET' && !call.url.pathname.includes('/tools/validate/')), setHook(value) { hook = value; }, setForeign(value) { sourceForeign = value; }, setMalformedHistory(value) { malformedHistory = value; }, setIncoming(value) { lastIncoming = value; }, async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
 }
 
+async function actionFixture(platform = 'telegram') {
+  const f = await fixture(), account = f.accounts.find(item => item.platform === platform) || { _id: 'action-account', platform, profileId: 'inbox-profile', isActive: true };
+  if (!f.accounts.includes(account)) f.accounts.push(account);
+  const state = { messages: [{ id: 'own-message', message: 'Original sent text', direction: 'outgoing', createdAt: new Date(Date.now() - 60000).toISOString(), attachments: [], reactions: [] }, { id: 'incoming-message', message: 'A recent question', senderId: 'participant-a', direction: 'incoming', createdAt: new Date(Date.now() - 30000).toISOString(), attachments: [], reactions: [] }], control: 'app', pendingRequest: false, malformed: false, unchanged: false, readFailure: false, wrote: false, hold: null };
+  f.setHook(async (url, options) => {
+    if (url.pathname.endsWith('/inbox/conversations/thread-1') && options.method === 'GET') return Response.json({ data: { id: 'thread-1', accountId: account._id, platform, participantId: 'participant-a', participantName: 'Alex', lastMessage: state.messages.at(-1)?.message || '', updatedTime: state.messages.at(-1)?.createdAt || new Date().toISOString(), status: 'active', threadControl: state.control } });
+    if (url.pathname.endsWith('/inbox/conversations') && options.method === 'GET' && url.searchParams.get('folder') === 'requests') return Response.json({ data: state.pendingRequest ? [{ id: 'thread-1', accountId: account._id, platform, participantId: 'participant-a', folder: 'requests', status: 'active' }] : [], pagination: { hasMore: false, nextCursor: null } });
+    if (url.pathname.endsWith('/messages') && options.method === 'GET') {
+      if (state.wrote && state.readFailure) return Response.json({ error: 'Unavailable' }, { status: 502 });
+      return Response.json({ messages: state.messages.map(item => ({ ...item, accountId: account._id, platform, conversationId: 'thread-1' })), pagination: { hasMore: false, nextCursor: null }, sortOrderApplied: 'desc' });
+    }
+    const messageAction = /\/messages\/([^/]+)(\/reactions)?$/.exec(url.pathname);
+    if (messageAction) {
+      const target = state.messages.find(item => item.id === decodeURIComponent(messageAction[1])); assert.ok(target);
+      state.wrote = true; state.onWrite?.(); if (state.hold) await state.hold;
+      const payload = options.body ? JSON.parse(options.body) : null;
+      if (messageAction[2]) {
+        if (!state.unchanged) target.reactions = [...target.reactions.filter(row => !row.fromMe), ...(options.method === 'POST' ? [{ emoji: payload.emoji, fromMe: true, reactedAt: new Date().toISOString() }] : [])];
+        return Response.json(state.malformed ? { success: true, messageId: 'stored-message', platformMessageId: 'wrong-message' } : { success: true, messageId: 'stored-message', platformMessageId: target.id });
+      }
+      if (options.method === 'PATCH') { if (!state.unchanged) { target.editHistory = [{ text: target.message, attachments: [], editedAt: new Date().toISOString() }]; target.message = payload.text; target.isEdited = true; target.editedAt = new Date().toISOString(); } return Response.json(state.malformed ? {} : { success: true, data: { messageId: target.id } }); }
+      assert.equal(options.method, 'DELETE'); if (!state.unchanged) { if (['bluesky', 'reddit'].includes(platform)) state.messages.splice(state.messages.indexOf(target), 1); else target.isDeleted = true; } return Response.json(state.malformed ? {} : { success: true });
+    }
+    if (url.pathname.endsWith('/thread-control')) {
+      const payload = JSON.parse(options.body); state.wrote = true;
+      const owner = payload.action === 'take' ? 'app' : payload.action === 'pass' ? 'other' : platform === 'whatsapp' ? 'ai_agent' : payload.action === 'request' ? state.control : 'other';
+      if (!state.unchanged) state.control = owner;
+      return Response.json(state.malformed ? {} : { success: true, control: { owner, ...(payload.action === 'pass' ? { ownerAppId: payload.targetAppId } : {}) } });
+    }
+    if (url.pathname.endsWith('/accept')) {
+      const payload = JSON.parse(options.body); state.wrote = true; if (!state.unchanged) { state.pendingRequest = false; state.messages.push({ id: 'acceptance-reply', direction: 'outgoing', message: payload.message, createdAt: new Date().toISOString(), attachments: [], reactions: [] }); }
+      return Response.json(state.malformed ? {} : { success: true, data: { messageId: 'acceptance-reply' } });
+    }
+  });
+  const thread = () => f.request(`${f.path}/conversations/thread-1/messages?accountId=${account._id}`);
+  const write = (message, verb, extra = {}, key = randomUUID()) => f.request(`${f.path}/conversations/thread-1/messages/${encodeURIComponent(message.id)}/${verb}`, 'POST', { accountId: account._id, expectedMessageVersion: message.version, ...extra }, key);
+  return { ...f, state, account, thread, write };
+}
+
+test('own text edits and platform deletions revalidate scoped snapshots and confirm exact message history', async () => {
+  const f = await actionFixture();
+  try {
+    let history = await f.thread(), own = history.data.messages.find(item => item.direction === 'outgoing'); assert.equal(own.actions.canEdit, true); assert.match(own.version, /^[a-f0-9]{64}$/); assert.equal(history.data.messages.find(item => item.direction === 'incoming').actions.canDelete, false);
+    const key = randomUUID(), accepted = await f.write(own, 'edit', { text: 'Updated sent text' }, key); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.equal(accepted.data.message.message, 'Updated sent text'); assert.equal(accepted.data.message.editHistory[0].text, 'Original sent text'); assert.equal(f.writes().at(-1).options.method, 'PATCH'); assert.deepEqual(f.writes().at(-1).body, { accountId: f.account._id, text: 'Updated sent text' });
+    const writes = f.writes().length; assert.equal((await f.write(own, 'edit', { text: 'Updated sent text' }, key)).status, 200); assert.equal(f.writes().length, writes);
+    assert.equal((await f.write(own, 'edit', { text: 'Stale edit' })).status, 409); own = (await f.thread()).data.messages.find(item => item.direction === 'outgoing');
+    assert.equal((await f.write(own, 'delete')).status, 400); const deleted = await f.write(own, 'delete', { confirmMessageId: own.id }); assert.equal(deleted.status, 200); assert.equal(deleted.data.message.isDeleted, true); assert.equal(deleted.data.deleteScope, 'platform');
+    history = await f.thread(); assert.equal(history.data.messages.find(item => item.id === own.id).actions.canEdit, false); assert.equal(history.data.messages.find(item => item.id === own.id).actions.canReact, false);
+  } finally { await f.close(); }
+});
+
+test('iMessage time windows and self-only deletion stay distinct from unsupported or incoming-message actions', async () => {
+  const apple = await actionFixture('imessage');
+  try {
+    let own = (await apple.thread()).data.messages[0]; assert.equal(own.actions.canEdit, true); assert.equal(own.actions.canDelete, true); assert.equal(own.actions.deleteScope, 'unsend');
+    apple.state.messages[0].createdAt = new Date(Date.now() - 3 * 60000).toISOString(); own = (await apple.thread()).data.messages[0]; assert.equal(own.actions.canEdit, true); assert.equal(own.actions.canDelete, false); assert.equal((await apple.write(own, 'delete', { confirmMessageId: own.id })).status, 409);
+    apple.state.messages[0].createdAt = new Date(Date.now() - 16 * 60000).toISOString(); own = (await apple.thread()).data.messages[0]; assert.equal(own.actions.canEdit, false); assert.equal((await apple.write(own, 'edit', { text: 'Late edit' })).status, 409); assert.equal(apple.writes().length, 0);
+  } finally { await apple.close(); }
+  for (const platform of ['bluesky', 'reddit', 'facebook']) {
+    const f = await actionFixture(platform);
+    try {
+      const rows = (await f.thread()).data.messages, own = rows[0], incoming = rows[1];
+      assert.ok([409, 422].includes((await f.write(incoming, 'delete', { confirmMessageId: incoming.id })).status));
+      if (platform === 'facebook') { assert.equal(own.actions.canDelete, false); assert.equal((await f.write(own, 'delete', { confirmMessageId: own.id })).status, 422); }
+      else { const result = await f.write(own, 'delete', { confirmMessageId: own.id }); assert.equal(result.status, 200); assert.equal(result.data.deleteScope, 'self'); assert.equal(f.state.messages.some(item => item.id === own.id), false); }
+    } finally { await f.close(); }
+  }
+});
+
+test('reactions preserve contact reactions, enforce Meta windows and Slack names, and distinguish acceptance from observation', async () => {
+  for (const platform of ['telegram', 'facebook', 'slack']) {
+    const f = await actionFixture(platform);
+    try {
+      let target = (await f.thread()).data.messages[1], emoji = platform === 'slack' ? ':thumbsup:' : '👍';
+      f.state.messages[1].reactions = [{ emoji: '❤️', fromMe: false }]; target = (await f.thread()).data.messages[1];
+      const before = f.writes().length; assert.equal((await f.write(target, 'unreact')).status, 409); assert.equal((await f.write(target, 'react', { emoji: platform === 'slack' ? '👍' : 'not-an-emoji' })).status, 400); assert.equal(f.writes().length, before);
+      let result = await f.write(target, 'react', { emoji }); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.observed, true); assert.equal(result.data.message.reactions.length, 2);
+      target = result.data.message; result = await f.write(target, 'unreact'); assert.equal(result.status, 200); assert.equal(result.data.observed, true); assert.deepEqual(result.data.message.reactions.map(item => item.fromMe), [false]); assert.equal(f.writes().at(-1).options.method, 'DELETE');
+      target = result.data.message; f.state.unchanged = true; result = await f.write(target, 'react', { emoji }); assert.equal(result.status, 200); assert.equal(result.data.accepted, true); assert.equal(result.data.observed, false, 'A success receipt alone cannot establish reaction placement.');
+      if (platform === 'facebook') { f.state.messages[1].createdAt = new Date(Date.now() - 2 * 86400000).toISOString(); target = (await f.thread()).data.messages[1]; assert.equal(target.actions.canReact, false); assert.equal((await f.write(target, 'react', { emoji })).status, 409); }
+    } finally { await f.close(); }
+  }
+});
+
+test('message actions reject foreign scope and preserve unknown mutation receipts without sending duplicates', async () => {
+  for (const mode of ['malformed', 'readFailure', 'unchanged']) {
+    const f = await actionFixture();
+    try {
+      const own = (await f.thread()).data.messages[0]; f.state[mode] = true;
+      const result = await f.write(own, 'edit', { text: 'Unconfirmed edit' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); const writes = f.writes().length;
+      assert.equal((await f.write(own, 'edit', { text: 'Unconfirmed edit' })).status, 409); assert.equal(f.writes().length, writes);
+    } finally { await f.close(); }
+  }
+  const f = await actionFixture();
+  try {
+    const own = (await f.thread()).data.messages[0], before = f.writes().length;
+    assert.equal((await f.request(f.path + '/conversations/thread-1/messages/missing/edit', 'POST', { accountId: f.account._id, expectedMessageVersion: own.version, text: 'Wrong item' })).status, 403);
+    assert.equal((await f.request(f.path + '/conversations/thread-1/messages/own-message/edit', 'POST', { accountId: 'foreign', expectedMessageVersion: own.version, text: 'Wrong tenant' })).status, 403);
+    assert.equal((await f.request(f.path + '/conversations/%broken/messages/own-message/edit', 'POST', { accountId: f.account._id, expectedMessageVersion: own.version, text: 'Wrong path' })).status, 400); assert.equal(f.writes().length, before);
+  } finally { await f.close(); }
+});
+
+test('handover requires fresh deliberate review, gates Instagram Login and confirms actual owner rather than a request', async () => {
+  const f = await actionFixture('facebook'), route = f.path + '/conversations/thread-1/thread-control';
+  try {
+    let conversation = (await f.thread()).data.conversation;
+    assert.deepEqual(conversation.controlActions, ['take', 'request', 'pass', 'release']);
+    assert.equal((await f.request(route, 'POST', { accountId: f.account._id, action: 'pass', targetAppId: '263902037430900', expectedConversationVersion: conversation.version })).status, 409); assert.equal(f.writes().length, 0);
+    const transfer = { accountId: f.account._id, action: 'pass', targetAppId: '263902037430900', metadata: 'Customer asked for Page Inbox', expectedConversationVersion: conversation.version, confirmControl: true }, accepted = await f.request(route, 'POST', transfer); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.equal(accepted.data.conversation.threadControl, 'other');
+    assert.equal((await f.request(route, 'POST', { ...transfer, action: 'take', targetAppId: undefined })).status, 409);
+    conversation = (await f.thread()).data.conversation; const requested = await f.request(route, 'POST', { accountId: f.account._id, action: 'request', expectedConversationVersion: conversation.version, confirmControl: true }); assert.equal(requested.status, 200); assert.equal(requested.data.requested, true); assert.equal(requested.data.control.owner, 'other');
+    f.state.malformed = true; const unknown = await f.request(route, 'POST', { accountId: f.account._id, action: 'take', expectedConversationVersion: conversation.version, confirmControl: true }); assert.equal(unknown.status, 409); assert.equal(unknown.data.operation.status, 'uncertain');
+  } finally { await f.close(); }
+  const instagram = await actionFixture('instagram');
+  try { const conversation = (await instagram.thread()).data.conversation; assert.deepEqual(conversation.controlActions, ['pass', 'release']); const result = await instagram.request(instagram.path + '/conversations/thread-1/thread-control', 'POST', { accountId: instagram.account._id, action: 'take', expectedConversationVersion: conversation.version, confirmControl: true }); assert.equal(result.status, 422); assert.equal(instagram.writes().length, 0); }
+  finally { await instagram.close(); }
+});
+
+test('request acceptance sends one reviewed reply only for a freshly proven pending Meta request', async () => {
+  const f = await actionFixture('facebook'), route = f.path + '/conversations/thread-1/accept';
+  try {
+    const conversation = (await f.thread()).data.conversation, body = { accountId: f.account._id, expectedConversationVersion: conversation.version, message: 'Thanks for your request', confirmSend: true };
+    assert.equal((await f.request(route, 'POST', { ...body, confirmSend: false })).status, 409); assert.equal((await f.request(route, 'POST', body)).status, 409); assert.equal(f.writes().length, 0);
+    f.state.pendingRequest = true; const key = randomUUID(), accepted = await f.request(route, 'POST', body, key); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.equal(accepted.data.sent, true); assert.equal(f.state.pendingRequest, false); assert.equal(f.state.messages.at(-1).message, body.message);
+    const writes = f.writes().length; assert.equal((await f.request(route, 'POST', body, key)).status, 200); assert.equal(f.writes().length, writes);
+  } finally { await f.close(); }
+});
+
+test('inbox message actions share a conversation lock and viewers cannot dispatch them', async () => {
+  const f = await actionFixture(); let release, entered;
+  try {
+    const own = (await f.thread()).data.messages[0]; f.state.hold = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; }); f.state.onWrite = entered;
+    const pending = f.write(own, 'edit', { text: 'Held edit' }); await started;
+    const simultaneous = await f.write(own, 'delete', { confirmMessageId: own.id }); assert.equal(simultaneous.status, 409); assert.equal(simultaneous.data.error.code, 'PROVIDER_RESOURCE_BUSY'); assert.equal(f.writes().some(call => call.options.method === 'DELETE'), false);
+    release(); f.state.hold = null; assert.equal((await pending).status, 200);
+    const fresh = (await f.thread()).data.messages[0]; f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const writes = f.writes().length;
+    assert.equal((await f.write(fresh, 'delete', { confirmMessageId: fresh.id })).status, 403); assert.equal(f.writes().length, writes);
+  } finally { release?.(); await f.close(); }
+});
+
+test('unreadable reactions and accepted request replies remain uncertain without a second provider write', async () => {
+  for (const action of ['react', 'accept']) {
+    const f = await actionFixture('facebook');
+    try {
+      const history = await f.thread(), target = history.data.messages[1], conversation = history.data.conversation;
+      f.state.malformed = true; f.state.pendingRequest = true;
+      const route = action === 'react' ? `${f.path}/conversations/thread-1/messages/${target.id}/react` : `${f.path}/conversations/thread-1/accept`, body = action === 'react' ? { accountId: f.account._id, expectedMessageVersion: target.version, emoji: '👍' } : { accountId: f.account._id, expectedConversationVersion: conversation.version, message: 'Do not send twice', confirmSend: true };
+      const result = await f.request(route, 'POST', body); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); const writes = f.writes().length;
+      assert.equal((await f.request(route, 'POST', body)).status, 409); assert.equal(f.writes().length, writes);
+    } finally { await f.close(); }
+  }
+});
+
 test('full-history search forwards the scoped query and opaque pages, validates snippets and reports skipped accounts', async () => {
   const f = await fixture(); let mode = 'normal';
   f.setHook(url => {

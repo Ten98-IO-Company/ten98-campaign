@@ -22,6 +22,7 @@ import { handleInbox } from './inbox.mjs';
 import { createSmsInbox } from './sms-inbox.mjs';
 import { createLinks } from './links.mjs';
 import { normalizePostVariants, normalizeMediaItems } from '../shared/social-posts.mjs';
+import { validateQueueIntent } from './zernio-queues.mjs';
 
 const roles = ['owner', 'admin', 'editor', 'viewer'];
 const projectFields = 'p.id,p.workspace_id AS workspaceId,p.name,p.color,p.zernio_profile_id AS zernioProfileId,p.drive_folder_id AS driveFolderId';
@@ -59,6 +60,7 @@ function validateRecord(collection, raw) {
     date(data.scheduledAt, 'Scheduled time');
     if (data.status === 'scheduled' && (!data.scheduledAt || Date.parse(data.scheduledAt) <= Date.now())) bad('Scheduled posts need a future scheduled time.');
     if (data.accounts !== undefined) data.accounts = strings(data.accounts, 'Accounts', 20);
+    validateQueueIntent(data);
     try {
       if (data.mediaItems !== undefined && data.mediaItems !== null) data.mediaItems = normalizeMediaItems(data.mediaItems);
       if (data.platformOverrides !== undefined) data.platformOverrides = normalizePostVariants(data);

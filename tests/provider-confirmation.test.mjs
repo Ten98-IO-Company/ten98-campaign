@@ -47,6 +47,8 @@ test('social write receipts reject malformed or cross-account acknowledgements b
       const beforeRetry = writes.length;
       assert.equal((await invoke(action, post, `confirmation-retry-${sequence}`)).status, 409);
       assert.equal(writes.length, beforeRetry, 'Fresh action keys cannot repeat an unconfirmed provider write.');
+      // This fixture never applies its acknowledgement; reconcile before the next independent malformed-receipt case.
+      db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE id=?").run(result.data.operation.id);
     }
     for (const platforms of [[{ platform: 'facebook', status: 'published' }], [{ accountId: account._id, status: 'pending' }], [{ platform: 'facebook', accountId: { _id: account._id }, status: 'published' }]]) {
       const post = { id: `minimal-${++sequence}`, content: 'Documented minimal acknowledgement', platforms: ['facebook'], accounts: [account._id], status: 'draft' };

@@ -1,8 +1,23 @@
 # Full Zernio feature support: scope and delivery breakdown
 
-Updated 18 October 2026. Application baseline: **v0.8.5**. Provider baseline: **Zernio OpenAPI 1.292.0**.
+Updated 18 October 2026. Application baseline: **v0.8.6**. Provider baseline: **Zernio OpenAPI 1.292.0**.
 
 Full Zernio support is the target. **The app does not provide it yet.** Version 0.8.5 implements the first connection, publishing, measurement and inbox subsets below. Missing workflows remain implementation work; completing a subset does not complete its API family.
+
+## Current expansion
+
+This ten98 Campaign implementation-status update covers the v0.8.6 expansion. The listed subsets are implemented; their exact verification boundaries are linked below. Their wider API families remain incomplete.
+
+| Area | Added workflow | Remaining boundary |
+| --- | --- | --- |
+| Connections | Bluesky app-password setup; Telegram bot-code and direct-channel setup; Shopify authorization/token and WordPress.com/self-hosted setup; Whop tracking account setup. Each credential connection is confirmed against the mapped profile. | Remaining headless/secondary selection, destination/default management and platform administration. Connecting a store does not implement articles or commerce. Whop is tracking-only. |
+| Publishing queues | Weekly slots, timezone previews, default/update/delete, saved queue intent, approval of exact queue settings, and enqueue through the shared publication/recovery flow. | Bulk import, per-account variants, media libraries and remaining platform formats. Recycling has its own separate future-copy approval, apply/stop flow and linked-copy history. |
+| Social reports | Follower snapshots, posting times, Instagram history/demographics/online hours/Story insights, Facebook demographics and YouTube retention with selected owned content. Missing, provisional, cached and permission/add-on states remain explicit. | Older-video/archived-Story discovery and the wider specialist reporting suite. |
+| Inbox controls | Eligible text edits/deletion, reactions/removal, reviewed conversation control and Meta message-request acceptance. Confirmations bind to the reviewed conversation version. | Rich messages, typing, complete conversation deletion and additional platform-specific controls. |
+| Advertising leads | Scoped Meta/LinkedIn forms, details and responses, explicit local-contact import without granting consent, basic typed form creation/archive and project-owned Meta test-lead lifecycle. | Advanced form formats/localization, builder form selection and lead-event ingestion. |
+| WhatsApp templates | All-status discovery, exact variant detail, typed positional creation/editing, delivery-window changes, exact-name library lookup/import and confirmed variant deletion. WABA ownership and shared-resource review are explicit. | Named/carousel/Flow/authentication and other advanced template composers, Flows, business administration and provider automation. |
+
+Combined automated, browser and live-acceptance boundaries are recorded in [verification](verification.md). Synthetic provider tests do not establish real delivery, platform review, billing eligibility or live account access.
 
 ## Scope and evidence
 
@@ -20,7 +35,7 @@ Snapshot SHA-256: `324a4675b576bbd15f7f1f7c60397d5832b76e49fd976479028b22cd572d7
 | Unavailable/gated | Zernio or the platform restricts it; show the reason and required approval rather than a false success. |
 | Excluded | An earlier explicit user decision still applies. |
 
-Each domain report below contains current code anchors, capability rows, primary references and acceptance work. The v0.8.5 acceptance run passed 299 automated checks, the production build and a production dependency audit with no vulnerabilities. Browser walkthroughs use isolated synthetic upstream providers; they do not establish live eligibility, delivery, installation or spend. Exact evidence and browser boundaries are recorded in [verification](verification.md).
+Each domain report below contains current code anchors, capability rows, primary references and acceptance work. The v0.8.6 combined run passed 367 automated checks, the production build and a production dependency audit with no vulnerabilities. Browser walkthroughs use isolated synthetic upstream providers; they do not establish live eligibility, delivery, installation or spend. Exact evidence and browser boundaries are recorded in [verification](verification.md).
 
 ## Implemented in v0.8.5
 
@@ -39,20 +54,20 @@ Each domain report below contains current code anchors, capability rows, primary
 | Module | Current state | Required completion |
 | --- | --- | --- |
 | Connections and account administration | Partial | Health, supported reconnect/disconnect, overrides/X toggles, mapped profile edits and safe group CRUD are present. Complete provisioning, OAuth/credential/secondary selection, remaining settings and deliberate cross-project operations. [Social breakdown](zernio-social-coverage.md) |
-| Social publishing | Partial | Complete all supported platform formats/options, lookups and selectors, external-post discovery/import, bulk operations, provider queues, native edits and supported deletion. Existing separate captions/media, previews, scheduling and approvals remain the foundation. [Social breakdown](zernio-social-coverage.md) |
+| Social publishing | Partial | Complete all supported platform formats/options, lookups and selectors, external-post discovery/import, bulk operations, per-account variants, native edits and supported deletion. Existing separate captions/media, previews, scheduling and approvals remain the foundation. [Social breakdown](zernio-social-coverage.md) |
 | Paid ad creation and management | Partial | Extend the eight managed networks beyond the current formats; support full campaign/ad-set/ad hierarchy, duplication, attachments/assets and permitted edits. [Ads breakdown](zernio-ads-coverage.md) |
 | Creative library and research | Partial/missing | Reusable creative library, image/video lifecycle, rendered previews, partnership permissions and public ad-library research. Existing media URLs are a subset. [Ads breakdown](zernio-ads-coverage.md) |
 | Audiences and targeting | Partial | Customer uploads, supported engagement/website/lookalike/company audiences, saved presets, exclusions, reach/forecast/bid tools and platform-specific selectors. [Ads breakdown](zernio-ads-coverage.md) |
 | Pixels, conversions and attribution | Partial | Tag discovery/detail/code/events/create and Meta rename/diagnostics are present for the named networks. Complete event management, installation, sharing, matching quality, conversion adjustments and consent-aware server events. Existing UTM/short-link tracking is separate. [Ads breakdown](zernio-ads-coverage.md) |
-| Leads and catalogs | Missing | Instant forms, leads/webhooks, catalog/product/feed/set management, store sync and campaign use. Lead capture must create/update a contact without inventing outreach consent. [Ads](zernio-ads-coverage.md), [stores](zernio-commerce-admin-coverage.md) |
+| Leads and catalogs | Partial | Meta/LinkedIn form discovery, basic creation/archive, response reads, explicit consent-preserving imports and Meta test leads are present. Complete advanced forms, builder selection, lead webhooks, catalog/product/feed/set management, store sync and campaign use. [Ads](zernio-ads-coverage.md), [stores](zernio-commerce-admin-coverage.md) |
 | Paid/social analytics | Partial | Account/post/platform specialist reports, demographics, retention, timing, comparisons, breakdowns, asynchronous exports, missing/stale data and provider account operations. [Social](zernio-social-coverage.md), [ads](zernio-ads-coverage.md) |
-| Unified inbox | Partial | History search and opening conversations are present for the named platforms. Complete rich messages, supported message edits/deletion/reactions, attachment retrieval and control handover. [Messaging breakdown](zernio-messaging-coverage.md) |
+| Unified inbox | Partial | History/search/opening sends, eligible message edits/deletion/reactions, control handover and request acceptance are present. Complete rich messages, attachment retrieval, typing and whole-conversation deletion. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Comments, mentions and reviews | Partial | Supported engagement/moderation actions, private replies, mentions, additional filters and platform-specific actions. [Messaging breakdown](zernio-messaging-coverage.md) |
 | WhatsApp suite | Partial | Advanced templates and lifecycle, Flows, interactive/commerce messages, catalogs, business settings, quality/tier health, sandbox, groups and conversion analytics. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Contacts and direct campaigns | Partial | Link local identities to Zernio contacts/channels, custom fields/segments and all supported platform broadcasts. Keep local consent, suppression and Twilio delivery paths. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Automations | Missing | Sequences, branching workflows, comment-to-DM funnels, run history, versioning, handover and stop conditions. Use Zernio execution; do not create a second automation engine. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Community and business profiles | Partial | Discord administration, Telegram/Slack account tools, Google Business location/media/services/menus/attributes/actions/verification and supported social discovery/engagement. [Social](zernio-social-coverage.md), [messaging](zernio-messaging-coverage.md) |
-| Blogs and commerce | Missing | Shopify/WordPress onboarding, articles and native scheduling; supported products, variants, stock, collections, discounts, market pricing, custom content and store attribution. [Store breakdown](zernio-commerce-admin-coverage.md) |
+| Blogs and commerce | Partial setup | Shopify and WordPress connection setup is present. Articles, native scheduling, products, variants, stock, collections, discounts, market pricing, custom content and store attribution remain missing. [Store breakdown](zernio-commerce-admin-coverage.md) |
 | RCS, iMessage and Zernio SMS | Partial basic inbox adapters | Zernio SMS opening messages now use consent-checked local contacts; Twilio campaigns remain separate. Complete sender/agent lifecycle, rich campaign formats, provider audiences/subscriptions, compliance states, channel fallback and receipts. [Additional channels](zernio-commerce-admin-coverage.md) |
 | Webhooks and operations | Partial | Endpoint setup/testing/logs/redelivery, every relevant event family, diagnostics, provider usage/billing and public API change tracking. [Messaging](zernio-messaging-coverage.md), [administration](zernio-commerce-admin-coverage.md) |
 | Provider support and optional business agent | Missing | Explicit paid support runs and provider-native Meta Business Agent setup/knowledge/tools/evaluation where eligible. Keep these separate from OpenRouter creative drafting. [Administration](zernio-commerce-admin-coverage.md), [messaging](zernio-messaging-coverage.md) |
@@ -67,7 +82,7 @@ RCS and iMessage are messaging products, not extra destinations in a public soci
 
 ## Delivery sequence
 
-This is the continuing implementation order. No stage is complete: v0.8.5 advances bounded parts of stages 1, 3, 4, 5 and 8. Expand existing components and shared validation/operation helpers; add a module only when the workflow needs a distinct screen.
+This is the continuing implementation order. No stage is complete: v0.8.6 advances bounded parts of stages 1, 2, 3, 4, 5 and 8. Expand existing components and shared validation/operation helpers; add a module only when the workflow needs a distinct screen.
 
 | Stage | Deliverable | Dependencies and completion check |
 | --- | --- | --- |
@@ -80,7 +95,7 @@ This is the continuing implementation order. No stage is complete: v0.8.5 advanc
 | 7. Stores and additional channels | Blogs/commerce, catalog sync, Zernio SMS, RCS and iMessage sender/campaign lifecycle. | Provider capabilities, reviewed grants, approved senders and cost visibility. Test fallback and carrier/store failures with synthetic fixtures; live acceptance uses designated test accounts. |
 | 8. Administration and release closure | Complete provider logs/usage/support, webhook administration, change tracking and cross-module acceptance. | All relevant event families and role boundaries. Every included operation must map to a workflow and a test or an explicit unavailable/excluded reason. |
 
-The first compatibility and foundation increment is implemented in v0.8.5; it was not included in v0.8.4. The detailed reports distinguish these tested changes from the remaining stages. Next work must close the named missing workflows rather than count routes as complete: campaign hierarchy/advanced formats, conversion and lead resources, queues/media/bulk publishing, richer engagement/WhatsApp, contacts/automation, stores/additional channels and provider operations remain substantial work.
+The first compatibility and foundation increment is implemented in v0.8.5; it was not included in v0.8.4. The detailed reports distinguish these tested changes from the remaining stages. Next work must close the named missing workflows rather than count routes as complete: campaign hierarchy/advanced formats, remaining conversion and advanced lead resources, media/bulk/per-account publishing, richer engagement/WhatsApp, contacts/automation, stores/additional channels and provider operations remain substantial work.
 
 ## UI structure
 
