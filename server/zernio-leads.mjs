@@ -168,6 +168,35 @@ function createBody(body, scope) {
   return { accountId: scope.account._id, name, privacyPolicyUrl, platformSpecificData: settings };
 }
 
+async function leadAccount(api, profileId, accountId) {
+  const account = requireAccount(await scopedAccounts(api, profileId), identifier(accountId));
+  if (!platforms.has(account.platform) || account.isActive === false) fail(422, 'LEADS_UNAVAILABLE', 'Choose an active Meta or LinkedIn advertising connection.');
+  const native = (await adAccounts(api, account._id)).accounts;
+  if (!Array.isArray(native) || native.some(row => !object(row) || !token(row.id) || row.name != null && !text(row.name, 200) || row.selectable != null && typeof row.selectable !== 'boolean') || new Set(native.map(row => row.id)).size !== native.length) invalid();
+  return { account, native };
+}
+function advertiser(scope, adAccountId) {
+  identifier(adAccountId);
+  if (!scope.native.some(row => row.id === adAccountId && row.selectable !== false)) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'Choose an available advertising account from this project connection.');
+  return { account: scope.account, adAccountId };
+}
+export async function validateAdLeadForm(api, profileId, body) {
+  if (body.goal !== 'lead_generation' || !['facebook', 'instagram', 'linkedin'].includes(body.platform)) {
+    if (body.leadFormReview !== undefined) fail(400, 'UNEXPECTED_LEAD_FORM_REVIEW', 'Choose the native lead-generation goal before selecting a lead form.');
+    return null;
+  }
+  if (!object(body.leadFormReview)) fail(400, 'LEAD_FORM_REVIEW_REQUIRED', 'Choose and review a verified lead form before creating the ad.');
+  fields(body.leadFormReview, ['id', 'name', 'version']);
+  const reviewed = body.leadFormReview, formId = identifier(body.leadGenFormId);
+  if (reviewed.id !== formId || !text(reviewed.name, 200) || !reviewed.name.trim() || typeof reviewed.version !== 'string' || !/^[a-f0-9]{64}$/.test(reviewed.version)) fail(400, 'LEAD_FORM_REVIEW_REQUIRED', 'Choose and review a verified lead form before creating the ad.');
+  const found = await leadAccount(api, profileId, body.accountId), scope = { ...advertiser(found, body.adAccountId), profileId };
+  if ((found.account.platform === 'linkedinads') !== (body.platform === 'linkedin')) fail(400, 'AD_CONNECTION_MISMATCH', 'Choose a lead form from this advertising network.');
+  const detail = await verifiedForm(api, scope, formId);
+  if (detail.status !== (body.platform === 'linkedin' ? 'PUBLISHED' : 'ACTIVE')) fail(409, 'LEAD_FORM_UNAVAILABLE', 'This form is not available for new ads. Choose an active Meta form or a published LinkedIn form.');
+  expected(reviewed.version, detail.version, 'form'); expected(reviewed.name, detail.name, 'form');
+  return detail;
+}
+
 export async function handleZernioLeads(context, api, profileId, action) {
   const { req, url, body = {}, role, send } = context;
   if (action === 'accounts' && req.method === 'GET') { send(200, { accounts: (await scopedAccounts(api, profileId)).filter(row => platforms.has(row.platform)).map(row => ({ _id: row._id, platform: row.platform, displayName: row.displayName, username: row.username, isActive: row.isActive })) }); return true; }
@@ -179,14 +208,10 @@ export async function handleZernioLeads(context, api, profileId, action) {
   if (leadId && !importing && !testCreate && !testDelete || match[4] && !['leads', 'archive', 'test-leads'].includes(match[4]) || match[4] === 'test-leads' && !mutation) return false;
   if (req.method !== (mutation ? 'POST' : 'GET')) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available lead form controls.');
   if (mutation && !(importing ? writers : administrators).has(role)) fail(403, 'LEAD_PERMISSION_REQUIRED', importing ? 'Editing permission is required to import a lead contact.' : 'A workspace owner or administrator must change lead forms and test leads.');
-  const account = requireAccount(await scopedAccounts(api, profileId), accountId);
-  if (!platforms.has(account.platform) || account.isActive === false) fail(422, 'LEADS_UNAVAILABLE', 'Choose an active Meta or LinkedIn advertising connection.');
-  const native = (await adAccounts(api, accountId)).accounts;
-  if (!Array.isArray(native) || native.some(row => !object(row) || !token(row.id) || row.name != null && !text(row.name, 200) || row.selectable != null && typeof row.selectable !== 'boolean') || new Set(native.map(row => row.id)).size !== native.length) invalid();
+  const found = await leadAccount(api, profileId, accountId), { account, native } = found;
   if (match[2] === 'ad-accounts') { send(200, { accounts: native.filter(row => row.selectable !== false).map(row => ({ id: row.id, name: row.name || row.id, selectable: row.selectable !== false })) }); return true; }
   const adAccountId = identifier(mutation ? body.adAccountId : url.searchParams.get('adAccountId'));
-  if (!native.some(row => row.id === adAccountId && row.selectable !== false)) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'Choose an available advertising account from this project connection.');
-  const scope = { account, adAccountId, profileId }; tables(context.db);
+  const scope = { ...advertiser(found, adAccountId), profileId }; tables(context.db);
   if (!formId) { send(200, { platform: account.platform, ...await forms(api, scope, filters(url)) }); return true; }
   if (creating) {
     const payload = createBody(body, scope), outcome = await mutate(context, async key => {

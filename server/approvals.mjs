@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { IntegrationError, targetConfiguration, zernioClient } from './integrations.mjs';
-import { resolveVariant } from '../shared/social-posts.mjs';
+import { buildPlatformEntry, normalizeAccountVariants, resolveVariant } from '../shared/social-posts.mjs';
 import { queueList, reviewedQueue } from './zernio-queues.mjs';
 
 const initialized = new WeakSet(), administrators = new Set(['owner', 'admin']);
@@ -17,7 +17,8 @@ function policy(db, projectId) {
   return row ? { ...row, requireApproval: Boolean(row.requireApproval) } : { requireApproval: false, updatedBy: null, updatedAt: null };
 }
 function postSnapshot(context, post) {
-  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map(item => item?.assetId)].filter(Boolean))];
+  const accountOverrides = normalizeAccountVariants(post);
+  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map(item => item?.assetId), ...Object.values(accountOverrides).map(item => item?.assetId)].filter(Boolean))];
   const records = ids.map(id => context.store.get(context.project.id, 'assets', id));
   const assets = ids.map((id, index) => {
     const asset = records[index];
@@ -28,6 +29,7 @@ function postSnapshot(context, post) {
     return [platform, { content: variant.content, mediaItems: variant.mediaItems, options: variant.options }];
   }));
   const mediaItems = resolveVariant({ ...post, platformOverrides: {} }, 'facebook', records.filter(Boolean)).mediaItems;
+  const accountVariants = Object.fromEntries(Object.entries(accountOverrides).map(([id, copy]) => { const variant = resolveVariant(post, copy.platform, records.filter(Boolean), id); return [id, { platform: copy.platform, content: variant.content, mediaItems: variant.mediaItems, options: variant.options, ...(copy.scheduledAt ? { scheduledAt: copy.scheduledAt } : {}) }]; }));
   const wireItems = items => items.map(({ width, height, duration, ...item }) => item);
   const configuration = target => {
     const current = targetConfiguration(target);
@@ -35,12 +37,11 @@ function postSnapshot(context, post) {
     return { ...(typeof current.content === 'string' ? { customContent: current.content } : {}), ...(current.mediaItems ? { customMedia: wireItems(current.mediaItems) } : {}), ...(options && Object.keys(options).length ? { platformSpecificData: options } : {}) };
   };
   const providerVariants = (post.providerResults || []).filter(target => target.platform && target.accountId).flatMap(target => {
-    const override = post.platformOverrides?.[target.platform] || {}, variant = resolveVariant(post, target.platform, records.filter(Boolean));
-    const actual = configuration(target), expected = configuration({ platform: target.platform, ...(Object.hasOwn(override, 'content') ? { customContent: variant.content } : {}), ...(Object.hasOwn(override, 'mediaItems') || Object.hasOwn(override, 'assetId') ? { customMedia: variant.mediaItems } : {}), platformSpecificData: variant.options });
-    const scheduledFor = typeof target.scheduledFor === 'string' && Date.parse(target.scheduledFor) !== Date.parse(post.scheduledAt || post.scheduledFor) ? target.scheduledFor : '';
+    const id = String(target.accountId?._id || target.accountId), actual = configuration(target), expected = configuration(buildPlatformEntry(post, target.platform, id, records.filter(Boolean)));
+    const scheduledFor = typeof target.scheduledFor === 'string' && Date.parse(target.scheduledFor) !== Date.parse(accountOverrides[id]?.scheduledAt || post.scheduledAt || post.scheduledFor) ? target.scheduledFor : '';
     return JSON.stringify(actual) === JSON.stringify(expected) && !scheduledFor ? [] : [{ platform: target.platform, accountId: String(target.accountId?._id || target.accountId), ...actual, ...(scheduledFor ? { scheduledFor } : {}) }];
   });
-  return { ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null };
+  return { ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), ...(Object.keys(accountVariants).length ? { accountOverrides: accountVariants } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null };
 }
 const fingerprint = snapshot => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
 const latest = (db, projectId, postId) => db.prepare('SELECT * FROM post_approval_reviews WHERE project_id=? AND post_id=? ORDER BY rowid DESC LIMIT 1').get(projectId, postId);
@@ -66,7 +67,7 @@ function fields(body, allowed) {
 function queueItem(context, post, queue = null) {
   const snapshot = postSnapshot(context, post), review = latest(context.db, context.project.id, post.id);
   const status = submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
-  return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: snapshot.queueId || '', queueVersion: snapshot.queueVersion || '', content: snapshot.content, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
+  return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: snapshot.queueId || '', queueVersion: snapshot.queueVersion || '', content: snapshot.content, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, ...(snapshot.accountOverrides ? { accountOverrides: snapshot.accountOverrides } : {}), providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
 }
 async function publishingQueues(context) {
   const env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) }, profileId = String(context.project.zernioProfileId || '');

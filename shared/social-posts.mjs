@@ -144,12 +144,42 @@ export function normalizePostVariants(post, { strict = true } = {}) {
   return result;
 }
 
-export function resolveVariant(post, platform, assets = []) {
-  const variant = post.platformOverrides?.[platform] || {};
+export const validPostInstant = value => typeof value === 'string' && value.length <= 100 && /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/i.test(value) && Number.isFinite(Date.parse(value)) && new Date(value.slice(0, 10)).toISOString().slice(0, 10) === value.slice(0, 10);
+
+export function normalizeAccountVariants(post) {
+  if (post?.accountOverrides === undefined) return {};
+  if (!plain(post.accountOverrides) || Object.keys(post.accountOverrides).length > 50) fail('Account customizations must be an object keyed by connected account ID.');
+  return Object.fromEntries(Object.entries(post.accountOverrides).map(([accountId, variant]) => {
+    if (!accountId || accountId.length > 500 || /\s|[\u0000-\u001f]/u.test(accountId) || ['__proto__', 'constructor', 'prototype'].includes(accountId)) fail('A customization account ID is invalid.');
+    if (!plain(variant) || !own(PLATFORM_RULES, variant.platform) || Object.keys(variant).some(key => !['platform', 'content', 'mediaItems', 'assetId', 'options', 'scheduledAt'].includes(key))) fail('Account customization must include its platform and supported fields only.');
+    const { platform, scheduledAt, ...copy } = variant;
+    if (own(variant, 'scheduledAt') && scheduledAt !== '' && !validPostInstant(scheduledAt)) fail('An account schedule must be a valid date and time with a timezone.');
+    return [accountId, { platform, ...normalizePostVariants({ platformOverrides: { [platform]: copy } })[platform], ...(own(variant, 'scheduledAt') ? { scheduledAt } : {}) }];
+  }));
+}
+
+export function assertAccountSchedules(post, { publishNow = false, now = Date.now() } = {}) {
+  const timed = Object.values(normalizeAccountVariants(post)).filter(variant => variant.scheduledAt);
+  if (!timed.length) return;
+  if (publishNow || post.queueId || !validPostInstant(post.scheduledAt) || Date.parse(post.scheduledAt) <= now) fail('Separate account times require a future fixed post schedule; they cannot be used with Publish now or a queue.');
+  if (timed.some(variant => Date.parse(variant.scheduledAt) <= now)) fail('Every separate account time must be in the future.');
+}
+
+function explicitVariant(post, platform, accountId) {
+  const base = post.platformOverrides?.[platform] || {}, account = accountId ? post.accountOverrides?.[accountId] : undefined;
+  if (!account) return base;
+  if (account.platform !== platform) fail('An account customization does not match its connected platform.');
+  const merged = { ...base, ...account };
+  if (own(account, 'assetId') && !own(account, 'mediaItems')) delete merged.mediaItems;
+  return merged;
+}
+
+export function resolveVariant(post, platform, assets = [], accountId) {
+  const variant = explicitVariant(post, platform, accountId);
   const assetId = own(variant, 'mediaItems') ? undefined : own(variant, 'assetId') ? variant.assetId : Array.isArray(post.mediaItems) ? undefined : post.assetId;
   const asset = assetId ? assets.find(item => item.id === assetId) : undefined;
   const mediaItems = own(variant, 'mediaItems') ? variant.mediaItems : own(variant, 'assetId') ? asset ? [assetMedia(asset)] : [] : Array.isArray(post.mediaItems) ? post.mediaItems : asset ? [assetMedia(asset)] : [];
-  return { platform, content: own(variant, 'content') ? variant.content : typeof post.content === 'string' ? post.content : '', mediaItems, options: variant.options || {}, ...(assetId ? { assetId } : {}) };
+  return { platform, content: own(variant, 'content') ? variant.content : typeof post.content === 'string' ? post.content : '', mediaItems, options: variant.options || {}, ...(assetId ? { assetId } : {}), ...(variant.scheduledAt ? { scheduledAt: variant.scheduledAt } : {}) };
 }
 function assetMedia(asset) {
   return { type: asset.mimeType?.toLowerCase() === 'image/gif' ? 'gif' : asset.kind || asset.type, url: asset.deliveryUrl || asset.url,
@@ -160,11 +190,12 @@ function assetMedia(asset) {
 }
 
 export function buildPlatformEntry(post, platform, accountId, assets = []) {
-  const explicit = post.platformOverrides?.[platform] || {}, variant = resolveVariant(post, platform, assets);
+  const explicit = explicitVariant(post, platform, accountId), variant = resolveVariant(post, platform, assets, accountId);
   return { platform, accountId,
     ...(own(explicit, 'content') ? { customContent: variant.content } : {}),
     ...(own(explicit, 'mediaItems') || own(explicit, 'assetId') ? { customMedia: wireMediaItems(variant.mediaItems) } : {}),
-    ...(Object.keys(variant.options).length ? { platformSpecificData: wireOptions(platform, variant.options) } : {}),
+    ...(Object.keys(variant.options).length || own(post.accountOverrides?.[accountId] || {}, 'options') ? { platformSpecificData: wireOptions(platform, variant.options) } : {}),
+    ...(variant.scheduledAt ? { scheduledFor: variant.scheduledAt } : {}),
   };
 }
 function wireOptions(platform, options) {
@@ -196,16 +227,16 @@ export function captionLimitForVariant(variant) {
   return platform === 'telegram' && mediaItems.length ? 1024 : platform === 'tiktok' && mediaItems.some(item => item.type === 'image') ? 4000 : platform === 'snapchat' && options.contentType === 'saved_story' ? 45 : PLATFORM_RULES[platform]?.captionLimit || 0;
 }
 
-export function validatePostForPlatforms(post, platforms, { assets = [], requireMediaMetadata = false } = {}) {
+export function validatePostForPlatforms(post, platforms, { assets = [], requireMediaMetadata = false, accountId } = {}) {
   const errors = [], warnings = [], variants = {};
   const issue = (list, platform, field, message) => list.push({ platform, field, message });
-  try { normalizePostVariants(post); } catch (error) { issue(errors, '', 'platformOverrides', error.message); }
+  try { normalizePostVariants(post); normalizeAccountVariants(post); } catch (error) { issue(errors, '', 'platformOverrides', error.message); }
   if (!Array.isArray(platforms) || !platforms.length) issue(errors, '', 'platforms', 'Select at least one publishing platform.');
   for (const platform of new Set(platforms || [])) {
     const rule = PLATFORM_RULES[platform];
     if (!rule || !rule.supported) { issue(errors, platform, 'platform', rule?.notice || 'This platform is not supported for social posting.'); continue; }
     let variant;
-    try { variant = resolveVariant(post, platform, assets); variant.mediaItems = normalizeMediaItems(variant.mediaItems); normalizePlatformOptions(platform, variant.options, { required: true }); }
+    try { variant = resolveVariant(post, platform, assets, accountId); variant.mediaItems = normalizeMediaItems(variant.mediaItems); normalizePlatformOptions(platform, variant.options, { required: true }); }
     catch (error) { issue(errors, platform, 'options', error.message); continue; }
     variants[platform] = variant;
     const { content, mediaItems: media, options } = variant, videos = media.filter(item => item.type === 'video'), docs = media.filter(item => item.type === 'document'), images = media.filter(item => item.type === 'image');

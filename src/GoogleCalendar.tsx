@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 
-type CalendarEvent = { id: string; summary: string; description?: string; start: { date?: string; dateTime?: string }; end: { date?: string; dateTime?: string }; htmlLink?: string; managed?: boolean; projectId?: string };
+type CalendarEvent = { id: string; etag?: string; summary: string; description?: string; start: { date?: string; dateTime?: string }; end: { date?: string; dateTime?: string }; htmlLink?: string; managed?: boolean; projectId?: string; plan?: { collection: string; recordId: string; accountId?: string } };
+type PlanReview = { fingerprint: string; calendarId: string; projectId: string; upserts: (CalendarEvent & { action: string })[]; deletions: CalendarEvent[]; view: string };
 type Props = { projectId: string; isOperator: boolean; canWrite: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; fromDate?: string; toDate?: string; onEvents?: (events: CalendarEvent[]) => void };
 const dateInput = (value: Date) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 const localTime = (value: string) => { const date = new Date(value); if (!Number.isFinite(date.getTime())) return ''; date.setMinutes(date.getMinutes() - date.getTimezoneOffset()); return date.toISOString().slice(0, 16); };
@@ -11,18 +12,19 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
   const [status, setStatus] = useState<any>(null), [events, setEvents] = useState<CalendarEvent[]>([]), [loaded, setLoaded] = useState(false);
   const [from, setFrom] = useState(fromDate || dateInput(new Date(today.getFullYear(), today.getMonth(), 1))), [to, setTo] = useState(toDate || dateInput(new Date(today.getFullYear(), today.getMonth() + 1, 0)));
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [editing, setEditing] = useState<string | null>(null);
-  const blank = { summary: '', description: '', start: from + 'T12:00', end: from + 'T13:00', allDay: false };
+  const [review, setReview] = useState<PlanReview | null>(null), [deleting, setDeleting] = useState<(CalendarEvent & { calendarId: string }) | null>(null);
+  const blank = { summary: '', description: '', start: from + 'T12:00', end: from + 'T13:00', allDay: false, etag: '', calendarId: '' };
   const [draft, setDraft] = useState(blank), keys = useRef(new Map<string, string>()), callback = useRef(onEvents), active = useRef(true), scope = useRef('');
   callback.current = onEvents;
   const path = `/projects/${encodeURIComponent(projectId)}/calendar`, connected = Boolean(status?.configured && status?.mapped);
   const view = `${path}:${from}:${to}`; scope.current = view;
   useEffect(() => {
-    active.current = true; let current = true; setStatus(null); setEvents([]); setLoaded(false); setError(''); setNotice(''); setEditing(null); keys.current.clear();
+    active.current = true; let current = true; setStatus(null); setEvents([]); setLoaded(false); setError(''); setNotice(''); setEditing(null); setReview(null); setDeleting(null); keys.current.clear();
     request(`${path}/status`).then(result => { if (current) setStatus(result); }).catch(err => { if (current) setError(err.message || 'The calendar connection could not be read.'); });
     return () => { current = false; active.current = false; };
   }, [path, request]);
   useEffect(() => { if (fromDate) setFrom(fromDate); if (toDate) setTo(toDate); }, [fromDate, toDate]);
-  useEffect(() => { setEvents([]); setLoaded(false); callback.current?.([]); }, [from, to]);
+  useEffect(() => { setEvents([]); setLoaded(false); setReview(null); setDeleting(null); callback.current?.([]); }, [from, to]);
   function updateEvents(items: CalendarEvent[]) { if (active.current && scope.current === view) { setEvents(items); callback.current?.(items); } }
   async function action(run: () => Promise<void>) {
     if (busy) return; setBusy(true); setError(''); setNotice('');
@@ -46,28 +48,44 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
   }
   async function mapCalendar(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const calendarId = String(new FormData(event.currentTarget).get('calendarId') || '').trim();
-    await action(async () => { const result = await write('connection', 'POST', { calendarId }); setStatus({ ...status, ...result }); updateEvents([]); setLoaded(false); setEditing(null); setDraft(blank); setNotice(calendarId ? 'Shared calendar connected to this project.' : 'Calendar disconnected.'); });
+    await action(async () => { const result = await write('connection', 'POST', { calendarId }); setStatus({ ...status, ...result }); updateEvents([]); setLoaded(false); setEditing(null); setReview(null); setDeleting(null); setDraft(blank); setNotice(calendarId ? 'Shared calendar connected to this project.' : 'Calendar disconnected.'); });
   }
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await action(async () => {
-      const body = { ...draft, start: draft.allDay ? draft.start : new Date(draft.start).toISOString(), end: draft.allDay ? draft.end : new Date(draft.end).toISOString() };
+      const { etag, calendarId, ...fields } = draft;
+      const body = { ...fields, ...(editing ? { etag, calendarId } : {}), start: draft.allDay ? draft.start : new Date(draft.start).toISOString(), end: draft.allDay ? draft.end : new Date(draft.end).toISOString() };
       await write('events' + (editing ? '/' + encodeURIComponent(editing) : ''), editing ? 'PATCH' : 'POST', body);
       setEditing(null); setDraft(blank); setNotice('Event saved to Google Calendar.');
       await load();
     });
   }
-  async function syncPlan() {
+  async function reviewPlan() {
     await action(async () => {
       const plan = await request(path + '/plan');
       if (!active.current || scope.current !== view) return;
-      if (typeof plan.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(plan.fingerprint)) throw new Error('The campaign plan identity could not be read.');
-      const result = await write('sync', 'POST', { planFingerprint: plan.fingerprint });
-      setNotice(`Published campaign plan: ${result.created} events created, ${result.updated} updated.`); await load();
+      if (typeof plan.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(plan.fingerprint) || plan.projectId !== projectId || plan.calendarId !== status.calendarId || !Array.isArray(plan.upserts) || !Array.isArray(plan.deletions)) throw new Error('The campaign plan preview could not be read.');
+      setReview({ ...plan, view });
+    });
+  }
+  async function syncPlan() {
+    if (!canWrite || !review || review.view !== view || review.calendarId !== status.calendarId) return;
+    await action(async () => {
+      const result = await write('sync', 'POST', { planFingerprint: review.fingerprint });
+      setReview(null); setNotice(`Published campaign plan: ${result.created} events created, ${result.updated} updated, ${result.deleted || 0} obsolete app events removed.`); await load();
+    });
+  }
+  async function removeEvent() {
+    if (!canWrite || !deleting) return;
+    await action(async () => {
+      await write('events/' + encodeURIComponent(deleting.id), 'DELETE', { etag: deleting.etag, calendarId: deleting.calendarId });
+      updateEvents(events.filter(item => item.id !== deleting.id));
+      if (editing === deleting.id) { setEditing(null); setDraft(blank); }
+      setDeleting(null); setNotice('Google Calendar event deleted.');
     });
   }
   function edit(event: CalendarEvent) {
-    setEditing(event.id); setDraft({ summary: event.summary, description: event.description || '', allDay: Boolean(event.start.date), start: event.start.date || localTime(event.start.dateTime || ''), end: event.end.date || localTime(event.end.dateTime || '') });
+    setEditing(event.id); setDraft({ summary: event.summary, description: event.description || '', allDay: Boolean(event.start.date), start: event.start.date || localTime(event.start.dateTime || ''), end: event.end.date || localTime(event.end.dateTime || ''), etag: event.etag || '', calendarId: status.calendarId });
   }
   function when(value: { date?: string; dateTime?: string }) { return value.date || (value.dateTime ? new Date(value.dateTime).toLocaleString() : 'Time unavailable'); }
   return <section className="panel settings-panel">
@@ -79,11 +97,18 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
     </details>}
     {connected && <>
       <div className="form-grid"><label className="field"><span>From date</span><input type="date" value={from} required disabled={busy} onChange={event => setFrom(event.target.value)}/></label><label className="field"><span>Through date</span><input type="date" value={to} min={from} required disabled={busy} onChange={event => setTo(event.target.value)}/></label></div>
-      <div className="button-row"><button type="button" className="button" disabled={busy || !from || !to || to < from} onClick={() => action(load)}>{busy ? 'Working…' : 'Load Google events'}</button>{canWrite && <button type="button" className="button" disabled={busy} onClick={syncPlan}>Publish campaign plan to Google</button>}</div>
-      <p className="helper-note">Publishing the plan creates or updates dated campaigns, OOH placements, and scheduled posts. Existing unrelated events remain read-only. Calendar events do not publish social posts.</p>
+      <div className="button-row"><button type="button" className="button" disabled={busy || !from || !to || to < from} onClick={() => action(load)}>{busy ? 'Working…' : 'Load Google events'}</button>{canWrite && <button type="button" className="button" disabled={busy} onClick={reviewPlan}>Review campaign plan for Google</button>}</div>
+      <p className="helper-note">The plan covers this whole project, across all dates. Account customizations create separate events at each account’s publishing time. Publishing also removes obsolete plan events shown in the review; manually created and unrelated events are excluded. Calendar events do not publish social posts.</p>
+      {review && review.view === view && canWrite && <section className="helper-note" aria-label="Review Google Calendar plan"><h3>Review the exact Google changes</h3><p>Project: {review.projectId}<br/>Shared calendar: {review.calendarId}</p>
+        <p>{review.upserts.length} planned events to create or update; {review.deletions.length} obsolete app-managed plan events to delete.</p>
+        <ul>{review.upserts.map(event => <li key={event.id}><strong>{event.action === 'create' ? 'Create' : 'Update'} · {event.summary}</strong><br/>{when(event.start)} – {when(event.end)}{event.description && <p style={{ whiteSpace: 'pre-wrap' }}>{event.description}</p>}</li>)}</ul>
+        {!!review.deletions.length && <><h4>Delete these obsolete plan events from Google</h4><p>Only the following events created from this project’s campaign plan will be deleted.</p><ul>{review.deletions.map(event => <li key={event.id}><strong>{event.summary}</strong><br/>{when(event.start)} – {when(event.end)}<br/><small>Event ID: {event.id}</small></li>)}</ul></>}
+        <div className="button-row"><button type="button" className="button primary" disabled={busy} onClick={syncPlan}>{review.deletions.length ? 'Publish reviewed plan and delete listed obsolete events' : 'Publish reviewed plan to Google'}</button><button type="button" className="button" disabled={busy} onClick={() => setReview(null)}>Cancel review</button></div>
+      </section>}
+      {deleting && canWrite && <section className="helper-note" aria-label="Confirm Google event deletion"><h3>Delete this Google event?</h3><p>{deleting.summary}<br/>{when(deleting.start)} – {when(deleting.end)}<br/>Shared calendar: {deleting.calendarId}<br/>Event ID: {deleting.id}</p><div className="button-row"><button type="button" className="button danger" disabled={busy} onClick={removeEvent}>Delete this event from Google</button><button type="button" className="button" disabled={busy} onClick={() => setDeleting(null)}>Cancel</button></div></section>}
       {loaded && !events.length && <p>No Google events in this date range.</p>}
       {events.length > 0 && <div className="table-scroll"><table><thead><tr><th>Google event</th><th>Start</th><th>End</th><th>Actions</th></tr></thead><tbody>{events.map(event => { const managed = event.managed && event.projectId === projectId, link = providerLink(event.htmlLink); return <tr key={event.id}>
-        <td><strong>{event.summary}</strong><br/><small>{managed ? 'Managed by this project' : 'External calendar event'}{event.start.date ? ' · All day (exclusive end)' : ''}</small></td><td>{when(event.start)}</td><td>{when(event.end)}</td><td><div className="button-row">{link && <a href={link} target="_blank" rel="noopener noreferrer">Open in Google</a>}{managed && canWrite && <><button type="button" className="button" disabled={busy} onClick={() => edit(event)}>Edit</button><button type="button" className="button danger" disabled={busy} onClick={() => { if (window.confirm(`Delete “${event.summary}” from Google Calendar?`)) action(async () => { await write('events/' + encodeURIComponent(event.id), 'DELETE'); updateEvents(events.filter(item => item.id !== event.id)); if (editing === event.id) { setEditing(null); setDraft(blank); } setNotice('Google Calendar event deleted.'); }); }}>Delete</button></>}</div></td>
+        <td><strong>{event.summary}</strong><br/><small>{managed ? 'Managed by this project' : 'External calendar event'}{event.start.date ? ' · All day (exclusive end)' : ''}</small></td><td>{when(event.start)}</td><td>{when(event.end)}</td><td><div className="button-row">{link && <a href={link} target="_blank" rel="noopener noreferrer">Open in Google</a>}{managed && canWrite && <><button type="button" className="button" disabled={busy} onClick={() => edit(event)}>Edit</button><button type="button" className="button danger" disabled={busy} onClick={() => setDeleting({ ...event, calendarId: status.calendarId })}>Delete</button></>}</div></td>
       </tr>; })}</tbody></table></div>}
       {canWrite && <details open={editing ? true : undefined}><summary>{editing ? 'Edit project event' : 'Create a Google event'}</summary><form onSubmit={save}><fieldset disabled={busy}>
         <label className="field"><span>Event title *</span><input required maxLength={500} value={draft.summary} onChange={event => setDraft({ ...draft, summary: event.target.value })}/></label>

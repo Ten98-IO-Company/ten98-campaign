@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { postScheduleEntries } from '../shared/post-schedule.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -45,10 +46,11 @@ test('campaign money and counts preserve fractional amounts and distinguish abse
 test('post labels show a platform caption when shared content is empty and identify media-only posts', () => {
   const declaration = source().match(/^function postLabel\(post: Row\) \{[^\r\n]+\}$/m)?.[0];
   assert.ok(declaration);
-  const label = runInNewContext(declaration.replace('(post: Row)', '(post)').replace('(platform: string)', '(platform)') + '; postLabel');
+  const label = runInNewContext(stripTypeScriptTypes(declaration) + '; postLabel');
   assert.equal(label({ content: 'Shared caption', platforms: ['twitter'], platformOverrides: { twitter: { content: 'Custom caption' } } }), 'Shared caption');
   assert.equal(label({ content: '', platforms: ['instagram', 'twitter'], platformOverrides: { twitter: { content: 'Custom caption' } } }), 'Custom caption');
   assert.equal(label({ content: '', platforms: ['instagram'], platformOverrides: { instagram: { mediaItems: [] } } }), 'Media post');
+  assert.equal(label({ content: '', platforms: ['facebook'], accountOverrides: { page: { platform: 'facebook', content: 'Account-only caption' } } }), 'Account-only caption');
 });
 
 test('local campaign results distinguish missing metrics from zero and never display NaN rates', () => {
@@ -78,9 +80,9 @@ test('calendar dates stay on their intended day while timestamps follow the brow
 });
 
 test('upcoming posts exclude past and completed work and sort by instant without changing the source list', () => {
-  const declaration = source().match(/^function upcomingPosts\(posts: Row\[\], now = Date\.now\(\)\) \{[^\r\n]+\}$/m)?.[0];
+  const declaration = source().match(/^function upcomingPosts\([^\r\n]+\}$/m)?.[0];
   assert.ok(declaration, 'Keep the upcoming-post selector available for this regression check.');
-  const upcoming = runInNewContext(declaration.replace('(posts: Row[], now', '(posts, now') + '; upcomingPosts');
+  const upcoming = runInNewContext(stripTypeScriptTypes(declaration) + '; upcomingPosts', { postScheduleEntries });
   const now = Date.parse('2026-10-18T10:00:00Z');
   const posts = [
     { id: 'latest', status: 'scheduled', scheduledAt: '2026-10-18T13:00:00Z' },
@@ -98,6 +100,20 @@ test('upcoming posts exclude past and completed work and sort by instant without
   assert.deepEqual(Array.from(result, row => row.id), ['offset-earliest', 'submitted', 'latest']);
   assert.deepEqual(posts, before);
   assert.equal(upcoming([], now).length, 0);
+  const copy = { id: 'copies', status: 'scheduled', content: 'Shared', scheduledAt: '2026-10-18T14:00:00Z', platforms: ['facebook'], accounts: ['one', 'two'], accountOverrides: { two: { platform: 'facebook', content: 'Second account', scheduledAt: '2026-10-18T11:30:00Z' } } };
+  const copies = upcoming([copy], now); assert.deepEqual(Array.from(copies, row => [row.id, row.content, row.scheduledAt]), [['copies:two', 'Second account', '2026-10-18T11:30:00Z'], ['copies:one', 'Shared', '2026-10-18T14:00:00Z']]); assert.ok(copies.every(row => row.post === copy), 'Calendar and overview entries must open the original post, not a flattened copy.');
+});
+
+test('calendar overlay hides only exact verified copies of visible local post entries', () => {
+  const declaration = source().match(/^function calendarOverlayEvents\([^\r\n]+\}$/m)?.[0]; assert.ok(declaration);
+  const overlay = runInNewContext(stripTypeScriptTypes(declaration) + '; calendarOverlayEvents');
+  const post = { id: 'post', platforms: ['facebook'], content: 'Shared', scheduledAt: '2026-10-18T10:00:00Z', accounts: ['one', 'two'], accountOverrides: { two: { platform: 'facebook', content: 'Other caption', scheduledAt: '2026-10-18T11:00:00Z' } } };
+  const entries = postScheduleEntries(post), event = { id: 'google', managed: true, projectId: 'project', plan: { collection: 'posts', recordId: 'post', accountId: 'two' }, summary: 'Social · Other caption', start: { dateTime: '2026-10-18T15:00:00+04:00' }, end: { dateTime: '2026-10-18T11:30:00Z' } };
+  assert.equal(overlay([event], entries, 'project').length, 0);
+  for (const change of [{ managed: false }, { projectId: 'foreign' }, { plan: undefined }, { plan: { ...event.plan, recordId: 'deleted' } }, { plan: { ...event.plan, accountId: 'one' } }, { plan: { ...event.plan, collection: 'campaigns' } }, { summary: 'Manually edited caption' }, { start: { dateTime: '2026-10-18T12:00:00Z' } }, { end: { dateTime: '2026-10-18T12:00:00Z' } }]) assert.equal(overlay([{ ...event, ...change }], entries, 'project').length, 1, JSON.stringify(change));
+  assert.equal(overlay([event], [], 'project').length, 1, 'Orphan or currently invisible local entries stay visible.');
+  assert.equal(overlay([{ ...event, plan: { collection: 'posts', recordId: 'ordinary' }, summary: 'Social · Ordinary' }], postScheduleEntries({ id: 'ordinary', content: 'Ordinary', scheduledAt: event.start.dateTime }), 'project').length, 0);
+  assert.match(source(), /calendarPosts\.filter\(p =>/); assert.match(source(), /calendarOverlay\.filter\(event =>/);
 });
 
 test('asset previews select safe actual media and fall back after a thumbnail fails', () => {

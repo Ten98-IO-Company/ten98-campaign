@@ -145,7 +145,7 @@ test('an empty Drive collection is readable and syncable without erasing existin
   } finally { globalThis.fetch = originalFetch; db.close(); }
 });
 
-test('editing the visible post schedule moves existing per-account overrides to that time', async () => {
+test('editing the shared post schedule preserves each independently scheduled account time', async () => {
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'schedule-project', zernioProfileId: 'schedule-profile' }, writes = [];
   const copies = [{ platform: 'facebook', accountId: 'facebook-copy', status: 'pending', scheduledFor: '2070-01-01T10:00:00Z', customContent: 'Facebook caption' }, { platform: 'linkedin', accountId: 'linkedin-copy', status: 'pending', scheduledFor: '2070-01-01T11:00:00Z', customContent: 'LinkedIn caption' }];
   let remote = { _id: 'schedule-remote', status: 'scheduled', content: 'Shared caption', scheduledFor: '2070-01-01T09:00:00Z', platforms: copies }, post = { id: 'schedule-local', externalId: remote._id, zernioProfileId: project.zernioProfileId, content: remote.content, status: 'scheduled' };
@@ -168,8 +168,8 @@ test('editing the visible post schedule moves existing per-account overrides to 
     for (const [index, body] of [{}, { platformOverrides: { facebook: { content: 'New Facebook caption' }, linkedin: { content: 'New LinkedIn caption' } } }].entries()) {
       const result = await invoke(body, 'copy-schedule-' + index); assert.equal(result.status, 200, JSON.stringify(result.data));
       const payload = writes.at(-1); assert.equal(payload.scheduledFor, '2070-02-01T12:00:00.000Z');
-      assert.equal(payload.platforms?.length, copies.length, 'Existing account overrides must be replaced even when the caption variants were not edited.');
-      for (const target of payload.platforms) assert.equal(target.scheduledFor || payload.scheduledFor, payload.scheduledFor);
+      assert.equal(payload.platforms?.length, copies.length, 'Existing account overrides remain explicit when the shared schedule changes.');
+      for (const target of payload.platforms) assert.equal(target.scheduledFor, copies.find(copy => copy.accountId === target.accountId).scheduledFor, 'Only an explicit account-time edit replaces its separate time.');
       assert.deepEqual(payload.platforms.map(copy => copy.customContent), index === 0 ? copies.map(copy => copy.customContent) : ['New Facebook caption', 'New LinkedIn caption']);
     }
   } finally { globalThis.fetch = originalFetch; db.close(); }

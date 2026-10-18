@@ -76,6 +76,22 @@ test('recycling rejects unsupported platforms, generated seeds, invalid dates/va
   } finally { await f.close(); }
 });
 
+test('recurring review includes account-specific assets and blocks independent account times', async () => {
+  const f = await fixture();
+  try {
+    const asset = f.app.store.create(f.projectId, 'assets', { name: 'Account creative', kind: 'image', approval: 'pending', deliveryUrl: 'https://cdn.example.test/account.jpg' });
+    f.app.store.update(f.projectId, 'posts', f.local.id, { accountOverrides: { 'facebook-recycle': { platform: 'facebook', assetId: asset.id } } });
+    await f.request(`${f.project}/approvals/policy`, 'POST', { requireApproval: true });
+    assert.ok((await f.detail()).assets.some(row => row.id === asset.id && row.approval === 'pending'));
+    assert.equal((await f.review()).data.error.code, 'RECYCLING_ASSET_APPROVAL_REQUIRED');
+    f.app.store.update(f.projectId, 'assets', asset.id, { approval: 'approved' });
+    f.remote.platforms[0].scheduledFor = '2070-01-01T11:00:00Z';
+    assert.equal((await f.detail()).canEnable, false);
+    assert.equal((await f.review()).data.error.code, 'RECYCLING_UNAVAILABLE');
+    assert.equal(f.writes().length, 0);
+  } finally { await f.close(); }
+});
+
 test('full scoped history enforces ten active cycles, rejects incomplete counts and does not mistake a copied post for a new seed', async () => {
   const f = await fixture();
   try {

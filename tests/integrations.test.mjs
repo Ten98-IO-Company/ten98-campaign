@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { generateKeyPairSync, verify } from 'node:crypto';
-import { handleIntegration, providerRequest, scopedAccounts } from '../server/integrations.mjs';
+import { handleIntegration, providerRequest, scopedAccounts, adAccounts } from '../server/integrations.mjs';
 
 test('shared connected-account reads reject unreadable labels and activity flags while preserving optional values and profile scope', async () => {
   const base = { _id: 'account-a', platform: 'whatsapp', profileId: 'profile-a' }, read = account => scopedAccounts(async () => ({ accounts: [account] }), 'profile-a');
@@ -12,6 +12,15 @@ test('shared connected-account reads reject unreadable labels and activity flags
   for (const value of ['false', 0, {}]) await assert.rejects(read({ ...base, isActive: value }), error => error.status === 502 && error.code === 'INVALID_PROVIDER_RESPONSE');
   for (const optional of [{}, { displayName: null, username: null, name: null, isActive: null }, { displayName: 'Business', username: '', name: 'Legacy label', isActive: false }]) assert.deepEqual(await read({ ...base, ...optional }), [{ ...base, ...optional }]);
   assert.deepEqual(await scopedAccounts(async () => ({ accounts: [{ ...base, profileId: 'foreign-profile', displayName: {} }, base] }), 'profile-a'), [base]);
+});
+
+test('advertising membership rejects stale quota fallbacks and malformed freshness metadata for every shared caller', async () => {
+  const accounts = [{ id: '1234567890', selectable: true }];
+  for (const value of [{ accounts }, { accounts, stale: false, cachedAt: null }, { accounts, stale: false, cachedAt: '2026-10-18T10:00:00Z' }]) {
+    assert.deepEqual(await adAccounts(async (path, query) => { assert.equal(path, '/ads/accounts'); assert.deepEqual(query, { accountId: 'connection', inScopeOnly: true }); return value; }, 'connection'), value);
+  }
+  await assert.rejects(adAccounts(async () => ({ accounts, stale: true, cachedAt: '2026-10-01T10:00:00Z' }), 'connection'), error => error.status === 503 && error.code === 'AD_ACCOUNT_MEMBERSHIP_STALE' && !error.uncertain);
+  for (const value of [null, { accounts, stale: 'false' }, { accounts, stale: 0 }, { accounts, cachedAt: '2026-02-30T10:00:00Z' }]) await assert.rejects(adAccounts(async () => value, 'connection'), error => error.status === 502 && error.code === 'INVALID_PROVIDER_RESPONSE');
 });
 
 test('social lifecycle updates, cancellation, failed retry, published-copy edits and removal stay scoped and durable', async () => {
@@ -345,6 +354,7 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
   const accounts = ['metaads', 'googleads', 'linkedinads', 'tiktokads', 'xads', 'openaiads', 'redditads', 'pinterestads', 'facebook'].map(platform => ({ _id: platform, platform, profileId: 'profile-a', isActive: true }));
   const store = { create(projectId, collection, data) { const value = { ...data, projectId, collection, id: `local-${records.length}` }; records.push(value); return value; }, get(projectId, collection, id) { return records.find(item => item.id === id && item.projectId === projectId && item.collection === collection); }, list(projectId, collection) { return records.filter(item => item.projectId === projectId && item.collection === collection); }, update(projectId, collection, id, data) { const value = this.get(projectId, collection, id); Object.assign(value, data); return value; }, activity() {} };
   const campaign = { platformCampaignId: 'native-campaign', platform: 'facebook', profileId: 'profile-a', currency: 'AED', status: 'paused', adSets: [{ platformAdSetId: 'native-set', adSetName: 'Website visitors', budget: { amount: 20, type: 'daily' } }] };
+  const leadForm = { id: 'lead-form', name: 'Verified inquiry form', status: 'ACTIVE', privacy_policy_url: 'https://example.com/privacy', questions: [{ type: 'EMAIL' }] };
   let currentAd = { _id: 'ad-in-project', platform: 'facebook', profileId: 'profile-a', platformCampaignId: campaign.platformCampaignId, status: 'paused', configuredStatus: 'ACTIVE', creative: {} }, uncertainCreate = false, confirmStatus = true, mappedProfile = 'profile-a', remapAt = '';
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target), payload = options.body ? JSON.parse(options.body) : undefined;
@@ -352,6 +362,8 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     let result;
     if (url.pathname === '/api/v1/accounts') result = { accounts: [...accounts, { _id: 'outside', platform: 'metaads', profileId: 'profile-b' }] };
     else if (url.pathname === '/api/v1/ads/accounts') result = { accounts: [{ id: 'native-account', currency: 'AED', selectable: true }] };
+    else if (url.pathname === '/api/v1/ads/lead-forms') result = { status: 'success', forms: [leadForm], pagination: { hasMore: false, cursor: null } };
+    else if (url.pathname === '/api/v1/ads/lead-forms/lead-form') result = { status: 'success', form: leadForm };
     else if (url.pathname === '/api/v1/ads/create' || url.pathname === '/api/v1/ads/boost') {
       assert.equal(payload.status, 'PAUSED'); assert.equal(payload.platform, undefined); assert.ok(options.headers['Idempotency-Key']);
       if (uncertainCreate) throw new Error('Connection timed out after upload');
@@ -414,6 +426,9 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     const conversion = { ...base, goal: 'conversions', promotedObject: { pixelId: '123', customEventType: 'PURCHASE' }, targeting: { ageMin: 25, ageMax: 55, gender: 'female', languages: ['en'] } };
     assert.equal((await invoke('ads/create', conversion)).status, 200); assert.deepEqual(writes.at(-1).payload.targeting, conversion.targeting);
     const lead = { ...base, goal: 'lead_generation', leadGenFormId: 'lead-form' }; delete lead.linkUrl;
+    assert.equal((await invoke('ads/create', lead)).status, 400, 'A manually supplied ID without a reviewed form cannot create an ad.');
+    const reviewedForm = (await invoke('leads/metaads/forms/lead-form?adAccountId=native-account')).data.form;
+    lead.leadFormReview = { id: reviewedForm.id, name: reviewedForm.name, version: reviewedForm.version };
     assert.equal((await invoke('ads/create', lead)).status, 200); assert.equal(writes.at(-1).payload.leadGenFormId, 'lead-form');
     assert.equal((await invoke('ads/create', { ...clean('openai', 'openaiads'), imageUrl: base.imageUrl, goal: 'awareness', bidStrategy: 'LOWEST_COST_WITH_BID_CAP', bidAmount: 1.5 })).status, 200);
 

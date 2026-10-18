@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 
 type Connection = { _id: string; platform: string; displayName?: string; username?: string; isActive?: boolean };
 type AdAccount = { id: string; name: string; currency?: string; selectable?: boolean; minimumDailyBudget?: number };
+type LeadForm = { id: string; name: string; version: string; status: string; privacyPolicyUrl: string; headline?: string; description?: string; questions: { key: string; label: string; type: string; options: { key: string; value: string }[]; required?: boolean }[]; consents?: { description: string; required: boolean }[] };
 type Props = { request: (path: string, body?: any) => Promise<any>; posts?: any[]; initialDraft?: Record<string, any>; onCreated: () => void; onCancel: () => void };
 const networks: Record<string, string> = { facebook: 'facebook', instagram: 'facebook', metaads: 'facebook', googleads: 'google', pinterest: 'pinterest', pinterestads: 'pinterest', tiktokads: 'tiktok', tiktok: 'tiktok', linkedinads: 'linkedin', linkedin: 'linkedin', xads: 'twitter', twitter: 'twitter', openaiads: 'openai', redditads: 'reddit' };
 const labels: Record<string, string> = { facebook: 'Meta', google: 'Google', pinterest: 'Pinterest', tiktok: 'TikTok', linkedin: 'LinkedIn', twitter: 'X', openai: 'ChatGPT', reddit: 'Reddit' };
@@ -15,6 +16,7 @@ function Field({ label, multiline, ...props }: { label: string; multiline?: bool
   return <label className="field"><span>{label}{props.required && <span className="required"> *</span>}</span>{multiline ? <textarea name={props.name} required={props.required} maxLength={props.maxLength} placeholder={props.placeholder} defaultValue={props.defaultValue as string}/> : <input {...props}/>}</label>;
 }
 const lines = (value = '') => value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+const readableLeadForm = (value: any): value is LeadForm => value && typeof value.id === 'string' && !!value.id && typeof value.name === 'string' && !!value.name && typeof value.version === 'string' && /^[a-f0-9]{64}$/.test(value.version) && typeof value.status === 'string' && typeof value.privacyPolicyUrl === 'string' && Array.isArray(value.questions);
 
 export default function AdComposer({ request, posts = [], initialDraft, onCreated, onCancel }: Props) {
   const requester = useRef(request); requester.current = request;
@@ -22,6 +24,8 @@ export default function AdComposer({ request, posts = [], initialDraft, onCreate
   const [accountId, setAccountId] = useState(''), [adAccountId, setAdAccountId] = useState(''), [format, setFormat] = useState('image'), [mode, setMode] = useState('create'), [goal, setGoal] = useState('traffic'), [cards, setCards] = useState(2);
   const [budgetType, setBudgetType] = useState('daily'), [bidding, setBidding] = useState('automatic'), [validation, setValidation] = useState('');
   const [pixels, setPixels] = useState<{ id: string; name: string; status: string }[]>([]), [pixelId, setPixelId] = useState(''), [pixelBusy, setPixelBusy] = useState(false), [pixelsLoaded, setPixelsLoaded] = useState(false), [pixelError, setPixelError] = useState('');
+  const [leadForms, setLeadForms] = useState<LeadForm[]>([]), [leadForm, setLeadForm] = useState<LeadForm | null>(null), [leadPage, setLeadPage] = useState<{ hasMore: boolean; cursor?: string | null } | null>(null), [leadBusy, setLeadBusy] = useState(false), [leadLoaded, setLeadLoaded] = useState(false), [leadError, setLeadError] = useState(''), [leadUnavailable, setLeadUnavailable] = useState(false), [manualLeadId, setManualLeadId] = useState(''), [manualLead, setManualLead] = useState(false), [leadReview, setLeadReview] = useState<string | false>(false);
+  const leadRead = useRef(0), leadSelection = useRef<object | null>(null);
   const pixelRead = useRef(0), pixelScope = JSON.stringify([accountId, adAccountId]), currentPixelScope = useRef(pixelScope); currentPixelScope.current = pixelScope;
   const identity = JSON.stringify([accountId, adAccountId, format, mode]), currentIdentity = useRef(identity), mounted = useRef(true); currentIdentity.current = identity;
   const isCurrent = () => mounted.current && currentIdentity.current === identity;
@@ -38,6 +42,8 @@ export default function AdComposer({ request, posts = [], initialDraft, onCreate
     return Array.isArray(value) ? value.join('\n') : typeof value === 'string' ? value : '';
   };
   const assets = platform === 'google' && !['search', 'display'].includes(format), carousel = ['carousel', 'demand_carousel'].includes(format), video = ['video', 'demand_video'].includes(format), boosting = mode === 'boost';
+  const needsLeadForm = !boosting && goal === 'lead_generation' && ['facebook', 'linkedin'].includes(platform), leadIdentity = JSON.stringify([accountId, adAccountId, platform, goal, mode]), leadScope = useRef({ identity: leadIdentity }); if (leadScope.current.identity !== leadIdentity) leadScope.current = { identity: leadIdentity };
+  const leadView = leadScope.current, currentLeadView = () => mounted.current && leadScope.current === leadView, usableLeadForm = (row: LeadForm) => row.status === (platform === 'linkedin' ? 'PUBLISHED' : 'ACTIVE');
   const canBoost = connection && ['facebook', 'instagram', 'twitter', 'linkedin', 'tiktok', 'pinterest', 'redditads'].includes(connection.platform);
   const publishedPosts = posts.filter(post => post.externalId && !post.sample && ['published', 'partial'].includes(post.status) && (!post.providerResults?.length ? post.status === 'published' : post.providerResults.some((copy: any) => (platform === 'reddit' ? copy.platform === 'reddit' : String(copy.accountId?._id || copy.accountId) === accountId) && copy.status === 'published' && !(copy.platform === 'tiktok' && (copy.platformSpecificData?.isDraft || copy.platformSpecificData?.draft)))));
   const goals = ['traffic', 'awareness', ...(!['openai', 'reddit'].includes(platform) ? ['engagement'] : []), ...(['facebook', 'tiktok', 'linkedin', 'reddit'].includes(platform) && video && !boosting || platform === 'reddit' && boosting ? ['video_views'] : []), ...(['facebook', 'tiktok', 'openai', 'reddit'].includes(platform) && (!boosting || platform === 'reddit') ? ['conversions'] : []), ...(['facebook', 'linkedin'].includes(platform) && !boosting || platform === 'reddit' && (boosting || format !== 'text') ? ['lead_generation'] : [])];
@@ -54,6 +60,34 @@ export default function AdComposer({ request, posts = [], initialDraft, onCreate
     return () => { active = false; };
   }, [accountId, retry]);
   useEffect(() => { pixelRead.current++; setPixels([]); setPixelsLoaded(false); setPixelId(''); setPixelBusy(false); setPixelError(''); }, [accountId, adAccountId]);
+  useEffect(() => {
+    leadRead.current++; leadSelection.current = null; setLeadForms([]); setLeadForm(null); setLeadPage(null); setLeadBusy(false); setLeadLoaded(false); setLeadError(''); setLeadUnavailable(false); setManualLeadId(''); setManualLead(false); setLeadReview(false);
+    if (needsLeadForm && accountId && adAccountId) void loadLeadForms();
+  }, [leadIdentity]);
+  async function loadLeadForms(cursor = '') {
+    if (!needsLeadForm || !accountId || !adAccountId || !currentLeadView()) return;
+    const read = ++leadRead.current; setLeadBusy(true); setLeadError(''); setLeadUnavailable(false);
+    if (!cursor) { leadSelection.current = null; setLeadForm(null); setLeadReview(false); }
+    try {
+      const result = await requester.current(`leads/${encodeURIComponent(accountId)}/forms?adAccountId=${encodeURIComponent(adAccountId)}${cursor ? '&cursor=' + encodeURIComponent(cursor) : ''}`);
+      if (!currentLeadView() || read !== leadRead.current) return;
+      if (!Array.isArray(result.forms) || !result.forms.every(readableLeadForm) || typeof result.pagination?.hasMore !== 'boolean' || result.pagination.hasMore && (typeof result.pagination.cursor !== 'string' || !result.pagination.cursor)) throw new Error('The form list could not be read. Refresh before choosing a form.');
+      setLeadForms(previous => cursor ? [...new Map([...previous, ...result.forms].map(row => [row.id, row])).values()] : result.forms); setLeadPage(result.pagination); setLeadLoaded(true);
+    } catch (failure) {
+      if (currentLeadView() && read === leadRead.current) { const problem = failure as Error & { code?: string; status?: number }; setLeadError(problem.message || 'Lead forms could not be loaded.'); setLeadUnavailable(['PROVIDER_UNAVAILABLE', 'PROVIDER_RATE_LIMIT'].includes(problem.code || '') || problem.code === 'PROVIDER_REJECTED' && !!problem.status && problem.status >= 500); }
+    } finally { if (currentLeadView() && read === leadRead.current) setLeadBusy(false); }
+  }
+  async function previewLeadForm(id: string, manual = false) {
+    if (!needsLeadForm || !accountId || !adAccountId || !id.trim() || !currentLeadView()) return;
+    const read = ++leadRead.current; leadSelection.current = null; setLeadBusy(true); setLeadError(''); setLeadForm(null); setLeadReview(false); setManualLead(manual);
+    try {
+      const result = await requester.current(`leads/${encodeURIComponent(accountId)}/forms/${encodeURIComponent(id.trim())}?adAccountId=${encodeURIComponent(adAccountId)}`);
+      if (!currentLeadView() || read !== leadRead.current) return;
+      if (!readableLeadForm(result.form) || result.form.id !== id.trim()) throw new Error('The selected form preview could not be read. Refresh and choose it again.');
+      leadSelection.current = leadView; setLeadForm(result.form);
+    } catch (failure) { if (currentLeadView() && read === leadRead.current) setLeadError((failure as Error).message || 'The form could not be verified.'); }
+    finally { if (currentLeadView() && read === leadRead.current) setLeadBusy(false); }
+  }
   async function loadPixels() {
     if (!accountId || !adAccountId || platform !== 'reddit' || pixelBusy) return;
     const read = ++pixelRead.current; setPixelBusy(true); setPixelError('');
@@ -109,7 +143,10 @@ export default function AdComposer({ request, posts = [], initialDraft, onCreate
           if (platform === 'facebook') payload.advantageAudience = values.advantageAudience === 'on' ? 1 : 0;
           if (platform === 'pinterest' && values.boardId?.trim()) payload.boardId = values.boardId.trim();
           if (platform === 'linkedin' && values.organizationId?.trim()) payload.organizationId = values.organizationId.trim();
-          if (goal === 'lead_generation' && platform !== 'reddit') payload.leadGenFormId = values.leadGenFormId.trim();
+          if (goal === 'lead_generation' && platform !== 'reddit') {
+            if (!leadForm || leadSelection.current !== leadView || !usableLeadForm(leadForm) || leadReview !== leadForm.version || !currentLeadView()) throw new Error('Choose and review a verified lead form before creating the ad.');
+            payload.leadGenFormId = leadForm.id; payload.leadFormReview = { id: leadForm.id, name: leadForm.name, version: leadForm.version };
+          }
           if (goal === 'conversions' && platform !== 'reddit' && (values.pixelId?.trim() || values.customEventType?.trim())) payload.promotedObject = { ...(values.pixelId?.trim() ? { pixelId: values.pixelId.trim() } : {}), ...(values.customEventType?.trim() ? { customEventType: values.customEventType.trim() } : {}) };
           if (platform === 'openai') {
             if (goal === 'awareness' || budgetType === 'lifetime' || bidding === 'fixed') { payload.bidStrategy = 'LOWEST_COST_WITH_BID_CAP'; payload.bidAmount = Number(values.bidAmount); }
@@ -149,7 +186,7 @@ export default function AdComposer({ request, posts = [], initialDraft, onCreate
           {platform === 'facebook' && <label className="checkbox-label"><input type="checkbox" name="advantageAudience"/>Allow Meta to expand your audience with Advantage</label>}
           {platform === 'linkedin' && <Field label="LinkedIn Company Page ID (optional if owned by the ad account)" name="organizationId" placeholder="123456"/>}
           {platform === 'pinterest' && <Field label="Pinterest board ID (optional)" name="boardId" maxLength={200}/>}
-          {goal === 'lead_generation' && platform !== 'reddit' && <Field label="Existing lead form ID" name="leadGenFormId" required/>}
+          {needsLeadForm && <section className="helper-note" aria-label="Lead form selection"><h3>Lead form</h3><p className="field-help">{platform === 'linkedin' ? 'Choose a published form owned by this advertising account. Use a LinkedIn Ads connection for form access.' : 'Choose an active form from the Page used by this connection. Meta forms may be shared by advertising accounts using that Page.'}</p><label className="field"><span>Verified forms *</span><select value={leadSelection.current === leadView && leadForm && leadForms.some(row => row.id === leadForm.id) ? leadForm.id : ''} disabled={leadBusy || !adAccountId} onChange={event => { if (event.target.value) void previewLeadForm(event.target.value); else { leadSelection.current = null; setLeadForm(null); setLeadReview(false); } }}><option value="">{leadBusy ? 'Loading or verifying forms…' : 'Choose a lead form'}</option>{leadForms.map(row => <option key={row.id} value={row.id} disabled={!usableLeadForm(row)}>{row.name} · {row.status}</option>)}</select></label><div className="button-wrap"><button className="button" type="button" disabled={leadBusy || !adAccountId} onClick={() => loadLeadForms()}>Refresh forms</button>{leadPage?.hasMore && <button className="button" type="button" disabled={leadBusy} onClick={() => loadLeadForms(leadPage.cursor || '')}>Load more forms</button>}</div>{leadLoaded && !leadForms.length && <p>No forms were returned. Create a form in Leads or in the provider’s builder, then refresh.</p>}{leadError && <p className="alert" role="alert">{leadError}</p>}{leadUnavailable && <div><p className="field-help">The provider’s form list is unavailable. A known form ID still needs a verified preview before it can be used; an outage cannot skip ownership or status checks.</p><label className="field"><span>Known form ID</span><input value={manualLeadId} maxLength={500} onChange={event => { setManualLeadId(event.target.value); leadSelection.current = null; setLeadForm(null); setLeadReview(false); }}/></label><button className="button" type="button" disabled={leadBusy || !manualLeadId.trim()} onClick={() => previewLeadForm(manualLeadId, true)}>Preview and verify this ID</button></div>}{leadForm && leadSelection.current === leadView && <div><h4>{leadForm.name}</h4><p>Form {leadForm.id} · {leadForm.status}</p>{leadForm.headline && <p>{leadForm.headline}</p>}{leadForm.description && <p>{leadForm.description}</p>}<label className="field"><span>Privacy policy URL</span><input readOnly value={leadForm.privacyPolicyUrl || 'Not reported by provider'}/></label><ul>{leadForm.questions.map(row => <li key={row.key}>{row.label} · {row.type}{row.required ? ' · Required' : ''}{row.options?.length > 0 && <p>{row.options.map(choice => choice.value).join(' / ')}</p>}</li>)}</ul>{leadForm.consents?.map((row, index) => <p key={index}>{row.description}{row.required ? ' · Required consent' : ' · Optional consent'}</p>)}{!usableLeadForm(leadForm) && <p className="alert">This form cannot be attached to a new ad. Choose an active Meta form or published LinkedIn form.</p>}<label className="checkbox-label"><input type="checkbox" checked={leadReview === leadForm.version} disabled={!usableLeadForm(leadForm) || leadBusy} onChange={event => setLeadReview(event.target.checked ? leadForm.version : false)}/>{manualLead ? 'I reviewed this manually entered ID’s verified form, account, status and privacy policy.' : 'I reviewed this form, advertising account, status and privacy policy.'}</label><p className="field-help">The form is checked again before ad creation. Submitted leads require a separate contact import; this selection grants no local marketing permission.</p></div>}</section>}
           {goal === 'conversions' && platform !== 'reddit' && <>{platform !== 'openai' && <Field label="Tracking pixel ID" name="pixelId" required/>}<Field label={platform === 'openai' ? 'Conversion event ID or name (optional)' : 'Conversion event'} name="customEventType" required={platform !== 'openai'} placeholder={platform === 'tiktok' ? 'SHOPPING' : 'PURCHASE'}/><p className="field-help">Use a conversion event configured for this advertising account.</p></>}
           {platform === 'openai' && <><label className="field"><span>Bidding</span><select value={goal === 'awareness' || budgetType === 'lifetime' ? 'fixed' : bidding} disabled={goal === 'awareness' || budgetType === 'lifetime'} onChange={event => setBidding(event.target.value)}><option value="automatic">Maximize results</option><option value="fixed">Fixed bid</option></select></label>{(goal === 'awareness' || budgetType === 'lifetime' || bidding === 'fixed') && <Field label={`Fixed bid (${currency || 'account currency'})`} name="bidAmount" type="number" min={step} step={step} required/>}<Field label="Click tracking parameters (optional, key=value per line)" name="urlTags" multiline placeholder={'utm_source=chatgpt\nutm_campaign={campaign_id}\nclick_id={oppref}'}/><p className="field-help">Supported click macros: {'{campaign_id}'}, {'{ad_group_id}'}, {'{ad_id}'} and {'{oppref}'}. Put macros here; ChatGPT does not expand them in the destination URL.</p></>}
           {!['search', 'text'].includes(format) && <p className="field-help">Media links must deliver public files over HTTPS. Google Drive preview links cannot be used as ad media.{video && platform !== 'google' && ' Video processing may take a few minutes; keep this dialog open.'}</p>}
@@ -159,6 +196,6 @@ export default function AdComposer({ request, posts = [], initialDraft, onCreate
     {validation && <p role="status">{validation}</p>}
     {error && <div className="alert" role="alert">{error}</div>}
     {error && !busy && (!connections.length || (accountId && !adAccounts.length)) && <button type="button" className="button" onClick={() => setRetry(value => value + 1)}>Reload accounts</button>}
-    <div className="modal-actions">{!boosting && (platform === 'openai' || platform === 'google' && assets) && <button className="button" data-action="validate" disabled={busy || loading || loadingAds || !adAccount || adAccount.selectable === false || !currency}>Validate without creating</button>}<button type="button" className="button" disabled={busy} onClick={onCancel}>Cancel</button><button className="button primary" disabled={busy || loading || loadingAds || !adAccount || adAccount.selectable === false || !currency}>{busy ? 'Working with provider…' : boosting ? 'Create paused boost' : 'Create paused ad'}</button></div>
+    <div className="modal-actions">{!boosting && (platform === 'openai' || platform === 'google' && assets) && <button className="button" data-action="validate" disabled={busy || loading || loadingAds || !adAccount || adAccount.selectable === false || !currency}>Validate without creating</button>}<button type="button" className="button" disabled={busy} onClick={onCancel}>Cancel</button><button className="button primary" disabled={busy || loading || loadingAds || !adAccount || adAccount.selectable === false || !currency || needsLeadForm && (leadBusy || !leadForm || leadSelection.current !== leadView || !usableLeadForm(leadForm) || leadReview !== leadForm.version)}>{busy ? 'Working with provider…' : boosting ? 'Create paused boost' : 'Create paused ad'}</button></div>
   </form>;
 }
