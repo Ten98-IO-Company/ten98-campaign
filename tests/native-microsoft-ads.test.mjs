@@ -27,7 +27,9 @@ async function fixture() {
     const path = url.pathname.slice('/CampaignManagement/v13'.length), nextId = () => String(++counter);
     if (path === '/Campaigns/QueryByAccountId') { assert.equal(body.AccountId, '100'); return Response.json({ Campaigns: state.campaigns }); }
     if (path === '/Campaigns' && options.method === 'PUT') { Object.assign(state.campaigns.find(row => row.Id === body.Campaigns[0].Id), body.Campaigns[0]); return Response.json({ PartialErrors: [] }); }
-    if (path === '/Campaigns') { assert.equal(body.Campaigns[0].Status, 'Paused'); assert.equal(body.Campaigns[0].CampaignType, 'Search'); assert.deepEqual(body.Campaigns[0].BiddingScheme, { Type: 'MaxClicksBiddingScheme', MaxCpc: { Amount: 2 } }); const row = { Id: nextId(), BudgetId: '0', ...body.Campaigns[0] }; state.campaigns.push(row); return Response.json({ CampaignIds: [row.Id], PartialErrors: [] }); }
+    // Microsoft's REST SDK defaults to MaxClicks, while accepting both that and the legacy SOAP name on reads:
+    // https://github.com/BingAds/BingAds-Python-SDK/blob/main/openapi_client/models/campaign/bidding_scheme.py
+    if (path === '/Campaigns') { assert.equal(body.Campaigns[0].Status, 'Paused'); assert.equal(body.Campaigns[0].CampaignType, 'Search'); assert.deepEqual(body.Campaigns[0].BiddingScheme, { Type: 'MaxClicks', MaxCpc: { Amount: 2 } }); const row = { Id: nextId(), BudgetId: '0', ...body.Campaigns[0] }; state.campaigns.push(row); return Response.json({ CampaignIds: [row.Id], PartialErrors: [] }); }
     if (path === '/AdGroups') { const row = { Id: nextId(), ...body.AdGroups[0] }; state.groups.push(row); return Response.json({ AdGroupIds: [row.Id], PartialErrors: [] }); }
     if (path === '/Ads') { if (state.mode === 'lost-ad-receipt') throw new Error('PRIVATE_PROVIDER_LOST_ACK'); const row = { Id: nextId(), ...body.Ads[0] }; state.ads.push(row); return Response.json({ AdIds: [row.Id], PartialErrors: [] }); }
     if (path === '/Keywords') { const created = body.Keywords.map(row => ({ Id: nextId(), ...row })); state.keywords.push(...created); return Response.json({ KeywordIds: created.map(row => row.Id), PartialErrors: [] }); }
@@ -55,6 +57,9 @@ test('native Microsoft search creates a paused campaign with exact targeting, re
     assert.equal((await f.request(otherPrefix + '/connection', 'POST', { customerId: '10', accountId: '100', confirmed: true })).status, 409);
     const key = randomUUID(), created = await f.request(f.prefix + '/campaigns', 'POST', input, key); assert.equal(created.status, 200, JSON.stringify(created.data));
     assert.equal(created.data.providerCampaign.status, 'Paused'); assert.equal(created.data.campaign.nativeProvider, 'microsoft'); assert.equal(f.state.campaigns.length, 1);
+    assert.equal(created.data.providerCampaign.bidding, 'MaxClicksBiddingScheme', 'REST MaxClicks readback must confirm the configured bidding strategy.');
+    f.state.campaigns[0].BiddingScheme.Type = 'MaxClicksBiddingScheme';
+    assert.equal((await f.request(f.prefix + '/campaigns')).data.campaigns[0].bidding, created.data.providerCampaign.bidding, 'Legacy SOAP names remain readable.');
     assert.deepEqual(f.state.ads[0].Headlines.map(row => row.Asset.Text), input.headlines); assert.deepEqual(f.state.ads[0].Descriptions.map(row => row.Asset.Text), input.descriptions); assert.deepEqual(f.state.keywords.map(row => [row.Text, row.MatchType]), input.keywords.map(value => [value, input.matchType])); assert.equal(f.state.locations[0].Criterion.LocationId, '190');
     assert.equal((await f.request(f.prefix + '/campaigns', 'POST', input, key)).status, 200); assert.equal(f.state.campaigns.length, 1);
     const campaignId = created.data.providerCampaign.id, updated = await f.request(f.prefix + '/campaigns/' + campaignId, 'POST', { status: 'Active', dailyBudget: 25, confirmed: true }, randomUUID());
@@ -115,4 +120,24 @@ test('a concurrent campaign list can rotate its token without interrupting pause
     assert.equal(f.state.campaigns.length, 1); assert.equal(f.app.store.list(f.projectId, 'campaigns').length, 1);
     assert.match(f.env.MICROSOFT_ADS_REFRESH_TOKEN, /^ROTATED_/);
   } finally { clearTimeout(timer); release?.(); await create?.catch(() => {}); await f.close(); }
+});
+
+test('native Microsoft serializes campaign status and budget changes through provider readback', async () => {
+  const f = await fixture(); let release, heldRequest, timer;
+  try {
+    await f.map(); const created = await f.request(f.prefix + '/campaigns', 'POST', input, randomUUID()); assert.equal(created.status, 200);
+    const campaignId = created.data.providerCampaign.id, route = f.prefix + '/campaigns/' + campaignId;
+    let reached; const started = new Promise(resolve => { reached = resolve; }), held = new Promise(resolve => { release = resolve; });
+    f.state.hook = async (url, body) => { if (url.pathname === '/CampaignManagement/v13/Campaigns' && body.Campaigns?.[0].Status === 'Active') { f.state.hook = null; reached(); await held; } };
+    const key = randomUUID(); heldRequest = f.request(route, 'POST', { status: 'Active', confirmed: true }, key);
+    await Promise.race([started, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Microsoft held update was not reached.')), 5000); })]); clearTimeout(timer);
+    const writes = () => f.calls.filter(row => row.method === 'PUT').length, before = writes();
+    for (const body of [{ status: 'Paused', confirmed: true }, { dailyBudget: 30, confirmed: true }]) {
+      const blocked = await f.request(route, 'POST', body, randomUUID()); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'PROVIDER_RESOURCE_BUSY'); assert.equal(blocked.data.operation, undefined);
+    }
+    assert.equal(writes(), before, 'Overlapping native changes cannot reach Microsoft.'); release(); assert.equal((await heldRequest).status, 200);
+    assert.equal((await f.request(route, 'POST', { status: 'Paused', confirmed: true }, randomUUID())).status, 200);
+    assert.equal((await f.request(route, 'POST', { status: 'Active', confirmed: true }, key)).status, 200, 'A completed receipt can still replay.');
+    assert.equal(f.state.campaigns[0].Status, 'Paused'); assert.equal(f.app.store.get(f.projectId, 'campaigns', created.data.campaign.id).status, 'paused');
+  } finally { clearTimeout(timer); release?.(); await heldRequest?.catch(() => {}); await f.close(); }
 });

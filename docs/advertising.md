@@ -2,6 +2,8 @@
 
 Open **Ads manager** for Zernio campaigns, Google paid-search tools and the two native connections below. New campaigns start paused. Review targeting, account currency, budgets, creative approval and conversion setup before enabling delivery. Provider charges and account approvals apply.
 
+Choose **Campaigns** for Zernio campaigns and the ad builder, **Google search** for keyword/research tools, **Google Shopping** for the direct Google connection, or **Microsoft Advertising** for Microsoft campaigns. Provider controls are shown in their selected view. Opening a native campaign from the campaign plan takes you to its matching advertising view.
+
 The first installation owner is the **instance operator** and can save global credentials. Mapping an advertising account also requires owner/admin access to its workspace. Workspace editors can create and control campaigns; viewers can read. Zernio's Google account powers the main builder and Google Ads tools; the separate native Google credentials power Standard Shopping and Video reporting.
 
 ## Zernio and ChatGPT
@@ -10,11 +12,11 @@ An instance operator who administers the workspace maps one Zernio profile to ea
 
 For ChatGPT ads, use **Connect OpenAI Ads** in Integrations with your OpenAI Ads key. Zernio retains this provider credential; it is not saved as a local operation receipt. The app checks that the resulting account belongs to this project's profile. ChatGPT campaigns support daily or lifetime budgets, supported goals, automatic or fixed bidding, conversion-event selection and URL macros. The builder rejects invalid goal/budget/bidding combinations and offers provider validation without creating an ad. Lifetime budget changes preserve the existing allocation type; the supported conversion to daily is explicit. See [Zernio's OpenAI Ads contract](https://docs.zernio.com/platforms/openai-ads).
 
-**Google Ads tools** manages positive and negative search keywords, campaign negatives, paid search terms, Keyword Planner ideas/history, supported geography/language/device targeting and bidding. Select the connected Google account, advertising customer and campaign before campaign changes. Keyword data can lag Google. Replacing campaign negatives replaces that entire set, including an explicitly confirmed empty set. Shared/portfolio configurations are guarded where this editor cannot safely change them.
+**Google search** manages positive and negative search keywords, campaign negatives, paid search terms, Keyword Planner ideas/history, supported geography/language/device targeting and bidding. Select the connected Google account, advertising customer and campaign before campaign changes. Keyword data can lag Google. Replacing campaign negatives replaces that entire set, including an explicitly confirmed empty set. Shared/portfolio configurations are guarded where this editor cannot safely change them.
 
 ## Native Google Shopping
 
-In **Integrations → Google Ads native**, save and test:
+In **Integrations → Google Shopping**, save and test:
 
 - OAuth client ID and client secret.
 - A refresh token obtained with Google's `https://www.googleapis.com/auth/adwords` scope.
@@ -27,7 +29,7 @@ In Ads manager, an instance operator who also administers the workspace verifies
 
 Expand **Create paused Standard Shopping campaign**. Supply the already linked Merchant Center account, an approved product feed label, priority, average daily budget, maximum CPC, target countries and political-ad declaration. Validation checks the setup without creating resources. Creation atomically adds a budget, paused campaign, paused ad group, paused product ad, all-products listing group and country targets. This includes every product in that feed; maintain product/feed eligibility in Merchant Center.
 
-Native controls can enable the app-created campaign together with its tracked ad group and ad, pause its campaign and change an unshared daily budget with explicit confirmation and provider readback. Other Shopping campaigns retain their existing child switches. Existing Shopping and standard Video campaigns have date-scoped performance reporting; missing metrics remain unknown.
+Below the performance table, choose a Shopping campaign under **Campaign controls**. You can enable an app-created campaign together with its tracked ad group and ad, pause its campaign and change an unshared daily budget after confirmation and provider readback. Campaign-total budgets are labelled separately and have no daily-budget editor. **Product bid** edits the maximum CPC for the app-created all-products group after checking that it still uses Manual CPC; externally changed product partitions and automated/portfolio bidding require Google Ads. Other Shopping campaigns retain their existing child switches. Existing Shopping and standard Video campaigns have date-scoped performance reporting; missing metrics remain unknown.
 
 **Standard Video campaign creation is unavailable in Google's API.** Create those campaigns in Google Ads; use the Zernio builder for supported Demand Gen video creation. [Google's Video API limits](https://developers.google.com/google-ads/api/docs/video/overview).
 
@@ -43,7 +45,7 @@ Eligible Search ads can reach Copilot inventory. Placement and approval are cont
 
 ## AI drafting and AI placements
 
-In **AI agent**, ask the configured OpenRouter model for an ad creative draft. **Review in ad builder** transfers supported copy, keywords and public media references into the existing composer. Select the account and budget yourself before submitting. Suggestions never create or activate provider campaigns automatically; model inference is remote through OpenRouter.
+In **Assistant**, ask the configured OpenRouter model for an ad creative draft. **Review in ad builder** transfers supported copy, keywords and public media references into the existing composer. Select the account and budget yourself before submitting. Suggestions never create or activate provider campaigns automatically; model inference is remote through OpenRouter.
 
 Google Search, Shopping and Performance Max campaigns can be eligible for Google's AI search experiences under Google's market, targeting and auction rules. The app provides these paid campaign types; it does not promise an AI-only placement or separate AI Overviews reporting. [Google AI Overviews eligibility](https://support.google.com/google-ads/answer/16297775), [AI Mode advertising](https://business.google.com/us/accelerate/announcements/ads-in-ai-mode/).
 
@@ -54,5 +56,7 @@ No verified public campaign-management API was identified for additional AI ad p
 Native secrets are encrypted in the private database. Automatic refresh-token replacement is persisted without invalidating concurrent requests; administrative credential changes still invalidate in-flight verification. Back up the database and session secret together using the [deployment and operations instructions](../README.md#deployment-and-operations).
 
 Every native mapping and action checks project access. Mutations use the shared operation ledger; uncertain writes remain blocked. An instance operator who also administers the workspace checks the provider dashboard, opens **Settings → Provider receipts & recovery**, and records **Applied** or **Not applied** with a note. Only Not applied allows a new manual attempt; the interface generates its new action key automatically. Review does not replay the request or update the campaign automatically. Manual campaign records cannot overwrite or delete provider-managed delivery evidence. Ordinary validation failures can be corrected and retried.
+
+Changes to one advertising campaign are serialized through its provider readback. A concurrent change stops before writing; completed receipts can still be replayed safely. Confirmed Zernio status and campaign budget changes update matching local campaign records. Acknowledgements without status readback do not invent a confirmed delivery state.
 
 Automated and browser checks use isolated synthetic accounts and simulated provider responses. Live account acceptance still requires your credentials, developer-token approval, eligible products/creative, permissions and provider readbacks. The tests do not establish real placement or spending results.

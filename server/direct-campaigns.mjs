@@ -219,7 +219,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret, store }) {
       if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
       if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending so unsubscribe links and delivery callbacks can work.');
       const scheduledAt = action === 'send' ? nowISO() : body.scheduledAt;
-      if (typeof scheduledAt !== 'string' || !/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(scheduledAt) || !Number.isFinite(Date.parse(scheduledAt)) || (action === 'schedule' && (Date.parse(scheduledAt) <= Date.now() || Date.parse(scheduledAt) > Date.now() + 366 * 86400000))) fail(400, 'INVALID_SCHEDULE', 'Choose a valid future time within the next year.');
+      if (typeof scheduledAt !== 'string' || !/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(scheduledAt) || !Number.isFinite(Date.parse(scheduledAt)) || new Date(scheduledAt.slice(0, 10)).toISOString().slice(0, 10) !== scheduledAt.slice(0, 10) || (action === 'schedule' && (Date.parse(scheduledAt) <= Date.now() || Date.parse(scheduledAt) > Date.now() + 366 * 86400000))) fail(400, 'INVALID_SCHEDULE', 'Choose a valid future time within the next year.');
       const selected = audience(campaign);
       if (body.previewToken !== preview(campaign).previewToken) fail(409, 'AUDIENCE_CHANGED', 'The campaign or audience changed. Review a fresh preview before confirming.');
       if (!selected.eligible.length || selected.eligible.length > 500) fail(400, 'AUDIENCE_LIMIT', 'Select between 1 and 500 eligible recipients per campaign.');

@@ -10,7 +10,7 @@ async function audit(run) {
   const account = { _id: 'audit-account', profileId: project.zernioProfileId, platform: 'facebook' };
   const campaign = { profileId: project.zernioProfileId, platform: 'facebook', platformCampaignId: 'audit-campaign', currency: 'USD', budgetLevel: 'campaign', campaignBudget: { amount: 500, type: 'lifetime' }, adSets: [{ platformAdSetId: 'audit-set', adSetName: 'Lifetime set', adSetBudget: { amount: 500, type: 'lifetime' } }] };
   const post = { id: 'local-post', externalId: 'remote-post', zernioProfileId: project.zernioProfileId, status: 'published' };
-  const store = { get: () => post, create: (_project, _collection, values) => ({ id: 'created-campaign', ...values }), activity() {} }; let sequence = 0;
+  const store = { get: () => post, list: () => [], create: (_project, _collection, values) => ({ id: 'created-campaign', ...values }), activity() {} }; let sequence = 0;
   async function invoke(path, body) {
     let response;
     await handleIntegration({ req: { method: body ? 'POST' : 'GET', headers: { 'idempotency-key': 'audit-request-' + ++sequence } }, url: new URL('http://localhost/api/projects/audit-project/integrations/' + path), project, db, store, body, role: 'editor', config: { env: { ZERNIO_API_KEY: 'audit-fixture-key' } }, send(status, data) { response = { status, data }; } });

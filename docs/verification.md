@@ -1,6 +1,33 @@
-# End-to-end verification — v0.8.0
+# End-to-end verification — v0.8.1
 
-## Paid advertising and inbox audit
+## Campaign controls and interface audit
+
+Verified on 18 October 2026 with isolated databases, simulated providers and the production frontend. All **223 automated checks** pass (`npm test`), covering ads, social publishing, analytics, OOH, DAM, inbox, replies and direct campaigns. The production build and offline non-root Docker smoke check pass. `npm audit --omit=dev` reports no known production dependency vulnerabilities. No dependency was added. Ponytail and Paperthin evidence, consistency and independent reviews were applied.
+
+| Area | This audit's evidence |
+| --- | --- |
+| Shopping | Browser validation creates no resources; explicit creation produces a paused campaign. The report distinguishes a USD 500 campaign-total allocation from a USD 25 daily budget. The product-bid editor saves USD 2.25 and displays the provider-confirmed readback. HTTP checks update the app-created single all-products group and listing atomically, and reject externally changed partitions, automated bidding and total-budget daily edits. Switching campaigns resets unsaved controls and confirmation. |
+| Microsoft Advertising | The browser verifies account mapping, creates a paused Search campaign and requests a report that progresses from Pending to a completed ZIP link. HTTP checks use the REST `MaxClicks` bidding discriminator, retain compatibility with older readback, and verify creation, status, budget, report scope and uncertain outcomes. The synthetic export file is not downloaded. |
+| ChatGPT ads and shared controls | Actual HTTP checks cover connect, validation without creation, paused creation, replay, activation, budgets, permissions and uncertain outcomes. Archived/deleted ads cannot be reactivated. Campaign-wide budgets block ad-set budget changes. Confirmed changes update only the matching local campaign; a concurrent change to the same provider campaign is rejected until the current change and its readback finish, preventing older receipts from overwriting newer state. |
+| Google paid search | Stale bidding, targeting and negative-keyword responses cannot authorize or confirm writes. Repeated pagination cursors fail, Planner rejects private seed URLs and historical requests reject unsupported seed URLs. |
+| Inbox and direct campaigns | Archive/reopen receipts must match the requested conversation. Invalid calendar dates and timezone-less scheduled sends fail before delivery records are queued. Existing replies, publication, analytics, OOH, DAM and tracking regressions pass. |
+| Interface | Sign-in uses one compact form. Advertising has separate Campaigns, Google search, Google Shopping and Microsoft Advertising views. A browser opens a native campaign's provider view, generates an Assistant draft, reviews its retained creative in the ad builder, selects the account and budget, and creates a paused Google Search campaign. Promotional slogans and repeated technical copy were removed. |
+
+![Google Shopping product bid after confirmed readback](shopping-bid-verification.png)
+
+![Compact sign-in](sign-in-verification.png)
+
+![Separate advertising views and Microsoft campaign controls](advertising-ui-verification.png)
+
+![Microsoft export after Pending and Success](microsoft-export-verification.png)
+
+![Reviewed Assistant draft created as a paused Google Search campaign](draft-ad-verification.png)
+
+Relevant runnable checks: [Shopping](../tests/native-google-ads.test.mjs), [Microsoft](../tests/native-microsoft-ads.test.mjs), [ChatGPT and shared campaign controls](../tests/openai-ads.test.mjs), [Google search](../tests/google-ads-tools.test.mjs), [campaign UI](../tests/ads-workflow-ui.test.mjs), [inbox](../tests/inbox-http.test.mjs) and [direct schedules](../tests/direct-campaigns-http.test.mjs). The release commands below repeat the automated checks; screenshots come from the manual browser walkthrough.
+
+These results use synthetic accounts and provider responses. No real publication, message, upload, activation, booking or ad spend occurred. Live acceptance still needs configured credentials, permissions and provider approvals. Standard Video campaign creation remains unsupported by the Google Ads API; existing Video reporting and Zernio Demand Gen creation are supported. Organic search performance remains in ten98 Discover. Older screenshots and walkthroughs below were recorded in their stated releases; their automated regressions were rerun, without claiming fresh browser verification of every provider.
+
+## Previous paid advertising audit — v0.8.0
 
 Verified on 18 October 2026 with isolated local applications, temporary databases, the production frontend and simulated providers. All **214 automated tests** pass, including existing social publishing, analytics, OOH, DAM, inbox and direct-campaign regressions. The production build, non-root offline Docker smoke check and production dependency audit pass; the audit reports no known production dependency vulnerabilities. Ponytail and Paperthin correctness, evidence, consistency and independent cold-read reviews were applied. No dependency was added.
 
