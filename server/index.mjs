@@ -15,6 +15,7 @@ import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.mjs';
 import { handleCalendar } from './calendar.mjs';
 import { handleAgent } from './agent.mjs';
 import { handleOoh } from './ooh.mjs';
+import { createDirectCampaigns } from './direct-campaigns.mjs';
 import { normalizePostVariants, normalizeMediaItems } from '../shared/social-posts.mjs';
 
 const roles = ['owner', 'admin', 'editor', 'viewer'];
@@ -101,6 +102,8 @@ export function createApp(options = {}) {
   if (config.oidcEnabled && new URL(config.oidcIssuer).protocol !== 'https:') throw new Error('OIDC_ISSUER must use HTTPS.');
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
   const integrationSettings = createIntegrationSettings({ db, env, secret: config.sessionSecret });
+  const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
+  const directTimer = options.directScheduler === false ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
   const webhooks = createWebhookService({ db, store, env });
   const drainWebhooks = () => { try { webhooks.processPending(); } catch { console.error('Webhook processing deferred.'); } };
   drainWebhooks(); const webhookTimer = setInterval(drainWebhooks, 1000); webhookTimer.unref();
@@ -127,9 +130,12 @@ export function createApp(options = {}) {
       if (path.startsWith('/api/')) {
         res.setHeader('Cache-Control', 'no-store');
         if (path === '/api/webhooks/zernio' && req.method === 'POST') { const result = webhooks.receive(await readRawBody(req, WEBHOOK_MAX_BYTES), req.headers); return send(result.status, result.body); }
+        if (/^\/api\/webhooks\/twilio\/(?:inbound|status\/[\w-]+)$/.test(path) && req.method === 'POST') { direct.receiveTwilio({ rawBody: await readRawBody(req, 65536), headers: req.headers, url }); res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' }); return res.end('<Response/>'); }
+        const unsubscribe = path.match(/^\/api\/direct\/unsubscribe\/([A-Za-z0-9_.-]+)$/);
+        if (unsubscribe && ['GET', 'POST'].includes(req.method)) { if (req.method === 'POST') await readRawBody(req, 4096); const html = direct.handleUnsubscribe(unsubscribe[1], req.method); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Email preferences</title><main>' + html + '</main></html>'); }
         if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
         if (mutating && req.headers.origin !== appUrl) throw new HttpError(403, 'A matching Origin header is required.');
-        const body = mutating && req.method !== 'DELETE' ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : /^\/api\/projects\/[^/]+\/(?:posts(?:\/[^/]+)?|integrations\/social\/(?:validate|update))$/.test(path) ? 2 * 1024 * 1024 : 65536) : {};
+        const body = mutating && req.method !== 'DELETE' ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : /^\/api\/projects\/[^/]+\/(?:posts(?:\/[^/]+)?|integrations\/social\/(?:validate|update)|direct\/(?:contacts\/import|campaigns(?:\/[^/]+)?))$/.test(path) ? 2 * 1024 * 1024 : 65536) : {};
         if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(auth.user(req, res)), setupRequired: !db.prepare('SELECT id FROM users LIMIT 1').get(), oidcEnabled: config.oidcEnabled });
         if (path === '/api/auth/setup' && req.method === 'POST') {
           auth.limit('setup:' + req.socket.remoteAddress, 10);
@@ -241,6 +247,7 @@ export function createApp(options = {}) {
           const context = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT zernio_profile_id FROM projects WHERE id=?').get(project.id); if (current?.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT drive_folder_id FROM projects WHERE id=?').get(project.id); if (current?.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: (collection, fields) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); checkReferences(store, project.id, data); return data; } };
           context.assertPublishingApproval = post => assertPublishingApproval(context, post);
           context.assertProviderPostEdit = () => assertProviderPostEdit(context);
+          if (projectRoute[2]?.startsWith('direct/') && await direct.handle(context)) return;
           if (projectRoute[2]?.startsWith('operations') && await handleOperationRecovery(context)) return;
           if (projectRoute[2]?.startsWith('approvals/') && await handleApprovals(context)) return;
           if (projectRoute[2]?.startsWith('calendar/') && await handleCalendar(context)) return;
@@ -293,7 +300,7 @@ export function createApp(options = {}) {
     } catch (error) { if (!res.headersSent) send(error instanceof HttpError || error instanceof IntegrationError ? error.status : 500, { error: error instanceof HttpError ? error.message : error instanceof IntegrationError ? { code: error.code, message: error.message } : 'The request could not be completed.' }); else res.end(); }
   });
   server.requestTimeout = 30000; server.headersTimeout = 10000;
-  return { server, db, store, config, webhooks, close: () => new Promise((resolveClose, reject) => { clearInterval(webhookTimer); if (!server.listening) { db.close(); resolveClose(); return; } server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); server.closeIdleConnections(); }) };
+  return { server, db, store, config, webhooks, direct, close: async () => { clearInterval(directTimer); direct.close(); await direct.idle(); return new Promise((resolveClose, reject) => { clearInterval(webhookTimer); if (!server.listening) { db.close(); resolveClose(); return; } server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); server.closeIdleConnections(); }); } };
 }
 function checkProfileMapping(db, profileId, projectId = '') { if (profileId && db.prepare('SELECT id FROM projects WHERE zernio_profile_id=? AND id<>?').get(profileId, projectId)) throw new HttpError(409, 'This Zernio profile is already mapped to another project. Use one profile per project for publishing and analytics.'); }
 function projectInput(data) {

@@ -7,9 +7,11 @@ const groups = {
   google: { serviceAccountEmail: 'GOOGLE_SERVICE_ACCOUNT_EMAIL', privateKey: 'GOOGLE_PRIVATE_KEY' },
   googleMaps: { browserApiKey: 'GOOGLE_MAPS_BROWSER_API_KEY', mapId: 'GOOGLE_MAPS_MAP_ID' },
   broadsign: { apiKey: 'BROADSIGN_API_KEY', environment: 'BROADSIGN_ENVIRONMENT', domainId: 'BROADSIGN_DOMAIN_ID' },
+  twilio: { accountSid: 'TWILIO_ACCOUNT_SID', authToken: 'TWILIO_AUTH_TOKEN', fromNumber: 'TWILIO_FROM_NUMBER', messagingServiceSid: 'TWILIO_MESSAGING_SERVICE_SID' },
+  cloudflareEmail: { accountId: 'CLOUDFLARE_ACCOUNT_ID', apiKey: 'CLOUDFLARE_EMAIL_API_TOKEN', zoneId: 'CLOUDFLARE_ZONE_ID', fromAddress: 'CLOUDFLARE_EMAIL_FROM_ADDRESS', fromName: 'CLOUDFLARE_EMAIL_FROM_NAME' },
 };
-const providers = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', broadsign: 'Broadsign' };
-const secretFields = new Set(['apiKey', 'webhookSecret', 'privateKey', 'browserApiKey']);
+const providers = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email' };
+const secretFields = new Set(['apiKey', 'authToken', 'webhookSecret', 'privateKey', 'browserApiKey']);
 const defaults = { maxTokens: '2048', maxSteps: '4', environment: 'sandbox' };
 const groupFor = provider => ['googleDrive', 'googleCalendar'].includes(provider) ? 'google' : provider;
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
@@ -39,6 +41,11 @@ function validate(field, input) {
   if (field === 'mapId' && (value.length > 100 || !/^[A-Za-z0-9_-]+$/.test(value))) fail(400, 'INVALID_SETTING', 'Enter a valid Google map ID.');
   if (field === 'environment' && !['sandbox', 'production'].includes(value)) fail(400, 'INVALID_SETTING', 'Choose the Broadsign sandbox or production environment.');
   if (field === 'domainId' && (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)))) fail(400, 'INVALID_SETTING', 'Enter a positive numeric Broadsign domain ID.');
+  if (['accountSid', 'messagingServiceSid'].includes(field) && !new RegExp(`^${field === 'accountSid' ? 'AC' : 'MG'}[a-fA-F0-9]{32}$`).test(value)) fail(400, 'INVALID_SETTING', 'Enter the complete Twilio account or Messaging Service SID.');
+  if (['accountId', 'zoneId'].includes(field) && !/^[a-fA-F0-9]{32}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the 32-character Cloudflare account or zone ID.');
+  if (field === 'fromNumber' && !/^\+[1-9]\d{6,14}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the Twilio sender number with + and country code.');
+  if (field === 'fromAddress' && (value.length > 254 || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value))) fail(400, 'INVALID_SETTING', 'Enter a sender email address on an enabled Cloudflare sending domain.');
+  if (field === 'fromName' && value.length > 200) fail(400, 'INVALID_SETTING', 'Keep the sender name to 200 characters.');
   return value;
 }
 
@@ -90,7 +97,7 @@ export function createIntegrationSettings({ db, env, secret }) {
       if (secretFields.has(field)) secrets[field] = { configured: Boolean(value), source };
       else fields[field] = ['maxTokens', 'maxSteps'].includes(field) ? Number(value || defaults[field]) : value || defaults[field] || '';
     }
-    const configured = group === 'google' ? Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) : provider === 'openrouter' ? Boolean(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL) : provider === 'googleMaps' ? Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY) : Boolean(env[groups[group].apiKey]);
+    const configured = group === 'google' ? Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) : provider === 'openrouter' ? Boolean(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL) : provider === 'googleMaps' ? Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY) : provider === 'twilio' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : provider === 'cloudflareEmail' ? Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS) : Boolean(env[groups[group].apiKey]);
     return { id: provider, label: providers[provider], configured, source: sources.size > 1 ? 'mixed' : [...sources][0] || 'unconfigured', fields, secretFields: secrets, updatedAt: row?.updatedAt || null };
   }
   const describe = () => ({ providers: Object.keys(providers).map(describeProvider), revision });
@@ -163,6 +170,18 @@ export function createIntegrationSettings({ db, env, secret }) {
       } else if (provider === 'googleMaps') {
         result.ok = false; result.status = 'browser_verification_required'; result.requiresBrowserVerification = true;
         result.message = 'The browser key is configured. Open the map preview to test Maps JavaScript API access, billing, map ID, and this site’s referrer restrictions.';
+      } else if (provider === 'twilio') {
+        if (!/^AC[a-fA-F0-9]{32}$/.test(current.TWILIO_ACCOUNT_SID) || current.TWILIO_MESSAGING_SERVICE_SID && !/^MG[a-fA-F0-9]{32}$/.test(current.TWILIO_MESSAGING_SERVICE_SID) || !current.TWILIO_MESSAGING_SERVICE_SID && !/^\+[1-9]\d{6,14}$/.test(current.TWILIO_FROM_NUMBER || '')) fail(409, 'INVALID_SETTING', 'Configure a valid Twilio account and sender.');
+        const data = await readProvider(`https://api.twilio.com/2010-04-01/Accounts/${current.TWILIO_ACCOUNT_SID}.json`, `Basic ${Buffer.from(`${current.TWILIO_ACCOUNT_SID}:${current.TWILIO_AUTH_TOKEN}`).toString('base64')}`, 'Twilio');
+        if (data.sid !== current.TWILIO_ACCOUNT_SID || data.status !== 'active') fail(409, 'TWILIO_ACCOUNT_UNAVAILABLE', 'Twilio did not confirm an active matching account.');
+        result.message = 'Twilio accepted the credentials for an active account. No SMS was sent; sender registration and delivery were not tested.';
+      } else if (provider === 'cloudflareEmail') {
+        if (!/^[a-fA-F0-9]{32}$/.test(current.CLOUDFLARE_ACCOUNT_ID || '') || !/^[a-fA-F0-9]{32}$/.test(current.CLOUDFLARE_ZONE_ID || '') || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(current.CLOUDFLARE_EMAIL_FROM_ADDRESS || '')) fail(409, 'INVALID_SETTING', 'Configure valid Cloudflare account, zone, and sender details to test the sending domain.');
+        const data = await readProvider(`https://api.cloudflare.com/client/v4/zones/${current.CLOUDFLARE_ZONE_ID}/email/sending/subdomains`, `Bearer ${current.CLOUDFLARE_EMAIL_API_TOKEN}`, 'Cloudflare Email Sending');
+        if (data.success !== true || !Array.isArray(data.result) || data.result.some(row => !plain(row) || typeof row.name !== 'string' || typeof row.enabled !== 'boolean')) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Cloudflare did not return sending domain information.');
+        const domain = current.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase();
+        if (!data.result.some(row => row.enabled && (row.name.toLowerCase() === domain || row.name.startsWith('*.') && domain.endsWith(row.name.slice(1).toLowerCase())))) fail(409, 'EMAIL_SENDER_NOT_ENABLED', 'The sender domain is not enabled for Cloudflare Email Sending in this zone.');
+        result.message = 'Cloudflare confirmed an enabled sender domain. No email was sent; send permissions and delivery were not tested. Transactional email only.';
       } else {
         const base = { sandbox: 'https://direct-sandbox.broadsign.com', production: 'https://direct.broadsign.com' }[current.BROADSIGN_ENVIRONMENT || 'sandbox'];
         if (!base) fail(409, 'INVALID_SETTING', 'Choose the Broadsign sandbox or production environment.');

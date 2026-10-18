@@ -1,8 +1,8 @@
 # ten98 Campaign
 
-An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
+An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.4.1 hardens end-to-end ads, social publishing, analytics, OOH, and Drive DAM workflows. Per-platform captions, media, publishing options, previews, and restriction checks are included. It uses Zernio for social publishing, advertising, and analytics; Google Drive for the DAM; Google Calendar for shared planning; Broadsign for OOH proposals and bookings; Google Maps for locations; and OpenRouter for an optional campaign assistant. It includes integration configuration and connection tests, team invitations, content approvals, and provider-operation reconciliation. Unified inbox, messaging, and comment/review feeds have been removed to focus on campaign management. The application is [MIT licensed](LICENSE). Provider accounts, API access, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.5.0 adds **Direct campaigns**: Cloudflare transactional email, Twilio SMS, and Zernio WhatsApp broadcasts, with contact hygiene, consent, previews, scheduling and delivery evidence. It also includes per-platform social publishing, advertising, analytics, OOH, and Drive DAM workflows. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Unified inbox and comment/review feeds remain removed. Voice calling is excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
 
@@ -27,6 +27,7 @@ For development, run `npm run dev` and open [http://127.0.0.1:5178](http://127.0
 | --- | --- |
 | Campaigns | Workspace/project organization, roles, dates, budgets, separate currency totals, local results, and CSV export. |
 | Social | Per-platform captions, media and options; previews and restriction checks; content approvals; explicit publish/schedule submission; status reconciliation, rescheduling, cancellation, eligible retries, and supported published-copy changes. Zernio executes submitted schedules. |
+| Direct campaigns | Cloudflare transactional email, Twilio SMS, and Zernio approved WhatsApp templates; consent-aware contacts; CSV import preview and deduplication; disposable/role/typo flags, DNS mail-route checks, suppression, signed unsubscribe/opt-out handling, scheduling and delivery receipts. |
 | Advertising | Campaign/ad-group/ad reporting; supported status, budget, targeting, and creative changes; paused ad creation and eligible post boosting. |
 | OOH | Local provider/booking ledger, verified Broadsign inventory, proposals, availability, explicit booking/cancellation, delivery totals, and mapped locations. |
 | DAM | Asset links, public delivery URLs, tags, approvals, Google Drive metadata sync, and Shared Drive uploads. Originals remain in Drive. |
@@ -38,13 +39,23 @@ For development, run `npm run dev` and open [http://127.0.0.1:5178](http://127.0
 
 ## Integration settings
 
-The **Integrations** page configures Zernio, OpenRouter, Google Drive, Google Calendar, Google Maps, and Broadsign. Only an **instance operator** can read or change installation-wide credentials and run connection tests. Operators also need workspace owner/admin access to change a project's Zernio profile, Drive folder, or shared calendar mapping. Workspace ownership alone does not grant installation credentials access.
+The **Integrations** page configures Zernio, OpenRouter, Google Drive, Google Calendar, Google Maps, Broadsign, Cloudflare transactional email, and Twilio SMS. Only an **instance operator** can read or change installation-wide credentials and run connection tests. Operators also need workspace owner/admin access to change a project's Zernio profile, Drive folder, or shared calendar mapping. Workspace ownership alone does not grant installation credentials access.
 
 Saved fields override their server environment values. A blank secret field keeps its current credential; **Clear this credential** explicitly disables that field, including environment fallback. **Use server environment** removes that provider's saved overrides. Drive and Calendar share one service account, so saving, clearing, or resetting its credentials affects both. Credentials are not returned in settings responses; the Google Maps key is separately available to authorized project members because Google's browser service requires it.
 
 Settings are encrypted in SQLite using AES-256-GCM and a key derived from the instance session secret. Back up the database **with the matching `SESSION_SECRET` or generated `data/session-secret`**. Replacing that secret without preserving its match makes saved integration settings unreadable. Protect the complete data directory, including backups.
 
 **Test connection** runs only when requested. Zernio checks accessible profiles, OpenRouter checks key access without generating a model completion, Drive checks the saved folder, Calendar checks the saved calendar's read access, and Broadsign checks its account/domain. These checks do not publish, send, upload, book, change events, or verify every write permission. Maps performs a browser map-rendering check after any required page reload; configuration alone is not reported as a verified map connection. Save project mapping edits before testing.
+
+## Email, SMS and WhatsApp campaigns
+
+Open **Direct campaigns** to import or maintain project contacts, record channel-specific consent, and create drafts. Preview recipients and personalized content before an explicitly confirmed send or schedule. Email/SMS use `{{name}}`, `{{email}}`, `{{phone}}`, and `{{company}}`. WhatsApp requires an approved template/language; text values, public image/video/document headers, static buttons and supported URL-suffix buttons are available.
+
+Cloudflare permits **transactional email only**: receipts, expected reminders and service notices. Marketing newsletters are unavailable through this connection. Configure Twilio's sender or Messaging Service for SMS and the project's Zernio WhatsApp Business account for broadcasts. Sending requires a publicly reachable HTTPS `APP_URL` so recipient preferences and delivery callbacks work. Connection tests send no email or SMS.
+
+Contact cleanup rejects invalid syntax, deduplicates canonical destinations, flags common disposable/role/typo addresses, and checks MX/A/AAAA/null-MX records on request. DNS and heuristics cannot prove that a mailbox exists. Confirmed hard bounces, provider suppressions, manual suppression, email unsubscribe and SMS STOP prevent future sends. Suppression survives deletion/reimport and cannot be cleared by importing another opt-in.
+
+The persistent local queue sends one email/SMS recipient per second, up to 500 eligible recipients per campaign; Zernio paces WhatsApp broadcasts. Run one app process with SQLite. Uncertain sends stop for review and are not automatically replayed after restart. Cloudflare queued mail has no per-message delivery lookup; send receipts and suppression refresh are shown without invented open/click metrics. See the [setup, hygiene and delivery guide](docs/direct-campaigns.md). Contact/campaign interface ideas are inspired by [listmonk](https://listmonk.app/); its source is not incorporated.
 
 ## Zernio: social and advertising
 
