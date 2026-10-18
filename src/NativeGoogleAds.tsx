@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 
-type Props = { projectId: string; canWrite: boolean; isOperator: boolean; canManageProject: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any> };
+type Props = { projectId: string; canWrite: boolean; isOperator: boolean; canManageProject: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void> };
 const number = (value: any) => value == null || !Number.isFinite(Number(value)) ? '—' : new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(Number(value));
 
-export default function NativeGoogleAds({ projectId, canWrite, isOperator, canManageProject, request }: Props) {
+export default function NativeGoogleAds({ projectId, canWrite, isOperator, canManageProject, request, onChanged }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/native-google-ads`, active = useRef(true), currentPath = useRef(path); currentPath.current = path;
   const [status, setStatus] = useState<any>(null), [error, setError] = useState(''), [busy, setBusy] = useState(false), [refresh, setRefresh] = useState(0);
   useEffect(() => { active.current = true; let current = true; setStatus(null); setError(''); request(path + '/status').then(result => { if (current) setStatus(result); }).catch(err => { if (current) setError(err.message); }); return () => { current = false; active.current = false; }; }, [path, request, refresh]);
@@ -18,12 +18,12 @@ export default function NativeGoogleAds({ projectId, canWrite, isOperator, canMa
     {status && !status.configured && <p className="field-help">Configure Google Shopping in Integrations, then connect the advertising account below. Live accounts require an approved Google Ads developer token.</p>}
     {status && isOperator && canManageProject && <details><summary>Advertising account{status.customerId ? ` · ${status.customerId}` : ''}</summary><form onSubmit={event => { event.preventDefault(); map(String(new FormData(event.currentTarget).get('customerId') || '')); }}><fieldset disabled={busy || !status.configured}><label className="field"><span>Advertising customer ID · ten digits, no hyphens</span><input name="customerId" required pattern="[0-9]{10}" maxLength={10} defaultValue={status.customerId} key={status.customerId}/></label><p className="field-help">Mapping verifies Google access and the account currency. Each advertising customer can belong to only one project. A manager account belongs in the Integrations login customer setting.</p><button className="button">Verify and map customer</button>{status.mapped && <button className="button danger" type="button" onClick={() => { if (window.confirm('Disconnect the native Google advertising customer from this project? Existing provider campaigns stay in Google Ads.')) map(''); }}>Disconnect customer</button>}</fieldset></form></details>}
     {status && !status.mapped && !isOperator && <p className="field-help">Ask an instance operator with workspace administration to map this project’s advertising customer.</p>}
-    {status?.configured && status.mapped && <ShoppingAccount key={projectId + ':' + status.customerId} path={path} customerId={status.customerId} canWrite={canWrite} request={request}/>}
+    {status?.configured && status.mapped && <ShoppingAccount key={projectId + ':' + status.customerId} path={path} customerId={status.customerId} canWrite={canWrite} request={request} onChanged={onChanged}/>}
     <p className="field-help">Standard Video campaigns are read-only here. Create Demand Gen video ads from the Campaigns view. <a href="https://developers.google.com/google-ads/api/docs/video/overview" target="_blank" rel="noreferrer">Google’s Video API limits</a></p>
   </section>;
 }
 
-function ShoppingAccount({ path, customerId, canWrite, request }: { path: string; customerId: string; canWrite: boolean; request: Props['request'] }) {
+function ShoppingAccount({ path, customerId, canWrite, request, onChanged }: { path: string; customerId: string; canWrite: boolean; request: Props['request']; onChanged?: Props['onChanged'] }) {
   const active = useRef(true), pending = useRef(false), keys = useRef(new Map<string, string>());
   const [productBids, setProductBids] = useState<Record<string, any>>({});
   const [managedId, setManagedId] = useState('');
@@ -41,7 +41,9 @@ function ShoppingAccount({ path, customerId, canWrite, request }: { path: string
     try { result = await request(path + '/' + suffix, 'POST', body, key); }
     catch (failure) { const error = failure as Error & { code?: string; status?: number }; if (error.status && error.status < 500 && error.code !== 'OPERATION_UNCERTAIN') keys.current.delete(fingerprint); throw failure; }
     if (!active.current) throw new DOMException('Google account changed.', 'AbortError');
-    keys.current.delete(fingerprint); return result;
+    keys.current.delete(fingerprint);
+    if (!body.validateOnly) { try { await onChanged?.(); } catch { if (active.current) setError('Google confirmed the change, but the shared campaign plan could not refresh. Reload the app to see the latest plan.'); } }
+    return result;
   }
   async function create(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = event.currentTarget, values = Object.fromEntries(new FormData(form)) as Record<string, string>;

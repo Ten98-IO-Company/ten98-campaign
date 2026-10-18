@@ -658,9 +658,11 @@ function validateRemotePayload(payload, assets = [], post = {}) {
     assertPostRestrictions(postRestrictions(single, [target.platform], assets));
   }
 }
-async function savePostSnapshot(store, projectId, post, remote, extra = {}, targets) {
+async function savePostSnapshot(store, projectId, post, remote, extra = {}, targets, source = post) {
   assertPostResult(remote, post.zernioProfileId, { id: post.externalId, targets });
   const model = Array.isArray(remote.platforms) && remote.platforms.every(target => target.platform && target.accountId) ? await remotePostModel(store, projectId, post, remote) : {};
+  const current = store.get(projectId, 'posts', post.id);
+  if (current && canonical(current) !== canonical(source)) throw new IntegrationError(409, 'POST_CHANGED', 'The post changed during the provider request. Refresh it before continuing and review any unconfirmed provider action.', true);
   const updated = await store.update(projectId, 'posts', post.id, { ...model, status: localStatus(remote.status), providerStatus: remote.status, ...(Array.isArray(remote.platforms) ? { providerResults: redact(remote.platforms) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(remote.publishedAt ? { publishedAt: remote.publishedAt } : {}), ...extra });
   if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The local post was removed while the provider accepted this action. Reconcile the provider outcome.', true);
   return updated;
@@ -955,7 +957,7 @@ export async function handleIntegration(context) {
           let confirmed;
           try { confirmed = await scopedPost(api, profileId, post); }
           catch { throw new IntegrationError(502, 'POST_RECONCILIATION_REQUIRED', 'The provider accepted this update, but its latest state could not be read. Check Zernio before repeating it.', true); }
-          const updated = await savePostSnapshot(store, project.id, changed, confirmed, { content: confirmed.content ?? content, scheduledAt }, remote.platforms);
+          const updated = await savePostSnapshot(store, project.id, changed, confirmed, { content: confirmed.content ?? content, scheduledAt }, remote.platforms, post);
           await store.activity(project.id, 'Updated an unpublished social post in Zernio.');
           return { post: updated, provider: { id: post.externalId, status: confirmed.status } };
         }
@@ -980,7 +982,7 @@ export async function handleIntegration(context) {
           });
           if (copies && new Set(copies.map(copy => String(copy.accountId?._id || copy.accountId))).size !== copies.length) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned duplicate retried account copies.', true);
           const ordered = copies && remote.platforms.map(copy => copies.find(item => String(item.accountId?._id || item.accountId) === String(copy.accountId?._id || copy.accountId)) || copy);
-          const updated = await savePostSnapshot(store, project.id, model, { ...result.post, ...(ordered ? { platforms: ordered } : {}) }, {}, remote.platforms);
+          const updated = await savePostSnapshot(store, project.id, model, { ...result.post, ...(ordered ? { platforms: ordered } : {}) }, {}, remote.platforms, post);
           await store.activity(project.id, 'Retried a failed social post through Zernio.');
           return { post: updated, provider: { id: post.externalId, status: result.post.status } };
         }

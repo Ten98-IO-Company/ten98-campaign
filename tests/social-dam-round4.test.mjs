@@ -4,6 +4,67 @@ import { generateKeyPairSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { handleIntegration } from '../server/integrations.mjs';
 
+test('late social refreshes cannot overwrite newer edits or cancellation receipts, even with identical update timestamps', async () => {
+  for (const action of ['update', 'cancel']) {
+    const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'refresh-race-project', zernioProfileId: 'refresh-race-profile' };
+    const account = { _id: 'refresh-race-account', platform: 'facebook', profileId: project.zernioProfileId };
+    let post = { id: 'refresh-race-local', externalId: 'refresh-race-remote', zernioProfileId: project.zernioProfileId, content: 'Original caption', status: 'scheduled', updatedAt: 'same-timestamp' };
+    let remote = { _id: post.externalId, status: 'scheduled', content: post.content, scheduledFor: '2070-01-01T10:00:00Z', platforms: [{ platform: account.platform, accountId: account._id, status: 'pending' }] };
+    let release, entered, holdNextRead = true, refresh;
+    const reached = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+    const store = { get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+    globalThis.fetch = async (target, options = {}) => {
+      const url = new URL(target);
+      if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
+      if (options.method === 'DELETE') return new Response(null, { status: 204 });
+      if (options.method === 'PUT') { const payload = JSON.parse(options.body); remote = { ...remote, ...payload, status: payload.isDraft ? 'draft' : 'scheduled' }; }
+      const snapshot = structuredClone(remote);
+      if (holdNextRead) { holdNextRead = false; entered(); await gate; }
+      return Response.json({ post: snapshot });
+    };
+    async function invoke(path, body) {
+      let response;
+      await handleIntegration({ req: { method: body ? 'POST' : 'GET', headers: { 'idempotency-key': 'refresh-race-' + path } }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/social/${path}${body ? '' : '?postId=' + post.id}`), body: { postId: post.id, ...body }, project, db, store, role: 'editor', config: { env: { ZERNIO_API_KEY: 'fixture-key' } }, send(status, data) { response = { status, data }; } });
+      return response;
+    }
+    try {
+      refresh = invoke('status'); await reached;
+      const changed = await invoke(action, action === 'cancel' ? { confirmCancellation: true } : { content: 'New caption', mode: 'draft' });
+      assert.equal(changed.status, 200, JSON.stringify(changed.data));
+      assert.equal(post.status, action === 'cancel' ? 'cancelled' : 'draft');
+      if (action === 'update') assert.equal(post.content, 'New caption'); else assert.ok(post.providerDeletedAt);
+      const latest = structuredClone(post); release(); const stale = await refresh;
+      assert.equal(stale.status, 409); assert.equal(stale.data.error.code, 'POST_CHANGED');
+      assert.deepEqual(post, latest, 'An older provider response cannot replace the newer local receipt.');
+      assert.equal((await invoke('status')).status, 200, 'A fresh status read remains available.');
+    } finally { release(); await refresh?.catch(() => {}); globalThis.fetch = originalFetch; db.close(); }
+  }
+});
+
+test('a social write accepted during a newer local status update remains uncertain and cannot be repeated', async () => {
+  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'write-race-project', zernioProfileId: 'write-race-profile' };
+  const account = { _id: 'write-race-account', platform: 'facebook', profileId: project.zernioProfileId };
+  let post = { id: 'write-race-local', externalId: 'write-race-remote', zernioProfileId: project.zernioProfileId, content: 'Original caption', status: 'draft' }, writes = 0;
+  let remote = { _id: post.externalId, status: 'draft', content: post.content, platforms: [{ platform: account.platform, accountId: account._id }] };
+  const store = { get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+  globalThis.fetch = async (target, options = {}) => {
+    if (new URL(target).pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
+    if (options.method === 'PUT') { writes++; remote = { ...remote, ...JSON.parse(options.body) }; post = { ...post, status: 'published', providerStatus: 'published', providerEventAt: '2070-01-01T10:00:00Z' }; }
+    return Response.json({ post: remote });
+  };
+  async function invoke(key) {
+    let response;
+    await handleIntegration({ req: { method: 'POST', headers: { 'idempotency-key': key } }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/social/update`), body: { postId: post.id, content: 'New caption', mode: 'draft' }, project, db, store, role: 'editor', config: { env: { ZERNIO_API_KEY: 'fixture-key' } }, send(status, data) { response = { status, data }; } });
+    return response;
+  }
+  try {
+    const result = await invoke('write-race-original');
+    assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
+    assert.equal(post.status, 'published'); assert.equal(post.content, 'Original caption');
+    assert.equal((await invoke('write-race-new-key')).status, 409); assert.equal(writes, 1);
+  } finally { globalThis.fetch = originalFetch; db.close(); }
+});
+
 test('an empty Drive collection is readable and syncable without erasing existing assets', async () => {
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const project = { id: 'empty-drive-project', driveFolderId: 'empty-drive-folder' }, assets = [{ id: 'existing-asset', name: 'Retained creative' }];
