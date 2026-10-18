@@ -1,33 +1,36 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 type Member = { id: string; userId: string; name: string; email: string; role: string };
 type Props = { workspaceId: string; role: string; currentUserId: string; request: (path: string, method?: string, body?: unknown) => Promise<any> };
 export default function TeamPanel({ workspaceId, role, currentUserId, request }: Props) {
   const [members, setMembers] = useState<Member[]>([]), [opened, setOpened] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const canManage = ['owner', 'admin'].includes(role), roles = role === 'owner' ? ['owner', 'admin', 'editor', 'viewer'] : ['editor', 'viewer'];
   const path = `/workspaces/${encodeURIComponent(workspaceId)}/members`;
   const manageable = (member: Member) => role === 'owner' || (role === 'admin' && !['owner', 'admin'].includes(member.role));
   async function load() {
     const result = await request(path);
     if (!Array.isArray(result.members)) throw new Error('The team list could not be read.');
-    setMembers(result.members); setOpened(true);
+    if (active.current) { setMembers(result.members); setOpened(true); }
   }
   async function refresh() {
     if (busy || !canManage) return;
     setBusy(true); setError('');
     try { await load(); }
-    catch (err) { setError((err as Error).message || 'The team could not be loaded.'); }
-    finally { setBusy(false); }
+    catch (err) { if (active.current) setError((err as Error).message || 'The team could not be loaded.'); }
+    finally { if (active.current) setBusy(false); }
   }
   async function change(method: string, member?: Member, body?: unknown) {
     if (busy || !canManage) return false;
     setBusy(true); setError('');
     try {
       await request(path + (member && method !== 'POST' ? '/' + encodeURIComponent(member.userId || member.id) : ''), method, body);
+      if (!active.current) return false;
       if ((member?.userId || member?.id) === currentUserId) { window.location.reload(); return true; }
       await load(); return true;
-    } catch (err) { setError((err as Error).message || 'This team change could not be saved.'); return false; }
-    finally { setBusy(false); }
+    } catch (err) { if (active.current) setError((err as Error).message || 'This team change could not be saved.'); return false; }
+    finally { if (active.current) setBusy(false); }
   }
   async function add(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = event.currentTarget, values = Object.fromEntries(new FormData(form));

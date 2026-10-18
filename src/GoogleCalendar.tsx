@@ -23,16 +23,17 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
   }, [path, request]);
   useEffect(() => { if (fromDate) setFrom(fromDate); if (toDate) setTo(toDate); }, [fromDate, toDate]);
   useEffect(() => { setEvents([]); setLoaded(false); callback.current?.([]); }, [from, to]);
-  function updateEvents(items: CalendarEvent[]) { setEvents(items); callback.current?.(items); }
+  function updateEvents(items: CalendarEvent[]) { if (active.current && scope.current === view) { setEvents(items); callback.current?.(items); } }
   async function action(run: () => Promise<void>) {
     if (busy) return; setBusy(true); setError(''); setNotice('');
     try { await run(); } catch (err) { if (active.current && scope.current === view) setError((err as Error).message || 'The calendar action could not be completed.'); }
     finally { if (active.current) setBusy(false); }
   }
   async function write(suffix: string, method: string, body?: unknown) {
+    if (!active.current || scope.current !== view) throw new DOMException('The calendar view changed.', 'AbortError');
     const fingerprint = `${method}:${path}/${suffix}:${JSON.stringify(body)}`;
     let key = keys.current.get(fingerprint); if (!key) { key = crypto.randomUUID(); keys.current.set(fingerprint, key); }
-    try { const result = await request(`${path}/${suffix}`, method, body, key); keys.current.delete(fingerprint); return result; }
+    try { const result = await request(`${path}/${suffix}`, method, body, key); keys.current.delete(fingerprint); if (!active.current || scope.current !== view) throw new DOMException('The calendar view changed.', 'AbortError'); return result; }
     catch (err) { const failure = err as Error & { status?: number; code?: string }; if (failure.status && failure.code !== 'OPERATION_UNCERTAIN') keys.current.delete(fingerprint); throw err; }
   }
   async function load() {

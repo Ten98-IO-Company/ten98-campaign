@@ -197,7 +197,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret, store }) {
       if (!id && method === 'GET') send(200, { contacts: contacts.list(project.id) });
       else if (!id && method === 'POST') send(201, { contact: contacts.save(project.id, body) });
       else if (id === 'import' && method === 'POST') send(200, contacts.import(project.id, body));
-      else if (id === 'assess-dns' && method === 'POST') { const result = await contacts.assessDNS(project.id, body.ids); context.assertIntegrationSettings(); send(200, result); }
+      else if (id === 'assess-dns' && method === 'POST') { const result = await contacts.assessDNS(project.id, body.ids, { assertAccess: context.assertIntegrationSettings }); context.assertIntegrationSettings(); send(200, result); }
       else if (id && !action && method === 'PATCH') send(200, { contact: contacts.save(project.id, body, id) });
       else if (id && !action && method === 'DELETE') { if (!contacts.remove(project.id, id)) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { removed: true }); }
       else if (id && action === 'suppress' && method === 'POST') send(200, { contact: contacts.suppress(project.id, id, body.channel, body.reason) });

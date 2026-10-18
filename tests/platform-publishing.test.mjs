@@ -97,8 +97,8 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     result = await publish(scheduled); assert.equal(result.status, 200); assert.equal(result.data.post.status, 'scheduled');
     assert.equal(writes.at(-1).payload.scheduledFor, '2070-01-01T08:00:00.000Z'); assert.equal(writes.at(-1).payload.timezone, 'UTC'); assert.equal(writes.at(-1).payload.publishNow, undefined);
     const remote = remotePosts.get(result.data.post.externalId), originalCopies = structuredClone(remote.platforms);
-    const expiring = await draft({ status: 'scheduled', scheduledAt: '2070-01-01T10:00:00Z' }), realNow = Date.now, writesBeforeExpiry = writes.length;
-    validationHook = () => { Date.now = () => Date.parse('2070-01-01T10:00:01Z'); };
+    const expiringAt = new Date(Date.now() + 3600000).toISOString(), expiring = await draft({ status: 'scheduled', scheduledAt: expiringAt }), realNow = Date.now, writesBeforeExpiry = writes.length;
+    validationHook = () => { Date.now = () => Date.parse(expiringAt) + 1000; };
     try { result = await publish(expiring); } finally { Date.now = realNow; }
     assert.equal(result.status, 409); assert.equal(result.data.error.code, 'SCHEDULE_PASSED'); assert.equal(writes.length, writesBeforeExpiry, 'A schedule that expires during provider checks cannot become immediate publication.');
     remote.platforms.find(copy => copy.platform === 'instagram').customContent = 'Caption edited in Zernio';

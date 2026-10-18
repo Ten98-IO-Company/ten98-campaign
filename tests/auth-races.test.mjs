@@ -44,6 +44,23 @@ test('an old-password login already verifying cannot create a session after a pa
   } finally { db.close(); }
 });
 
+test('a password change cannot replace credentials or recreate a session revoked during password verification', async () => {
+  const db = database(), oldPassword = 'existing fixture password 2026', oldHash = await hashPassword(oldPassword);
+  db.prepare('INSERT INTO users VALUES(?,?,?,?)').run('user-a', 'Fixture', 'fixture@example.test', oldHash);
+  const auth = createAuth(db, { sessionSecret: 'auth-revocation-fixture-secret-32-characters', appUrl: 'https://campaign.example' }), signedIn = response();
+  auth.establish(signedIn, 'user-a');
+  const req = { headers: { cookie: signedIn.headers['Set-Cookie'].split(';')[0] } }, res = response();
+  try {
+    const pending = auth.changePassword(req, res, 'user-a', oldPassword, 'replacement fixture password 2026');
+    // The request has entered asynchronous verification when another signed-in device revokes it.
+    db.prepare('DELETE FROM sessions WHERE user_id=?').run('user-a');
+    await assert.rejects(pending, error => error.status === 403 && /session ended/i.test(error.message));
+    assert.equal(db.prepare('SELECT password FROM users WHERE id=?').get('user-a').password, oldHash);
+    assert.equal(db.prepare('SELECT count(*) AS count FROM sessions').get().count, 0);
+    assert.equal(res.headers['Set-Cookie'], undefined);
+  } finally { db.close(); }
+});
+
 test('OIDC invitation continuation is browser-bound, single-use and origin-fixed without bypassing provisioning or identity linking', async () => {
   const db = database(), source = await readFile(new URL('../server/auth.mjs', import.meta.url), 'utf8');
   const appUrl = 'https://campaign.example', issuer = 'https://identity.example', invite = 'A'.repeat(43);

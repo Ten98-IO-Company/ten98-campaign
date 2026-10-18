@@ -66,6 +66,7 @@ async function request(url, options = {}, provider = 'Zernio', assertMapping) {
   let result;
   try {
     result = await providerJson(response);
+    if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error();
   } catch { throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', `${provider} returned an unreadable response.`, options.method && options.method !== 'GET'); }
   checkMapping(assertMapping, options.method && options.method !== 'GET');
   return result;
@@ -130,7 +131,7 @@ async function analyticsDashboard(api, profileId, dates) {
 }
 async function scopedAccounts(api, profileId) {
   const result = await api('/accounts', { profileId });
-  if (!Array.isArray(result.accounts)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return an account list.');
+  if (!Array.isArray(result.accounts) || result.accounts.some(account => !reportObject(account) || typeof account._id !== 'string' || !account._id || typeof account.platform !== 'string' || !account.platform)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return an account list.');
   // Fail closed if Zernio ever returns an account outside the requested profile.
   return result.accounts.filter(account => String(account.profileId?._id || account.profileId) === profileId);
 }
@@ -524,11 +525,26 @@ function publishBody(post, accounts, assets = [], { validate = true } = {}) {
 function localStatus(status) {
   return ['published', 'failed', 'scheduled', 'draft', 'partial', 'cancelled'].includes(status) ? status : 'submitted';
 }
+function assertPostResult(remote, profileId, { id, targets, uncertain = true } = {}) {
+  const validText = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f]/.test(value);
+  const reference = value => value?._id || value;
+  const invalid = () => { throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the expected post and publishing accounts.', uncertain); };
+  if (!reportObject(remote) || !validText(remote._id) || id && remote._id !== id || !validText(remote.status) || remote.content !== undefined && typeof remote.content !== 'string' || remote.profileId !== undefined && reference(remote.profileId) !== profileId) invalid();
+  if (remote.platforms !== undefined) {
+    if (!Array.isArray(remote.platforms) || !remote.platforms.length) invalid();
+    for (const target of remote.platforms) {
+      if (!reportObject(target) || !target.platform && !target.accountId || target.platform !== undefined && !validText(target.platform) || target.accountId !== undefined && !validText(reference(target.accountId)) || target.customContent !== undefined && typeof target.customContent !== 'string') invalid();
+      // Zernio's minimal create receipt may omit accountId or platform. Check every identity it does return.
+      if (targets && !targets.some(expected => (target.platform === undefined || target.platform === expected.platform) && (target.accountId === undefined || reference(target.accountId) === reference(expected.accountId)))) invalid();
+    }
+  }
+}
 async function scopedPost(api, profileId, post, activeOnly = false) {
   if (!post?.externalId || post.zernioProfileId !== profileId) fail(404, 'POST_NOT_SUBMITTED', 'No submitted post was found for this project.');
   if (post.providerDeletedAt) fail(409, 'POST_CANCELLED', 'This provider record was removed. Create a new draft to publish again.');
   const result = await api(`/posts/${encodeURIComponent(post.externalId)}`), accounts = await scopedAccounts(api, profileId);
-  if (result.post?._id !== post.externalId || !Array.isArray(result.post.platforms) || !result.post.platforms.length) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return the submitted post.');
+  assertPostResult(result.post, profileId, { id: post.externalId, uncertain: false });
+  if (!Array.isArray(result.post.platforms)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return the submitted post.');
   for (const item of result.post.platforms) {
     const account = requireAccount(accounts, String(item.accountId?._id || item.accountId));
     if (account.platform !== item.platform) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned a post with an inconsistent account platform.');
@@ -583,8 +599,8 @@ function validateRemotePayload(payload, assets = [], post = {}) {
     assertPostRestrictions(postRestrictions(single, [target.platform], assets));
   }
 }
-async function savePostSnapshot(store, projectId, post, remote, extra = {}) {
-  if (remote?._id !== post.externalId || typeof remote.status !== 'string') throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the post change.', true);
+async function savePostSnapshot(store, projectId, post, remote, extra = {}, targets) {
+  assertPostResult(remote, post.zernioProfileId, { id: post.externalId, targets });
   const model = Array.isArray(remote.platforms) && remote.platforms.every(target => target.platform && target.accountId) ? await remotePostModel(store, projectId, post, remote) : {};
   const updated = await store.update(projectId, 'posts', post.id, { ...model, status: localStatus(remote.status), providerStatus: remote.status, ...(Array.isArray(remote.platforms) ? { providerResults: redact(remote.platforms) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(remote.publishedAt ? { publishedAt: remote.publishedAt } : {}), ...extra });
   if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The local post was removed while the provider accepted this action. Reconcile the provider outcome.', true);
@@ -805,7 +821,7 @@ export async function handleIntegration(context) {
         context.assertPublishingApproval?.(publishingPost);
         if (payload.scheduledFor && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'The scheduled time passed during the provider checks. Choose a future time before submitting.');
         const result = await api('/posts', {}, payload, key);
-        if (!result.post?._id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the submitted post.', true);
+        assertPostResult(result.post, profileId, { targets: payload.platforms });
         const updated = await store.update(project.id, 'posts', post.id, { externalId: result.post._id, zernioProfileId: profileId, status: localStatus(result.post.status), providerStatus: result.post.status, providerResults: redact(result.post.platforms || []) });
         if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The post was removed while Zernio accepted it. Reconcile the provider outcome.', true);
         await store.activity(project.id, 'Submitted a social post to Zernio.');
@@ -862,7 +878,7 @@ export async function handleIntegration(context) {
           context.assertProviderPostEdit?.();
           if (payload.scheduledFor && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'The scheduled time passed during the provider checks. Choose a future time before submitting.');
           const result = await api(endpoint, {}, payload, key, 'PUT');
-          const updated = await savePostSnapshot(store, project.id, changed, result.post, { content: result.post?.content ?? content, scheduledAt });
+          const updated = await savePostSnapshot(store, project.id, changed, result.post, { content: result.post?.content ?? content, scheduledAt }, remote.platforms);
           await store.activity(project.id, 'Updated an unpublished social post in Zernio.');
           return { post: updated, provider: { id: post.externalId, status: result.post.status } };
         }
@@ -873,7 +889,7 @@ export async function handleIntegration(context) {
           validateRemotePayload(payload, assets, model); await assertTikTokCreatorRestrictions(api, payload, Object.values(postRestrictions(model, model.platforms, assets).variants).flatMap(variant => variant.mediaItems)); assertPostRestrictions(await providerPostValidation(api, { ...payload, publishNow: true }));
           context.assertPublishingApproval?.(model);
           const result = await api(endpoint + '/retry', {}, {}, key);
-          const updated = await savePostSnapshot(store, project.id, post, result.post);
+          const updated = await savePostSnapshot(store, project.id, post, result.post, {}, remote.platforms);
           await store.activity(project.id, 'Retried a failed social post through Zernio.');
           return { post: updated, provider: { id: post.externalId, status: result.post.status } };
         }

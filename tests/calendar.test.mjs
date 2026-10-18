@@ -13,7 +13,7 @@ test('Google Calendar mapping, managed event boundaries, stable writes, sync dat
   db.prepare('INSERT INTO workspaces VALUES(?,?)').run('workspace-a', 'Team');
   for (const id of ['project-a', 'project-b']) db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run(id, 'workspace-a', id);
   const env = { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'calendar-service@example.test', GOOGLE_PRIVATE_KEY: privateKey };
-  const calls = []; let remote = [], seq = 0, loseResponse = false, invalidWriteResponse = false;
+  const calls = []; let remote = [], seq = 0, loseResponse = false, invalidWriteResponse = false, malformedEventResponse = false;
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); calls.push({ url, options });
     assert.equal(url.protocol, 'https:'); assert.equal(options.redirect, 'error');
@@ -35,6 +35,7 @@ test('Google Calendar mapping, managed event boundaries, stable writes, sync dat
     assert.equal(event.visibility, 'private'); remote = [...remote.filter(item => item.id !== event.id), event];
     if (loseResponse) { loseResponse = false; throw new Error('A private upstream diagnostic must not escape.'); }
     if (invalidWriteResponse) { invalidWriteResponse = false; return Response.json({ id: 'unexpected-event' }); }
+    if (malformedEventResponse) { malformedEventResponse = false; return Response.json({ ...event, summary: { private: 'not display text' } }); }
     return new Response(JSON.stringify(event));
   };
   async function invoke(suffix, { method = 'GET', body = {}, role = 'owner', operator = true, projectId = 'project-a', key = `calendar-key-${++seq}` } = {}) {
@@ -55,6 +56,11 @@ test('Google Calendar mapping, managed event boundaries, stable writes, sync dat
     assert.equal(listed.status, 200); assert.equal(listed.data.events[0].managed, false); assert.equal(listed.data.events[1].projectId, 'project-b');
     const listing = calls.find(call => call.url.searchParams.has('timeMin'));
     assert.equal(listing.url.searchParams.get('timeMin'), '2026-10-01T00:00:00Z'); assert.equal(listing.url.searchParams.get('timeMax'), '2026-11-01T00:00:00.000Z');
+    const originalEvents = remote;
+    for (const invalid of [null, { ...originalEvents[0], summary: {} }, { ...originalEvents[0], start: { date: {} } }, { ...originalEvents[0], start: { date: {}, dateTime: '2026-10-01T12:00:00Z' } }, { ...originalEvents[0], end: null }]) {
+      remote = [invalid]; const result = await invoke('events'); assert.equal(result.status, 502); assert.equal(result.data.error.code, 'CALENDAR_ERROR'); assert.equal(result.data.events, undefined);
+    }
+    remote = originalEvents;
     assert.equal((await invoke('events/other001', { method: 'DELETE' })).status, 404);
     assert.equal((await invoke('events/external01', { method: 'PATCH' })).status, 404);
     assert.equal((await invoke('events', { method: 'POST', role: 'viewer' })).status, 403); assert.equal(eventWrites().length, 0);
@@ -71,6 +77,12 @@ test('Google Calendar mapping, managed event boundaries, stable writes, sync dat
     assert.equal((await invoke(`events/${id}`, { method: 'DELETE', key: 'stable-delete-001' })).data.deleted, true);
     assert.equal((await invoke(`events/${id}`, { method: 'DELETE', key: 'stable-delete-001' })).data.deleted, true);
     assert.equal(eventWrites().filter(call => call.options.method === 'DELETE').length, 1);
+    malformedEventResponse = true;
+    const malformedBody = { ...body, summary: 'Unconfirmed event details' }, beforeMalformed = eventWrites().length;
+    const malformed = await invoke('events', { method: 'POST', body: malformedBody, key: 'malformed-event-create' });
+    assert.equal(malformed.status, 409); assert.equal(malformed.data.operation.status, 'uncertain');
+    await invoke('events', { method: 'POST', body: malformedBody, key: 'malformed-event-retry' });
+    assert.equal(eventWrites().length, beforeMalformed + 1, 'Unreadable event details after a successful write must not authorize another create.');
     store.create('project-a', 'campaigns', { name: 'Launch', startDate: '2026-10-18', endDate: '2026-10-20' });
     store.create('project-a', 'placements', { name: 'Sample booking', startDate: '2026-10-18', sample: true });
     store.create('project-a', 'posts', { content: 'Publish later', scheduledAt: '2026-10-19T09:00:00Z' });

@@ -8,6 +8,18 @@ function fixture() {
   return { db, contacts: createContacts({ db }) };
 }
 
+test('DNS results cannot update contacts after the initiating access is revoked', async () => {
+  const { db, contacts } = fixture();
+  try {
+    const contact = contacts.save('a', { email: 'recipient@example.test' }), before = contacts.get('a', contact.id);
+    let permitted = true, checked = 0;
+    const assertAccess = () => { checked++; if (!permitted) throw Object.assign(new Error('Access revoked'), { status: 403 }); };
+    await assert.rejects(contacts.assessDNS('a', [contact.id], { assertAccess, resolver: async () => { permitted = false; return [{ priority: 1, exchange: 'mail.example.test' }]; } }), error => error.status === 403);
+    assert.equal(checked, 2); assert.deepEqual(contacts.get('a', contact.id), before);
+    let queries = 0; await assert.rejects(contacts.assessDNS('a', [contact.id], { assertAccess, resolver: async () => { queries++; return []; } }), error => error.status === 403); assert.equal(queries, 0);
+  } finally { db.close(); }
+});
+
 test('verified SMS opt-outs survive future projects, deletion and opt-in imports without changing manual or other-channel scope', () => {
   const { db, contacts } = fixture();
   try {

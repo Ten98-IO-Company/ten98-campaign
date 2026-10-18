@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { stripTypeScriptTypes } from 'node:module';
 
 test('the Calendar UI ignores stale month and unmounted responses and reloads after saving', async () => {
   const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
@@ -33,6 +34,42 @@ test('a delayed calendar status response preserves integration mapping edits', a
   const accept = new Function('current', 'setMapping', 'setCalendarLoaded', `return (${callback});`)(true, value => { mapping = typeof value === 'function' ? value(mapping) : value; }, value => { loaded = value; });
   accept({ calendarId: 'shared@example.test' });
   assert.deepEqual(mapping, { zernioProfileId: 'new-profile', driveFolderId: 'new-folder', calendarId: 'shared@example.test' }); assert.equal(loaded, true);
+});
+
+test('calendar writes finishing in a departed month or closed page do not continue changing the current view', async () => {
+  const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
+  const handler = stripTypeScriptTypes(source.slice(source.indexOf('async function write('), source.indexOf('  async function load(')));
+  for (const stale of ['month', 'unmounted']) {
+    let finish; const calls = [], keys = { current: new Map() }, active = { current: true }, scope = { current: 'october' };
+    const write = new Function('path', 'keys', 'request', 'active', 'scope', 'view', `return (${handler});`)('/projects/a/calendar', keys, (...args) => { calls.push(args); return new Promise(resolve => { finish = resolve; }); }, active, scope, 'october');
+    let changed = false;
+    const pending = write('events/october-event', 'DELETE').then(() => { changed = true; });
+    if (stale === 'month') scope.current = 'november'; else active.current = false;
+    finish({}); await assert.rejects(pending, { name: 'AbortError' });
+    assert.equal(changed, false, 'A completed old write must not publish October events or reset a newer form.');
+    assert.equal(keys.current.size, 0, 'The confirmed mutation must release its idempotency key.');
+    await assert.rejects(write('sync', 'POST', {}), { name: 'AbortError' });
+    assert.equal(calls.length, 1, 'A stale continuation must not issue another provider write.');
+  }
+  const updateSource = stripTypeScriptTypes(source.match(/  function updateEvents\([^\n]+/)[0].trim());
+  const parent = [], local = [], active = { current: true }, scope = { current: 'november' };
+  const update = new Function('active', 'scope', 'view', 'setEvents', 'callback', `return (${updateSource});`)(active, scope, 'october', rows => local.push(rows), { current: rows => parent.push(rows) });
+  update([{ id: 'old-october-event' }]);
+  scope.current = 'october'; active.current = false; update([]);
+  assert.deepEqual(parent, [], 'A late calendar mapping callback must not clear a newly mounted calendar.'); assert.deepEqual(local, []);
+  active.current = true; update([{ id: 'current-event' }]); assert.deepEqual(parent, [[{ id: 'current-event' }]]);
+});
+
+test('team changes completing after Settings closes cannot reload a different page or fetch the old workspace', async () => {
+  const source = await readFile(new URL('../src/TeamPanel.tsx', import.meta.url), 'utf8');
+  const handler = stripTypeScriptTypes(source.slice(source.indexOf('async function change('), source.indexOf('  async function add(')));
+  for (const userId of ['self', 'colleague']) {
+    let finish, refreshed = false, reloaded = false;
+    const active = { current: true }, context = { busy: false, canManage: true, active, setBusy() {}, setError() {}, request: () => new Promise(resolve => { finish = resolve; }), path: '/workspaces/old/members', currentUserId: 'self', window: { location: { reload() { reloaded = true; } } }, load: async () => { refreshed = true; } };
+    const change = new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context));
+    const pending = change('PATCH', { userId }, { role: 'viewer' }); active.current = false; finish({}); await pending;
+    assert.equal(reloaded, false); assert.equal(refreshed, false);
+  }
 });
 
 test('an agent history refresh failure preserves the uncertain paid request error and retry key', async () => {
