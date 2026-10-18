@@ -332,16 +332,16 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     else if (url.pathname === '/api/v1/ads/create' || url.pathname === '/api/v1/ads/boost') {
       assert.equal(payload.status, 'PAUSED'); assert.equal(payload.platform, undefined); assert.ok(options.headers['Idempotency-Key']);
       if (uncertainCreate) throw new Error('Connection timed out after upload');
-      result = { ad: { _id: `created-${writes.length}`, platformCampaignId: `campaign-${writes.length}`, status: 'pending_review', platform: 'facebook' } };
+      result = { ad: { _id: `created-${writes.length}`, platformCampaignId: `campaign-${writes.length}`, status: 'pending_review', platform: payload.accountId === 'metaads' ? 'facebook' : payload.accountId === 'xads' ? 'twitter' : payload.accountId.replace(/ads$/, '') } };
     } else if (url.pathname === '/api/v1/ads/tree') { assert.equal(url.searchParams.get('profileId'), 'profile-a'); result = { campaigns: [campaign], pagination: { pages: 1 } }; }
     else if (url.pathname === '/api/v1/ads' && !payload) { assert.equal(url.searchParams.get('profileId'), 'profile-a'); result = { ads: [currentAd, { ...currentAd, _id: 'ad-outside', profileId: 'profile-b' }], pagination: { pages: 1 } }; }
     else if (url.pathname === '/api/v1/ads/ad-in-project' && !payload) { assert.equal(url.searchParams.get('live'), 'true'); result = { ad: currentAd, statusReadAt: '2026-10-18T00:00:00Z' }; }
     else if (url.pathname === '/api/v1/ads/ad-in-project') result = { ad: { ...currentAd, ...payload } };
     else if (url.pathname === '/api/v1/ads/ad-in-project/status') result = { configuredStatus: confirmStatus ? payload.status.toUpperCase() : null, status: 'paused', updated: 1 };
     else if (url.pathname === '/api/v1/ads/campaigns/native-campaign/status') result = { platformCampaignStatus: confirmStatus ? payload.status.toUpperCase() : null, statusReadAt: confirmStatus ? '2026-10-18T00:00:00Z' : null, status: payload.status, updated: 1, skipped: 0 };
-    else if (url.pathname === '/api/v1/ads/ad-sets/native-set') result = { updated: 1, ...payload };
+    else if (url.pathname === '/api/v1/ads/ad-sets/native-set') { if (payload.name) campaign.adSets[0].adSetName = payload.name; if (payload.budget) campaign.adSets[0].budget = payload.budget; result = { updated: 1, ...payload }; }
     else if (url.pathname === '/api/v1/ads/campaigns/native-campaign') result = { updated: 1, ...payload };
-    else if (url.pathname === '/api/v1/posts/remote-published') result = { post: { _id: 'remote-published', status: 'published', platforms: [{ accountId: 'facebook', status: 'published' }] } };
+    else if (url.pathname === '/api/v1/posts/remote-published') result = { post: { _id: 'remote-published', status: 'published', platforms: [{ platform: 'facebook', accountId: 'facebook', status: 'published' }] } };
     else if (url.pathname === '/api/v1/ads/targeting/search') { assert.equal(url.searchParams.get('accountId'), 'metaads'); assert.equal(url.searchParams.get('adAccountId'), 'native-account'); result = { results: [{ id: '6001', name: 'Design', type: 'interest' }] }; }
     else if (url.pathname === '/calendar/v3/calendars/calendar/events/event' && options.method === 'DELETE') return new Response(null, { status: 204 });
     else throw new Error(`Unexpected endpoint ${url.pathname}`);

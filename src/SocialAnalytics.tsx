@@ -13,13 +13,13 @@ export default function SocialAnalytics({ request, connected }: Props) {
   const [to, setTo] = useState(today), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [report, setReport] = useState<{ data: Dashboard; from: string; to: string } | null>(null);
   const chartId = useId(), data = report?.data;
-  const daily = data?.daily || [], topPosts = (data?.topPosts || []).slice(0, 10);
+  const daily = data?.daily || [], topPosts = data?.topPosts || [];
   const maximum = Math.max(1, ...daily.map(day => numeric(day.impressions) ? day.impressions : 0));
   const hasDaily = daily.some(day => numeric(day.impressions)), barWidth = daily.length ? 960 / daily.length : 0;
   async function load(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (busy || !connected) return;
     setError('');
-    if (!from || !to || from > to || Date.parse(to) - Date.parse(from) > 366 * 86400000) { setError('Choose a start date before the end date, with a range of at most 366 days.'); return; }
+    if (!from || !to || from > to || Date.parse(to) - Date.parse(from) >= 366 * 86400000) { setError('Choose a start date before the end date, with a range of at most 366 days.'); return; }
     setBusy(true);
     try {
       const response = await request(`analytics/dashboard?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}`);
@@ -65,7 +65,7 @@ export default function SocialAnalytics({ request, connected }: Props) {
           <text x="980" y="16" textAnchor="end" fill="currentColor" fontSize="12">Peak: {number(Math.max(...daily.filter(day => numeric(day.impressions)).map(day => day.impressions!)))}</text>
         </svg>
       </div> : <div className="empty"><p>No daily impressions were returned for this date range.</p></div>}
-      <div className="panel-heading"><div><h3>Top posts</h3><p>Showing {topPosts.length} of {data.topPosts?.length || 0} posts returned in this summary. Full post pagination is unavailable here.</p></div></div>
+      <div className="panel-heading"><div><h3>Top posts</h3><p>Showing all {topPosts.length} posts returned in this reporting summary.</p></div></div>
       {topPosts.length ? <div className="table-scroll"><table><thead><tr><th>Post / channel</th><th>Published</th><th>Impressions</th><th>Reach</th><th>Likes</th><th>Comments</th><th>Shares</th><th>Engagement</th></tr></thead><tbody>{topPosts.map((post, index) => <tr key={`${post.postId}-${index}`}><td><strong>{post.postId || '—'}</strong><br/>{post.platform || '—'}</td><td>{post.publishedAt?.slice(0, 10) || '—'}</td><td>{number(post.metrics?.impressions)}</td><td>{number(post.metrics?.reach)}</td><td>{number(post.metrics?.likes)}</td><td>{number(post.metrics?.comments)}</td><td>{number(post.metrics?.shares)}</td><td>{numeric(post.metrics?.engagementRate) ? `${number(post.metrics.engagementRate, 2)}%` : '—'}</td></tr>)}</tbody></table></div> : <div className="empty"><p>No top posts were returned for this date range.</p></div>}
       <p className="helper-note" style={{ padding: '16px 22px' }}>{data.dataAsOf ? `Provider data as of ${data.dataAsOf}.` : 'The provider did not report when this data was updated.'} Missing values appear as —.</p>
     </>}

@@ -19,12 +19,13 @@ function previewCopy(post: any, copy: any, assets: any[]) {
 
 export default function PostManagement({ request, post, canWrite, assets = [], campaigns = [], accounts = [], onCancel, onChanged }: Props) {
   const requester = useRef(request); requester.current = request;
+  const changed = useRef(onChanged); changed.current = onChanged;
   const [current, setCurrent] = useState(post), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [replaceVariants, setReplaceVariants] = useState(false);
   const copies = current.providerResults || [], editable = !current.providerDeletedAt && ['draft', 'scheduled', 'failed', 'cancelled'].includes(current.status) && !copies.some((item: any) => ['published', 'publishing'].includes(item.status));
   const providerAccounts = accounts.length ? accounts : copies.map((item: any) => ({ ...(typeof item.accountId === 'object' ? item.accountId : {}), _id: accountId(item), platform: item.platform }));
   const seenCopies = new Map<string, string>(), divergentCopies = copies.some((item: any) => { const configuration = JSON.stringify([item.customContent, item.customMedia, item.platformSpecificData]), previous = seenCopies.get(item.platform); seenCopies.set(item.platform, configuration); return previous !== undefined && previous !== configuration; });
-  useEffect(() => { let active = true; setCurrent(post); setBusy(true); setError(''); setNotice(''); requester.current('social/status?postId=' + encodeURIComponent(post.id)).then(result => { if (active) { setCurrent(result.post); } }).catch(err => { if (active) setError(err.message); }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [post.id]);
+  useEffect(() => { let active = true; setCurrent(post); setBusy(true); setError(''); setNotice(''); requester.current('social/status?postId=' + encodeURIComponent(post.id)).then(async result => { if (active) { setCurrent(result.post); await changed.current?.(); } }).catch(err => { if (active) setError(err.message); }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [post.id]);
   async function act(path: string, body: any, message: string) {
     setBusy(true); setError(''); setNotice('');
     try { const result = await requester.current(path, body); setCurrent(result.post); setNotice(message); onChanged?.(); }

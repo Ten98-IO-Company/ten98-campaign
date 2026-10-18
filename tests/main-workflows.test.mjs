@@ -15,6 +15,20 @@ test('post labels show a platform caption when shared content is empty and ident
   assert.equal(label({ content: '', platforms: ['instagram'], platformOverrides: { instagram: { mediaItems: [] } } }), 'Media post');
 });
 
+test('local campaign results distinguish missing metrics from zero and never display NaN rates', () => {
+  const appSource = source(), start = appSource.indexOf('<h2>Campaign results</h2>'), row = appSource.slice(start, appSource.indexOf('</tbody>', start));
+  const cells = [...row.matchAll(/<td>\{([^{}]+)\}<\/td>/g)].slice(0, 5).map(match => match[1]);
+  assert.equal(cells.length, 5);
+  const declaration = appSource.match(/^const numeric = .+;$/m)[0].replace('(value: unknown): value is number', '(value)');
+  const numeric = runInNewContext(declaration + '; numeric');
+  const render = campaign => cells.map(expression => new Function('c', 'numeric', 'compact', 'money', `return (${expression});`)(campaign, numeric, value => String(value), value => `AED ${value}`));
+  assert.deepEqual(render({}), ['—', '—', '—', '—', '—']);
+  assert.deepEqual(render({ impressions: 100, conversions: 2 }), ['100', '—', '—', 2, '—']);
+  assert.deepEqual(render({ impressions: 100, clicks: 0, conversions: 2, spent: 0 }), ['100', '0', '0.00%', 2, 'AED 0']);
+  assert.deepEqual(render({ impressions: 0, clicks: 0, conversions: 0, spent: 0 }), ['0', '0', '—', 0, '—']);
+  assert.deepEqual(render({ impressions: Infinity, clicks: NaN, conversions: null, spent: undefined }), ['—', '—', '—', '—', '—']);
+});
+
 test('calendar dates stay on their intended day while timestamps follow the browser timezone', () => {
   const declaration = source().match(/^const date = .+;$/m)?.[0];
   assert.ok(declaration, 'Exercise the date formatter used by campaign and OOH cards.');

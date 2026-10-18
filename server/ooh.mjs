@@ -22,7 +22,7 @@ function integer(value, label) {
 }
 function dates(body) {
   for (const key of ['startDate', 'endDate']) if (typeof body[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(body[key]) || !Number.isFinite(Date.parse(body[key])) || new Date(body[key]).toISOString().slice(0, 10) !== body[key]) fail(400, 'INVALID_OOH_DATES', 'Use valid start and end dates.');
-  if (body.endDate < body.startDate || Date.parse(body.endDate) - Date.parse(body.startDate) > 366 * 86400000) fail(400, 'INVALID_OOH_DATES', 'Use an ordered booking period of at most one year.');
+  if (body.endDate < body.startDate || Date.parse(body.endDate) - Date.parse(body.startDate) >= 366 * 86400000) fail(400, 'INVALID_OOH_DATES', 'Use an ordered booking period of at most 366 days, including both dates.');
 }
 function initialize(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS project_ooh_connections(project_id TEXT PRIMARY KEY,provider TEXT NOT NULL,external_scope_id TEXT NOT NULL,config_public TEXT NOT NULL);
@@ -42,7 +42,7 @@ function canRetryCancellation(db, projectId, booking) {
 }
 function coordinate(value, limit) { return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= limit ? value : null; }
 function screenView(screen) {
-  return { id: screen.id, name: String(screen.name || screen.id).slice(0, 250), location: String(screen.address || '').slice(0, 500), resolution: String(screen.resolution || '').slice(0, 80), latitude: coordinate(screen.lat, 90), longitude: coordinate(screen.long, 180), syncedAt: new Date().toISOString() };
+  return { id: Number(screen.id), name: String(screen.name || screen.id).slice(0, 250), location: String(screen.address || '').slice(0, 500), resolution: String(screen.resolution || '').slice(0, 80), latitude: coordinate(screen.lat, 90), longitude: coordinate(screen.long, 180), syncedAt: new Date().toISOString() };
 }
 function placementRecords({ db, store, project }, booking) {
   const inventory = list(db, 'project_ooh_inventory', project.id), existing = store.list(project.id, 'placements');
@@ -141,6 +141,7 @@ export async function handleOoh(context) {
         const approved = JSON.parse(other.config_public);
         if (Number(other.external_scope_id) === connection.domainId && approved.environment === connection.environment && approved.screenIds.some(id => connection.screenIds.includes(id))) fail(409, 'OOH_SCREEN_ALREADY_MAPPED', 'A screen is already assigned to another project.');
       }
+      if (JSON.stringify(mapping(db, project.id)) === JSON.stringify(connection)) { send(200, { connection }); return true; }
       db.prepare('INSERT INTO project_ooh_connections VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET external_scope_id=excluded.external_scope_id,config_public=excluded.config_public').run(project.id, 'broadsign', String(connection.domainId), JSON.stringify({ clientId: connection.clientId, clientName: connection.clientName, screenIds: connection.screenIds, environment: connection.environment }));
       db.prepare('DELETE FROM project_ooh_inventory WHERE project_id=?').run(project.id);
       store?.activity(project.id, 'Approved Broadsign project inventory mapping.'); send(200, { connection }); return true;
@@ -197,12 +198,15 @@ export async function handleOoh(context) {
       if (!booking.lineItemId) fail(409, 'OOH_INCOMPLETE_DRAFT', 'This draft was only partly created. Reconcile it in Broadsign before continuing.');
       await verifyDomain(env, connection);
       if (route[2] === 'availability' && req.method === 'GET') {
-        const result = await availability(env, connection, booking); booking.providerStatus = result.providerStatus; saveBooking(db, project.id, booking);
+        const result = await availability(env, connection, booking);
+        if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== row.data) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the availability check. Refresh before continuing.');
+        booking.providerStatus = result.providerStatus; saveBooking(db, project.id, booking);
         send(200, { ...result, placements: placementRecords(context, booking) }); return true;
       }
       if (route[2] === 'report' && req.method === 'GET') {
         const { proposal, item } = await checkedProposal(env, connection, booking, true);
-        const report = { actualImpressions: typeof item.actual_impressions === 'number' ? item.actual_impressions : null, actualPlays: typeof item.actual_repetitions === 'number' ? item.actual_repetitions : null, updatedAt: item.performance_update_tm || null, rawProofOfPlay: false };
+        if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== row.data) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the delivery check. Refresh before continuing.');
+        const report = { actualImpressions: typeof item.actual_impressions === 'number' && Number.isFinite(item.actual_impressions) && item.actual_impressions >= 0 ? item.actual_impressions : null, actualPlays: typeof item.actual_repetitions === 'number' && Number.isFinite(item.actual_repetitions) && item.actual_repetitions >= 0 ? item.actual_repetitions : null, updatedAt: typeof item.performance_update_tm === 'string' ? item.performance_update_tm.slice(0, 100) : null, rawProofOfPlay: false };
         Object.assign(booking, { providerStatus: Number(proposal.status), report, ...([12, 14, 15].includes(Number(proposal.status)) ? { stage: Number(proposal.status) === 12 ? 'cancelled' : Number(proposal.status) === 14 ? 'ended' : 'cancelling' } : {}) }); saveBooking(db, project.id, booking); send(200, { booking, report, placements: placementRecords(context, booking) }); return true;
       }
       if (route[2] === 'cancel' && req.method === 'POST') {

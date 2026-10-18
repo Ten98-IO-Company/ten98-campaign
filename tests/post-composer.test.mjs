@@ -105,3 +105,27 @@ test('legacy unsupported destinations remain removable while new drafts offer on
   assert.deepEqual(platforms, ['facebook']); assert.deepEqual(selected, ['fb-account']);
   assert.equal(choices(platforms).includes('whatsapp'), false);
 });
+
+test('opening a provider post refreshes its parent calendar once and ignores responses after closing', async () => {
+  const management = await readFile(new URL('../src/PostManagement.tsx', import.meta.url), 'utf8'), effect = management.match(/useEffect\((.+), \[post.id\]\);/)[1];
+  const pending = [], accepted = [], changed = [], busy = [];
+  const context = { post: { id: 'post-a', scheduledAt: '2030-01-01T09:00:00Z' }, setCurrent: value => accepted.push(value), setBusy: value => busy.push(value), setError: () => {}, setNotice: () => {}, requester: { current: () => new Promise(resolve => pending.push(resolve)) }, changed: { current: async () => changed.push(true) } };
+  const start = new Function(...Object.keys(context), `return (${effect});`)(...Object.values(context));
+  const close = start(); pending[0]({ post: { id: 'post-a', scheduledAt: '2030-01-02T09:00:00Z' } }); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(changed, [true]); assert.equal(accepted.at(-1).scheduledAt, '2030-01-02T09:00:00Z'); assert.equal(busy.at(-1), false); close();
+  const closeAgain = start(); closeAgain(); pending[1]({ post: { id: 'post-a', scheduledAt: '2030-01-03T09:00:00Z' } }); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(changed, [true]); assert.equal(accepted.at(-1).scheduledAt, '2030-01-01T09:00:00Z');
+});
+
+test('a confirmed approval stays saved when refreshing its queue fails and closed views do not notify their parent', async () => {
+  const approvals = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');
+  const acceptSource = approvals.match(/function acceptItem\(item: any\) \{[^\r\n]+\}/)[0].replace('item: any', 'item').replaceAll('previous: any', 'previous').replaceAll('entry: any', 'entry');
+  const reviewSource = approvals.slice(approvals.indexOf('async function review('), approvals.indexOf('  const posts =')).replace('item: any, decision: string', 'item, decision');
+  const pending = { post: { id: 'post-a' }, status: 'pending', review: { id: 'review-a' } }, approved = { ...pending, status: 'approved', review: { id: 'review-a', status: 'approved' } }, active = { current: true }, notices = [], changes = [], errors = [];
+  let data = { posts: [pending] }, notes = { 'post-a': 'Approved for launch.' };
+  const accept = new Function('active', 'setData', `return (${acceptSource});`)(active, update => { data = update(data); });
+  const context = { action: async (_, run) => { try { await run(); } catch (error) { errors.push(error.message); } }, request: async () => ({ item: approved }), path: '/projects/project-a/approvals', notes, active, acceptItem: accept, setNotes: update => { notes = update(notes); }, setNotice: message => notices.push(message), onChanged: async () => changes.push(true), load: async () => { throw new Error('Queue refresh unavailable.'); } };
+  const review = new Function(...Object.keys(context), `return (${reviewSource});`)(...Object.values(context));
+  await review(pending, 'approved'); assert.equal(data.posts[0].status, 'approved'); assert.equal(notes['post-a'], ''); assert.match(notices[0], /Post approved/); assert.deepEqual(changes, [true]); assert.deepEqual(errors, ['Queue refresh unavailable.']);
+  active.current = false; await review(pending, 'approved'); assert.deepEqual(changes, [true]); assert.equal(notices.length, 1);
+});

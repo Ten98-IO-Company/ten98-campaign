@@ -152,8 +152,9 @@ export function resolveVariant(post, platform, assets = []) {
   return { platform, content: own(variant, 'content') ? variant.content : typeof post.content === 'string' ? post.content : '', mediaItems, options: variant.options || {}, ...(assetId ? { assetId } : {}) };
 }
 function assetMedia(asset) {
-  return { type: asset.kind || asset.type, url: asset.deliveryUrl || asset.url,
-    ...Object.fromEntries(['mimeType', 'altText', 'title', 'filename'].filter(key => typeof asset[key] === 'string' && asset[key]).map(key => [key, asset[key]])),
+  return { type: asset.mimeType?.toLowerCase() === 'image/gif' ? 'gif' : asset.kind || asset.type, url: asset.deliveryUrl || asset.url,
+    ...Object.fromEntries(['mimeType', 'title', 'filename'].filter(key => typeof asset[key] === 'string' && asset[key]).map(key => [key, asset[key]])),
+    ...(asset.altText || asset.description ? { altText: asset.altText || asset.description } : {}),
     ...Object.fromEntries(['width', 'height', 'duration', 'size'].filter(key => Number.isFinite(Number(asset[key])) && Number(asset[key]) > 0).map(key => [key, Number(asset[key])])),
   };
 }

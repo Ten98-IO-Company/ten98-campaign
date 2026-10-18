@@ -2,9 +2,9 @@
 
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.4.0 adds per-platform captions, media, publishing options, previews, and restriction checks. It uses Zernio for social publishing, advertising, and analytics; Google Drive for the DAM; Google Calendar for shared planning; Broadsign for OOH proposals and bookings; Google Maps for locations; and OpenRouter for an optional campaign assistant. It includes integration configuration and connection tests, team invitations, content approvals, and provider-operation reconciliation. Unified inbox, messaging, and comment/review feeds have been removed to focus on campaign management. The application is [MIT licensed](LICENSE). Provider accounts, API access, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.4.1 hardens end-to-end ads, social publishing, analytics, OOH, and Drive DAM workflows. Per-platform captions, media, publishing options, previews, and restriction checks are included. It uses Zernio for social publishing, advertising, and analytics; Google Drive for the DAM; Google Calendar for shared planning; Broadsign for OOH proposals and bookings; Google Maps for locations; and OpenRouter for an optional campaign assistant. It includes integration configuration and connection tests, team invitations, content approvals, and provider-operation reconciliation. Unified inbox, messaging, and comment/review feeds have been removed to focus on campaign management. The application is [MIT licensed](LICENSE). Provider accounts, API access, media spending, and model usage remain subject to their providers' terms and charges.
 
-![Campaign workspace](docs/preview.png)
+![Campaign ads manager](docs/ads-verification.png)
 
 ## Run locally
 
@@ -115,6 +115,8 @@ Direct-message, conversation, comment and review subscriptions are no longer nee
 Enable the Drive API, configure the service account in **Integrations** (or set `GOOGLE_SERVICE_ACCOUNT_EMAIL` and `GOOGLE_PRIVATE_KEY`), and share a folder with it. An instance operator with workspace administration maps the folder ID. Choose **Sync Drive** in the asset library.
 
 Sync stores metadata and original links without making files public. It lists the mapped folder directly, without recursion, up to 2,000 files across 20 pages; an incomplete search does not produce a partial sync. Uploads require a folder in a **Google Shared Drive** and accept JPG, PNG, WebP, GIF, MP4, PDF, or text up to 5 MB. Tokens stay server-side. [Drive API](https://developers.google.com/workspace/drive/api/guides/about-sdk); [service-account authorization](https://developers.google.com/identity/protocols/oauth2/service-account).
+
+Imports validate the complete response and save atomically, deduplicating files across pages and concurrent syncs. Image/video dimensions and video duration are retained for publishing checks; unknown metadata stays unknown. Camera/location EXIF data is not requested. Existing delivery URLs, descriptions, tags and unchanged approvals survive sync. GIF assets use GIF restrictions, and the asset description supplies publishing alt text. [Drive file metadata](https://developers.google.com/workspace/drive/api/reference/rest/v3/files).
 
 An asset's optional **public delivery URL** supplies publishable media while preserving its Drive original. The app does not grant public Drive permissions or host a delivery CDN. When sync detects changed file metadata/checksum, it resets that asset's approval to pending; associated content approval also becomes stale. Keep public media permissions and usage rights under your control.
 

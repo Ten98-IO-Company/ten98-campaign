@@ -63,6 +63,7 @@ async function api(path: string, method = 'GET', body?: unknown, key?: string) {
 }
 const money = (n: unknown, currency = 'AED') => new Intl.NumberFormat('en-AE', { style: 'currency', currency, maximumFractionDigits: 0 }).format(Number(n) || 0);
 const compact = (n: unknown) => new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(Number(n) || 0);
+const numeric = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const title = (s: string) => s ? s.charAt(0).toUpperCase() + s.slice(1).replaceAll('_', ' ') : '';
 const date = (value: string) => value ? new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', ...(/^\d{4}-\d{2}-\d{2}$/.test(value) ? { timeZone: 'UTC' } : {}) }) : 'Not set';
 const initial = (value: string) => value?.split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase() || '98';
@@ -94,7 +95,7 @@ function App() {
   const [calendar, setCalendar] = useState(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const searchRef = useRef<HTMLInputElement>(null), dialogRef = useRef<HTMLDialogElement>(null), triggerRef = useRef<HTMLElement | null>(null);
   const pendingKeys = useRef(new Map<string, string>());
-  const loadVersion = useRef(0), activeProject = useRef('');
+  const loadVersion = useRef(0), activeProject = useRef(''), pendingWork = useRef(0);
   const providerManaged = !!modal?.item && ((modal.type === 'placement' && modal.item.source === 'broadsign') || (modal.type === 'campaign' && modal.item.externalId));
   const canMap = !!state?.user.isOperator && ['owner', 'admin'].includes(state?.workspaces.find(w => w.id === state?.projects.find(p => p.id === state.projectId)?.workspaceId)?.role);
   const project = state?.projects.find(p => p.id === state.projectId);
@@ -110,13 +111,16 @@ function App() {
     finally { if (version === loadVersion.current) setLoading(false); }
   }
   async function run(work: () => Promise<any>, success?: string) {
+    const requestProject = activeProject.current;
+    pendingWork.current++;
     setBusy(true); setError('');
-    try { const result = await work(); if (success) { setNotice(success); } return result; }
-    catch (err) { if ((err as Error).name !== 'AbortError') setError((err as Error).message); return null; }
-    finally { setBusy(false); }
+    try { const result = await work(); if (success && activeProject.current === requestProject) { setNotice(success); } return result; }
+    catch (err) { if (activeProject.current === requestProject && (err as Error).name !== 'AbortError') setError((err as Error).message); return null; }
+    finally { setBusy(--pendingWork.current > 0); }
   }
   async function integrate(path: string, body?: any) {
     const requestProject = state!.projectId;
+    if (activeProject.current !== requestProject) throw new DOMException('Project changed', 'AbortError');
     const operation = `${requestProject}:${path}:${JSON.stringify(body)}`;
     if (!pendingKeys.current.has(operation)) pendingKeys.current.set(operation, crypto.randomUUID());
     try {
@@ -143,6 +147,7 @@ function App() {
     const requestProject = state!.projectId, form = e.currentTarget, values = Object.fromEntries(new FormData(form)) as Record<string, any>;
     const kind = modal!.type, editing = modal!.item;
     const result = await run(async () => {
+      if (activeProject.current !== requestProject) throw new DOMException('Project changed', 'AbortError');
       if (kind === 'connect') { const result = await integrate('connect?platform=' + encodeURIComponent(values.platform) + '&kind=' + encodeURIComponent(values.kind)); if (result.authUrl) window.location.assign(result.authUrl); return result; }
       if (kind === 'workspace') return api('/workspaces', 'POST', { name: values.name });
       if (kind === 'project') return api('/projects', 'POST', { ...values, workspaceId: workspace!.id });
@@ -156,16 +161,19 @@ function App() {
   }
   async function savePost(values: Record<string, any>) {
     const requestProject = state!.projectId, editing = modal?.item;
+    if (activeProject.current !== requestProject) throw new DOMException('Project changed', 'AbortError');
+    pendingWork.current++;
     setBusy(true); setError('');
     try {
       const result = await api(`/projects/${requestProject}/posts${editing ? '/' + editing.id : ''}`, editing ? 'PATCH' : 'POST', values);
       if (activeProject.current === requestProject) { setModal(null); setNotice('Post versions saved. Publishing is a separate action.'); await reload(requestProject); }
       return result;
-    } finally { setBusy(false); }
+    } finally { setBusy(--pendingWork.current > 0); }
   }
   async function remove(collection: string, item: Row) {
     if (!window.confirm(`Delete “${item.name || 'this draft'}”? This removes the local record.`)) return;
-    await run(async () => { await api(endpoint(collection + '/' + item.id), 'DELETE'); setModal(null); await reload(); }, 'Record deleted');
+    const requestProject = state!.projectId;
+    await run(async () => { if (activeProject.current !== requestProject) throw new DOMException('Project changed', 'AbortError'); await api(endpoint(collection + '/' + item.id), 'DELETE'); if (activeProject.current === requestProject) { setModal(null); await reload(requestProject); } }, 'Record deleted');
   }
   async function clearSampleData() {
     if (!window.confirm('Remove all sample records from this project? Your own records stay. Sample records you edited will also be removed.')) return;
@@ -225,7 +233,7 @@ function App() {
           <div className="overview-toolbar"><span><span className="status-dot green"/>{activeCampaigns} active campaigns <span className="muted">across your project</span></span><label className="currency-select">Reporting currency <select value={currency} onChange={e => setCurrency(e.target.value)}>{['AED', 'USD', 'EUR', 'GBP'].map(c => <option key={c}>{c}</option>)}</select></label></div>
           <div className="stat-grid"><Stat label="Campaign spend" value={money(spent, currency)} caption={`${budget ? Math.round(spent / budget * 100) : 0}% of ${money(budget, currency)} total budget`} icon="money"/><Stat label="Total impressions" value={compact(impressions)} caption="Across tracked campaigns" icon="eye"/><Stat label="Scheduled posts" value={String(state.posts.filter(p => p.status === 'scheduled').length)} caption={`${state.posts.filter(p => p.status === 'draft').length} drafts ready for your next idea`} icon="calendar"/><Stat label="OOH placements" value={String(state.placements.filter(p => ['live', 'booked'].includes(p.status)).length)} caption={`${state.providers.length} media providers in your network`} icon="billboard"/></div>
           <div className="overview-grid"><section className="panel performance-panel"><div className="panel-heading"><div><h2>Campaign performance</h2><p>Spend against budget, by campaign · {currency}</p></div><span className="subtle-tag">Tracked totals</span></div><div className="performance-legend"><span><i className="legend-dot purple"/>Spent</span><span><i className="legend-dot pale"/>Remaining budget</span></div><div className="budget-chart">{currentCurrency.length ? currentCurrency.slice(0, 5).map(c => <div className="chart-row" key={c.id}><div><span>{c.name}</span><strong>{money(c.spent, currency)}</strong></div><div className="chart-track"><span style={{ width: `${Math.min(100, Number(c.spent) / Math.max(1, Number(c.budget)) * 100)}%` }}/></div></div>) : <Empty title="A clear view of your budget">Add a campaign in {currency} to start tracking performance.</Empty>}</div><div className="chart-footer"><Icon name="chart" size={15}/>{sample ? 'Illustrative data' : 'Locally tracked campaign totals'}<span>Provider insights in Ads manager</span></div></section><section className="panel channel-panel"><div className="panel-heading"><div><h2>Your channel mix</h2><p>A campaign is bigger than one channel.</p></div><Icon name="layers"/></div><div className="mix-visual">{Object.keys(channels).map((key, i) => { const count = state.campaigns.filter(c => c.channel === key).length; return count > 0 && <span key={key} className={'mix-band band-' + i} style={{ flex: count }} title={`${channels[key]}: ${count}`}>{count}</span>; })}{!state.campaigns.length && <span className="mix-empty">Your channels will appear here</span>}</div><div className="channel-breakdown">{Object.entries(channels).map(([key, label], i) => <div key={key}><span><i className={'legend-dot mix-dot-' + i}/>{label}</span><strong>{state.campaigns.filter(c => c.channel === key).length} <small>campaigns</small></strong></div>)}</div><button className="text-link" onClick={() => setPage('Campaigns')}>Explore campaigns <Icon name="arrow" size={15}/></button></section></div>
-          {page === 'Overview' ? <><section className="panel"><div className="panel-heading"><div><h2>Campaigns in motion <span className="count">{state.campaigns.length}</span></h2><p>A bird’s-eye view of what you’re putting into the world.</p></div><button className="text-link" onClick={() => setPage('Campaigns')}>View all campaigns <Icon name="arrow" size={15}/></button></div>{campaignTable(filtered(state.campaigns).slice(0, 4), true)}</section><div className="overview-grid bottom-grid"><section className="panel"><div className="panel-heading"><h2>Up next</h2><button className="text-link" onClick={() => setPage('Calendar')}>Open calendar <Icon name="arrow" size={14}/></button></div>{upcomingPosts(state.posts).slice(0, 3).map(p => <button className="upcoming-row" key={p.id} onClick={() => setModal({ type: 'post', item: p })}><div className="date-tile"><strong>{new Date(p.scheduledAt).getDate()}</strong><span>{new Date(p.scheduledAt).toLocaleDateString('en', { month: 'short' })}</span></div><div><strong>{postLabel(p).slice(0, 65)}</strong><span>{p.platforms?.map((n: string) => title(n)).join(' · ')}<span className="dot-separator">·</span>{p.externalId ? 'Submitted' : 'Planned'}</span></div><Icon name="arrow" size={16}/></button>)}{!upcomingPosts(state.posts).length && <Empty title="Room for your next idea">Create a post and choose a date to fill your calendar.</Empty>}</section><section className="panel activity-panel"><div className="panel-heading"><h2>Workspace activity</h2><span className="subtle-tag">Latest</span></div>{state.activity.slice(0, 4).map(a => <div className="activity-row" key={a.id}><span className="activity-icon"><Icon name="check" size={14}/></span><div><p>{a.message || a.action || a.description}</p><small>{date(a.createdAt)}</small></div></div>)}{!state.activity.length && <Empty title="A fresh start">Your team’s campaign activity will appear here.</Empty>}</section></div></> : <section className="panel"><div className="panel-heading"><div><h2>Campaign results</h2><p>Local campaign totals. Live network insights are available in Ads manager.</p></div></div><div className="table-scroll"><table><thead><tr><th>Campaign</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>Conversions</th><th>Cost per conversion</th></tr></thead><tbody>{filtered(state.campaigns).map(c => <tr key={c.id}><td><strong>{c.name}</strong></td><td>{compact(c.impressions)}</td><td>{compact(c.clicks)}</td><td>{c.impressions ? (c.clicks / c.impressions * 100).toFixed(2) + '%' : '—'}</td><td>{c.conversions ?? '—'}</td><td>{c.conversions ? money(c.spent / c.conversions, c.currency || 'AED') : '—'}</td></tr>)}</tbody></table></div></section>}
+          {page === 'Overview' ? <><section className="panel"><div className="panel-heading"><div><h2>Campaigns in motion <span className="count">{state.campaigns.length}</span></h2><p>A bird’s-eye view of what you’re putting into the world.</p></div><button className="text-link" onClick={() => setPage('Campaigns')}>View all campaigns <Icon name="arrow" size={15}/></button></div>{campaignTable(filtered(state.campaigns).slice(0, 4), true)}</section><div className="overview-grid bottom-grid"><section className="panel"><div className="panel-heading"><h2>Up next</h2><button className="text-link" onClick={() => setPage('Calendar')}>Open calendar <Icon name="arrow" size={14}/></button></div>{upcomingPosts(state.posts).slice(0, 3).map(p => <button className="upcoming-row" key={p.id} onClick={() => setModal({ type: 'post', item: p })}><div className="date-tile"><strong>{new Date(p.scheduledAt).getDate()}</strong><span>{new Date(p.scheduledAt).toLocaleDateString('en', { month: 'short' })}</span></div><div><strong>{postLabel(p).slice(0, 65)}</strong><span>{p.platforms?.map((n: string) => title(n)).join(' · ')}<span className="dot-separator">·</span>{p.externalId ? 'Submitted' : 'Planned'}</span></div><Icon name="arrow" size={16}/></button>)}{!upcomingPosts(state.posts).length && <Empty title="Room for your next idea">Create a post and choose a date to fill your calendar.</Empty>}</section><section className="panel activity-panel"><div className="panel-heading"><h2>Workspace activity</h2><span className="subtle-tag">Latest</span></div>{state.activity.slice(0, 4).map(a => <div className="activity-row" key={a.id}><span className="activity-icon"><Icon name="check" size={14}/></span><div><p>{a.message || a.action || a.description}</p><small>{date(a.createdAt)}</small></div></div>)}{!state.activity.length && <Empty title="A fresh start">Your team’s campaign activity will appear here.</Empty>}</section></div></> : <section className="panel"><div className="panel-heading"><div><h2>Campaign results</h2><p>Local campaign totals. Live network insights are available in Ads manager.</p></div></div><div className="table-scroll"><table><thead><tr><th>Campaign</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>Conversions</th><th>Cost per conversion</th></tr></thead><tbody>{filtered(state.campaigns).map(c => <tr key={c.id}><td><strong>{c.name}</strong></td><td>{numeric(c.impressions) ? compact(c.impressions) : '—'}</td><td>{numeric(c.clicks) ? compact(c.clicks) : '—'}</td><td>{numeric(c.impressions) && c.impressions > 0 && numeric(c.clicks) ? (c.clicks / c.impressions * 100).toFixed(2) + '%' : '—'}</td><td>{numeric(c.conversions) ? c.conversions : '—'}</td><td>{numeric(c.conversions) && c.conversions > 0 && numeric(c.spent) ? money(c.spent / c.conversions, c.currency || 'AED') : '—'}</td></tr>)}</tbody></table></div></section>}
         </>}
         {page === 'Approvals' && <ContentApprovals key={state.projectId + ':' + state.user.id} projectId={state.projectId} role={workspace?.role || 'viewer'} request={api} onChanged={() => { if (activeProject.current === state.projectId) return reload(); }}/> }
         {page === 'AI agent' && <CampaignAgent key={state.projectId} projectId={state.projectId} canWrite={canWrite} request={api} onSaved={() => { if (activeProject.current === state.projectId) { run(() => reload()); setNotice('Draft saved in this project.'); } }}/>}

@@ -1,5 +1,6 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
 import { buildPlatformEntry, normalizeMediaItems, normalizePostVariants, resolveVariant, validatePostForPlatforms, wireMediaItems } from '../shared/social-posts.mjs';
+import { transaction } from './database.mjs';
 
 const ZERNIO = 'https://zernio.com/api/v1';
 const GOOGLE = 'https://www.googleapis.com';
@@ -86,6 +87,41 @@ function dateQuery(url) {
   }
   if (query.fromDate && query.toDate && query.fromDate > query.toDate) fail(400, 'INVALID_DATE', 'The start date must precede the end date.');
   return query;
+}
+function analyticsDates(url, days) {
+  const dates = dateQuery(url), toDate = dates.toDate || new Date().toISOString().slice(0, 10), fromDate = dates.fromDate || new Date(Date.parse(toDate) - (days - 1) * 86400000).toISOString().slice(0, 10);
+  if (fromDate > toDate || Date.parse(toDate) - Date.parse(fromDate) >= 366 * 86400000) fail(400, 'INVALID_DATE', 'Choose an analytics window of at most 366 inclusive days.');
+  return { fromDate, toDate };
+}
+const reportObject = value => value && typeof value === 'object' && !Array.isArray(value);
+function analyticsMetrics(value) {
+  return reportObject(value) && ['impressions', 'reach', 'likes', 'comments', 'shares', 'saves', 'clicks', 'views', 'engagement', 'engagementRate'].every(key => value[key] === undefined || value[key] === null || typeof value[key] === 'number' && Number.isFinite(value[key]));
+}
+function reportDay(value, dates) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value && value >= dates.fromDate && value <= dates.toDate;
+}
+function analyticsScope(row, profileId, accounts) {
+  if (!reportObject(row)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return a readable analytics row.');
+  if (row.profileId !== undefined && row.profileId !== null && String(row.profileId?._id || row.profileId) !== profileId) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned analytics outside this project.');
+  if (row.accountId !== undefined) {
+    const account = accounts.find(item => item._id === String(row.accountId?._id || row.accountId));
+    if (!account || row.platform && account.platform !== row.platform) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned analytics outside this project’s connected accounts.');
+  }
+}
+async function analyticsDashboard(api, profileId, dates) {
+  const response = await api('/analytics/dashboard', { profileId, ...dates, compare: 'previous_period' }), result = response.data || response;
+  if (!analyticsMetrics(result.totals) || result.previousTotals !== undefined && !analyticsMetrics(result.previousTotals) || !Array.isArray(result.daily) || result.daily.length > 366 || result.daily.some(row => !reportObject(row) || !reportDay(row.date, dates) || !analyticsMetrics(row)) || new Set(result.daily.map(row => row.date)).size !== result.daily.length) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return a readable analytics dashboard.');
+  if (result.dateRange && (result.dateRange.fromDate !== dates.fromDate || result.dateRange.toDate !== dates.toDate)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned a different reporting window.');
+  for (const key of ['topPosts', 'recentPosts']) if (result[key] !== undefined && (!Array.isArray(result[key]) || result[key].length > 25 || result[key].some(row => !reportObject(row) || typeof row.postId !== 'string' || row.postId.length > 500 || row.publishedAt != null && (typeof row.publishedAt !== 'string' || !Number.isFinite(Date.parse(row.publishedAt))) || row.metrics !== undefined && !analyticsMetrics(row.metrics)))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable post performance rows.');
+  const followerSets = [result.followers, result.previousFollowers].filter(value => value !== undefined);
+  for (const value of followerSets) {
+    if (!reportObject(value) || ['current', 'gained'].some(key => value[key] != null && (typeof value[key] !== 'number' || !Number.isFinite(value[key]) || key === 'current' && value[key] < 0))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable follower performance totals.');
+    if (value.byAccount !== undefined && (!Array.isArray(value.byAccount) || value.byAccount.length > 1000 || value.byAccount.some(row => !reportObject(row) || typeof row.accountId !== 'string'))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable follower performance rows.');
+  }
+  const scopedRows = [...followerSets.flatMap(value => value.byAccount || []), ...(result.topPosts || []), ...(result.recentPosts || [])];
+  const accounts = scopedRows.some(row => row.accountId !== undefined) ? await scopedAccounts(api, profileId) : [];
+  scopedRows.forEach(row => analyticsScope(row, profileId, accounts));
+  return result;
 }
 async function scopedAccounts(api, profileId) {
   const result = await api('/accounts', { profileId });
@@ -215,8 +251,8 @@ function adBody(body, account, nativeAccount, boost = false) {
   const minimum = Math.max(platform === 'pinterest' ? 5 : platform === 'tiktok' ? 20 : platform === 'openai' ? 1 : 0, Number(nativeAccount.minimumDailyBudget) || 0);
   const result = { accountId: account._id, adAccountId: nativeAccount.id, name: text(body.name, 'ad name', 255), ...(!advancedGoogle ? { goal: body.goal } : {}), budgetAmount: adAmount(body.budgetAmount, nativeAccount.currency, minimum), budgetType: 'daily', countries: countries(body.countries), status: 'PAUSED' };
   if (body.targeting !== undefined) { result.targeting = adTargeting(body.targeting, platform, body.campaignType); if (result.targeting.countries) fail(400, 'INVALID_AUDIENCE', 'Set countries once using the target countries field.'); }
-  for (const key of ['startDate', 'endDate']) if (body[key] !== undefined) { if (typeof body[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(body[key]) || Number.isNaN(Date.parse(body[key])) || new Date(body[key].slice(0, 10)).toISOString().slice(0, 10) !== body[key].slice(0, 10)) fail(400, 'INVALID_DATE', 'Use a valid date and time including its timezone.'); result[key] = new Date(body[key]).toISOString(); }
-  if ((result.endDate && Date.parse(result.endDate) <= Date.now()) || (result.startDate && result.endDate && result.startDate >= result.endDate)) fail(400, 'INVALID_DATE', 'The end must be in the future and later than the start.');
+  for (const key of ['startDate', 'endDate']) if (body[key] !== undefined) { if (typeof body[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(body[key]) || Number.isNaN(Date.parse(body[key])) || new Date(body[key].slice(0, 10)).toISOString().slice(0, 10) !== body[key].slice(0, 10)) fail(400, 'INVALID_DATE', 'Use a valid date and time including its timezone.'); result[key] = google ? body[key] : new Date(body[key]).toISOString(); }
+  if (google ? result.startDate && result.endDate && result.startDate.slice(0, 10) > result.endDate.slice(0, 10) : (result.endDate && Date.parse(result.endDate) <= Date.now()) || (result.startDate && result.endDate && Date.parse(result.startDate) >= Date.parse(result.endDate))) fail(400, 'INVALID_DATE', google ? 'The end day must be the same as or later than the start day, in the advertising account’s timezone.' : 'The end must be in the future and later than the start.');
   if (boost) return result;
   const perNetwork = google ? ['campaignType', ...(advancedGoogle ? [body.campaignType === 'pmax' ? 'assetGroup' : 'demandGen'] : ['headline', 'body', 'linkUrl', ...(body.campaignType === 'search' ? ['additionalHeadlines', 'additionalDescriptions', 'keywords'] : ['businessName', 'images'])])] : ['headline', 'body', 'linkUrl', 'imageUrl', ...(meta ? ['video', 'carouselCards', 'callToAction', 'advantageAudience', 'promotedObject', 'leadGenFormId'] : platform === 'linkedin' ? ['video', 'callToAction', 'organizationId', 'leadGenFormId'] : platform === 'reddit' ? ['video', 'carouselCards', 'callToAction', 'promotedObject', 'creativeFormat'] : platform === 'pinterest' ? ['boardId'] : platform === 'openai' ? ['promotedObject', 'bidStrategy', 'bidAmount'] : platform === 'tiktok' ? ['promotedObject'] : [])];
   if (Object.keys(body).some(key => !common.includes(key) && !perNetwork.includes(key))) fail(400, 'UNSUPPORTED_AD_FIELD', 'Use the fields for this network and ad format.');
@@ -273,13 +309,20 @@ function adBody(body, account, nativeAccount, boost = false) {
   return result;
 }
 
+function assertCreatedAd(ad, platform, account, nativeAccount, profileId) {
+  const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/\s/.test(value);
+  const id = value => String(value?._id || value?.id || value);
+  const networks = ['facebook', 'instagram'].includes(platform) ? ['facebook', 'instagram'] : [platform];
+  if (!ad || !validId(ad._id) || !validId(ad.platformCampaignId) || !networks.includes(ad.platform) || ad.accountId !== undefined && id(ad.accountId) !== account._id || ad.profileId !== undefined && id(ad.profileId) !== profileId || ad.platformAdAccountId !== undefined && id(ad.platformAdAccountId) !== nativeAccount.id || ad.adAccountId !== undefined && id(ad.adAccountId) !== nativeAccount.id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the created ad’s network and account scope. Check the provider before repeating this request.', true);
+}
+
 async function scopedAds(api, profileId, query = {}) {
   const ads = []; let backfillPending = false;
   // ponytail: cap at 1,000 ads per view; use campaign filters or background sync for larger accounts.
   for (let page = 1; page <= 10; page++) {
     const result = await api('/ads', { profileId, source: 'all', page, limit: 100, ...query });
     if (!Array.isArray(result.ads)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return an ad list.');
-    ads.push(...result.ads.filter(ad => String(ad.profileId?._id || ad.profileId) === profileId)); backfillPending ||= Boolean(result.backfillPending);
+    ads.push(...result.ads.filter(ad => String(ad.profileId?._id || ad.profileId) === profileId && (!query.campaignId || String(ad.platformCampaignId) === query.campaignId) && (!query.platform || ad.platform === query.platform))); backfillPending ||= Boolean(result.backfillPending);
     const pagination = result.pagination || {}, pages = pagination.pages ?? (pagination.total === undefined ? undefined : Math.ceil(pagination.total / 100));
     if ((pages !== undefined && page >= pages) || pagination.hasMore === false || (pages === undefined && pagination.hasMore !== true && result.ads.length < 100)) return { ads, complete: !backfillPending, backfillPending };
   }
@@ -304,7 +347,8 @@ function editableAd(body, ad) {
   fields(body, ['adId', 'name', 'creative', 'targeting', 'headlines', 'descriptions', 'finalUrls', 'assetGroup', 'demandGen']);
   const platform = ad.platform, google = platform === 'google', channel = String(ad.advertisingChannelType || '').toLowerCase(), payload = {};
   if (['rejected', 'completed', 'cancelled'].includes(ad.status)) fail(409, 'TERMINAL_AD_STATUS', 'A finished or rejected ad cannot be edited. Create a new ad.');
-  if (body.name !== undefined) { if (!['facebook', 'instagram', 'tiktok', 'reddit'].includes(platform)) fail(422, 'UNSUPPORTED_AD_FIELD', 'Rename this ad in its provider dashboard.'); payload.name = text(body.name, 'ad name', 255); }
+  if (platform === 'tiktok' && ad.isSmartPlus === true) fail(422, 'SMART_PLUS_EDIT_UNSUPPORTED', 'Change this TikTok Smart+ ad’s creative and audience in TikTok Ads Manager. Its delivery switch remains available here.');
+  if (body.name !== undefined) { if (!['facebook', 'instagram'].includes(platform)) fail(422, 'UNSUPPORTED_AD_FIELD', 'Rename this ad in its provider dashboard.'); payload.name = text(body.name, 'ad name', 255); }
   if (body.targeting !== undefined) {
     if (['pinterest', 'twitter', 'openai'].includes(platform)) fail(422, 'UNSUPPORTED_AD_FIELD', 'This network requires audience changes in its provider dashboard.');
     if (platform === 'reddit') fail(422, 'UNSUPPORTED_AD_FIELD', 'Reddit replaces the entire audience; manage its audience in the provider dashboard.');
@@ -549,24 +593,34 @@ async function driveToken(env, scope = 'https://www.googleapis.com/auth/drive') 
   try { signature = createSign('RSA-SHA256').update(unsigned).sign(env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'), 'base64url'); }
   catch { fail(503, 'DRIVE_CONFIGURATION', 'The Google service account credentials need attention.'); }
   const result = await request('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${unsigned}.${signature}` }).toString() }, 'Google Drive');
-  if (typeof result.access_token !== 'string') fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not grant access.');
+  if (typeof result.access_token !== 'string' || !result.access_token || result.access_token.length > 16384 || /[\s\u0000-\u001f]/.test(result.access_token)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not grant access.');
   return result.access_token;
 }
 function driveAsset(file) {
-  return { name: file.name, url: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`, thumbnailUrl: file.thumbnailLink || '', kind: file.mimeType?.startsWith('image/') ? 'image' : file.mimeType?.startsWith('video/') ? 'video' : 'document', mimeType: file.mimeType, size: Number(file.size || 0), modifiedTime: typeof file.modifiedTime === 'string' ? file.modifiedTime : '', md5Checksum: typeof file.md5Checksum === 'string' ? file.md5Checksum : '', driveId: file.id, source: 'google-drive', tags: [], approval: 'pending' };
+  const invalid = () => fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive returned invalid file metadata. No assets were changed.');
+  if (!file || typeof file !== 'object' || typeof file.id !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(file.id) || typeof file.name !== 'string' || !file.name.trim() || file.name.length > 1024 || /[\u0000-\u001f]/.test(file.name) || typeof file.mimeType !== 'string' || file.mimeType.length > 200 || !/^[\w.+-]+\/[\w.+-]+$/.test(file.mimeType)) invalid();
+  const link = (value, fallback) => { if (value === undefined || value === null || value === '') return fallback; try { const url = new URL(value); if (typeof value !== 'string' || value.length > 4096 || url.protocol !== 'https:' || url.username || url.password) invalid(); return url.href; } catch { invalid(); } };
+  const numeric = (value, positive = false) => { if (value === undefined || value === null) return null; if (!(typeof value === 'number' || typeof value === 'string' && /^\d+$/.test(value)) || !Number.isSafeInteger(Number(value)) || Number(value) < (positive ? 1 : 0)) invalid(); return Number(value); };
+  const kind = file.mimeType.startsWith('image/') ? 'image' : file.mimeType.startsWith('video/') ? 'video' : 'document', metadata = kind === 'image' ? file.imageMediaMetadata : kind === 'video' ? file.videoMediaMetadata : undefined;
+  if (metadata !== undefined && (!metadata || typeof metadata !== 'object' || Array.isArray(metadata))) invalid();
+  if (file.modifiedTime != null && (typeof file.modifiedTime !== 'string' || file.modifiedTime.length > 100 || !Number.isFinite(Date.parse(file.modifiedTime)))) invalid();
+  if (file.md5Checksum != null && (typeof file.md5Checksum !== 'string' || !/^[a-f0-9]{32}$/i.test(file.md5Checksum))) invalid();
+  const milliseconds = kind === 'video' ? numeric(metadata?.durationMillis) : null;
+  return { name: file.name, url: link(file.webViewLink, `https://drive.google.com/file/d/${file.id}/view`), thumbnailUrl: link(file.thumbnailLink, ''), kind, mimeType: file.mimeType, size: numeric(file.size), width: numeric(metadata?.width, true), height: numeric(metadata?.height, true), duration: milliseconds === null ? null : milliseconds / 1000, modifiedTime: file.modifiedTime || '', md5Checksum: file.md5Checksum || '', driveId: file.id, source: 'google-drive', tags: [], approval: 'pending' };
 }
 
 export { driveToken as googleToken, request as providerRequest, zernioClient, scopedAccounts, requireAccount };
-async function saveDriveFiles(store, projectId, files, assertMapping) {
-  const assets = await store.list(projectId, 'assets'); const saved = [];
-  for (const file of files) {
-    if (!file.id || file.mimeType === 'application/vnd.google-apps.folder') continue;
-    const data = driveAsset(file); const existing = assets.find(asset => asset.driveId === file.id);
+function saveDriveFiles(db, store, projectId, files, assertMapping) {
+  const normalized = [...new Map(files.map(driveAsset).filter(asset => asset.mimeType !== 'application/vnd.google-apps.folder').map(asset => [asset.driveId, asset])).values()];
+  return transaction(db, () => {
     checkMapping(assertMapping);
-    const changed = existing && ['size', 'mimeType', 'modifiedTime', 'md5Checksum'].some(field => existing[field] !== data[field]);
-    saved.push(existing ? await store.update(projectId, 'assets', existing.id, { ...data, tags: existing.tags || [], approval: changed ? 'pending' : existing.approval || 'pending' }) : await store.create(projectId, 'assets', data));
-  }
-  return saved;
+    const assets = new Map(); for (const asset of store.list(projectId, 'assets')) if (asset.driveId && !assets.has(asset.driveId)) assets.set(asset.driveId, asset);
+    return normalized.map(data => {
+      const existing = assets.get(data.driveId), changed = existing && ['url', 'kind', 'size', 'mimeType', 'width', 'height', 'duration', 'modifiedTime', 'md5Checksum'].some(field => (existing[field] ?? null) !== (data[field] ?? null));
+      const saved = existing ? store.update(projectId, 'assets', existing.id, { ...data, tags: existing.tags || [], approval: changed ? 'pending' : existing.approval || 'pending' }) : store.create(projectId, 'assets', data);
+      assets.set(data.driveId, saved); return saved;
+    });
+  });
 }
 
 export async function handleIntegration(context) {
@@ -591,14 +645,14 @@ export async function handleIntegration(context) {
         const token = await driveToken(env); const files = []; let pageToken;
         for (let page = 0; page < 20; page++) {
           const target = new URL(`${GOOGLE}/drive/v3/files`);
-          target.search = new URLSearchParams({ q: `'${project.driveFolderId}' in parents and trashed = false`, pageSize: '100', fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum)', supportsAllDrives: 'true', includeItemsFromAllDrives: 'true', ...(pageToken ? { pageToken } : {}) }).toString();
+          target.search = new URLSearchParams({ q: `'${project.driveFolderId}' in parents and trashed = false`, pageSize: '100', fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum,imageMediaMetadata(width,height),videoMediaMetadata(width,height,durationMillis))', supportsAllDrives: 'true', includeItemsFromAllDrives: 'true', ...(pageToken ? { pageToken } : {}) }).toString();
           const result = await driveRequest(target, { headers: { Authorization: `Bearer ${token}` } });
-          if (!Array.isArray(result.files)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not return a file list.');
+          if (!Array.isArray(result.files) || result.files.length > 100) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not return a valid file page.');
           if (result.incompleteSearch) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'Google Drive could not complete the folder search. No assets were changed.');
           files.push(...result.files);
           if (!result.nextPageToken) {
-            if (req.method === 'GET') send(200, { files: files.map(driveAsset), complete: true });
-            else { const assets = await saveDriveFiles(store, project.id, files, assertDrive); await store.activity(project.id, `Synced ${assets.length} assets from Google Drive.`); send(200, { assets, synced: assets.length, complete: true }); }
+            if (req.method === 'GET') send(200, { files: [...new Map(files.map(driveAsset).filter(asset => asset.mimeType !== 'application/vnd.google-apps.folder').map(asset => [asset.driveId, asset])).values()], complete: true });
+            else { const assets = saveDriveFiles(context.db, store, project.id, files, assertDrive); store.activity(project.id, `Synced ${assets.length} assets from Google Drive.`); send(200, { assets, synced: assets.length, complete: true }); }
             return true;
           }
           if (result.nextPageToken === pageToken) break;
@@ -614,13 +668,15 @@ export async function handleIntegration(context) {
         if (bytes.length > 5 * 1024 * 1024) fail(413, 'FILE_TOO_LARGE', 'Files must be at most 5 MB.');
         const token = await driveToken(env);
         const folder = await driveRequest(`${GOOGLE}/drive/v3/files/${encodeURIComponent(project.driveFolderId)}?supportsAllDrives=true&fields=id,mimeType,driveId`, { headers: { Authorization: `Bearer ${token}` } });
-        if (folder.mimeType !== 'application/vnd.google-apps.folder' || !folder.driveId) fail(409, 'SHARED_DRIVE_REQUIRED', 'Service account uploads require a folder in a Google shared drive.');
+        if (folder.id !== folderId || folder.mimeType !== 'application/vnd.google-apps.folder' || typeof folder.driveId !== 'string' || !folder.driveId) fail(409, 'SHARED_DRIVE_REQUIRED', 'Service account uploads require the mapped folder in a Google shared drive.');
         const outcome = await operation(context, async () => {
           const boundary = `ten98-${randomUUID()}`;
           const multipart = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [project.driveFolderId] })}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`), bytes, Buffer.from(`\r\n--${boundary}--\r\n`)]);
-          const file = await driveRequest(`${GOOGLE}/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart });
+          const file = await driveRequest(`${GOOGLE}/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum,imageMediaMetadata(width,height),videoMediaMetadata(width,height,durationMillis)`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart });
           if (!file.id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not confirm the uploaded file.', true);
-          const [asset] = await saveDriveFiles(store, project.id, [file], assertDrive);
+          let asset;
+          try { [asset] = saveDriveFiles(context.db, store, project.id, [file], assertDrive); }
+          catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
           return { asset };
         }); send(outcome.status, outcome.data); return true;
       }
@@ -690,17 +746,24 @@ export async function handleIntegration(context) {
     if (req.method === 'GET' && path === 'analytics') {
       const page = Number(url.searchParams.get('page') || 1);
       if (!Number.isInteger(page) || page < 1 || page > 1000) fail(400, 'INVALID_PAGE', 'Choose an analytics page from 1 to 1000.');
-      const result = await api('/analytics', { profileId, ...dateQuery(url), page, limit: 100 });
+      const dates = analyticsDates(url, 90), accounts = await scopedAccounts(api, profileId), result = await api('/analytics', { profileId, ...dates, page, limit: 100 });
+      if (!Array.isArray(result.posts) || result.posts.length > 100 || result.posts.some(row => !reportObject(row) || row.analytics != null && !analyticsMetrics(row.analytics)) || result.accounts !== undefined && !Array.isArray(result.accounts)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable post analytics.');
+      for (const row of result.posts) {
+        analyticsScope(row, profileId, accounts);
+        if (row.platforms !== undefined && !Array.isArray(row.platforms)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable platform analytics.');
+        for (const copy of row.platforms || []) { if (!copy?.accountId) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio did not identify an analytics account.'); analyticsScope(copy, profileId, accounts); }
+        if (!row.profileId && !(row.platforms?.length && row.platforms.every(copy => copy.accountId))) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio did not identify the project accounts for this analytics row.');
+      }
+      for (const account of result.accounts || []) { if (!account?._id) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio did not identify an analytics account.'); analyticsScope({ accountId: account._id, platform: account.platform }, profileId, accounts); }
       send(200, { ...redact(result), complete: result.pagination?.pages !== undefined ? page >= result.pagination.pages : false }); return true;
     }
-    if (req.method === 'GET' && path === 'analytics/daily') { send(200, redact(await api('/analytics/daily-metrics', { profileId, ...dateQuery(url), attribution: 'received' }))); return true; }
+    if (req.method === 'GET' && path === 'analytics/daily') {
+      const dates = analyticsDates(url, 180), result = await api('/analytics/daily-metrics', { profileId, ...dates, attribution: 'received' });
+      if (!Array.isArray(result.dailyData) || result.dailyData.length > 366 || result.dailyData.some(row => !reportObject(row) || !reportDay(row.date, dates) || !analyticsMetrics(row.metrics)) || !Array.isArray(result.platformBreakdown) || result.platformBreakdown.some(row => !reportObject(row) || !analyticsMetrics(row))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable daily analytics.');
+      send(200, redact(result)); return true;
+    }
     if (req.method === 'GET' && path === 'analytics/dashboard') {
-      const dates = dateQuery(url); const toDate = dates.toDate || new Date().toISOString().slice(0, 10); const fromDate = dates.fromDate || new Date(Date.parse(toDate) - 29 * 86400000).toISOString().slice(0, 10);
-      if (fromDate > toDate || Date.parse(toDate) - Date.parse(fromDate) > 366 * 86400000) fail(400, 'INVALID_DATE', 'Choose an analytics window of at most 366 days.');
-      const result = await api('/analytics/dashboard', { profileId, fromDate, toDate, compare: 'previous_period' });
-      const dashboard = result.data || result;
-      if (!dashboard.totals || !Array.isArray(dashboard.daily)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return an analytics dashboard.');
-      send(200, redact(dashboard)); return true;
+      send(200, redact(await analyticsDashboard(api, profileId, analyticsDates(url, 30)))); return true;
     }
     if (req.method === 'GET' && path === 'social/tiktok-creator-info') {
       const accountId = identifier(url.searchParams.get('accountId'), 'TikTok account ID'), account = requireAccount(await scopedAccounts(api, profileId), accountId), mediaType = url.searchParams.get('mediaType') || 'video';
@@ -875,7 +938,17 @@ export async function handleIntegration(context) {
       if (body.name !== undefined) payload.name = text(body.name, 'ad set name', 255);
       if (body.budget !== undefined) { fields(body.budget, ['amount', 'type'], 'budget'); if (body.budget.type !== 'daily') fail(400, 'UNSUPPORTED_BUDGET', 'This editor changes daily budgets.'); if (body.platform === 'google' || campaign.budgetLevel === 'campaign') fail(422, 'CAMPAIGN_BUDGET_REQUIRED', 'This budget belongs to the campaign. Use the campaign budget editor.'); if (adSet.budget?.type === 'lifetime') fail(400, 'UNSUPPORTED_BUDGET', 'Keep lifetime budgets in the provider dashboard.'); payload.budget = { amount: adAmount(body.budget.amount, campaign.currency, body.platform === 'tiktok' ? 20 : body.platform === 'pinterest' ? 5 : 0), type: 'daily' }; }
       if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a name or daily budget to update.');
-      const outcome = await operation(context, async key => ({ result: redact(await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}`, {}, payload, key, 'PUT')) }));
+      const outcome = await operation(context, async key => {
+        const result = await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}`, {}, payload, key, 'PUT');
+        if (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== payload.budget.type)) throw new IntegrationError(502, 'AD_SET_UPDATE_NOT_CONFIRMED', 'Zernio did not acknowledge the ad set budget. Check the provider before repeating this change.', true);
+        if (payload.name) {
+          let refreshed;
+          try { refreshed = await scopedCampaign(api, profileId, campaignKey(campaign), body.platform); }
+          catch { throw new IntegrationError(502, 'AD_SET_UPDATE_NOT_CONFIRMED', 'The provider accepted the rename, but its current name could not be read. Check the provider before repeating it.', true); }
+          if (refreshed.adSets?.find(item => item.platformAdSetId === adSetId)?.adSetName !== payload.name) throw new IntegrationError(502, 'AD_SET_UPDATE_NOT_CONFIRMED', 'Zernio did not confirm the ad set name. Check the provider before repeating this change.', true);
+        }
+        return { result: redact(result) };
+      });
       send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && path === 'ads/campaign') {
@@ -892,7 +965,7 @@ export async function handleIntegration(context) {
       if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a campaign name or daily budget to change.');
       const outcome = await operation(context, async key => {
         const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, payload, key, 'PUT');
-        if (!Number.isInteger(result.updated) || result.updated < 0 || (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== 'daily'))) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not acknowledge the campaign changes.', true);
+        if (!Number.isInteger(result.updated) || result.updated < 0 || (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== 'daily')) || (payload.name && result.name !== payload.name)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not acknowledge the campaign changes.', true);
         return { result: redact(result) };
       }); send(outcome.status, outcome.data); return true;
     }
@@ -908,7 +981,7 @@ export async function handleIntegration(context) {
       const payload = adBody(body, account, nativeAccount);
       const outcome = await operation(context, async key => {
         const result = await api('/ads/create', {}, payload, key);
-        if (!result.ad?._id || !result.ad.platformCampaignId) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the created ad.', true);
+        assertCreatedAd(result.ad, body.platform, account, nativeAccount, profileId);
         const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: payload.status === 'PAUSED' ? 'paused' : result.ad.status === 'active' ? 'active' : 'draft', budget: payload.budgetAmount, budgetType: 'daily', spent: 0, currency: nativeAccount.currency, platform: result.ad.platform, externalId: result.ad._id, platformCampaignId: result.ad.platformCampaignId, providerStatus: result.ad.status, zernioProfileId: profileId });
         await store.activity(project.id, `Created an advertising campaign through Zernio (${payload.status.toLowerCase()}).`);
         return { campaign, ad: redact(result.ad), provider: { id: result.ad._id, status: result.ad.status } };
@@ -922,14 +995,15 @@ export async function handleIntegration(context) {
       if (!native) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This advertising account is not connected to this project.');
       if (native.selectable === false) fail(409, 'AD_ACCOUNT_UNAVAILABLE', 'This advertising account is unavailable.');
       const payload = adBody(body, account, native, true), post = await store.get(project.id, 'posts', identifier(body.postId, 'post ID'));
-      if (!post || sample(post) || !post.externalId || post.zernioProfileId !== profileId || post.status !== 'published') fail(400, 'BOOST_PUBLISHED_POST_REQUIRED', 'Choose a published post from this project.');
+      if (!post || sample(post) || !post.externalId || post.zernioProfileId !== profileId || !['published', 'partial'].includes(post.status)) fail(400, 'BOOST_PUBLISHED_POST_REQUIRED', 'Choose a published copy of a post from this project.');
       const remote = await api(`/posts/${encodeURIComponent(post.externalId)}`);
-      if (remote.post?._id !== post.externalId || remote.post.status !== 'published' || !Array.isArray(remote.post.platforms) || !remote.post.platforms.some(item => String(item.accountId?._id || item.accountId) === account._id && item.status === 'published')) fail(403, 'POST_OUTSIDE_ACCOUNT', 'This post was not published by the selected connection.');
+      const copy = Array.isArray(remote.post?.platforms) && remote.post.platforms.find(item => String(item.accountId?._id || item.accountId) === account._id && item.platform === account.platform && item.status === 'published');
+      if (remote.post?._id !== post.externalId || !['published', 'partial'].includes(remote.post.status) || !copy || copy.platformSpecificData?.isDraft || copy.platformSpecificData?.draft || copy.platformSpecificData?.tiktokSettings?.draft) fail(403, 'POST_OUTSIDE_ACCOUNT', 'This copy was not publicly published by the selected connection.');
       payload.postId = post.externalId;
       const outcome = await operation(context, async key => {
         const result = await api('/ads/boost', {}, payload, key);
-        if (!result.ad?._id || !result.ad.platformCampaignId) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the boosted ad.', true);
-        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: 'paused', budget: payload.budgetAmount, budgetType: 'daily', spent: 0, currency: native.currency, platform: body.platform, externalId: result.ad._id, platformCampaignId: result.ad.platformCampaignId, providerStatus: result.ad.status, zernioProfileId: profileId });
+        assertCreatedAd(result.ad, body.platform, account, native, profileId);
+        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: 'paused', budget: payload.budgetAmount, budgetType: 'daily', spent: 0, currency: native.currency, platform: result.ad.platform, externalId: result.ad._id, platformCampaignId: result.ad.platformCampaignId, providerStatus: result.ad.status, zernioProfileId: profileId });
         await store.activity(project.id, 'Created a paused paid boost for a published social post.'); return { campaign, ad: redact(result.ad) };
       }); send(outcome.status, outcome.data); return true;
     }
