@@ -199,6 +199,23 @@ test('membership changes while a provider read is pending stop writes and preven
   } finally { await f.close(); }
 });
 
+test('archive receipts must identify the requested or resolved conversation and cannot be replayed after mismatch', async () => {
+  const f = await fixture(), route = f.path + '/conversations/thread-1/status'; let receiptId = 'stored-thread-1';
+  f.setHook((url, options) => {
+    if (!url.pathname.endsWith('/inbox/conversations/thread-1')) return;
+    return Response.json({ success: true, data: { id: options.method === 'PUT' ? receiptId : 'stored-thread-1', accountId: 'fb', platform: 'facebook', participantId: 'participant-a', status: options.method === 'PUT' ? JSON.parse(options.body).status : 'active' } });
+  });
+  try {
+    assert.equal((await f.request(route, 'POST', { accountId: 'fb', status: 'archived' })).status, 200, 'Meta may return the detail-resolved stored ID.');
+    receiptId = 'thread-1'; assert.equal((await f.request(route, 'POST', { accountId: 'fb', status: 'active' })).status, 200, 'The originally requested platform ID remains valid.');
+    receiptId = 'other-conversation'; const body = { accountId: 'fb', status: 'archived' }, key = randomUUID(), before = f.writes().length;
+    const result = await f.request(route, 'POST', body, key);
+    assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(result.data.conversation, undefined);
+    assert.equal((await f.request(route, 'POST', body, key)).status, 409); assert.equal((await f.request(route, 'POST', body)).status, 409);
+    assert.equal(f.writes().length, before + 1, 'An unconfirmed archive must not be repeated with a fresh key.');
+  } finally { await f.close(); }
+});
+
 test('WhatsApp replies round-trip delivery history, enforce the session and use exact approved templates outside it', async () => {
   const f = await fixture(), route = f.path + '/conversations/thread-1/reply';
   const template = { id: 'appointment-template', name: 'appointment_update', language: 'en', status: 'APPROVED', category: 'UTILITY', components: [{ type: 'BODY', text: 'Your appointment is now on {{1}}.' }] };

@@ -351,6 +351,11 @@ async function scopedAd(api, profileId, id) {
   return ad;
 }
 const campaignKey = campaign => String(campaign.platformCampaignId || campaign.campaignId || campaign.id || campaign._id);
+function saveCampaignSnapshot(context, profileId, platform, campaignId, data) {
+  for (const campaign of context.store.list(context.project.id, 'campaigns')) {
+    if (campaign.externalId && !campaign.nativeProvider && campaign.zernioProfileId === profileId && campaign.platform === platform && campaign.platformCampaignId === campaignId) context.store.update(context.project.id, 'campaigns', campaign.id, data);
+  }
+}
 async function scopedCampaign(api, profileId, id, platform, dates = {}) {
   if (!AD_PLATFORMS.has(platform)) fail(400, 'INVALID_AD_PLATFORM', 'Choose a supported advertising platform.');
   const tree = await campaignTree(api, profileId, dates), matches = tree.campaigns.filter(item => campaignKey(item) === id && item.platform === platform), campaign = matches[0];
@@ -362,7 +367,7 @@ async function scopedCampaign(api, profileId, id, platform, dates = {}) {
 function editableAd(body, ad) {
   fields(body, ['adId', 'name', 'creative', 'targeting', 'headlines', 'descriptions', 'finalUrls', 'assetGroup', 'demandGen']);
   const platform = ad.platform, google = platform === 'google', channel = String(ad.advertisingChannelType || '').toLowerCase(), payload = {};
-  if (['rejected', 'completed', 'cancelled'].includes(ad.status)) fail(409, 'TERMINAL_AD_STATUS', 'A finished or rejected ad cannot be edited. Create a new ad.');
+  if (['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(ad.status)) fail(409, 'TERMINAL_AD_STATUS', 'This ad cannot be edited. Create a new ad.');
   if (platform === 'tiktok' && ad.isSmartPlus === true) fail(422, 'SMART_PLUS_EDIT_UNSUPPORTED', 'Change this TikTok Smart+ ad’s creative and audience in TikTok Ads Manager. Its delivery switch remains available here.');
   if (body.name !== undefined) { if (!['facebook', 'instagram'].includes(platform)) fail(422, 'UNSUPPORTED_AD_FIELD', 'Rename this ad in its provider dashboard.'); payload.name = text(body.name, 'ad name', 255); }
   if (body.targeting !== undefined) {
@@ -398,7 +403,7 @@ function editableAd(body, ad) {
   return payload;
 }
 
-export async function operation(context, action) {
+export async function operation(context, action, resourceKey) {
   const { db, project, req, url, body } = context;
   const key = req.headers['idempotency-key'];
   if (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{8,200}$/.test(key)) fail(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Send a unique Idempotency-Key header for this action.');
@@ -417,11 +422,14 @@ export async function operation(context, action) {
     return { status: existing.http_status, data: JSON.parse(existing.response) };
   }
   if (db.prepare("SELECT id FROM integration_operations WHERE project_id = ? AND request_hash = ? AND status IN ('pending', 'uncertain', 'reviewed-applied')").get(project.id, hash)) fail(409, 'OPERATION_UNCERTAIN', 'This action has an unresolved or externally applied provider outcome. Review its receipt before trying again.');
+  // ponytail: one process owns this SQLite connection; use database resource locks before running multiple server processes.
+  const resource = resourceKey ? canonical([project.id, resourceKey]) : null;
+  if (resource && active.has(resource)) fail(409, 'PROVIDER_RESOURCE_BUSY', 'Another change to this campaign is in progress. Wait for it to finish, refresh, then try again.');
   const id = randomUUID();
-  const known = new Set(['native-google-ads', 'microsoft-ads', 'shopping', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
+  const known = new Set(['native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
   const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
   db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString(), actionPath, operation.runId);
-  active.add(id);
+  active.add(id); if (resource) active.add(resource);
   try {
     let outcome;
     try { outcome = { status: 200, data: { operation: { id, status: 'complete' }, ...await action(key) } }; }
@@ -432,7 +440,7 @@ export async function operation(context, action) {
     const updated = db.prepare("UPDATE integration_operations SET status = ?, response = ?, http_status = ? WHERE id = ? AND status = 'pending'").run(outcome.data.operation.status, JSON.stringify(outcome.data), outcome.status, id);
     if (!updated.changes) fail(409, 'OPERATION_REVIEWED', 'This action was closed by an operator review. Its review and original receipt were preserved.');
     return outcome;
-  } finally { active.delete(id); }
+  } finally { active.delete(id); if (resource) active.delete(resource); }
 }
 export function mediaUrl(value) {
   let url;
@@ -1003,7 +1011,7 @@ export async function handleIntegration(context) {
       const campaignId = identifier(body.campaignId, 'campaign ID');
       if (!AD_PLATFORMS.has(body.platform) || !['active', 'paused'].includes(body.status)) fail(400, 'INVALID_AD_STATUS', 'Choose a valid ad platform and active or paused status.');
       const campaign = await scopedCampaign(api, profileId, campaignId, body.platform);
-      if (['rejected', 'completed', 'cancelled'].includes(campaign.status)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot resume. Create a new campaign.');
+      if (['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(campaign.status)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot resume. Create a new campaign.');
       const outcome = await operation(context, async key => {
         const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}/status`, {}, { status: body.status, platform: body.platform }, key, 'PUT');
         if (['pinterest', 'linkedin', 'twitter'].includes(body.platform)) {
@@ -1012,8 +1020,9 @@ export async function handleIntegration(context) {
         }
         const actual = String(result.platformCampaignStatus || '').toUpperCase(), expected = body.status === 'active' ? ['ACTIVE', 'ENABLE', 'ENABLED'] : ['PAUSED', 'DISABLE', 'DISABLED', 'DRAFT'];
         if (!result.statusReadAt || !expected.includes(actual)) throw new IntegrationError(502, 'AD_STATUS_NOT_CONFIRMED', 'The campaign switch was not confirmed by the provider.', true);
+        saveCampaignSnapshot(context, profileId, body.platform, campaignId, { status: body.status, providerStatus: body.status });
         return { result: redact(result), requestedStatus: body.status, verification: 'confirmed' };
-      });
+      }, ['ads', body.platform, campaignId]);
       send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && ['ads/edit', 'ads/ad-status'].includes(path)) {
@@ -1022,7 +1031,7 @@ export async function handleIntegration(context) {
       if (path === 'ads/ad-status') {
         fields(body, ['adId', 'status']);
         if (!['active', 'paused'].includes(body.status)) fail(400, 'INVALID_AD_STATUS', 'Choose active or paused.');
-        if (['rejected', 'completed', 'cancelled'].includes(ad.status)) fail(409, 'TERMINAL_AD_STATUS', 'This ad cannot resume. Create a new ad.');
+        if (['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(ad.status)) fail(409, 'TERMINAL_AD_STATUS', 'This ad cannot resume. Create a new ad.');
         if (ad.platform === 'twitter') fail(422, 'AD_SET_STATUS_REQUIRED', 'X uses one switch for the entire ad set. Change that switch in X Ads Manager.');
         payload = { status: body.status };
       } else payload = editableAd(body, ad);
@@ -1031,16 +1040,17 @@ export async function handleIntegration(context) {
         if (path === 'ads/ad-status') { if (String(result.configuredStatus || '').toUpperCase() !== body.status.toUpperCase()) throw new IntegrationError(502, 'AD_STATUS_NOT_CONFIRMED', 'The ad switch was not confirmed by the provider.', true); }
         else if (result.ad?._id !== ad._id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the edited ad.', true);
         return { result: redact(result) };
-      }); send(outcome.status, outcome.data); return true;
+      }, ['ads', ad.platform, ad.platformCampaignId || `ad:${ad._id}`]); send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && path === 'ads/adset') {
       fields(body, ['campaignId', 'platform', 'adSetId', 'name', 'budget']);
       const campaign = await scopedCampaign(api, profileId, identifier(body.campaignId, 'campaign ID'), body.platform);
+      if (['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(campaign.status)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot be edited.');
       const adSetId = identifier(body.adSetId, 'ad set ID'), adSet = campaign.adSets?.find(item => item.platformAdSetId === adSetId);
       if (!adSet) fail(403, 'AD_SET_OUTSIDE_PROJECT', 'This ad set was not found in the selected project campaign.');
       const payload = { platform: body.platform };
       if (body.name !== undefined) payload.name = text(body.name, 'ad set name', 255);
-      if (body.budget !== undefined) { fields(body.budget, ['amount', 'type'], 'budget'); if (body.budget.type !== 'daily') fail(400, 'UNSUPPORTED_BUDGET', 'This editor changes daily budgets.'); if (body.platform === 'google' || campaign.budgetLevel === 'campaign') fail(422, 'CAMPAIGN_BUDGET_REQUIRED', 'This budget belongs to the campaign. Use the campaign budget editor.'); if (adSet.budget?.type === 'lifetime' || adSet.adSetBudget?.type === 'lifetime') fail(400, 'UNSUPPORTED_BUDGET', 'Keep lifetime budgets in the provider dashboard.'); payload.budget = { amount: adAmount(body.budget.amount, campaign.currency, body.platform === 'tiktok' ? 20 : body.platform === 'pinterest' ? 5 : 0), type: 'daily' }; }
+      if (body.budget !== undefined) { fields(body.budget, ['amount', 'type'], 'budget'); if (body.budget.type !== 'daily') fail(400, 'UNSUPPORTED_BUDGET', 'This editor changes daily budgets.'); if (['google', 'openai'].includes(body.platform) || campaign.budgetLevel === 'campaign') fail(422, 'CAMPAIGN_BUDGET_REQUIRED', 'This budget belongs to the campaign. Use the campaign budget editor.'); if (adSet.budget?.type === 'lifetime' || adSet.adSetBudget?.type === 'lifetime') fail(400, 'UNSUPPORTED_BUDGET', 'Keep lifetime budgets in the provider dashboard.'); payload.budget = { amount: adAmount(body.budget.amount, campaign.currency, body.platform === 'tiktok' ? 20 : body.platform === 'pinterest' ? 5 : 0), type: 'daily' }; }
       if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a name or daily budget to update.');
       const outcome = await operation(context, async key => {
         const result = await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}`, {}, payload, key, 'PUT');
@@ -1052,12 +1062,13 @@ export async function handleIntegration(context) {
           if (refreshed.adSets?.find(item => item.platformAdSetId === adSetId)?.adSetName !== payload.name) throw new IntegrationError(502, 'AD_SET_UPDATE_NOT_CONFIRMED', 'Zernio did not confirm the ad set name. Check the provider before repeating this change.', true);
         }
         return { result: redact(result) };
-      });
+      }, ['ads', body.platform, campaignKey(campaign)]);
       send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && path === 'ads/campaign') {
       fields(body, ['campaignId', 'platform', 'name', 'budget']);
       const campaignId = identifier(body.campaignId, 'campaign ID'), campaign = await scopedCampaign(api, profileId, campaignId, body.platform), payload = { platform: body.platform };
+      if (['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(campaign.status)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot be edited.');
       if (body.name !== undefined) { if (!['facebook', 'instagram', 'reddit'].includes(body.platform)) fail(422, 'UNSUPPORTED_AD_FIELD', 'Rename this campaign in its provider dashboard.'); payload.name = text(body.name, 'campaign name', 255); }
       if (body.budget !== undefined) {
         fields(body.budget, ['amount', 'type'], 'budget');
@@ -1071,8 +1082,9 @@ export async function handleIntegration(context) {
       const outcome = await operation(context, async key => {
         const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, payload, key, 'PUT');
         if (!Number.isInteger(result.updated) || result.updated < 0 || (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== payload.budget.type)) || (payload.name && result.name !== payload.name)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not acknowledge the campaign changes.', true);
+        saveCampaignSnapshot(context, profileId, body.platform, campaignId, { ...(payload.budget ? { budget: result.budget.amount, budgetType: result.budget.type } : {}), ...(payload.name ? { name: result.name } : {}) });
         return { result: redact(result) };
-      }); send(outcome.status, outcome.data); return true;
+      }, ['ads', body.platform, campaignId]); send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && ['ads/create', 'ads/validate'].includes(path)) {
       if (!CREATE_CONNECTIONS[body.platform]) fail(422, 'AD_CREATION_REQUIREMENTS', 'Choose a supported advertising network.');

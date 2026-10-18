@@ -14,7 +14,7 @@ const groups = {
   twilio: { accountSid: 'TWILIO_ACCOUNT_SID', authToken: 'TWILIO_AUTH_TOKEN', fromNumber: 'TWILIO_FROM_NUMBER', messagingServiceSid: 'TWILIO_MESSAGING_SERVICE_SID' },
   cloudflareEmail: { accountId: 'CLOUDFLARE_ACCOUNT_ID', apiKey: 'CLOUDFLARE_EMAIL_API_TOKEN', zoneId: 'CLOUDFLARE_ZONE_ID', fromAddress: 'CLOUDFLARE_EMAIL_FROM_ADDRESS', fromName: 'CLOUDFLARE_EMAIL_FROM_NAME', replyToAddress: 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS' },
 };
-const providers = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', googleAdsNative: 'Google Ads native', microsoftAds: 'Microsoft Advertising', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email' };
+const providers = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', googleAdsNative: 'Google Shopping', microsoftAds: 'Microsoft Advertising', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email' };
 const secretFields = new Set(['apiKey', 'authToken', 'webhookSecret', 'privateKey', 'browserApiKey', 'clientSecret', 'refreshToken', 'developerToken']);
 const defaults = { maxTokens: '2048', maxSteps: '4', environment: 'sandbox' };
 const groupFor = provider => ['googleDrive', 'googleCalendar'].includes(provider) ? 'google' : provider;

@@ -213,7 +213,7 @@ export async function handleInbox(context) {
         if (route[2] === 'status') {
           fields(body, ['accountId', 'status']); if (!['active', 'archived'].includes(body.status)) fail(400, 'INVALID_INBOX_STATUS', 'Choose active or archived.');
           const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}`, {}, { accountId, status: body.status }, key, 'PUT');
-          if (result.success !== true || result.data?.accountId !== accountId || result.data?.platform !== account.platform || result.data?.status !== body.status || !valid(result.data?.id)) invalid(true);
+          if (result.success !== true || result.data?.accountId !== accountId || result.data?.platform !== account.platform || result.data?.status !== body.status || ![conversationId, row.id].includes(result.data?.id)) invalid(true);
           return { conversation: { ...row, status: body.status } };
         }
         if (route[2] === 'read') {

@@ -111,6 +111,24 @@ test('Cloudflare email enforces transactional purpose, reports true receipts, ap
   } finally { await f.close(); }
 });
 
+test('direct schedules reject normalized dates and invalid clock times without queuing recipients', async () => {
+  const f = await fixture();
+  try {
+    await f.person(); const campaign = await f.draft(), february = new Date();
+    february.setUTCMonth(1, 1); if (february <= new Date()) february.setUTCFullYear(february.getUTCFullYear() + 1);
+    const prefix = february.toISOString().slice(0, 7), tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    for (const scheduledAt of [`${prefix}-30T12:00:00Z`, `${tomorrow}T24:00:00Z`, `${tomorrow}T12:60:00Z`, `${tomorrow}T12:00:00`]) {
+      const rejected = await f.arm(campaign, 'schedule', { scheduledAt });
+      assert.equal(rejected.status, 400, scheduledAt); assert.equal(rejected.data.error.code, 'INVALID_SCHEDULE');
+      const unchanged = (await f.request(f.path + '/campaigns/' + campaign.id)).data;
+      assert.equal(unchanged.campaign.status, 'draft'); assert.deepEqual(unchanged.deliveries, []);
+    }
+    const scheduledAt = `${tomorrow}T12:30:00+04:00`, accepted = await f.arm(campaign, 'schedule', { scheduledAt });
+    assert.equal(accepted.status, 200); assert.equal(accepted.data.campaign.scheduledAt, new Date(scheduledAt).toISOString());
+    assert.equal(accepted.data.deliveries.length, 1); assert.equal(f.messages.size, 0);
+  } finally { await f.close(); }
+});
+
 test('WhatsApp uses scoped approved-template broadcasts, separate durable phases and recipient delivery refresh', async () => {
   const f = await fixture();
   try {

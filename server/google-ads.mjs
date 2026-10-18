@@ -1,4 +1,5 @@
 import { IntegrationError, operation, redact, scopedAccounts, requireAccount, campaignTree, adAccounts } from './integrations.mjs';
+import { publicMediaUrl } from '../shared/social-posts.mjs';
 
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -93,6 +94,7 @@ export async function handleGoogleAds(context, api, profileId, action) {
   if (!write && action === 'search-terms') {
     const result = await api('/ads/search-terms', { accountId, adAccountId, ...dates(url), ...(campaignId ? { campaignId } : {}), ...(groupId ? { adSetId: groupId } : {}), pageToken: cursor(values.pageToken) });
     if (result.customerId !== adAccountId || !Array.isArray(result.data) || result.data.length > 10000 || result.data.some(row => !object(row) || typeof row.searchTerm !== 'string' || !label(row.campaignName) || !label(row.adGroupName) || !label(row.status) || !label(row.campaignId) || !label(row.adGroupId) || ['clicks', 'impressions', 'costMicros', 'conversions'].some(field => !count(row[field])) || campaignId && row.campaignId !== campaignId || groupId && row.adGroupId !== groupId) || result.paging?.nextPageToken !== undefined && (typeof result.paging.nextPageToken !== 'string' || result.paging.nextPageToken.length > 4000)) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio did not return readable search terms for this advertising account.');
+    if (result.paging?.nextPageToken && result.paging.nextPageToken === values.pageToken) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google repeated the same search report page cursor.');
     send(200, redact(result)); return true;
   }
   if (action === 'planner' && write) {
@@ -101,13 +103,14 @@ export async function handleGoogleAds(context, api, profileId, action) {
     const payload = { accountId, adAccountId, network: body.network || 'GOOGLE_SEARCH' };
     if (!['GOOGLE_SEARCH', 'GOOGLE_SEARCH_AND_PARTNERS'].includes(payload.network)) fail(400, 'INVALID_PLANNER', 'Choose Google Search or Search and partners.');
     if (body.keywords !== undefined) { const rows = keywords(body.keywords, 1, body.mode === 'ideas' ? 20 : 1000); payload[body.mode === 'ideas' ? 'seedKeywords' : 'keywords'] = rows.map(row => row.text); }
-    if (body.seedUrl && body.mode === 'ideas') { let target; try { target = new URL(body.seedUrl); } catch {} if (!target || target.protocol !== 'https:' || target.username || target.password) fail(400, 'INVALID_URL', 'Enter a public HTTPS page for keyword ideas.'); payload.seedUrl = target.href; }
+    if (body.seedUrl !== undefined) { if (body.mode !== 'ideas') fail(400, 'INVALID_PLANNER', 'Seed pages apply only to keyword ideas.'); try { payload.seedUrl = publicMediaUrl(body.seedUrl); } catch { fail(400, 'INVALID_URL', 'Enter a public HTTPS page for keyword ideas.'); } }
     if (!payload.keywords && !payload.seedKeywords && !payload.seedUrl) fail(400, 'INVALID_PLANNER', 'Enter keywords or a seed page to research.');
     if (body.countries !== undefined) { payload.countries = countries(body.countries); if (payload.countries.length > 10) fail(400, 'INVALID_COUNTRIES', 'Choose up to ten countries for Keyword Planner.'); }
     if (body.languageConstantId) { payload.languageConstantId = id(body.languageConstantId, 'Google language ID'); if (!/^\d{1,10}$/.test(payload.languageConstantId)) fail(400, 'INVALID_LANGUAGE', 'Use a numeric Google language ID.'); }
     if (body.mode === 'ideas') { payload.pageSize = 100; if (body.pageToken) payload.pageToken = cursor(body.pageToken); } else payload.includeAverageCpc = true;
     const result = await api(`/ads/keywords/${body.mode === 'ideas' ? 'ideas' : 'historical-metrics'}`, {}, payload);
     if (result.customerId !== adAccountId || !Array.isArray(result.data) || result.data.length > 1000 || result.data.some(row => { const metrics = row?.keywordIdeaMetrics ?? row?.keywordMetrics; return !object(row) || typeof row.text !== 'string' || metrics !== undefined && (!object(metrics) || !label(metrics.competition) || ['avgMonthlySearches', 'lowTopOfPageBidMicros', 'highTopOfPageBidMicros', 'averageCpcMicros'].some(key => !count(metrics[key]))); }) || result.paging?.nextPageToken !== undefined && (typeof result.paging.nextPageToken !== 'string' || result.paging.nextPageToken.length > 4000)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable Keyword Planner results for this account.');
+    if (result.paging?.nextPageToken && result.paging.nextPageToken === body.pageToken) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google repeated the same Keyword Planner page cursor.');
     send(200, { ...redact(result), currency: native.currency }); return true;
   }
   if (['negatives', 'targeting', 'bidding'].includes(action)) {
@@ -131,10 +134,10 @@ export async function handleGoogleAds(context, api, profileId, action) {
       if (parameter) { if (typeof body[parameter] !== 'number' || !Number.isFinite(body[parameter]) || body[parameter] <= 0 || body[parameter] > 10000000) fail(400, 'INVALID_BIDDING', 'Enter a positive bidding target.'); payload[parameter] = body[parameter]; }
     }
     const outcome = await operation(context, async key => {
-      if (action === 'bidding') { const current = await api(endpoint, { accountId, adAccountId, platform: 'google' }); if (String(current.campaignId) !== campaignId || typeof current.biddingStrategyType !== 'string') fail(502, 'INVALID_PROVIDER_RESPONSE', 'Current campaign bidding could not be verified.'); if (current.portfolio || current.bidSpec?.portfolioBidStrategyId) fail(409, 'SHARED_BIDDING', 'Detach the shared portfolio strategy in Google Ads before changing this campaign’s bidding.'); }
+      if (action === 'bidding') { const current = await api(endpoint, { accountId, adAccountId, platform: 'google' }); if (String(current.campaignId) !== campaignId || typeof current.biddingStrategyType !== 'string') fail(502, 'INVALID_PROVIDER_RESPONSE', 'Current campaign bidding could not be verified.'); if (current.stale === true) fail(409, 'STALE_GOOGLE_BIDDING', 'Google could not refresh the current bidding. Load it again before making a change.'); if (current.portfolio || current.bidSpec?.portfolioBidStrategyId) fail(409, 'SHARED_BIDDING', 'Detach the shared portfolio strategy in Google Ads before changing this campaign’s bidding.'); }
       const result = await api(action === 'bidding' ? `/ads/campaigns/${encodeURIComponent(campaignId)}` : endpoint, {}, payload, key, 'PUT');
-      if (action === 'negatives') confirmed(Array.isArray(result.keywords) && sameKeywords(result.keywords, payload.keywords), 'Google did not confirm the complete campaign negative keyword set.');
-      if (action === 'targeting') confirmed(validTargeting(result) && String(result.campaignId) === campaignId && Array.isArray(result.updated) && Object.keys(payload.targeting).every(field => result.updated.includes(field)), 'Google did not confirm the updated campaign targeting.');
+      if (action === 'negatives') confirmed(result.stale !== true && Array.isArray(result.keywords) && sameKeywords(result.keywords, payload.keywords), 'Google did not confirm the complete campaign negative keyword set.');
+      if (action === 'targeting') confirmed(validTargeting(result) && result.stale !== true && String(result.campaignId) === campaignId && Array.isArray(result.updated) && Object.keys(payload.targeting).every(field => result.updated.includes(field)), 'Google did not confirm the updated campaign targeting.');
       if (action === 'bidding') {
         confirmed(result.bidStrategy === payload.bidStrategy && ['bidAmount', 'roasAverageFloor'].every(field => payload[field] === undefined || result[field] === payload[field]), 'Google did not acknowledge the requested bidding strategy.');
         let current; try { current = await api(endpoint, { accountId, adAccountId, platform: 'google' }); } catch (error) { error.uncertain = true; throw error; }
@@ -142,7 +145,7 @@ export async function handleGoogleAds(context, api, profileId, action) {
         return { result: redact(current) };
       }
       return { result: redact(result) };
-    }); send(outcome.status, outcome.data); return true;
+    }, ['ads', 'google', campaignId]); send(outcome.status, outcome.data); return true;
   }
   if (write && ['keywords/add', 'keyword/status', 'keyword/remove'].includes(action)) {
     requireCampaign();
@@ -168,7 +171,7 @@ export async function handleGoogleAds(context, api, profileId, action) {
       if (action === 'keyword/status') confirmed(result.keyword?.id === keywordId && result.keyword.status === body.status && result.keyword.adSetId === selected.adSetId && scope(result.keyword, profileId, accountId, adAccountId), 'Google did not confirm this keyword’s new status.');
       else confirmed(result.removed === true && result.keywordId === keywordId && result.adSetId === selected.adSetId && result.campaignId === campaignId, 'Google did not confirm removal of the selected keyword.');
       return { result: redact(result) };
-    }); send(outcome.status, outcome.data); return true;
+    }, ['ads', 'google', campaignId]); send(outcome.status, outcome.data); return true;
   }
   fail(404, 'GOOGLE_TOOL_NOT_FOUND', 'This Google Ads tool was not found.');
 }
