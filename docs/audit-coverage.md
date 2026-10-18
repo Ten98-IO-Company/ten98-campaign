@@ -1,6 +1,17 @@
 # Application audit coverage
 
-Reviewed on 18 October 2026. This pass traced existing server functions, API actions, UI handlers and their callers across the application. It checked normal, empty, invalid, unauthorized, failed, stale, concurrent and retry states, with focused regressions for reproduced defects. Coverage is grouped by workflow and action; it does not mean every function or branch has its own test. Source review and simulated-provider testing do not establish live provider acceptance or imply that every provider capability is implemented.
+Current audit: **v0.8.4**, verified on 18 October 2026. This pass traced existing server functions, API actions, UI handlers and their callers across the application. It checked normal, empty, invalid, unauthorized, failed, stale, concurrent and retry states, with focused regressions for reproduced defects. Coverage is grouped by workflow and action; it does not mean every function or branch has its own test. Source review and simulated-provider testing do not establish live provider acceptance or imply that every provider capability is implemented.
+
+## Confirmed fixes in this audit
+
+- Adding surrounding whitespace no longer bypasses an unresolved OpenRouter billing request. Malformed Microsoft OAuth token metadata is rejected before any account request.
+- Google bidding checks validate returned strategy, target, portfolio and freshness fields on reads, before writes and after writes. Invalid preflight data cannot authorize a change; unconfirmed write results remain uncertain. Google search and Shopping monetary displays preserve the account currency's precision, including 0.001 KWD.
+- Shared connected-account reads reject malformed display labels and activity flags while preserving optional omitted/null values and project scope.
+- CSV file reads cannot overwrite a newer file or pasted content. Selecting a valid replacement clears the previous import text/result immediately, and blank submissions cannot import the old CSV while the new file is loading.
+- Calendar sync identifies the exact current plan. A changed plan can update existing events; edits during a batch stop it, and an unconfirmed batch blocks another plan until reviewed. Reviewing an outcome never repeats a provider write.
+- Dashboard spend includes daily-budget campaigns without adding daily limits to campaign-total allocations. Missing spend or impression values remain unknown; mixed budget periods no longer produce a misleading allocation percentage.
+- The shared API client rejects unreadable JSON and non-object receipts, including malformed HTTP 200 responses. A potentially accepted write is not reported as successful or assigned a known-failure status merely because its response could not be read.
+- Ad media guidance follows the chosen format; uploaded-video processing notes do not appear for Search, text or boost flows. Closed mobile navigation is hidden from keyboard focus, and the menu button reports its expanded state.
 
 ## Reviewed workflows
 
@@ -12,7 +23,7 @@ Reviewed on 18 October 2026. This pass traced existing server functions, API act
 | Microsoft Advertising | OAuth refresh and mapping; paused Search creation with responsive copy, keywords and locations; status and confirmed unshared daily-budget changes; report request/poll/export states. Shared or unreadable budget ownership permits status-only changes. | [Microsoft HTTP](../tests/native-microsoft-ads.test.mjs), [UI timing](../tests/settings-ui-races.test.mjs) |
 | ChatGPT ads and AI drafting | Zernio connection scope and secret handling; validation, paused creation, budget types, bidding and tracking macros. OpenRouter tools, private history, bounded requests, usage, uncertain-run review and local draft application; creative suggestions require explicit review in the ad builder. | [OpenAI ads](../tests/openai-ads.test.mjs), [composer UI](../tests/openai-ads-ui.test.mjs), [agent](../tests/agent.test.mjs), [drafts](../tests/ai-ad-drafts.test.mjs), [malformed results](../tests/agent-recovery-audit.test.mjs) |
 | Social publishing and approvals | Shared and per-platform captions/media/options, restrictions, previews, account schedules, draft/review policy, publish/update/cancel/delete, published-copy text editing/unpublishing and failed-copy retry; delayed refreshes, webhook state and provider evidence. | [Publishing HTTP](../tests/platform-publishing.test.mjs), [social/DAM races](../tests/social-dam-round4.test.mjs), [approvals](../tests/approvals.test.mjs), [webhooks](../tests/webhooks.test.mjs) |
-| Calendar and analytics | Planned versus provider schedules, Calendar mapping/sync, date windows, missing metrics, malformed results, retained reports and stale response handling. Campaign amounts retain currency precision; missing values remain distinct from zero. | [Calendar](../tests/calendar.test.mjs), [calendar/settings audit](../tests/calendar-settings-audit.test.mjs), [social analytics](../tests/integrations.test.mjs), [ad analytics](../tests/ads-analytics-audit.test.mjs), [main UI](../tests/main-workflows.test.mjs) |
+| Calendar and analytics | Planned versus provider schedules, Calendar mapping/sync, exact plan identity, edits during sync and uncertain/legacy batch recovery; date windows, missing metrics, malformed results, retained reports and stale response handling. Campaign amounts retain currency precision; missing values remain distinct from zero. | [Calendar](../tests/calendar.test.mjs), [calendar/settings audit](../tests/calendar-settings-audit.test.mjs), [social analytics](../tests/integrations.test.mjs), [ad analytics](../tests/ads-analytics-audit.test.mjs), [main UI](../tests/main-workflows.test.mjs) |
 | OOH and Maps | Provider mapping, inventory, location display, availability, exact screen/price terms, booking, delivery/proof and cancellation; scoped readback and uncertain outcomes. | [OOH HTTP](../tests/ooh-workflows.test.mjs), [OOH readback](../tests/ooh-round4.test.mjs), [Maps loader](../tests/maps-loader.test.mjs) |
 | Drive DAM | Folder mapping, sync/import/upload, pagination, metadata and deduplication, asset approval, safe previews, public delivery media and concurrent/partial failures. | [DAM HTTP](../tests/dam-workflows.test.mjs), [social/DAM audit](../tests/social-dam-audit.test.mjs), [main UI](../tests/main-workflows.test.mjs) |
 | Inbox, comments and reviews | Scoped lists/details/history; replies, read/archive, moderation and review replacement; platform windows and templates, signed webhooks, Messenger identity-only contacts, SMS routing/attachments and opt-outs. | [Inbox HTTP](../tests/inbox-http.test.mjs), [inbox webhooks](../tests/inbox-contacts-webhooks.test.mjs), [SMS inbox](../tests/sms-inbox.test.mjs), [SMS media](../tests/sms-media.test.mjs) |
@@ -26,11 +37,26 @@ Reviewed on 18 October 2026. This pass traced existing server functions, API act
 
 The checks use temporary or in-memory databases, synthetic identities and simulated provider HTTP. They exercise actual application routes and handlers, including failure and concurrency paths. UI checks include production-handler timing tests and source/element assertions; they do not replace browser interaction tests.
 
-The full automated suite passed **244 checks**, with no failures, skips or cancellations. The production TypeScript and Vite build passed, and `npm audit --omit=dev` reported no known production dependency vulnerabilities. Focused provider, workflow and UI runs are subsets of this suite, not additional totals. See [verification](verification.md) for release commands and evidence.
+All **255 automated checks** pass with no failures or skipped checks (`npm test`). The production build (`npm run build`), container build and offline non-root container smoke check pass. `npm audit --omit=dev` reports zero vulnerabilities. Overlapping focused runs are not additional release totals. See [verification](verification.md) for recorded results.
 
-## Browser walkthrough
+## Current browser walkthrough — v0.8.4
 
-The production UI was exercised against isolated local fixtures with simulated providers. All amounts, delivery states and metrics below are synthetic.
+The production UI used isolated local databases and simulated providers. These are new observations for this release; all accounts, amounts and outcomes are synthetic.
+
+| Workflow | Observed browser result | Evidence |
+| --- | --- | --- |
+| Overview | USD 10 manual spend plus USD 31.50 daily-budget campaign spend displays USD 41.50. The USD 100 total allocation excludes the separate USD 25 daily limit. | [Spend and allocation](overview-ad-spend-verification.png) |
+| Google Shopping | A 0.001 KWD total budget and spend remain visible. Validation creates no resources; explicit creation produces a paused campaign with a separate 0.001 KWD daily budget, then reporting preserves both budget periods. These values test display precision, not live minimum-budget eligibility. | [Currency and periods](shopping-currency-verification.png) |
+| Microsoft Advertising | A proxy replaces an accepted creation response with JSON null. The UI reports an unreadable response and retains the form. Retrying returns the original paused campaign; the provider log records exactly one creation for that request. | [Unreadable receipt](microsoft-receipt-error-verification.png), [recovered receipt](microsoft-receipt-recovery-verification.png) |
+| Drafting and ad forms | An OpenRouter draft retains copy in the Search builder and requires explicit account/budget selection before paused creation. Search hides irrelevant media guidance. Escape closes the ad dialog and returns focus to its trigger. | [Search form](search-form-verification.png) |
+| Contacts | Two duplicate CSV rows preview as one creation and one merge, then import as one contact without granting email, SMS or WhatsApp permission. | [Runnable CSV regressions](../tests/direct-campaigns-ui.test.mjs) |
+| Calendar | The first sync creates one managed event. Changing the local campaign name and dates, then syncing again, updates that same event: zero new events and one update. | [Changed plan update](calendar-plan-update-verification.png) |
+
+Delayed file-picker reads and closed mobile navigation have focused handler/source regression and review evidence; they were not manually exercised with a file chooser or resized viewport. This pass does not claim a complete accessibility certification. Other browser flows below retain their explicitly historical evidence.
+
+## Historical browser walkthrough — v0.8.3
+
+These observations were recorded for v0.8.3 and are retained as historical evidence, not a claim that every workflow has a fresh browser walkthrough in v0.8.4. The production UI used isolated local fixtures with simulated providers; all amounts, delivery states and metrics below are synthetic.
 
 | Workflow group | Observed browser result | Evidence |
 | --- | --- | --- |

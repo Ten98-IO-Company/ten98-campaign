@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
 import { createApp } from '../server/index.mjs';
 import { testNativeGoogleAds } from '../server/native-google-ads.mjs';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { transformWithOxc } from 'vite';
 
 const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_ADS_CLIENT_SECRET: 'fixture-client-secret', GOOGLE_ADS_REFRESH_TOKEN: 'fixture-refresh-token', GOOGLE_ADS_DEVELOPER_TOKEN: 'fixture-developer-token', GOOGLE_ADS_LOGIN_CUSTOMER_ID: '9999999999' };
 
@@ -144,4 +147,21 @@ test('native Google UI preserves action keys on unknown outcomes and rejects com
   pending = write({ name: 'Shop' }); assert.equal(calls[0][3], calls[1][3]); active.current = false; finish({ campaign: {} }); await assert.rejects(pending, error => error.name === 'AbortError'); assert.equal(keys.current.size, 1);
   await assert.rejects(write({ name: 'Shop' }), error => error.name === 'AbortError'); assert.equal(calls.length, 2);
   active.current = true; pending = write({ name: 'Shop' }); reject(Object.assign(new Error('Provider rejected before writing'), { status: 400, code: 'PROVIDER_REJECTED' })); await assert.rejects(pending); assert.equal(keys.current.size, 0, 'Definite failures must release the action key for a corrected retry.');
+});
+
+test('Shopping report budgets and spend retain the mapped currency precision', async () => {
+  const source = await readFile(new URL('../src/NativeGoogleAds.tsx', import.meta.url), 'utf8');
+  const number = new Function(`return (${stripTypeScriptTypes(source.match(/const number = (.+);/)[1])});`)();
+  const start = source.indexOf('<table><thead><tr><th>Campaign</th><th>Type / state'), end = source.indexOf('</table>', start) + '</table>'.length;
+  assert.ok(start > 0 && end > start);
+  const { code } = await transformWithOxc(`const render = (report, currency, digits) => (${source.slice(start, end)});`, 'ShoppingReport.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', 'number', code + '; return render;')(React, number);
+  for (const [currency, micros, expected] of [['KWD', '1000', '0.001 KWD'], ['USD', '1230000', '1.23 USD'], ['JPY', '1000000', '1 JPY']]) {
+    const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
+    for (const budgetPeriod of ['DAILY', 'CUSTOM_PERIOD']) {
+      const row = { id: '123', name: 'Precision fixture', channel: 'SHOPPING', status: 'PAUSED', budgetPeriod, dailyBudgetMicros: micros, totalBudgetMicros: micros, metrics: { costMicros: micros } };
+      const text = renderToStaticMarkup(render({ campaigns: [row] }, currency, digits)).replace(/<[^>]*>/g, '');
+      assert.equal(text.split(expected).length - 1, 2, 'Both the budget and spend must retain ' + expected);
+    }
+  }
 });

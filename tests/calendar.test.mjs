@@ -1,13 +1,112 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, createStore } from '../server/database.mjs';
 import { handleCalendar, calendarPlan } from '../server/calendar.mjs';
+import { handleOperationRecovery } from '../server/operation-recovery.mjs';
 
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+test('Calendar plan sync stops stale local records before writing and quarantines partial batches', async () => {
+  for (const during of ['list', 'write', 'remove', 'last']) {
+    const { DatabaseSync } = await import('node:sqlite'), db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, writes = [];
+    db.exec("CREATE TABLE projects(id TEXT PRIMARY KEY); INSERT INTO projects VALUES('plan-race'); CREATE TABLE calendar_connections(project_id TEXT PRIMARY KEY,calendar_id TEXT); INSERT INTO calendar_connections VALUES('plan-race','qa@example.test');");
+    let posts = [{ id: 'one', content: 'First post', scheduledAt: '2070-01-01T10:00:00Z' }, { id: 'two', content: 'Second post', scheduledAt: '2070-01-02T10:00:00Z' }], change = true;
+    const store = { list(_project, collection) { return collection === 'posts' ? structuredClone(posts) : []; }, activity() {} };
+    function edit() { if (during === 'remove') posts.pop(); else posts[1].scheduledAt = '2070-02-02T10:00:00Z'; change = false; }
+    globalThis.fetch = async (target, options = {}) => {
+      if (new URL(target).hostname === 'oauth2.googleapis.com') return Response.json({ access_token: 'fixture-token' });
+      if (options.method === 'GET') { if (during === 'list' && change) edit(); return Response.json({ items: [] }); }
+      const event = JSON.parse(options.body); writes.push(event); if (change && (during !== 'last' || writes.length === 2)) edit(); return Response.json(event);
+    };
+    async function invoke(key) {
+      let response;
+      await handleCalendar({ req: { method: 'POST', headers: { 'idempotency-key': key } }, url: new URL('http://localhost/api/projects/plan-race/calendar/sync'), body: {}, project: { id: 'plan-race' }, role: 'owner', user: { isOperator: true }, db, store, config: { env: { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'qa@example.test', GOOGLE_PRIVATE_KEY: privateKey } }, send(status, data) { response = { status, data }; } });
+      return response;
+    }
+    try {
+      const result = await invoke('plan-race-original');
+      const applied = during === 'list' ? 0 : during === 'last' ? 2 : 1;
+      assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(writes.length, applied);
+      assert.equal(result.data.operation.status, during === 'list' ? 'failed' : 'uncertain');
+      const retry = await invoke('plan-race-new-key');
+      if (during === 'list') { assert.equal(retry.status, 200); assert.equal(writes[1].start.dateTime, '2070-02-02T10:00:00.000Z'); }
+      else { assert.equal(retry.status, 409); assert.equal(writes.length, applied, 'A partially applied batch must not replay with a fresh key.'); }
+    } finally { globalThis.fetch = originalFetch; db.close(); }
+  }
+});
+
+test('Calendar sync recovery binds the mapped plan and never bypasses an unresolved prior sync', async () => {
+  const { DatabaseSync } = await import('node:sqlite'), db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, remote = new Map();
+  db.exec("CREATE TABLE projects(id TEXT PRIMARY KEY); INSERT INTO projects VALUES('plan-intent'); CREATE TABLE calendar_connections(project_id TEXT PRIMARY KEY,calendar_id TEXT); INSERT INTO calendar_connections VALUES('plan-intent','qa@example.test');");
+  const project = { id: 'plan-intent' }, user = { id: 'qa-operator', isOperator: true }, originalTime = '2070-01-01T10:00:00Z';
+  let scheduledAt = originalTime, loseResponse = true, writes = 0, release, entered, pending;
+  const reached = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const store = { list(_project, collection) { return collection === 'posts' ? [{ id: 'one', content: 'Appointment', scheduledAt }] : []; }, activity() {} };
+  globalThis.fetch = async (target, options = {}) => {
+    if (new URL(target).hostname === 'oauth2.googleapis.com') return Response.json({ access_token: 'fixture-token' });
+    if (options.method === 'GET') return Response.json({ items: [...remote.values()] });
+    const event = JSON.parse(options.body); remote.set(event.id, event); writes++;
+    if (loseResponse) { loseResponse = false; entered(); await gate; throw new Error('Synthetic acknowledgement lost after the event was applied.'); }
+    return Response.json(event);
+  };
+  async function invoke(key, body = {}) {
+    let response;
+    await handleCalendar({ req: { method: 'POST', headers: { 'idempotency-key': key } }, url: new URL('http://localhost/api/projects/plan-intent/calendar/sync'), body, project, user, role: 'owner', db, store, config: { env: { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'qa@example.test', GOOGLE_PRIVATE_KEY: privateKey } }, send(status, data) { response = { status, data }; } });
+    return response;
+  }
+  try {
+    pending = invoke('plan-intent-first'); await reached;
+    scheduledAt = '2070-02-01T10:00:00Z'; assert.equal((await invoke('plan-intent-still-running')).status, 409); assert.equal(writes, 1);
+    release(); const first = await pending; assert.equal(first.data.operation.status, 'uncertain');
+    assert.equal((await invoke('plan-intent-unreviewed')).status, 409); assert.equal(writes, 1);
+    let reviewed;
+    await handleOperationRecovery({ req: { method: 'POST' }, url: new URL(`http://localhost/api/projects/plan-intent/operations/${first.data.operation.id}/review`), body: { resolution: 'applied', confirmChecked: true, note: 'Checked the synthetic provider event and verified it exists.', reference: [...remote.keys()][0] }, project, role: 'owner', user, db, send(status, data) { reviewed = { status, data }; } });
+    assert.equal(reviewed.status, 200);
+    scheduledAt = originalTime; assert.equal((await invoke('plan-intent-same-plan')).status, 409); assert.equal(writes, 1);
+    scheduledAt = '2070-02-01T10:00:00Z'; const changed = await invoke('plan-intent-changed-plan');
+    assert.equal(changed.status, 200, JSON.stringify(changed.data)); assert.equal(writes, 2); assert.equal(changed.data.updated, 1);
+    assert.equal([...remote.values()][0].start.dateTime, '2070-02-01T10:00:00.000Z');
+    assert.equal(db.prepare('SELECT status FROM integration_operations WHERE id=?').get(first.data.operation.id).status, 'reviewed-applied');
+  } finally { release(); await pending?.catch(() => {}); globalThis.fetch = originalFetch; db.close(); }
+});
+
+test('Calendar plan fingerprints are read-only, order independent, mapping bound and checked before sync', async () => {
+  const { DatabaseSync } = await import('node:sqlite'), db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch;
+  db.exec("CREATE TABLE projects(id TEXT PRIMARY KEY); INSERT INTO projects VALUES('fingerprint'); CREATE TABLE calendar_connections(project_id TEXT PRIMARY KEY,calendar_id TEXT); INSERT INTO calendar_connections VALUES('fingerprint','one@example.test');");
+  let posts = [{ id: 'one', content: 'First post', scheduledAt: '2070-01-01T10:00:00Z' }, { id: 'two', content: 'Second post', scheduledAt: '2070-01-02T10:00:00Z' }], reads = 0;
+  const store = { list(_project, collection) { return collection === 'posts' ? posts : []; } };
+  globalThis.fetch = async target => { reads++; assert.equal(new URL(target).hostname, 'oauth2.googleapis.com'); return Response.json({ access_token: 'fixture-token' }); };
+  async function invoke(method, action, body = {}) {
+    let response;
+    await handleCalendar({ req: { method, headers: { 'idempotency-key': 'fingerprint-request' } }, url: new URL('http://localhost/api/projects/fingerprint/calendar/' + action), body, project: { id: 'fingerprint' }, role: 'owner', user: { isOperator: true }, db, store, config: { env: { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'qa@example.test', GOOGLE_PRIVATE_KEY: privateKey } }, send(status, data) { response = { status, data }; } });
+    return response;
+  }
+  try {
+    const first = await invoke('GET', 'plan'); assert.equal(first.status, 200); assert.match(first.data.fingerprint, /^[a-f0-9]{64}$/); assert.equal(reads, 0);
+    posts.reverse(); assert.equal((await invoke('GET', 'plan')).data.fingerprint, first.data.fingerprint);
+    posts[0] = { ...posts[0], content: 'Changed caption' }; const changed = await invoke('GET', 'plan'); assert.notEqual(changed.data.fingerprint, first.data.fingerprint);
+    assert.equal((await invoke('POST', 'sync', { planFingerprint: first.data.fingerprint })).status, 409);
+    assert.equal((await invoke('POST', 'sync', { planFingerprint: 'invalid' })).status, 400);
+    db.prepare('UPDATE calendar_connections SET calendar_id=?').run('two@example.test'); assert.notEqual((await invoke('GET', 'plan')).data.fingerprint, changed.data.fingerprint);
+  } finally { globalThis.fetch = originalFetch; db.close(); }
+});
+
+test('Calendar plan identity cannot bypass unconfirmed legacy receipts without action metadata', async () => {
+  const { DatabaseSync } = await import('node:sqlite'), db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch;
+  db.exec("CREATE TABLE projects(id TEXT PRIMARY KEY); INSERT INTO projects VALUES('legacy-plan'); CREATE TABLE calendar_connections(project_id TEXT PRIMARY KEY,calendar_id TEXT); INSERT INTO calendar_connections VALUES('legacy-plan','qa@example.test'); CREATE TABLE integration_operations(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL,request_hash TEXT NOT NULL,status TEXT NOT NULL,response TEXT,http_status INTEGER,created_at TEXT NOT NULL,UNIQUE(project_id,request_key));");
+  const path = '/api/projects/legacy-plan/calendar/sync', legacyHash = createHash('sha256').update(JSON.stringify({ body: {}, method: 'POST', path })).digest('hex');
+  db.prepare('INSERT INTO integration_operations VALUES(?,?,?,?,?,?,?,?)').run('legacy-operation', 'legacy-plan', 'legacy-plan-old-key', legacyHash, 'uncertain', null, null, new Date().toISOString());
+  globalThis.fetch = async (target, options = {}) => { if (new URL(target).hostname === 'oauth2.googleapis.com') return Response.json({ access_token: 'fixture-token' }); assert.equal(options.method, 'GET', 'An unconfirmed legacy plan may not issue another provider write.'); return Response.json({ items: [] }); };
+  try {
+    let response;
+    await handleCalendar({ req: { method: 'POST', headers: { 'idempotency-key': 'legacy-plan-fresh-key' } }, url: new URL('http://localhost' + path), body: {}, project: { id: 'legacy-plan' }, role: 'owner', user: { isOperator: true }, db, store: { list(_project, collection) { return collection === 'posts' ? [{ id: 'one', content: 'New plan', scheduledAt: '2070-01-01T10:00:00Z' }] : []; }, activity() {} }, config: { env: { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'qa@example.test', GOOGLE_PRIVATE_KEY: privateKey } }, send(status, data) { response = { status, data }; } });
+    assert.equal(response.status, 409); assert.equal(response.data.operation.status, 'failed'); assert.equal(db.prepare('SELECT status FROM integration_operations WHERE id=?').get('legacy-operation').status, 'uncertain');
+  } finally { globalThis.fetch = originalFetch; db.close(); }
+});
+
 test('Google Calendar mapping, managed event boundaries, stable writes, sync dates and retries', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'ten98-calendar-')), db = openDatabase(dir), store = createStore(db), originalFetch = globalThis.fetch;
   db.prepare('INSERT INTO workspaces VALUES(?,?)').run('workspace-a', 'Team');

@@ -101,7 +101,7 @@ export async function handleAgent(context) {
       if (['running', 'uncertain'].includes(previous.status)) fail(409, 'This request is running or has an uncertain provider outcome. Review it in OpenRouter.');
       send(previous.status === 'failed' ? 400 : 200, { run: publicRun(db, previous), ...(previous.status === 'failed' ? { error: previous.error } : {}) }); return true;
     }
-    if (db.prepare("SELECT id FROM agent_runs WHERE project_id=? AND user_id=? AND input_hash=? AND status IN ('running','uncertain')").get(project.id, user.id, hash)) fail(409, 'This message has an unresolved model request. Review OpenRouter usage before retrying.');
+    if (db.prepare("SELECT id FROM agent_runs WHERE project_id=? AND user_id=? AND (input_hash=? OR message=?) AND status IN ('running','uncertain')").get(project.id, user.id, hash, body.message.trim())) fail(409, 'This message has an unresolved model request. Review OpenRouter usage before retrying.');
     const id = randomUUID(), usage = { requests: 0, promptTokens: 0, completionTokens: 0, cost: null };
     db.prepare('INSERT INTO agent_runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id, project.id, user.id, key, hash, 'running', body.message.trim(), env.OPENROUTER_MODEL, '', JSON.stringify(usage), null, new Date().toISOString());
     // ponytail: bounded request-local loop; use a durable job worker for long-running agents.

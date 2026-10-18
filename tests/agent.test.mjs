@@ -83,11 +83,15 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
     assert.equal(calls.length, beforeInbox, 'Removed inbox opt-in cannot send private messages to the model.');
 
     responses = [new Error('SECRET_FROM_PROVIDER_OR_NETWORK')];
-    const uncertainBody = { message: 'Prepare a separate uncertain run.' }, beforeUncertain = calls.length;
+    const uncertainBody = { message: ' \tPrepare a separate uncertain run.\n' }, beforeUncertain = calls.length;
     result = await invoke('run', { method: 'POST', key: 'uncertain-0001', body: uncertainBody }); assert.equal(result.status, 409); assert.equal(result.data.run.status, 'uncertain'); assert.equal(JSON.stringify(result).includes('SECRET_FROM_PROVIDER_OR_NETWORK'), false);
     const uncertainId = result.data.run.id;
     result = await invoke('run', { method: 'POST', key: 'uncertain-0001', body: uncertainBody }); assert.equal(result.status, 409);
     result = await invoke('run', { method: 'POST', key: 'uncertain-0002', body: uncertainBody }); assert.equal(result.status, 409); assert.equal(calls.length, beforeUncertain + 1, 'Fresh request keys cannot bypass an ambiguous billing outcome.');
+    for (const [index, message] of [uncertainBody.message.trim(), ' ' + uncertainBody.message, uncertainBody.message + '\n', '\t' + uncertainBody.message + ' \n'].entries()) {
+      result = await invoke('run', { method: 'POST', key: 'uncertain-whitespace-' + index, body: { message } });
+      assert.equal(result.status, 409); assert.equal(calls.length, beforeUncertain + 1, 'Changing surrounding whitespace cannot bill again for the same normalized unresolved model message.');
+    }
     for (let index = 0; index < 20; index++) db.prepare('INSERT INTO agent_runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(`later-run-${index}`, project.id, 'user-a', `later-key-${index}`, `later-hash-${index}`, 'complete', 'A later request', config.env.OPENROUTER_MODEL, 'Completed', JSON.stringify({ requests: 1, promptTokens: 1, completionTokens: 1, cost: 0.001 }), null, new Date().toISOString());
     const history = await invoke('history'); assert.equal(history.data.runs.length, 20); assert.equal(history.data.runs[0].id, uncertainId, 'Unresolved billed requests must remain reachable for review after newer runs fill the history.');
     result = await invoke(`runs/${uncertainId}/resolve`, { method: 'POST', body: {} }); assert.equal(result.status, 400);

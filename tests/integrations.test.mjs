@@ -2,7 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { generateKeyPairSync, verify } from 'node:crypto';
-import { handleIntegration, providerRequest } from '../server/integrations.mjs';
+import { handleIntegration, providerRequest, scopedAccounts } from '../server/integrations.mjs';
+
+test('shared connected-account reads reject unreadable labels and activity flags while preserving optional values and profile scope', async () => {
+  const base = { _id: 'account-a', platform: 'whatsapp', profileId: 'profile-a' }, read = account => scopedAccounts(async () => ({ accounts: [account] }), 'profile-a');
+  for (const key of ['displayName', 'username', 'name']) for (const value of [{ invalid: true }, ['invalid'], 1, true]) {
+    await assert.rejects(read({ ...base, [key]: value }), error => error.status === 502 && error.code === 'INVALID_PROVIDER_RESPONSE', key);
+  }
+  for (const value of ['false', 0, {}]) await assert.rejects(read({ ...base, isActive: value }), error => error.status === 502 && error.code === 'INVALID_PROVIDER_RESPONSE');
+  for (const optional of [{}, { displayName: null, username: null, name: null, isActive: null }, { displayName: 'Business', username: '', name: 'Legacy label', isActive: false }]) assert.deepEqual(await read({ ...base, ...optional }), [{ ...base, ...optional }]);
+  assert.deepEqual(await scopedAccounts(async () => ({ accounts: [{ ...base, profileId: 'foreign-profile', displayName: {} }, base] }), 'profile-a'), [base]);
+});
 
 test('social lifecycle updates, cancellation, failed retry, published-copy edits and removal stay scoped and durable', async () => {
   const originalFetch = globalThis.fetch, db = new DatabaseSync(':memory:'), writes = [], records = new Map();

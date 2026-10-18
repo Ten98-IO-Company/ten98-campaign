@@ -13,7 +13,7 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
   const campaign = { platformCampaignId: '12345', platform: 'google', profileId, accountId, platformAdAccountId: adAccountId, campaignName: 'Search fixture', advertisingChannelType: 'SEARCH', adSets: [{ platformAdSetId: '67890', adSetName: 'Products' }] };
   let rows = [{ id: 'first-keyword', platformCriterionId: '1', profileId, accountId, adAccountId, platform: 'google', campaignId: '12345', adSetId: '67890', keyword: 'campaign tools', matchType: 'exact', status: 'active', negative: false }, { id: 'second-keyword', platformCriterionId: '2', profileId, accountId, adAccountId, platform: 'google', campaignId: '12345', adSetId: '67890', keyword: 'free', matchType: 'phrase', status: 'active', negative: true }];
   let negativeRows = [{ criterionId: '55', text: 'jobs', matchType: 'broad' }], badKeywordScope = false, badAck = false, failBidReadback = false, bidWrite = false, portfolio = false;
-  let bidSpec = { bidStrategy: 'LOWEST_COST_WITHOUT_CAP' }, cookie, repeatCursor = false, staleBidding = false, staleTargeting = false, targetingReply = {};
+  let bidSpec = { bidStrategy: 'LOWEST_COST_WITHOUT_CAP' }, cookie, repeatCursor = false, staleBidding = false, staleTargeting = false, targetingReply = {}, biddingReply = {}, biddingReadbackReply = {};
   const targets = { campaignId: '12345', devices: [{ device: 'MOBILE', included: true, bidModifier: 1 }, { device: 'DESKTOP', included: true, bidModifier: 1 }], locations: [{ geoTargetId: '2784', countryCode: 'AE', type: 'Country', name: 'United Arab Emirates', negative: false }], excludedLocations: [], languages: [{ code: 'en', name: 'English' }], locationTargetingType: 'presence', updated: [] };
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
@@ -42,7 +42,7 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
       result = { customerId: adAccountId, data: [{ searchTerm: 'campaign manager', campaignId: '12345', adGroupId: '67890', clicks: 5, costMicros: 1500000 }], paging: { ...(url.searchParams.has('pageToken') && !repeatCursor ? {} : { nextPageToken: 'opaque-cursor' }) }, stale: false };
     } else if (url.pathname.endsWith('/ideas') || url.pathname.endsWith('/historical-metrics')) { assert.equal(payload.adAccountId, adAccountId); result = { customerId: adAccountId, data: [{ text: 'campaign software', keywordIdeaMetrics: { avgMonthlySearches: '1400', lowTopOfPageBidMicros: '1000000', highTopOfPageBidMicros: '3500000' } }], ...(repeatCursor ? { paging: { nextPageToken: payload.pageToken } } : {}) }; }
     else if (url.pathname.endsWith('/targeting')) { if (method === 'PUT') { targets.updated = badAck ? [] : Object.keys(payload.targeting); if (payload.targeting.languages) targets.languages = payload.targeting.languages.map(code => ({ code })); if (payload.targeting.locationTargetingType) targets.locationTargetingType = payload.targeting.locationTargetingType; } result = { ...targets, stale: staleTargeting, ...targetingReply }; }
-    else if (url.pathname.endsWith('/bidding')) { if (failBidReadback && bidWrite) throw new Error('Read after accepted write failed.'); result = { campaignId: '12345', biddingStrategyType: 'MAXIMIZE_CONVERSIONS', bidSpec, ...(portfolio ? { portfolio: { id: 'shared-portfolio' } } : {}), stale: staleBidding }; }
+    else if (url.pathname.endsWith('/bidding')) { if (failBidReadback && bidWrite) throw new Error('Read after accepted write failed.'); result = { campaignId: '12345', biddingStrategyType: 'MAXIMIZE_CONVERSIONS', bidSpec, ...(portfolio ? { portfolio: { id: 'shared-portfolio' } } : {}), stale: staleBidding, ...biddingReply, ...(bidWrite ? biddingReadbackReply : {}) }; }
     else if (url.pathname === '/api/v1/ads/campaigns/12345' && method === 'PUT') { bidWrite = true; bidSpec = { ...payload }; delete bidSpec.platform; result = { updated: 1, ...bidSpec }; }
     else throw new Error('Unexpected provider path: ' + method + ' ' + url.pathname);
     return new Response(JSON.stringify(result));
@@ -112,6 +112,19 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
     result = await request(route + 'targeting', { ...selection, targeting: { locations: ['AE'], languages: ['pt'] }, confirmChange: true }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); campaign.advertisingChannelType = 'SEARCH'; targetingReply = {};
     assert.equal((await request(route + 'targeting', { ...selection, targeting: { locations: [] }, confirmChange: true })).status, 400);
     assert.equal((await request(route + 'targeting', { ...selection, targeting: { locations: { countries: null } }, confirmChange: true })).status, 400);
+    const malformedBidding = [{ portfolio: { id: 'shared', name: {} } }, { bidSpec: [] }, { bidSpec: { bidAmount: -1 } }, { stale: 'false' }, { cachedAt: {} }];
+    for (const [index, reply] of malformedBidding.entries()) {
+      biddingReply = reply; const before = writes.length;
+      assert.equal((await request(route + 'bidding?' + query)).status, 502, JSON.stringify(reply));
+      result = await request(route + 'bidding', { ...selection, bidStrategy: 'COST_CAP', bidAmount: 9.25, confirmChange: true }, 'invalid-bidding-preflight-' + index);
+      assert.equal(result.status, 502); assert.equal(result.data.operation.status, 'failed'); assert.equal(writes.length, before, 'Malformed bidding preflight must not write to Google.');
+    }
+    biddingReply = { bidSpec: null, portfolio: null }; assert.equal((await request(route + 'bidding?' + query)).status, 200, 'Unmapped strategies can legitimately omit the editable triplet.'); biddingReply = {};
+    bidWrite = false; biddingReadbackReply = { biddingStrategyType: {} };
+    const unreadableBidding = { ...selection, bidStrategy: 'COST_CAP', bidAmount: 9.5, confirmChange: true };
+    result = await request(route + 'bidding', unreadableBidding, 'invalid-bidding-readback'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
+    const unreadableCount = writes.length; assert.equal((await request(route + 'bidding', unreadableBidding, 'fresh-invalid-bidding-readback')).status, 409); assert.equal(writes.length, unreadableCount);
+    biddingReadbackReply = {}; bidWrite = false;
     portfolio = true; const beforePortfolio = writes.length; result = await request(route + 'bidding', { ...selection, bidStrategy: 'COST_CAP', bidAmount: 10, confirmChange: true }); assert.equal(result.status, 409); assert.equal(writes.length, beforePortfolio); portfolio = false;
     result = await request(route + 'bidding', { ...selection, bidStrategy: 'COST_CAP', bidAmount: 10, confirmChange: true }); assert.equal(result.status, 200); assert.equal(result.data.result.bidSpec.bidAmount, 10);
     staleBidding = true; const staleCount = writes.length; result = await request(route + 'bidding', { ...selection, bidStrategy: 'COST_CAP', bidAmount: 11, confirmChange: true }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'STALE_GOOGLE_BIDDING'); assert.equal(writes.length, staleCount); staleBidding = false;
@@ -129,6 +142,9 @@ test('actual Google UI formats match types, micros and stale selection guards wi
   const matching = compile(source.match(/const matching = (.+);/)[1], {}), amount = compile(source.match(/const amount = (.+);/)[1], { number: value => String(value) });
   assert.deepEqual(matching('[campaign software]'), { text: 'campaign software', matchType: 'exact' }); assert.deepEqual(matching('"campaign software"'), { text: 'campaign software', matchType: 'phrase' });
   assert.equal(amount('1500000', 'USD'), '1.5 USD'); assert.equal(amount(null), '—');
+  const formatNumber = compile(source.match(/const number = (.+);/)[1], {}), formatAmount = compile(source.match(/const amount = (.+);/)[1], { number: formatNumber });
+  assert.equal(formatAmount('1000', 'KWD'), '0.001 KWD'); assert.equal(formatAmount('1230000', 'USD'), '1.23 USD'); assert.equal(formatAmount('1000000', 'JPY'), '1 JPY');
+  assert.equal(formatAmount(null, 'KWD'), '—'); assert.equal(formatAmount('1500000'), '1.5 ');
   const writeSource = source.slice(source.indexOf('async function write('), source.indexOf('  const readKeywords'));
   const active = { current: true }, calls = []; let finish;
   const write = compile(writeSource, { active, requester: { current: (...args) => { calls.push(args); return new Promise(resolve => { finish = resolve; }); } }, base: { accountId: 'account-one', adAccountId: 'customer-one' } });

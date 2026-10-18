@@ -19,7 +19,7 @@ test('the Calendar UI ignores stale month and unmounted responses and reloads af
   const third = november(); active.current = false; pending[2].resolve({ events: [{ id: 'old-project-event' }] }); await third;
   assert.equal(accepted.length, 1, 'An unmounted calendar must not overwrite the parent grid.');
 
-  const saveSource = source.slice(source.indexOf('async function save('), source.indexOf('  function edit(')).replace('event: React.FormEvent<HTMLFormElement>', 'event');
+  const saveSource = source.slice(source.indexOf('async function save('), source.indexOf('  async function syncPlan(')).replace('event: React.FormEvent<HTMLFormElement>', 'event');
   const calls = [], draft = { summary: 'Launch', description: '', allDay: true, start: '2026-11-01', end: '2026-11-02' };
   const save = new Function('action', 'draft', 'write', 'editing', 'setEditing', 'setDraft', 'blank', 'setNotice', 'load', `return (${saveSource});`)(run => run(), draft, async (path, method, body) => { calls.push({ path, method, body }); }, null, () => {}, () => {}, draft, () => {}, async () => { calls.push('reload'); });
   await save({ preventDefault() {} });

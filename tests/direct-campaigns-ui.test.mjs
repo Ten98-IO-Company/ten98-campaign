@@ -122,3 +122,53 @@ test('reply navigation carries the selected campaign account and recipient witho
   open({ channel: 'whatsapp', accountId: 'campaign-account' }, '+971501234567'); open({ channel: 'sms', accountId: 'unused' }, '+971501234567'); open({ channel: 'email' }, 'person@example.com');
   assert.deepEqual(calls, [['whatsapp', 'campaign-account', '+971501234567'], ['sms', undefined, '+971501234567']]);
 });
+
+test('CSV file reads cannot replace newer selections, manual edits or errors after the view closes', async () => {
+  function setup() {
+    const state = { csv: '', error: '', result: 'preview' }, version = { current: 1 }, csvRead = { current: 0 };
+    const context = { version, csvRead, setCsv: value => { state.csv = value; }, setError: value => { state.error = value; }, setImportResult: value => { state.result = value; } };
+    return { state, version, read: compile(section('async function readCsv(', '  async function suppress('), context), edit: compile(`event => { ${source.match(/value={csv} onChange={event => { (.*?) }}/)[1]} }`, context) };
+  }
+  const file = promise => ({ files: [{ size: 100, text: () => promise }], value: 'selected.csv' });
+  for (const failure of [false, true]) {
+    const ui = setup(); let resolve, reject;
+    const oldInput = file(new Promise((yes, no) => { resolve = yes; reject = no; })), oldRead = ui.read({ currentTarget: oldInput });
+    await ui.read({ currentTarget: file(Promise.resolve('New CSV')) });
+    if (failure) reject(new Error('Old read failed')); else resolve('Old CSV'); await oldRead;
+    assert.equal(ui.state.csv, 'New CSV'); assert.equal(ui.state.error, '');
+  }
+  {
+    const ui = setup(); let resolve;
+    const reading = ui.read({ currentTarget: file(new Promise(yes => { resolve = yes; })) });
+    ui.edit({ target: { value: 'Pasted CSV' } }); resolve('Old CSV'); await reading;
+    assert.equal(ui.state.csv, 'Pasted CSV'); assert.equal(ui.state.result, null);
+  }
+  {
+    const ui = setup(); let resolveOld, resolveNew;
+    const input = file(new Promise(yes => { resolveOld = yes; })), oldRead = ui.read({ currentTarget: input });
+    input.files = [{ size: 100, text: () => new Promise(yes => { resolveNew = yes; }) }]; input.value = 'new.csv';
+    const newRead = ui.read({ currentTarget: input }); resolveOld('Old CSV'); await oldRead;
+    assert.equal(input.value, '', 'Capture and clear the selected file before reading, so the same file can be chosen again.'); assert.equal(ui.state.csv, '');
+    resolveNew('New CSV'); await newRead; assert.equal(ui.state.csv, 'New CSV'); assert.equal(input.value, '');
+  }
+  for (const failure of [false, true]) {
+    const ui = setup(); let resolve, reject;
+    const reading = ui.read({ currentTarget: file(new Promise((yes, no) => { resolve = yes; reject = no; })) }); ui.version.current++;
+    if (failure) reject(new Error('Closed read failed')); else resolve('Closed CSV'); await reading;
+    assert.equal(ui.state.csv, ''); assert.equal(ui.state.error, '');
+  }
+});
+
+test('a replacement CSV cannot import the previous text while its file is still loading', async () => {
+  let csv = 'name,email\nPrevious,previous@example.com', finish;
+  const requests = [], version = { current: 1 }, csvRead = { current: 0 }, context = { version, csvRead, setCsv: value => { csv = value; }, setImportResult() {}, setError() {} };
+  const reading = compile(section('async function readCsv(', '  async function suppress('), context)({ currentTarget: { files: [{ size: 100, text: () => new Promise(resolve => { finish = resolve; }) }], value: 'replacement.csv' } });
+  async function submit() {
+    await compile(section('async function importContacts(', '  async function readCsv('), { ...context, csv, readOnly: false, action: async (_, run) => run(1), importConsent: {}, importSource: '', path: '/projects/a/direct', requester: { current: async (_path, _method, body) => { requests.push(body); return {}; } }, setNotice() {}, setContacts() {} })({ ...event, nativeEvent: { submitter: { getAttribute: () => 'preview' } } });
+  }
+  await submit(); assert.equal(requests.length, 0, 'Selecting another file must prevent import of the previous CSV.');
+  const edit = compile(`event => { ${source.match(/value={csv} onChange={event => { (.*?) }}/)[1]} }`, context);
+  edit({ target: { value: 'name,email\nManual,manual@example.com' } }); await submit(); assert.equal(requests.length, 1); assert.match(requests[0].csv, /Manual/);
+  finish('name,email\nReplacement,replacement@example.com'); await reading; assert.match(csv, /Manual/);
+  csv = '   '; await submit(); assert.equal(requests.length, 1);
+});

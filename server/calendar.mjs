@@ -38,6 +38,10 @@ export function calendarPlan(store, projectId) {
   if (plan.length > 100) fail(400, 'This project has more than 100 dated records. Publish individual events or split the campaign plan into projects.');
   return plan;
 }
+function planIntent(store, projectId, calendarId) {
+  const plan = calendarPlan(store, projectId), snapshot = JSON.stringify([...plan].sort((a, b) => a.id.localeCompare(b.id)));
+  return { plan, snapshot, fingerprint: createHash('sha256').update(JSON.stringify([calendarId, snapshot])).digest('hex') };
+}
 const eventView = event => ({ id: event.id, summary: event.summary || '(Untitled event)', description: event.description || '', start: event.start, end: event.end, htmlLink: event.htmlLink, status: event.status, managed: Boolean(event.extendedProperties?.private?.ten98ProjectId), projectId: event.extendedProperties?.private?.ten98ProjectId });
 
 export async function handleCalendar(context) {
@@ -64,6 +68,7 @@ export async function handleCalendar(context) {
     if (!configured || !connection) fail(409, 'Configure Google credentials and map a shared calendar for this project.');
     if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(req.method)) fail(405, 'This calendar action is not available.');
     if (req.method !== 'GET' && !['owner', 'admin', 'editor'].includes(role)) fail(403, 'Editing permission is required.');
+    if (path === 'plan' && req.method === 'GET') { send(200, { fingerprint: planIntent(store, project.id, connection.calendarId).fingerprint }); return true; }
     const token = await googleToken(env, scope), base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(connection.calendarId)}/events`;
     const currentMapping = () => { try { context.assertIntegrationSettings?.(); return db.prepare('SELECT calendar_id FROM calendar_connections WHERE project_id=?').get(project.id)?.calendar_id === connection.calendarId; } catch { return false; } };
     const call = async (suffix = '', method = 'GET', payload) => {
@@ -94,12 +99,26 @@ export async function handleCalendar(context) {
     }
     if (path === 'events' && req.method === 'GET') { send(200, { events: (await list()).map(eventView), complete: true }); return true; }
     if (path === 'sync' && req.method === 'POST') {
-      const plan = calendarPlan(store, project.id), existing = new Map((await list(true)).map(event => [event.id, event]));
-      const result = await operation(context, async () => {
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'planFingerprint') || body.planFingerprint !== undefined && (typeof body.planFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(body.planFingerprint))) fail(400, 'Use a valid campaign plan fingerprint.');
+      const { plan, snapshot, fingerprint } = planIntent(store, project.id, connection.calendarId);
+      if (body.planFingerprint !== undefined && body.planFingerprint !== fingerprint) fail(409, 'The campaign plan changed. Refresh it before publishing.');
+      const existing = new Map((await list(true)).map(event => [event.id, event]));
+      const result = await operation({ ...context, body: { planFingerprint: fingerprint } }, async () => {
+        const legacyHash = createHash('sha256').update(JSON.stringify({ body: {}, method: req.method, path: url.pathname })).digest('hex');
+        if (db.prepare("SELECT id FROM integration_operations WHERE project_id=? AND request_key<>? AND status IN ('pending','uncertain') AND (action_path='POST /calendar/sync' OR (action_path='' AND request_hash=?))").get(project.id, req.headers['idempotency-key'], legacyHash)) fail(409, 'Review the earlier unconfirmed Calendar plan sync before publishing another plan.');
         let created = 0, updated = 0;
-        for (const event of plan) {
-          if (existing.has(event.id)) { await call('/' + event.id + '?sendUpdates=none', 'PATCH', event); updated++; }
-          else { await call('?sendUpdates=none', 'POST', event); created++; }
+        // ponytail: compare at most 100 plan items; use per-record revisions if plans grow.
+        const assertPlan = () => { if (planIntent(store, project.id, connection.calendarId).snapshot !== snapshot) fail(409, 'The campaign plan changed during sync. Refresh it before publishing again.'); };
+        try {
+          assertPlan();
+          for (const event of plan) {
+            if (existing.has(event.id)) { await call('/' + event.id + '?sendUpdates=none', 'PATCH', event); updated++; }
+            else { await call('?sendUpdates=none', 'POST', event); created++; }
+            assertPlan();
+          }
+        } catch (error) {
+          if ((created || updated) && error instanceof IntegrationError) error.uncertain = true;
+          throw error;
         }
         store.activity(project.id, `Published ${plan.length} planned items to Google Calendar.`);
         return { created, updated, total: plan.length };

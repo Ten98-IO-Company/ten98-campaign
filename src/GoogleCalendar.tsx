@@ -57,6 +57,15 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
       await load();
     });
   }
+  async function syncPlan() {
+    await action(async () => {
+      const plan = await request(path + '/plan');
+      if (!active.current || scope.current !== view) return;
+      if (typeof plan.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(plan.fingerprint)) throw new Error('The campaign plan identity could not be read.');
+      const result = await write('sync', 'POST', { planFingerprint: plan.fingerprint });
+      setNotice(`Published campaign plan: ${result.created} events created, ${result.updated} updated.`); await load();
+    });
+  }
   function edit(event: CalendarEvent) {
     setEditing(event.id); setDraft({ summary: event.summary, description: event.description || '', allDay: Boolean(event.start.date), start: event.start.date || localTime(event.start.dateTime || ''), end: event.end.date || localTime(event.end.dateTime || '') });
   }
@@ -70,7 +79,7 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
     </details>}
     {connected && <>
       <div className="form-grid"><label className="field"><span>From date</span><input type="date" value={from} required disabled={busy} onChange={event => setFrom(event.target.value)}/></label><label className="field"><span>Through date</span><input type="date" value={to} min={from} required disabled={busy} onChange={event => setTo(event.target.value)}/></label></div>
-      <div className="button-row"><button type="button" className="button" disabled={busy || !from || !to || to < from} onClick={() => action(load)}>{busy ? 'Working…' : 'Load Google events'}</button>{canWrite && <button type="button" className="button" disabled={busy} onClick={() => action(async () => { const result = await write('sync', 'POST', {}); setNotice(`Published campaign plan: ${result.created} events created, ${result.updated} updated.`); await load(); })}>Publish campaign plan to Google</button>}</div>
+      <div className="button-row"><button type="button" className="button" disabled={busy || !from || !to || to < from} onClick={() => action(load)}>{busy ? 'Working…' : 'Load Google events'}</button>{canWrite && <button type="button" className="button" disabled={busy} onClick={syncPlan}>Publish campaign plan to Google</button>}</div>
       <p className="helper-note">Publishing the plan creates or updates dated campaigns, OOH placements, and scheduled posts. Existing unrelated events remain read-only. Calendar events do not publish social posts.</p>
       {loaded && !events.length && <p>No Google events in this date range.</p>}
       {events.length > 0 && <div className="table-scroll"><table><thead><tr><th>Google event</th><th>Start</th><th>End</th><th>Actions</th></tr></thead><tbody>{events.map(event => { const managed = event.managed && event.projectId === projectId, link = providerLink(event.htmlLink); return <tr key={event.id}>

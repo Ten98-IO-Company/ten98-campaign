@@ -134,7 +134,9 @@ async function scopedAccounts(api, profileId) {
   const result = await api('/accounts', { profileId });
   if (!Array.isArray(result.accounts) || result.accounts.some(account => !reportObject(account) || typeof account._id !== 'string' || !account._id || typeof account.platform !== 'string' || !account.platform)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return an account list.');
   // Fail closed if Zernio ever returns an account outside the requested profile.
-  return result.accounts.filter(account => String(account.profileId?._id || account.profileId) === profileId);
+  const accounts = result.accounts.filter(account => String(account.profileId?._id || account.profileId) === profileId);
+  if (accounts.some(account => ['displayName', 'username', 'name'].some(key => account[key] != null && typeof account[key] !== 'string') || account.isActive != null && typeof account.isActive !== 'boolean')) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable connected account details.');
+  return accounts;
 }
 function requireAccount(accounts, accountId) {
   const account = accounts.find(item => item._id === accountId);
