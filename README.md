@@ -2,7 +2,7 @@
 
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.7.5 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.8.0 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
 
@@ -73,7 +73,7 @@ Website tracking uses an explicit origin allowlist and public project snippet. I
 
 ## Zernio: social and advertising
 
-Configure Zernio in **Integrations** or set `ZERNIO_API_KEY`. Create a Zernio profile for each project, then have an **instance operator who also administers that workspace** map its profile ID. Connect supported channels in the app; use Zernio's dashboard for provider-specific credential flows, including OpenAI Ads. Load connected accounts before publishing or creating ads.
+Configure Zernio in **Integrations** or set `ZERNIO_API_KEY`. Create a Zernio profile for each project, then have an **instance operator who also administers that workspace** map its profile ID. Connect supported channels in the app; use Zernio's dashboard for provider-specific credential flows or the app's OpenAI Ads connection form. Load connected accounts before publishing or creating ads.
 
 The ad editor supports these formats, subject to the connected account's permissions and Zernio availability:
 
@@ -88,7 +88,9 @@ The ad editor supports these formats, subject to the connected account's permiss
 | Reddit | Image, video, carousel, and text. |
 | OpenAI / ChatGPT | Sponsored card with supported bidding and objectives. |
 
-New ads and boosts start **paused**. Budgets use the advertising account's currency and daily budget rules. Review conversion tracking, targeting, creative approval, and provider-side settings before activation. Supported campaign/ad-group budgets, ad edits, targeting lookup, and status controls are available through Ads manager; unsupported combinations return an error. Lifetime budgets, niche creative types, custom-audience management, conversion installation, and comprehensive bulk editing remain provider-dashboard workflows. The Zernio API supports more options than this editor exposes. [Zernio ad creation contract](https://docs.zernio.com/ad-campaigns/create-standalone-ad).
+New ads and boosts start **paused**. Budgets use the advertising account's currency; OpenAI supports daily and lifetime allocations. Review conversion tracking, targeting, creative approval, and provider-side settings before activation. Supported campaign/ad-group budgets, ad edits, targeting lookup, and status controls are available through Ads manager; unsupported combinations return an error. Niche creative types, custom-audience management, conversion installation, and comprehensive bulk editing remain provider-dashboard workflows. The Zernio API supports more options than this editor exposes. [Zernio ad creation contract](https://docs.zernio.com/ad-campaigns/create-standalone-ad).
+
+Google paid-search tools include keywords, campaign negatives, search terms, Keyword Planner, targeting and bidding. Native Google Standard Shopping creation and Microsoft Search campaigns have separate credentials and verified project mappings. Copilot eligibility comes through Microsoft; supported Google campaigns can qualify for Google's AI search inventory under provider rules. Standard Google Video creation is unavailable in its API; existing Video reporting and Zernio Demand Gen video creation are supported. Organic Search Console/SEO stays in ten98 Discover. See [advertising setup and limits](docs/advertising.md).
 
 Every provider action checks project/account scope. Mutating requests use persistent idempotency records; uncertain outcomes block duplicate submissions, including attempts with a fresh key. Use the provider-operation review panel in **Settings** to reconcile an interrupted action after checking the actual provider outcome. See deployment and operations below.
 
@@ -183,7 +185,7 @@ The map shows provider-supplied coordinates and team-entered placement coordinat
 
 Configure OpenRouter in Integrations or set `OPENROUTER_API_KEY` and a tool-capable `OPENROUTER_MODEL`. The assistant runs orchestration and project tools on this application server; **model inference runs remotely through OpenRouter**. Submitted prompts and requested campaign/post/placement/asset context leave the server. Inbox context and its old opt-in field are no longer accepted. [OpenRouter tool calling](https://openrouter.ai/docs/guides/features/tool-calling).
 
-The assistant can read scoped campaign/post/placement/asset data and propose local drafts. It cannot publish, activate ads, or book inventory. Users review each suggestion before saving it; saved suggestions are validated through the normal record rules. The default request loop allows four model calls and 2,048 completion tokens per call, configurable through `OPENROUTER_MAX_STEPS` (maximum eight) and `OPENROUTER_MAX_TOKENS` (maximum 8,192).
+The assistant can read scoped campaign/post/placement/asset data and propose local drafts, including ad creatives. Ad suggestions open the ad builder with supported copy and media; you explicitly select the account and budget before submission. It cannot publish, activate ads, or book inventory. Users review each suggestion before saving it; saved suggestions are validated through the normal record rules. The default request loop allows four model calls and 2,048 completion tokens per call, configurable through `OPENROUTER_MAX_STEPS` (maximum eight) and `OPENROUTER_MAX_TOKENS` (maximum 8,192).
 
 History records the provider-reported token usage and cost; unavailable usage remains unknown. A failed connection can leave a billable outcome uncertain, so duplicate attempts are blocked until the user reviews the request in OpenRouter and marks it reviewed. [Usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting). Model quality and tool support depend on the chosen model.
 

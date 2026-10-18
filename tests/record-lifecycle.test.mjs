@@ -27,6 +27,15 @@ test('record deletion preserves assignments and administrators can remove sample
       cookies[role] = (await request('/api/auth/login', { method: 'POST', body: { email, password: secret }, cookie: null })).cookie;
     }
     async function create(collection, body) { const result = await request(`${project}/${collection}`, { method: 'POST', body }); assert.equal(result.status, 201); return result.data.record; }
+    for (const field of ['nativeProvider', 'nativeCustomerId', 'nativeCampaignResource', 'nativeResources', 'nativeAccountId', 'nativeCampaignId', 'nativeAdGroupId', 'nativeAdId']) {
+      assert.equal((await request(project + '/campaigns', { method: 'POST', body: { name: 'Forged native receipt', [field]: 'forged' } })).status, 400);
+    }
+    for (const nativeProvider of ['googleAdsNative', 'microsoft']) {
+      const managed = app.store.create(projectId, 'campaigns', { name: 'Confirmed native campaign', nativeProvider, status: 'paused', budget: 25 });
+      assert.equal((await request(`${project}/campaigns/${managed.id}`, { method: 'PATCH', body: { status: 'active', budget: 100 } })).status, 400);
+      assert.equal((await request(`${project}/campaigns/${managed.id}`, { method: 'DELETE' })).status, 400);
+      assert.equal(app.store.get(projectId, 'campaigns', managed.id).status, 'paused');
+    }
     const campaign = await create('campaigns', { name: 'Keep my real campaign' }), provider = await create('providers', { name: 'Keep my real provider' }), asset = await create('assets', { name: 'Keep my real asset', url: 'https://cdn.example.com/real.jpg' });
     const post = await create('posts', { content: 'A real linked draft', platforms: ['facebook'], campaignId: campaign.id, assetId: asset.id });
     const placement = await create('placements', { name: 'A real booking', location: 'Dubai', providerId: provider.id });

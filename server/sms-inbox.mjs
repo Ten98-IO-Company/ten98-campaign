@@ -80,6 +80,39 @@ export function createSmsInbox({ db, env, appUrl, contacts = createContacts({ db
   async function handle(context) {
     const { req, url, project, role, body = {}, send } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/sms-inbox`, path = url.pathname.slice(prefix.length);
     if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
+    const media = path.match(/^\/media\/([\w-]+)\/(\d)$/);
+    if (media && req.method === 'GET') {
+      const entry = readMessage(media[1]), attachment = entry?.record.attachments?.[Number(media[2])];
+      if (!entry || entry.project_id !== project.id || !attachment) fail(404, 'SMS_MEDIA_NOT_FOUND', 'This SMS attachment was not found in the project.');
+      context.assertIntegrationSettings();
+      if (entry.account_sid !== env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) fail(409, 'SMS_CONNECTION_CHANGED', 'The Twilio account changed. Restore its connection before downloading this attachment.');
+      const target = new URL(attachment.url), expected = `/2010-04-01/Accounts/${entry.account_sid}/Messages/${entry.provider_id}/Media/`;
+      if (target.origin !== 'https://api.twilio.com' || target.username || target.password || !target.pathname.startsWith(expected) || !sid(target.pathname.slice(expected.length), 'ME') || target.search || target.hash) fail(502, 'INVALID_SMS_MEDIA', 'The stored SMS attachment is outside its verified Twilio message.');
+      const maximum = 20 * 1024 * 1024, signal = AbortSignal.timeout(15000);
+      let response;
+      try {
+        response = await fetch(target, { headers: { Authorization: 'Basic ' + Buffer.from(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`).toString('base64') }, redirect: 'manual', signal });
+        context.assertIntegrationSettings();
+        if ([301, 302, 303, 307, 308].includes(response.status)) {
+          const location = new URL(response.headers.get('location') || '', target);
+          if (location.origin !== 'https://mms.twiliocdn.com' || location.username || location.password) fail(502, 'INVALID_SMS_MEDIA', 'Twilio returned an unsupported attachment location.');
+          await response.body?.cancel();
+          response = await fetch(location, { redirect: 'error', signal });
+          context.assertIntegrationSettings();
+        }
+        if (!response.ok || response.headers.get('content-type')?.split(';')[0].toLowerCase() !== attachment.contentType.toLowerCase() || Number(response.headers.get('content-length') || 0) > maximum) fail(502, 'SMS_MEDIA_UNAVAILABLE', 'Twilio did not return the expected attachment within the 20 MB download limit.');
+        const chunks = []; let size = 0;
+        for await (const chunk of response.body || []) { size += chunk.length; if (size > maximum) fail(502, 'SMS_MEDIA_UNAVAILABLE', 'This SMS attachment exceeds the 20 MB download limit.'); chunks.push(chunk); }
+        context.assertIntegrationSettings();
+        const extension = attachment.contentType.split('/')[1].replace(/[^a-z0-9.+-]/gi, '').slice(0, 80), bytes = Buffer.concat(chunks);
+        context.res.writeHead(200, { 'Content-Type': attachment.contentType, 'Content-Disposition': `attachment; filename="sms-attachment.${extension}"`, 'Content-Length': bytes.length, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' }); context.res.end(bytes);
+      } catch (error) {
+        response?.body?.cancel().catch(() => {});
+        if (error?.status) throw error;
+        fail(502, 'SMS_MEDIA_UNAVAILABLE', 'The SMS attachment could not be downloaded from Twilio. Try again later.');
+      }
+      return true;
+    }
     const match = path.match(/^\/conversations\/([\w-]+)\/(messages|reply)$/);
     if (!['/status', '/conversations'].includes(path) && !match) return false;
     if (path === '/status' && req.method === 'GET') { send(200, { configured: Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)), publicCallbacks: appUrl.startsWith('https://'), callbackUrl: `${appUrl}/api/webhooks/twilio/inbound/${encodeURIComponent(project.id)}`, legacyCallbackUrl: `${appUrl}/api/webhooks/twilio/inbound` }); return true; }

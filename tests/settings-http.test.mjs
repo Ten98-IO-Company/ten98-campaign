@@ -6,6 +6,65 @@ import { join } from 'node:path';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { createApp } from '../server/index.mjs';
 
+test('native ad connection tests persist rotated tokens, survive restart and reject credentials changed in flight', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'ten98-native-settings-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;
+  let env = {}, app = createApp({ dataDir, env, appUrl: origin }), base, cookie, pause;
+  const start = async () => { await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`; };
+  const request = async (path, method = 'GET', body) => {
+    const response = await originalFetch(base + path, { method, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(method !== 'GET' ? { Origin: origin, 'Content-Type': 'application/json' } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
+  };
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(target);
+    if (url.hostname === '127.0.0.1') return originalFetch(target, options);
+    if (url.pathname.endsWith('/token')) {
+      const form = new URLSearchParams(options.body), refresh = form.get('refresh_token');
+      assert.ok(refresh?.startsWith('private-'));
+      if (pause) { const pending = pause; pause = null; pending.started(); await pending.wait; }
+      return Response.json({ access_token: 'private-access-token', token_type: 'Bearer', scope: 'https://ads.microsoft.com/msads.manage', refresh_token: refresh + '-rotated' });
+    }
+    assert.equal(options.headers.Authorization, 'Bearer private-access-token');
+    if (url.href === 'https://googleads.googleapis.com/v25/customers:listAccessibleCustomers') return Response.json({ resourceNames: ['customers/1234567890'] });
+    if (url.href === 'https://clientcenter.api.bingads.microsoft.com/CustomerManagement/v13/User/Query') return Response.json({ User: { Id: '123' } });
+    throw new Error('Unexpected native settings provider request');
+  };
+  try {
+    await start();
+    const setup = await request('/api/auth/setup', 'POST', { name: 'Native operator', email: 'native-settings@example.test', password: 'native connection fixture password', sample: false });
+    assert.equal(setup.status, 201); cookie = setup.cookie;
+    const projectId = (await request('/api/state')).data.projectId;
+    for (const [provider, prefix] of [['googleAdsNative', 'GOOGLE_ADS'], ['microsoftAds', 'MICROSOFT_ADS']]) {
+      const path = '/api/settings/integrations/' + provider;
+      const fields = { clientId: 'fixture-client', clientSecret: 'private-client-secret', developerToken: 'private-developer-token', refreshToken: 'private-' + provider };
+      assert.equal((await request(path, 'PUT', { fields })).status, 200);
+      for (let i = 1; i <= 2; i++) {
+        const checked = await request(path + '/test', 'POST', { projectId });
+        assert.equal(checked.status, 200, JSON.stringify(checked.data)); assert.equal(checked.data.ok, true);
+        assert.equal(env[prefix + '_REFRESH_TOKEN'], fields.refreshToken + '-rotated'.repeat(i));
+        assert.equal(JSON.stringify(checked.data).includes('private-'), false);
+      }
+      let started, release;
+      const entered = new Promise(resolve => { started = resolve; }), wait = new Promise(resolve => { release = resolve; });
+      pause = { started, wait };
+      const checking = request(path + '/test', 'POST', { projectId });
+      try {
+        await Promise.race([entered, new Promise((_, reject) => { setTimeout(() => reject(new Error('Expected native token refresh')), 3000).unref(); })]);
+        assert.equal((await request(path, 'PUT', { fields: { refreshToken: 'private-reconnected-' + provider } })).status, 200);
+      } finally { release(); }
+      assert.equal((await checking).status, 409);
+      assert.equal(env[prefix + '_REFRESH_TOKEN'], 'private-reconnected-' + provider, 'A stale refresh cannot overwrite a new authorization.');
+    }
+    const described = JSON.stringify((await request('/api/settings/integrations')).data);
+    assert.equal(described.includes('private-'), false);
+    for (const row of app.db.prepare('SELECT ciphertext FROM integration_settings').all()) assert.equal(Buffer.from(row.ciphertext).includes(Buffer.from('private-')), false);
+    await app.close(); env = {}; app = createApp({ dataDir, env, appUrl: origin }); await start();
+    for (const [provider, prefix] of [['googleAdsNative', 'GOOGLE_ADS'], ['microsoftAds', 'MICROSOFT_ADS']]) {
+      assert.equal(env[prefix + '_REFRESH_TOKEN'], 'private-reconnected-' + provider);
+      assert.equal((await request('/api/settings/integrations/' + provider + '/test', 'POST', { projectId })).status, 200);
+    }
+  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+});
+
 test('integration settings HTTP routes enforce operators, retain encrypted secrets, use approved project mappings and make only explicit connection tests', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-settings-http-')), distDir = join(dataDir, 'dist');
   await mkdir(distDir); await writeFile(join(distDir, 'index.html'), '<!doctype html><title>Campaign</title><script src="/app.js"></script>');
@@ -40,7 +99,7 @@ test('integration settings HTTP routes enforce operators, retain encrypted secre
     const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Settings operator', email: 'settings-operator@example.test', password: 'fixture settings password 2026', sample: false } });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const state = (await request('/api/state')).data, projectId = state.projectId, project = `/api/projects/${projectId}`, workspaceId = state.workspaces[0].id;
-    const settings = await request(route); assert.equal(settings.status, 200); assert.equal(settings.data.providers.length, 8);
+    const settings = await request(route); assert.equal(settings.status, 200); assert.equal(settings.data.providers.length, 10);
     assert.equal(find(settings.data, 'zernio').source, 'environment');
     assert.equal(JSON.stringify(settings.data).includes(env.ZERNIO_API_KEY), false);
 

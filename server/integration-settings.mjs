@@ -1,17 +1,21 @@
 import { createCipheriv, createDecipheriv, createPrivateKey, hkdfSync, randomBytes } from 'node:crypto';
 import { googleToken, providerRequest, IntegrationError } from './integrations.mjs';
+import { testNativeGoogleAds } from './native-google-ads.mjs';
+import { testMicrosoftAds } from './native-microsoft-ads.mjs';
 
 const groups = {
   zernio: { apiKey: 'ZERNIO_API_KEY', webhookSecret: 'ZERNIO_WEBHOOK_SECRET' },
   openrouter: { apiKey: 'OPENROUTER_API_KEY', model: 'OPENROUTER_MODEL', maxTokens: 'OPENROUTER_MAX_TOKENS', maxSteps: 'OPENROUTER_MAX_STEPS' },
   google: { serviceAccountEmail: 'GOOGLE_SERVICE_ACCOUNT_EMAIL', privateKey: 'GOOGLE_PRIVATE_KEY' },
   googleMaps: { browserApiKey: 'GOOGLE_MAPS_BROWSER_API_KEY', mapId: 'GOOGLE_MAPS_MAP_ID' },
+  googleAdsNative: { clientId: 'GOOGLE_ADS_CLIENT_ID', clientSecret: 'GOOGLE_ADS_CLIENT_SECRET', refreshToken: 'GOOGLE_ADS_REFRESH_TOKEN', developerToken: 'GOOGLE_ADS_DEVELOPER_TOKEN', loginCustomerId: 'GOOGLE_ADS_LOGIN_CUSTOMER_ID' },
+  microsoftAds: { clientId: 'MICROSOFT_ADS_CLIENT_ID', clientSecret: 'MICROSOFT_ADS_CLIENT_SECRET', refreshToken: 'MICROSOFT_ADS_REFRESH_TOKEN', developerToken: 'MICROSOFT_ADS_DEVELOPER_TOKEN' },
   broadsign: { apiKey: 'BROADSIGN_API_KEY', environment: 'BROADSIGN_ENVIRONMENT', domainId: 'BROADSIGN_DOMAIN_ID' },
   twilio: { accountSid: 'TWILIO_ACCOUNT_SID', authToken: 'TWILIO_AUTH_TOKEN', fromNumber: 'TWILIO_FROM_NUMBER', messagingServiceSid: 'TWILIO_MESSAGING_SERVICE_SID' },
   cloudflareEmail: { accountId: 'CLOUDFLARE_ACCOUNT_ID', apiKey: 'CLOUDFLARE_EMAIL_API_TOKEN', zoneId: 'CLOUDFLARE_ZONE_ID', fromAddress: 'CLOUDFLARE_EMAIL_FROM_ADDRESS', fromName: 'CLOUDFLARE_EMAIL_FROM_NAME', replyToAddress: 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS' },
 };
-const providers = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email' };
-const secretFields = new Set(['apiKey', 'authToken', 'webhookSecret', 'privateKey', 'browserApiKey']);
+const providers = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', googleAdsNative: 'Google Ads native', microsoftAds: 'Microsoft Advertising', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email' };
+const secretFields = new Set(['apiKey', 'authToken', 'webhookSecret', 'privateKey', 'browserApiKey', 'clientSecret', 'refreshToken', 'developerToken']);
 const defaults = { maxTokens: '2048', maxSteps: '4', environment: 'sandbox' };
 const groupFor = provider => ['googleDrive', 'googleCalendar'].includes(provider) ? 'google' : provider;
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
@@ -24,7 +28,7 @@ function validate(field, input) {
     if (!Number.isInteger(number) || number < (field === 'maxTokens' ? 256 : 1) || number > (field === 'maxTokens' ? 8192 : 8)) fail(400, 'INVALID_SETTING', `${field === 'maxTokens' ? 'Maximum tokens must be from 256 to 8192' : 'Maximum steps must be from 1 to 8'}.`);
     return String(number);
   }
-  if (typeof input !== 'string' || input.length > (field === 'privateKey' ? 20000 : 4096)) fail(400, 'INVALID_SETTING', 'Enter a valid integration setting.');
+  if (typeof input !== 'string' || input.length > (field === 'privateKey' ? 20000 : field === 'refreshToken' ? 16384 : 4096)) fail(400, 'INVALID_SETTING', 'Enter a valid integration setting.');
   const value = input.trim();
   if (!value) return '';
   if (field === 'privateKey') {
@@ -38,6 +42,7 @@ function validate(field, input) {
   if (secretFields.has(field) && (value.length < (field === 'webhookSecret' ? 16 : 8) || /\s/.test(value))) fail(400, 'INVALID_SETTING', 'Enter a complete API key or webhook secret without spaces.');
   if (field === 'serviceAccountEmail' && (value.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))) fail(400, 'INVALID_SETTING', 'Enter the Google service account email address.');
   if (field === 'model' && (value.length > 200 || /\s/.test(value))) fail(400, 'INVALID_SETTING', 'Enter an OpenRouter model ID without spaces.');
+  if (field === 'loginCustomerId') { const id = value.replace(/-/g, ''); if (!/^\d{10}$/.test(id)) fail(400, 'INVALID_SETTING', 'Enter the ten-digit Google Ads manager customer ID.'); return id; }
   if (field === 'mapId' && (value.length > 100 || !/^[A-Za-z0-9_-]+$/.test(value))) fail(400, 'INVALID_SETTING', 'Enter a valid Google map ID.');
   if (field === 'environment' && !['sandbox', 'production'].includes(value)) fail(400, 'INVALID_SETTING', 'Choose the Broadsign sandbox or production environment.');
   if (field === 'domainId' && (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)))) fail(400, 'INVALID_SETTING', 'Enter a positive numeric Broadsign domain ID.');
@@ -97,14 +102,14 @@ export function createIntegrationSettings({ db, env, secret }) {
       if (secretFields.has(field)) secrets[field] = { configured: Boolean(value), source };
       else fields[field] = ['maxTokens', 'maxSteps'].includes(field) ? Number(value || defaults[field]) : value || defaults[field] || '';
     }
-    const configured = group === 'google' ? Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) : provider === 'openrouter' ? Boolean(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL) : provider === 'googleMaps' ? Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY) : provider === 'twilio' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : provider === 'cloudflareEmail' ? Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS) : Boolean(env[groups[group].apiKey]);
+    const configured = group === 'google' ? Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) : provider === 'openrouter' ? Boolean(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL) : provider === 'googleMaps' ? Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY) : provider === 'twilio' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : provider === 'cloudflareEmail' ? Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS) : provider === 'googleAdsNative' ? Boolean(env.GOOGLE_ADS_CLIENT_ID && env.GOOGLE_ADS_CLIENT_SECRET && env.GOOGLE_ADS_REFRESH_TOKEN && env.GOOGLE_ADS_DEVELOPER_TOKEN) : provider === 'microsoftAds' ? Boolean(env.MICROSOFT_ADS_CLIENT_ID && env.MICROSOFT_ADS_REFRESH_TOKEN && env.MICROSOFT_ADS_DEVELOPER_TOKEN) : Boolean(env[groups[group].apiKey]);
     return { id: provider, label: providers[provider], configured, source: sources.size > 1 ? 'mixed' : [...sources][0] || 'unconfigured', fields, secretFields: secrets, updatedAt: row?.updatedAt || null };
   }
   const describe = () => ({ providers: Object.keys(providers).map(describeProvider), revision });
   return {
     get revision() { return revision; },
     describe,
-    save(provider, fields) {
+    save(provider, fields, { tokenRotation = false } = {}) {
       const group = requireProvider(provider);
       if (!plain(fields) || Object.keys(fields).length === 0 || Object.keys(fields).some(field => !Object.hasOwn(groups[group], field))) fail(400, 'INVALID_SETTING', 'Use only the settings shown for this integration.');
       const values = { ...(saved.get(group)?.fields || {}) }, before = JSON.stringify(Object.values(groups[group]).map(name => env[name]));
@@ -116,7 +121,7 @@ export function createIntegrationSettings({ db, env, secret }) {
       const ciphertext = Buffer.concat([cipher.update(JSON.stringify(values), 'utf8'), cipher.final()]), updatedAt = new Date().toISOString();
       db.prepare('INSERT INTO integration_settings VALUES(?,?,?,?,?) ON CONFLICT(provider) DO UPDATE SET nonce=excluded.nonce,ciphertext=excluded.ciphertext,tag=excluded.tag,updated_at=excluded.updated_at').run(group, nonce, ciphertext, cipher.getAuthTag(), updatedAt);
       saved.set(group, { fields: values, updatedAt }); apply(group);
-      if (before !== JSON.stringify(Object.values(groups[group]).map(name => env[name]))) revision++;
+      if (!tokenRotation && before !== JSON.stringify(Object.values(groups[group]).map(name => env[name]))) revision++;
       return describe();
     },
     reset(provider) {
@@ -127,10 +132,14 @@ export function createIntegrationSettings({ db, env, secret }) {
     },
     async test(provider, context = {}) {
       requireProvider(provider);
-      const currentRevision = revision, current = { ...env }, ready = describeProvider(provider);
+      const currentRevision = revision; const current = { ...env }, ready = describeProvider(provider);
       if (!ready.configured) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Save the required credentials before testing this integration.');
       const result = { ok: true, status: 'connected', checkedAt: new Date().toISOString(), readOnly: true };
-      if (provider === 'zernio') {
+      if (['googleAdsNative', 'microsoftAds'].includes(provider)) {
+        const assertCurrent = () => { if (currentRevision !== revision) fail(409, 'CONNECTION_CHANGED', 'Integration credentials changed during the connection test.'); };
+        const persistRefresh = (expected, next) => { assertCurrent(); const name = provider === 'microsoftAds' ? 'MICROSOFT_ADS_REFRESH_TOKEN' : 'GOOGLE_ADS_REFRESH_TOKEN'; if (env[name] === expected) this.save(provider, { refreshToken: next }, { tokenRotation: true }); current[name] = env[name]; };
+        Object.assign(result, await (provider === 'googleAdsNative' ? testNativeGoogleAds : testMicrosoftAds)(current, assertCurrent, persistRefresh));
+      } else if (provider === 'zernio') {
         const data = await providerRequest('https://zernio.com/api/v1/profiles', { method: 'GET', headers: { Authorization: `Bearer ${current.ZERNIO_API_KEY}` } }, 'Zernio');
         if (!Array.isArray(data.profiles)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return the expected profile list.');
         result.message = `Zernio accepted the key and returned ${data.profiles.length} accessible profile${data.profiles.length === 1 ? '' : 's'}. Webhook delivery must be tested from Zernio.`;
