@@ -143,7 +143,7 @@ History records the provider-reported token usage and cost; unavailable usage re
 
 ## Authentication and team access
 
-Roles are owner, admin, editor, and viewer. Workspace owners/admins manage existing members; instance operators separately control shared integration mappings. Local authentication uses password hashes, hashed sessions, and login rate limits.
+Roles are owner, admin, editor, and viewer. Workspace owners/admins manage existing members; instance operators separately control shared integration mappings. Local authentication uses password hashes, hashed sessions, and login rate limits. Session and OIDC browser cookies are scoped by configured app origin so separate local instances can coexist. Valid legacy sessions migrate without extending their expiry.
 
 In Settings, owners/admins create **seven-day, single-use invitation links** and copy them to the intended person manually; the app does not send invitation email. Administrators can invite editors/viewers; only owners can grant owner/admin access. A new local member chooses their own password. An existing member must sign in with the matching invited identity; a link cannot replace their password or grant instance-operator authority. Revoked, expired, used, and no-longer-authorized invitations fail closed.
 

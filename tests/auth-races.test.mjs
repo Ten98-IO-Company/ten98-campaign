@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
-import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { createAuth, hashPassword, cookies, publicUser, HttpError } from '../server/auth.mjs';
 import { transaction } from '../server/database.mjs';
@@ -61,7 +61,7 @@ test('OIDC invitation continuation is browser-bound, single-use and origin-fixed
     async authorizationCodeGrant(provider, url, checks) { exchanges++; assert.equal(provider.fixture, true); assert.equal(checks.expectedState, url.searchParams.get('state')); assert.match(checks.pkceCodeVerifier, /^verifier-/); assert.match(checks.expectedNonce, /^nonce-/); assert.equal(checks.idTokenExpected, true); return { claims: () => claims }; },
   };
   const factorySource = source.slice(source.indexOf('export function createAuth')).replace('export function createAuth', 'function createAuth').replace("await import('openid-client')", 'await Promise.resolve(oidcClient)');
-  const factory = runInNewContext(`(() => { ${factorySource}; return createAuth; })()`, { createHmac, randomBytes, randomUUID, cookies, publicUser, HttpError, hashPassword, transaction, URL, oidcClient, maxAge: 7 * 86400 });
+  const factory = runInNewContext(`(() => { ${factorySource}; return createAuth; })()`, { createHmac, createHash, randomBytes, randomUUID, cookies, publicUser, HttpError, hashPassword, transaction, URL, oidcClient, maxAge: 7 * 86400 });
   const auth = factory(db, config), digest = value => createHmac('sha256', config.sessionSecret).update(value).digest('hex');
   async function start(query = '') {
     const res = response(); await auth.oidcStart({ url: '/api/auth/oidc/start' + query, headers: {}, socket: { remoteAddress: '127.0.0.1' } }, res);

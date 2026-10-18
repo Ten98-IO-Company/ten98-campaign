@@ -1,6 +1,6 @@
 # End-to-end verification — v0.3.1
 
-Verified on 18 October 2026 using an isolated local database and synthetic accounts. Existing user records and credentials were not changed.
+Verified on 18 October 2026 using an isolated local database and synthetic accounts. Saved user records, passwords and integration credentials were not changed.
 
 ## Browser walkthrough
 
@@ -8,7 +8,7 @@ The production frontend was exercised against the actual local HTTP server. Prov
 
 | Workflow | Result |
 | --- | --- |
-| Local sign-in and project navigation | Passed |
+| Local sign-in and project navigation | Passed; same-host port cookie collision fixed with independent session/OIDC cookies |
 | Campaign creation with budget and dates | Passed |
 | Asset creation, metadata, approval and real-media fallback | Passed |
 | Social draft with campaign, artwork and planned time | Passed |
@@ -23,9 +23,9 @@ The production frontend was exercised against the actual local HTTP server. Prov
 
 ## Runnable checks
 
-Run `npm run build` and `npm test`. The release has 40 native checks, including temporary HTTP servers, provider mocks and actual frontend handler logic. They cover auth/OIDC/invitations, role boundaries, encrypted settings and connection probes, Drive/Calendar/Maps, approvals, social lifecycle, ad formats, signed webhook routing/replay/restarts, engagement replies, OOH proposals/cancellation, AI usage recovery, and record lifecycle.
+Run `npm run build` and `npm test`. The release has 41 native checks, including temporary HTTP servers, provider mocks and actual frontend handler logic. They cover auth/OIDC/invitations, role boundaries, encrypted settings and connection probes, Drive/Calendar/Maps, approvals, social lifecycle, ad formats, signed webhook routing/replay/restarts, engagement replies, OOH proposals/cancellation, AI usage recovery, and record lifecycle.
 
-New regressions cover stale Calendar views, preserved mapping edits, uncertain AI request warnings, native/webhook message identity and edits, delivery receipts and deletion, inbox scope/acknowledgements, sample cleanup, clearing publishing destinations, date-only timezone behavior, upcoming work, and safe preview fallbacks.
+New regressions cover local-instance cookie isolation and legacy migration, stale Calendar views, preserved mapping edits, uncertain AI request warnings, native/webhook message identity and edits, delivery receipts and deletion, inbox scope/acknowledgements, sample cleanup, clearing publishing destinations, date-only timezone behavior, upcoming work, and safe preview fallbacks.
 
 ## Live acceptance
 

@@ -1,4 +1,4 @@
-import { randomBytes, scrypt, timingSafeEqual, createHmac, randomUUID } from 'node:crypto';
+import { randomBytes, scrypt, timingSafeEqual, createHmac, createHash, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,19 +34,36 @@ export function cookies(req) {
 }
 export function createAuth(db, config) {
   const digest = value => createHmac('sha256', config.sessionSecret).update(value).digest('hex');
+  // Cookies are shared across ports; include the configured origin so local instances can coexist.
+  const scope = createHash('sha256').update(new URL(config.appUrl).origin).digest('hex').slice(0, 16), sessionName = 'ten98_session_' + scope, oidcName = 'ten98_oidc_' + scope;
   function cookie(name, value, age = maxAge) {
     return `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${age}${config.appUrl.startsWith('https:') ? '; Secure' : ''}`;
   }
-  function establish(res, userId) {
+  function setCookie(res, value) {
+    const previous = res.getHeader?.('Set-Cookie'), name = value.slice(0, value.indexOf('='));
+    const values = [value, ...(Array.isArray(previous) ? previous : previous ? [previous] : []).filter(item => !item.startsWith(name + '='))];
+    res.setHeader('Set-Cookie', values.length === 1 ? values[0] : values);
+  }
+  function findSession(token) {
+    if (!token || !/^[\w-]{43}$/.test(token)) return null;
+    return db.prepare('SELECT u.id,u.name,u.email,s.expires_at AS expiresAt,EXISTS(SELECT 1 FROM instance_operators o WHERE o.user_id=u.id) AS isOperator FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>?').get(digest(token), Date.now());
+  }
+  function sessionToken(req) { const values = cookies(req); return Object.hasOwn(values, sessionName) ? values[sessionName] : values.ten98_session; }
+  function establish(res, userId, req) {
+    const legacy = req && cookies(req).ten98_session;
+    if (findSession(legacy)) { db.prepare('DELETE FROM sessions WHERE token=?').run(digest(legacy)); setCookie(res, cookie('ten98_session', '', 0)); }
     const token = randomBytes(32).toString('base64url');
     db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(Date.now());
     db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(digest(token), userId, Date.now() + maxAge * 1000);
-    res.setHeader('Set-Cookie', cookie('ten98_session', token));
+    setCookie(res, cookie(sessionName, token));
   }
-  function user(req) {
-    const token = cookies(req).ten98_session;
-    if (!token || !/^[\w-]{43}$/.test(token)) return null;
-    return publicUser(db.prepare('SELECT u.id,u.name,u.email,EXISTS(SELECT 1 FROM instance_operators o WHERE o.user_id=u.id) AS isOperator FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>?').get(digest(token), Date.now()));
+  function user(req, res) {
+    const token = sessionToken(req), found = findSession(token);
+    if (found && res && !Object.hasOwn(cookies(req), sessionName)) {
+      setCookie(res, cookie('ten98_session', '', 0));
+      setCookie(res, cookie(sessionName, token, Math.max(0, Math.floor((found.expiresAt - Date.now()) / 1000))));
+    }
+    return publicUser(found);
   }
   function limit(key, maximum = 10) {
     const now = Date.now();
@@ -64,7 +81,7 @@ export function createAuth(db, config) {
   return {
     user, establish, limit,
     account(userId) { return { localPassword: Boolean(db.prepare('SELECT password FROM users WHERE id=?').get(userId)?.password), activeSessions: db.prepare('SELECT count(*) AS count FROM sessions WHERE user_id=? AND expires_at>?').get(userId, Date.now()).count }; },
-    revokeOtherSessions(req, userId) { return db.prepare('DELETE FROM sessions WHERE user_id=? AND token<>?').run(userId, digest(cookies(req).ten98_session || '')).changes; },
+    revokeOtherSessions(req, userId) { return db.prepare('DELETE FROM sessions WHERE user_id=? AND token<>?').run(userId, digest(sessionToken(req) || '')).changes; },
     async changePassword(req, res, userId, currentPassword, newPassword) {
       limit('password:' + userId);
       const previous = db.prepare('SELECT password FROM users WHERE id=?').get(userId)?.password;
@@ -75,7 +92,7 @@ export function createAuth(db, config) {
         db.prepare('UPDATE users SET password=? WHERE id=?').run(next, userId);
         db.prepare('DELETE FROM sessions WHERE user_id=?').run(userId);
       });
-      establish(res, userId);
+      establish(res, userId, req);
     },
     async login(req, res, body) {
       limit('ip:' + req.socket.remoteAddress, 30); limit('email:' + digest(body.email));
@@ -83,11 +100,13 @@ export function createAuth(db, config) {
       if (!await verify(body.password, found?.password)) throw new HttpError(401, 'Email or password is incorrect.');
       if (db.prepare('SELECT password FROM users WHERE id=?').get(found.id)?.password !== found.password) throw new HttpError(401, 'Your password changed. Sign in again.');
       db.prepare('DELETE FROM login_limits WHERE key=?').run('email:' + digest(body.email));
-      establish(res, found.id); return publicUser(found);
+      establish(res, found.id, req); return publicUser(found);
     },
     logout(req, res) {
-      if (cookies(req).ten98_session) db.prepare('DELETE FROM sessions WHERE token=?').run(digest(cookies(req).ten98_session));
-      res.setHeader('Set-Cookie', cookie('ten98_session', '', 0));
+      const token = sessionToken(req), legacy = cookies(req).ten98_session;
+      if (findSession(legacy)) { db.prepare('DELETE FROM sessions WHERE token=?').run(digest(legacy)); setCookie(res, cookie('ten98_session', '', 0)); }
+      if (token) db.prepare('DELETE FROM sessions WHERE token=?').run(digest(token));
+      setCookie(res, cookie(sessionName, '', 0));
     },
     async oidcStart(req, res) {
       if (!config.oidcEnabled || !db.prepare('SELECT id FROM users LIMIT 1').get()) throw new HttpError(400, 'Identity sign-in is unavailable.');
@@ -100,10 +119,10 @@ export function createAuth(db, config) {
       db.prepare('INSERT INTO oidc_flows VALUES(?,?,?,?,?)').run(digest(state), digest(browser), verifier, nonce, Date.now() + 600000);
       if (invite) db.prepare('INSERT INTO oidc_return_targets VALUES(?,?)').run(digest(state), invite);
       const location = client.buildAuthorizationUrl(provider, { redirect_uri: config.appUrl + '/api/auth/oidc/callback', scope: 'openid email profile', state, nonce, code_challenge: await client.calculatePKCECodeChallenge(verifier), code_challenge_method: 'S256' });
-      res.setHeader('Set-Cookie', cookie('ten98_oidc', browser, 600)); res.writeHead(302, { Location: location.href }); res.end();
+      setCookie(res, cookie(oidcName, browser, 600)); res.writeHead(302, { Location: location.href }); res.end();
     },
     async oidcCallback(req, res, url) {
-      const state = url.searchParams.get('state'), browser = cookies(req).ten98_oidc;
+      const values = cookies(req), scoped = Object.hasOwn(values, oidcName), state = url.searchParams.get('state'), browser = scoped ? values[oidcName] : values.ten98_oidc;
       if (!state || !browser || url.searchParams.getAll('state').length !== 1) throw new HttpError(400, 'Identity sign-in expired. Start again.');
       const flow = transaction(db, () => {
           const found = db.prepare('SELECT f.*,r.invite_token FROM oidc_flows f LEFT JOIN oidc_return_targets r ON r.state=f.state WHERE f.state=? AND f.browser=? AND f.expires_at>?').get(digest(state), digest(browser), Date.now());
@@ -111,6 +130,8 @@ export function createAuth(db, config) {
         return found;
       });
       if (!flow) throw new HttpError(400, 'Identity sign-in expired or was already used.');
+      if (!scoped) setCookie(res, cookie('ten98_oidc', '', 0));
+      setCookie(res, cookie(oidcName, '', 0));
       try {
         const { client, provider } = await oidc();
         const tokens = await client.authorizationCodeGrant(provider, url, { pkceCodeVerifier: flow.verifier, expectedState: state, expectedNonce: flow.nonce, idTokenExpected: true });
@@ -130,7 +151,7 @@ export function createAuth(db, config) {
           db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run(randomUUID(), workspace, 'My project');
           return id;
         });
-        establish(res, userId); res.setHeader('Set-Cookie', [res.getHeader('Set-Cookie'), cookie('ten98_oidc', '', 0)]);
+        establish(res, userId, req);
         res.writeHead(302, { Location: config.appUrl + '/' + (flow.invite_token ? '?invite=' + encodeURIComponent(flow.invite_token) : '') }); res.end();
       } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, 'Identity sign-in could not be verified. Start again.'); }
     },

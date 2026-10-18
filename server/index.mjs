@@ -131,7 +131,7 @@ export function createApp(options = {}) {
         if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
         if (mutating && req.headers.origin !== appUrl) throw new HttpError(403, 'A matching Origin header is required.');
         const body = mutating && req.method !== 'DELETE' ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : 65536) : {};
-        if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(auth.user(req)), setupRequired: !db.prepare('SELECT id FROM users LIMIT 1').get(), oidcEnabled: config.oidcEnabled });
+        if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(auth.user(req, res)), setupRequired: !db.prepare('SELECT id FROM users LIMIT 1').get(), oidcEnabled: config.oidcEnabled });
         if (path === '/api/auth/setup' && req.method === 'POST') {
           auth.limit('setup:' + req.socket.remoteAddress, 10);
           if (db.prepare('SELECT id FROM users LIMIT 1').get()) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
@@ -146,16 +146,16 @@ export function createApp(options = {}) {
             db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run(projectId, workspaceId, 'Brand launch');
             if (body.sample) seedSample(store, projectId);
           });
-          auth.establish(res, id); return send(201, { user: { id, name, email: mail, isOperator: true }, projectId });
+          auth.establish(res, id, req); return send(201, { user: { id, name, email: mail, isOperator: true }, projectId });
         }
         if (path === '/api/auth/login' && req.method === 'POST') return send(200, { user: await auth.login(req, res, { email: email(body.email), password: loginPassword(body.password) }) });
         if (path === '/api/auth/logout' && req.method === 'POST') { auth.logout(req, res); return send(200, { ok: true }); }
         if (path === '/api/auth/oidc/start' && req.method === 'GET') return await auth.oidcStart(req, res);
         if (path === '/api/auth/oidc/callback' && req.method === 'GET') return await auth.oidcCallback(req, res, url);
-        if (await handleInvitations({ req, url, body, user: auth.user(req), db, auth, config, send, workspaceAccess, establish: id => auth.establish(res, id) })) return;
-        const user = auth.user(req); if (!user) throw new HttpError(401, 'Sign in to continue.');
+        if (await handleInvitations({ req, url, body, user: auth.user(req, res), db, auth, config, send, workspaceAccess, establish: id => auth.establish(res, id, req) })) return;
+        const user = auth.user(req, res); if (!user) throw new HttpError(401, 'Sign in to continue.');
         if (path === '/api/account' && req.method === 'GET') return send(200, { user, ...auth.account(user.id) });
-        if (path === '/api/account' && req.method === 'PATCH') { if (Object.keys(body).some(key => key !== 'name')) bad('Only your display name can be changed here.'); db.prepare('UPDATE users SET name=? WHERE id=?').run(text(body.name, 'Name'), user.id); return send(200, { user: auth.user(req) }); }
+        if (path === '/api/account' && req.method === 'PATCH') { if (Object.keys(body).some(key => key !== 'name')) bad('Only your display name can be changed here.'); db.prepare('UPDATE users SET name=? WHERE id=?').run(text(body.name, 'Name'), user.id); return send(200, { user: auth.user(req, res) }); }
         if (path === '/api/account/password' && req.method === 'POST') { if (Object.keys(body).some(key => !['currentPassword', 'newPassword'].includes(key))) bad('Use the password fields.'); await auth.changePassword(req, res, user.id, loginPassword(body.currentPassword), password(body.newPassword)); return send(200, { changed: true }); }
         if (path === '/api/account/sessions/revoke' && req.method === 'POST') return send(200, { revoked: auth.revokeOtherSessions(req, user.id) });
         const settingsRoute = path.match(/^\/api\/settings\/integrations(?:\/([A-Za-z]+)(?:\/(test))?)?$/);
