@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import PostComposer, { PostVariantPreview } from './PostComposer';
 import { PLATFORM_RULES, resolveVariant } from '../shared/social-posts.mjs';
 
-type Props = { request: (path: string, body?: any) => Promise<any>; post: any; canWrite: boolean; assets?: any[]; campaigns?: any[]; accounts?: any[]; onCancel?: () => void; onChanged?: () => void };
+type Props = { request: (path: string, body?: any) => Promise<any>; post: any; canWrite: boolean; assets?: any[]; campaigns?: any[]; accounts?: any[]; onCancel?: () => void; onChanged?: () => void; onShortenLinks?: (values: Record<string, any>) => Promise<{ content: string; platformOverrides: Record<string, any> }> };
 const editPlatforms = ['twitter', 'discord', 'facebook', 'reddit', 'linkedin', 'telegram', 'pinterest', 'googlebusiness', 'youtube', 'slack'];
 const removePlatforms = ['threads', 'facebook', 'twitter', 'linkedin', 'youtube', 'pinterest', 'reddit', 'bluesky', 'googlebusiness', 'telegram'];
 const accountId = (item: any) => String(item.accountId?._id || item.accountId);
@@ -17,7 +17,7 @@ function previewCopy(post: any, copy: any, assets: any[]) {
   };
 }
 
-export default function PostManagement({ request, post, canWrite, assets = [], campaigns = [], accounts = [], onCancel, onChanged }: Props) {
+export default function PostManagement({ request, post, canWrite, assets = [], campaigns = [], accounts = [], onCancel, onChanged, onShortenLinks }: Props) {
   const requester = useRef(request); requester.current = request;
   const changed = useRef(onChanged); changed.current = onChanged;
   const [current, setCurrent] = useState(post), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
@@ -47,7 +47,7 @@ export default function PostManagement({ request, post, canWrite, assets = [], c
       {copies.length > 0 && <div className="table-scroll"><table><thead><tr><th>Account</th><th>Delivery</th><th>Published copy</th></tr></thead><tbody>{copies.map((item: any, index: number) => <tr key={accountId(item) + index}><td>{item.accountId?.displayName || item.accountId?.username || item.platform || 'Connected account'}</td><td>{deliveryLabel(item)}{item.error && <p className="field-help">{typeof item.error === 'string' ? item.error : item.error.message || 'Provider rejected this copy.'}</p>}</td><td>{liveUrl(item.platformPostUrl) ? <a href={liveUrl(item.platformPostUrl)} target="_blank" rel="noreferrer">Open post</a> : 'Not reported'}</td></tr>)}</tbody></table></div>}
       {canWrite && editable ? <>
         {divergentCopies && <label className="checkbox-label"><input type="checkbox" checked={replaceVariants} onChange={event => setReplaceVariants(event.target.checked)}/>Some accounts on the same platform have different content. Apply these platform versions to all of those account copies.</label>}
-        <PostComposer key={current.updatedAt || current.id} post={current} assets={assets} campaigns={campaigns} accounts={providerAccounts} canWrite={canWrite} providerPost busy={busy} onSubmit={update} onCancel={onCancel} onValidate={values => requester.current('social/validate', values)} onInspectMedia={item => requester.current('social/validate-media', { url: item.url })} onTikTokInfo={(accountId, mediaType) => requester.current(`social/tiktok-creator-info?accountId=${encodeURIComponent(accountId)}&mediaType=${encodeURIComponent(mediaType)}`)}/>
+        <PostComposer key={current.updatedAt || current.id} post={current} assets={assets} campaigns={campaigns} accounts={providerAccounts} canWrite={canWrite} providerPost busy={busy} onShortenLinks={onShortenLinks} onSubmit={update} onCancel={onCancel} onValidate={values => requester.current('social/validate', values)} onInspectMedia={item => requester.current('social/validate-media', { url: item.url })} onTikTokInfo={(accountId, mediaType) => requester.current(`social/tiktok-creator-info?accountId=${encodeURIComponent(accountId)}&mediaType=${encodeURIComponent(mediaType)}`)}/>
         <div className="modal-actions"><button className="button danger" type="button" disabled={busy} onClick={() => { if (window.confirm('Cancel this unpublished post and remove its record from Zernio? The local receipt will remain. A post already being sent may still go out.')) act('social/cancel', { postId: post.id, confirmCancellation: true }, 'Provider publication cancelled.'); }}>Cancel provider post</button></div>
       </> : <>{(copies.length ? copies : (current.platforms || []).map((platform: string) => ({ platform }))).map((copy: any, index: number) => {
         const variant = previewCopy(current, copy, assets), name = copy.accountId?.displayName || copy.accountId?.username || providerAccounts.find((account: any) => String(account._id || account.id) === accountId(copy))?.displayName || (copy.accountId ? accountId(copy) : 'Your brand');

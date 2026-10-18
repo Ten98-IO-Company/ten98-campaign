@@ -1,9 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { stripTypeScriptTypes } from 'node:module';
 import { PLATFORM_RULES, normalizePostVariants, publicMediaUrl, resolveVariant } from '../shared/social-posts.mjs';
 
 const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');
+
+test('late browser and provider media inspections cannot restore removed media or cross platform editors', async () => {
+  const compile = (value, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(value)});`)(...Object.values(context));
+  const updateSource = source.slice(source.indexOf('function update(index:'), source.indexOf('  async function inspect('));
+  const providerSource = source.slice(source.indexOf('async function inspectWithProvider('), source.indexOf('  return <div className="post-media-editor">'));
+  const browserSource = source.slice(source.indexOf('async function inspect(index:'), source.indexOf('  async function inspectWithProvider('));
+  const lifecycle = source.match(/useEffect\((\(\) => \{ active.current = true; return \(\) => \{ active.current = false; \}; \}), \[\]\);/)[1];
+  assert.match(source, /<MediaEditor key=\{selected\} items=\{override.mediaItems/, 'Platform tabs must mount separate editors even when the same source URL is used.');
+  for (const kind of ['provider', 'browser']) {
+    const active = { current: false }, current = { current: [{ type: 'image', url: 'https://cdn.example.com/shared.jpg', altText: 'Instagram creative' }] }, writes = [];
+    const unmount = compile(lifecycle, { active })();
+    const update = compile(updateSource, { active, current, onChange: value => writes.push(value) });
+    let finish;
+    class Video {}
+    class ImageElement { naturalWidth = 1200; naturalHeight = 800; set src(value) { finish = () => this.onload(); } }
+    const context = { active, current, inspecting: -1, update, onInspect: () => new Promise(resolve => { finish = () => resolve({ valid: true, size: 1200, contentType: 'image/jpeg' }); }), setInspecting() {}, setNotice() {}, previewUrl: value => value, Image: ImageElement, HTMLImageElement: ImageElement, HTMLVideoElement: Video, window: { setTimeout: () => 0 }, clearTimeout() {} };
+    const check = compile(kind === 'provider' ? providerSource : browserSource, context)(0);
+    unmount();
+    // The parent has switched to text-only, another asset source, or a different platform.
+    finish(); await check;
+    assert.deepEqual(writes, [], `${kind} inspection must not reattach media after the editor is removed.`);
+    assert.equal(active.current, false);
+    compile(lifecycle, { active })(); update(0, { width: 640 });
+    assert.equal(writes[0][0].width, 640, 'A live editor can still apply metadata without losing its own caption or media fields.');
+    assert.equal(writes[0][0].altText, 'Instagram creative');
+  }
+});
 const expression = source.match(/const values = useMemo\(\(\) => \((.+)\), \[content,/)[1];
 function draft(changes = {}) {
   const state = { content: 'Shared caption', platforms: ['facebook', 'instagram'], post: undefined, selectedAccounts: [], accountsTouched: false, accounts: [], baseMode: 'asset', assetId: 'shared-creative', campaignId: '', scheduledAt: '', baseMedia: [], overrides: { instagram: { content: '', mediaItems: [], options: { contentType: 'story' } } }, ...changes };

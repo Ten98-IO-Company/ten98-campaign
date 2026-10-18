@@ -83,7 +83,7 @@ test('SMS campaigns persist schedules, deduplicate sends, validate audiences, de
     const refreshing = f.request(f.path + `/campaigns/${campaign.id}/refresh`, 'POST', {}); await refreshEntered; assert.equal((await f.twilio(callback, form)).status, 200); resumeRefresh(); assert.equal((await refreshing).data.deliveries[0].status, 'delivered', 'A stale read cannot overwrite a callback that arrived during refresh.'); f.setHook(null);
     assert.equal((await f.twilio(callback, form, false)).status, 401); assert.equal((await f.twilio(callback, { ...form, To: other.phone })).status, 400); assert.equal((await f.twilio(callback, form)).status, 200);
     assert.equal((await f.twilio(callback, { ...form, MessageStatus: 'queued' })).status, 200); detail = (await f.request(f.path + '/campaigns/' + campaign.id)).data; assert.equal(detail.deliveries[0].status, 'delivered', 'Late callbacks cannot regress delivery.');
-    assert.equal((await f.twilio('/api/webhooks/twilio/inbound', { From: contact.phone, To: f.env.TWILIO_FROM_NUMBER, Body: 'STOP' })).status, 200);
+    assert.equal((await f.twilio('/api/webhooks/twilio/inbound', { MessageSid: 'SM' + 'f'.repeat(32), From: contact.phone, To: f.env.TWILIO_FROM_NUMBER, Body: 'STOP' })).status, 200);
     const updated = (await f.request(f.path + '/contacts')).data.contacts.find(item => item.id === contact.id); assert.equal(updated.consents.sms, false); assert.ok(updated.suppression.sms);
     const next = await f.draft(); assert.equal((await f.arm(next)).status, 400, 'Opt-outs exclude future campaigns.');
     assert.deepEqual(estimateSms('a'.repeat(161)), { encoding: 'GSM-7', units: 161, segments: 2 }); assert.equal(estimateSms('€'.repeat(81)).segments, 2); assert.equal(estimateSms('😀'.repeat(36)).encoding, 'UCS-2'); assert.equal(estimateSms('😀'.repeat(36)).segments, 2);
@@ -146,7 +146,7 @@ test('WhatsApp cancellation during preparation prevents dispatch and a changed r
     let release, started; const gate = new Promise(resolve => { release = resolve; }), entered = new Promise(resolve => { started = resolve; });
     f.setHook(async (url, options) => { if (url.pathname.endsWith('/recipients') && options.method === 'POST') { started(); await gate; return new Response(JSON.stringify({ success: true, added: 1, skipped: 0 })); } });
     const processing = f.app.direct.processPending(); await entered; assert.equal((await f.request(f.path + `/campaigns/${campaign.id}/cancel`, 'POST', {})).status, 200); release(); await processing; f.setHook(null);
-    assert.equal(f.calls.filter(call => /\/broadcasts\/[^/]+\/send$/.test(call.url)).length, 0); assert.equal((await f.request(f.path + '/campaigns/' + campaign.id)).data.campaign.status, 'cancelled');
+    assert.equal(f.calls.filter(call => /\/broadcasts\/[^/]+\/send$/.test(call.url)).length, 0); const cancelled = (await f.request(f.path + '/campaigns/' + campaign.id)).data.campaign; assert.equal(cancelled.status, 'cancelled'); assert.equal(cancelled.providerStatus, 'cancelled', 'A late worker error must preserve the confirmed provider cancellation.');
     const next = await f.draft({ channel: 'whatsapp', accountId: 'wa-direct', templateName: 'appointment_update', templateLanguage: 'en' }), preview = await f.request(f.path + `/campaigns/${next.id}/preview`, 'POST', {});
     let resume, reached; const wait = new Promise(resolve => { resume = resolve; }), waiting = new Promise(resolve => { reached = resolve; });
     f.setHook(async url => { if (url.pathname.endsWith('/whatsapp/templates')) { reached(); await wait; } });
@@ -167,4 +167,64 @@ test('restart quarantines in-flight requests and rejects expanded personalized b
     const recovered = createDirectCampaigns({ db: f.app.db, env: f.env, appUrl: f.origin, secret: f.app.config.sessionSecret, store: f.app.store }); await recovered.processPending(); recovered.close();
     const result = (await f.request(f.path + '/campaigns/' + campaign.id)).data; assert.equal(result.campaign.status, 'attention'); assert.equal(result.deliveries[0].status, 'uncertain'); assert.equal(f.messages.size, 0);
   } finally { await f.close(); }
+});
+
+test('late refreshes cannot restart an uncertain broadcast or revert a concurrently scheduled email draft', async () => {
+  const f = await fixture(); let releaseSend = () => {}, releaseRefresh = () => {}, releaseEmail = () => {};
+  try {
+    await f.person(); const campaign = await f.draft({ channel: 'whatsapp', accountId: 'wa-direct', templateName: 'appointment_update', templateLanguage: 'en' }); await f.arm(campaign);
+    let sendStarted, refreshStarted, sends = 0, heldRefresh = false;
+    const sendEntered = new Promise(resolve => { sendStarted = resolve; }), sendGate = new Promise(resolve => { releaseSend = resolve; }), refreshEntered = new Promise(resolve => { refreshStarted = resolve; }), refreshGate = new Promise(resolve => { releaseRefresh = resolve; });
+    f.setHook(async (url, options) => {
+      if (url.hostname === 'zernio.com' && url.pathname.endsWith('/send') && ++sends === 1) { sendStarted(); await sendGate; throw new Error('Lost acknowledgement'); }
+      if (url.pathname.endsWith('/recipients') && options.method === 'GET' && sends && !heldRefresh) { heldRefresh = true; refreshStarted(); await refreshGate; }
+    });
+    const worker = f.app.direct.processPending(); await sendEntered;
+    const refreshing = f.request(f.path + `/campaigns/${campaign.id}/refresh`, 'POST', {}); await refreshEntered;
+    releaseSend(); await worker; const uncertain = (await f.request(f.path + '/campaigns/' + campaign.id)).data.campaign; assert.equal(uncertain.status, 'attention');
+    releaseRefresh(); const refreshed = await refreshing; assert.equal(refreshed.status, 200); assert.equal(refreshed.data.campaign.status, 'attention'); assert.equal(refreshed.data.campaign.phase, uncertain.phase); assert.equal(refreshed.data.campaign.lastError, uncertain.lastError);
+    await f.app.direct.processPending(); assert.equal(sends, 1, 'A stale provider refresh must not rearm an unconfirmed send.');
+    const email = await f.draft({ channel: 'email', subject: 'Requested receipt', text: 'Your requested receipt.' });
+    let emailStarted; const emailEntered = new Promise(resolve => { emailStarted = resolve; }), emailGate = new Promise(resolve => { releaseEmail = resolve; });
+    f.setHook(async url => { if (url.pathname.endsWith('/suppressions')) { emailStarted(); await emailGate; } });
+    const emailRefresh = f.request(f.path + `/campaigns/${email.id}/refresh`, 'POST', {}); await emailEntered; assert.equal((await f.arm(email, 'schedule')).status, 200);
+    releaseEmail(); const scheduled = await emailRefresh; assert.equal(scheduled.data.campaign.status, 'scheduled'); assert.equal(scheduled.data.deliveries[0].status, 'pending');
+  } finally { releaseSend(); releaseRefresh(); releaseEmail(); await f.close(); }
+});
+
+test('a late WhatsApp refresh preserves a newer provider receipt and terminal delivery evidence', async () => {
+  const f = await fixture(); let release = () => {};
+  try {
+    await f.person(); const campaign = await f.draft({ channel: 'whatsapp', accountId: 'wa-direct', templateName: 'appointment_update', templateLanguage: 'en' }); await f.arm(campaign); await f.app.direct.processPending();
+    const broadcast = [...f.broadcasts.values()][0]; let oldRead = true, entered;
+    const reached = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
+    f.setHook(async (url, options) => {
+      if (oldRead && url.pathname.endsWith('/broadcasts/' + broadcast.id)) return Response.json({ success: true, broadcast: { ...broadcast, status: 'sending', recipientCount: 1, sentCount: 0, deliveredCount: 0 } });
+      if (oldRead && url.pathname.endsWith('/recipients') && options.method === 'GET') { oldRead = false; entered(); await gate; return Response.json({ success: true, recipients: [{ platformIdentifier: broadcast.phones[0].replace('+', ''), status: 'pending' }], pagination: { hasMore: false } }); }
+    });
+    const stale = f.request(f.path + `/campaigns/${campaign.id}/refresh`, 'POST', {}); await reached; broadcast.sentCount = 1; broadcast.deliveredCount = 1;
+    const fresh = await f.request(f.path + `/campaigns/${campaign.id}/refresh`, 'POST', {}); assert.equal(fresh.data.campaign.providerStatus, 'completed'); assert.equal(fresh.data.campaign.stats.deliveredCount, 1);
+    release(); const result = await stale; assert.equal(result.data.campaign.providerStatus, 'completed'); assert.equal(result.data.campaign.stats.deliveredCount, 1); assert.equal(result.data.deliveries[0].status, 'delivered');
+  } finally { release(); await f.close(); }
+});
+
+test('manual provider cancellation and refresh recheck the requester without requiring the original author', async () => {
+  const f = await fixture(); let releaseCancel = () => {}, releaseSms = () => {};
+  try {
+    await f.person(); const campaign = await f.draft({ channel: 'whatsapp', accountId: 'wa-direct', templateName: 'appointment_update', templateLanguage: 'en' }); await f.arm(campaign);
+    f.setHook(url => { if (url.hostname === 'zernio.com' && url.pathname.endsWith('/send')) { const broadcast = [...f.broadcasts.values()][0]; broadcast.status = 'sending'; return Response.json({ success: true, status: 'sending', sent: 0, failed: 0, recipientCount: broadcast.phones.length }); } });
+    await f.app.direct.processPending();
+    const raw = JSON.parse(f.app.db.prepare('SELECT data FROM direct_campaigns WHERE id=?').get(campaign.id).data); raw.scheduledBy = 'former-author'; f.app.db.prepare('UPDATE direct_campaigns SET data=? WHERE id=?').run(JSON.stringify(raw), campaign.id);
+    let cancelStarted, held = false; const cancelEntered = new Promise(resolve => { cancelStarted = resolve; }), cancelGate = new Promise(resolve => { releaseCancel = resolve; });
+    f.setHook(async url => { if (url.pathname.endsWith('/accounts') && !held) { held = true; cancelStarted(); await cancelGate; } });
+    const cancelling = f.request(f.path + `/campaigns/${campaign.id}/cancel`, 'POST', {}); await cancelEntered; f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); releaseCancel();
+    assert.equal((await cancelling).status, 403); assert.equal(f.calls.filter(call => call.url.endsWith('/cancel')).length, 0, 'Demotion during account verification must stop the provider cancellation.');
+    f.app.db.prepare("UPDATE memberships SET role='owner'").run(); f.setHook(null);
+    const retry = await f.request(f.path + `/campaigns/${campaign.id}/cancel`, 'POST', {}); assert.equal(retry.status, 200); assert.equal(retry.data.campaign.providerStatus, 'cancelled', 'An authorized administrator can reconcile a campaign whose author has left.');
+    const sms = await f.draft(); await f.arm(sms); await f.app.direct.processPending();
+    let smsStarted; const smsEntered = new Promise(resolve => { smsStarted = resolve; }), smsGate = new Promise(resolve => { releaseSms = resolve; });
+    f.setHook(async (url, options) => { if (url.hostname === 'api.twilio.com' && options.method === 'GET') { smsStarted(); await smsGate; } });
+    const refreshing = f.request(f.path + `/campaigns/${sms.id}/refresh`, 'POST', {}); await smsEntered; f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); releaseSms();
+    const denied = await refreshing; assert.equal(denied.status, 403); assert.equal(denied.data.deliveries, undefined, 'Revoked manual access must not expose an awaited provider receipt.');
+  } finally { releaseCancel(); releaseSms(); await f.close(); }
 });

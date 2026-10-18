@@ -38,6 +38,17 @@ function canonical(value) {
 function checkMapping(check, uncertain = false) {
   try { check?.(); } catch (error) { if (!uncertain && [403, 404].includes(error.status)) throw new IntegrationError(error.status, 'PROJECT_ACCESS_CHANGED', 'Your project access changed. Refresh before continuing.'); throw new IntegrationError(409, 'PROJECT_CONNECTION_CHANGED', uncertain ? 'The project connection changed after the provider received this action. Reconcile the previous connection.' : 'The project connection changed. Reload this project before continuing.', uncertain); }
 }
+async function providerJson(response) {
+  const reader = response.body?.getReader(); const chunks = []; let length = 0;
+  if (!reader) throw new Error();
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    length += value.byteLength;
+    if (length > 8 * 1024 * 1024) { await reader.cancel(); throw new Error(); }
+    chunks.push(value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
 async function request(url, options = {}, provider = 'Zernio', assertMapping) {
   const target = new URL(url);
   if (target.protocol !== 'https:' || !['zernio.com', 'www.googleapis.com', 'oauth2.googleapis.com', 'api.twilio.com', 'api.cloudflare.com'].includes(target.hostname)) fail(500, 'INVALID_PROVIDER', 'The provider endpoint is invalid.');
@@ -47,20 +58,14 @@ async function request(url, options = {}, provider = 'Zernio', assertMapping) {
   catch { throw new IntegrationError(502, 'PROVIDER_UNAVAILABLE', `${provider} did not confirm the request.`, options.method && options.method !== 'GET'); }
   if (!response.ok) {
     const status = response.status === 429 ? 429 : response.status >= 500 ? 502 : 400;
-    throw Object.assign(new IntegrationError(status, response.status === 429 ? 'PROVIDER_RATE_LIMIT' : 'PROVIDER_REJECTED', `${provider} ${response.status === 429 ? 'rate limit reached. Try again later.' : 'could not complete this request. Check the connection and request details.'}`, (response.status >= 500 || [408, 409].includes(response.status)) && options.method && options.method !== 'GET'), { providerStatus: response.status });
+    let providerCode;
+    if (target.hostname === 'api.twilio.com') { try { const result = await providerJson(response); if (Number.isSafeInteger(result?.code) && result.code >= 10000 && result.code <= 99999) providerCode = result.code; } catch { /* Preserve the sanitized rejection when the error body is unreadable. */ } }
+    throw Object.assign(new IntegrationError(status, response.status === 429 ? 'PROVIDER_RATE_LIMIT' : 'PROVIDER_REJECTED', `${provider} ${response.status === 429 ? 'rate limit reached. Try again later.' : 'could not complete this request. Check the connection and request details.'}`, (response.status >= 500 || [408, 409].includes(response.status)) && options.method && options.method !== 'GET'), { providerStatus: response.status, ...(providerCode === undefined ? {} : { providerCode }) });
   }
   if (response.status === 204) { checkMapping(assertMapping, options.method && options.method !== 'GET'); return {}; }
   let result;
   try {
-    const reader = response.body?.getReader(); const chunks = []; let length = 0;
-    if (!reader) throw new Error();
-    for (;;) {
-      const { done, value } = await reader.read(); if (done) break;
-      length += value.byteLength;
-      if (length > 8 * 1024 * 1024) { await reader.cancel(); throw new Error(); }
-      chunks.push(value);
-    }
-    result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    result = await providerJson(response);
   } catch { throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', `${provider} returned an unreadable response.`, options.method && options.method !== 'GET'); }
   checkMapping(assertMapping, options.method && options.method !== 'GET');
   return result;

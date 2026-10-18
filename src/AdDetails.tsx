@@ -12,16 +12,25 @@ export default function AdDetails({ request, campaign, canWrite, onChanged, onCl
   const [data, setData] = useState<any>(null), [selected, setSelected] = useState<any>(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [retry, setRetry] = useState(0);
   const [needsRefresh, setNeedsRefresh] = useState(false), [readVersion, setReadVersion] = useState(0);
   const campaignId = campaign.platformCampaignId || campaign.campaignId || campaign.id, platform = campaign.platform;
+  const identity = platform + ':' + campaignId, currentIdentity = useRef(identity), active = useRef(true); currentIdentity.current = identity;
+  const isCurrent = () => active.current && currentIdentity.current === identity;
+  async function scopedRequest(path: string, body?: any) {
+    if (!isCurrent()) throw new DOMException('Ad selection changed.', 'AbortError');
+    const result = await requester.current(path, body);
+    if (!isCurrent()) throw new DOMException('Ad selection changed.', 'AbortError');
+    return result;
+  }
   const live = selected?.ad, creative = live?.creative || {}, channel = String(live?.advertisingChannelType || '').toLowerCase();
   const smartPlus = platform === 'tiktok' && (live?.isSmartPlus || data?.campaign?.isSmartPlus);
-  useEffect(() => { let active = true; setBusy(true); setData(null); setSelected(null); setNeedsRefresh(false); setError(''); requester.current(`ads/items?campaignId=${encodeURIComponent(campaignId)}&platform=${encodeURIComponent(platform)}`).then(result => { if (active) setData(result); }).catch(err => { if (active) setError(err.message); }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [campaignId, platform, retry]);
+  useEffect(() => { active.current = true; let current = true; setBusy(true); setData(null); setSelected(null); setNeedsRefresh(false); setError(''); scopedRequest(`ads/items?campaignId=${encodeURIComponent(campaignId)}&platform=${encodeURIComponent(platform)}`).then(result => { if (current && isCurrent()) setData(result); }).catch(err => { if (current && isCurrent() && err.name !== 'AbortError') setError(err.message); }).finally(() => { if (current && isCurrent()) setBusy(false); }); return () => { current = false; active.current = false; }; }, [campaignId, platform, retry]);
   async function act(action: () => Promise<any>, message = '') {
-    setBusy(true); setError(''); setNotice(''); try { await action(); setNotice(message); if (message) onChanged?.(); } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+    if (!isCurrent()) return;
+    setBusy(true); setError(''); setNotice(''); try { await action(); if (isCurrent()) { setNotice(message); if (message) onChanged?.(); } } catch (err) { if (isCurrent() && (err as Error).name !== 'AbortError') setError((err as Error).message); } finally { if (isCurrent()) setBusy(false); }
   }
   async function readAd(adId: string, afterWrite = false) {
     if (afterWrite) setNeedsRefresh(true);
-    try { setSelected(await requester.current('ads/details?adId=' + encodeURIComponent(adId))); setReadVersion(value => value + 1); setNeedsRefresh(false); }
-    catch (failure) { if (!afterWrite) throw failure; setError('The provider confirmed the change, but its latest details could not be loaded. Refresh ad details before making another change. ' + (failure as Error).message); }
+    try { setSelected(await scopedRequest('ads/details?adId=' + encodeURIComponent(adId))); setReadVersion(value => value + 1); setNeedsRefresh(false); }
+    catch (failure) { if (!afterWrite || (failure as Error).name === 'AbortError' || !isCurrent()) throw failure; setError('The provider confirmed the change, but its latest details could not be loaded. Refresh ad details before making another change. ' + (failure as Error).message); }
   }
   async function edit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (busy || needsRefresh) return; const values = Object.fromEntries(new FormData(event.currentTarget)) as Record<string, string>, payload: Record<string, any> = { adId: live._id };
@@ -50,19 +59,19 @@ export default function AdDetails({ request, campaign, canWrite, onChanged, onCl
       if (Object.keys(updates).length) payload.creative = updates;
     }
     if (Object.keys(payload).length === 1) { setError('Choose at least one field to change.'); return; }
-    await act(async () => { await requester.current('ads/edit', payload); await readAd(live._id, true); }, 'Changes saved with the advertising provider.');
+    await act(async () => { await scopedRequest('ads/edit', payload); await readAd(live._id, true); }, 'Changes saved with the advertising provider.');
   }
   async function editSet(event: React.FormEvent<HTMLFormElement>, adSet: any) {
     event.preventDefault(); const values = Object.fromEntries(new FormData(event.currentTarget)) as Record<string, string>, payload: Record<string, any> = { campaignId, platform, adSetId: adSet.platformAdSetId };
     if (values.name.trim() !== (adSet.adSetName || '')) payload.name = values.name.trim();
     if (values.amount?.trim()) payload.budget = { amount: Number(values.amount), type: 'daily' };
-    await act(async () => { await requester.current('ads/adset', payload); setRetry(value => value + 1); }, 'Ad set changes saved.');
+    await act(async () => { await scopedRequest('ads/adset', payload); setRetry(value => value + 1); }, 'Ad set changes saved.');
   }
   async function editCampaign(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const values = Object.fromEntries(new FormData(event.currentTarget)) as Record<string, string>, payload: Record<string, any> = { campaignId, platform };
     if (values.name?.trim() && values.name.trim() !== (data.campaign.campaignName || data.campaign.name)) payload.name = values.name.trim();
     if (values.amount?.trim()) payload.budget = { amount: Number(values.amount), type: 'daily' };
-    await act(async () => { await requester.current('ads/campaign', payload); setRetry(value => value + 1); }, 'Campaign changes saved.');
+    await act(async () => { await scopedRequest('ads/campaign', payload); setRetry(value => value + 1); }, 'Campaign changes saved.');
   }
   return <section>
     <div className="panel-heading"><div><h2>{campaign.campaignName || campaign.name || 'Campaign details'}</h2><p className="field-help">Ads, conversion results and the audiences within this campaign.</p></div>{onClose && <button className="button" onClick={onClose}>Close</button>}</div>
@@ -79,7 +88,7 @@ export default function AdDetails({ request, campaign, canWrite, onChanged, onCl
       {live.rejectionReason && <div className="alert">{live.rejectionReason}</div>}
       {!selected.statusReadAt && <p className="field-help">The live status read was unavailable. These are the provider’s last stored values.</p>}
       <button type="button" className="button" disabled={busy} onClick={() => act(() => readAd(live._id))}>Refresh ad details</button>
-      {canWrite && !['rejected', 'completed', 'cancelled'].includes(live.status) && platform !== 'twitter' && <div className="modal-actions">{['paused', 'active'].map(status => <button key={status} className="button" disabled={busy || needsRefresh} onClick={() => { if (status === 'active' && !window.confirm('Enable this ad? It can spend when its campaign and ad set are also enabled.')) return; act(async () => { await requester.current('ads/ad-status', { adId: live._id, status }); await readAd(live._id, true); }, `Ad switch ${status === 'active' ? 'enabled' : 'paused'}.`); }}>{status === 'active' ? 'Enable ad' : 'Pause ad'}</button>)}</div>}
+      {canWrite && !['rejected', 'completed', 'cancelled'].includes(live.status) && platform !== 'twitter' && <div className="modal-actions">{['paused', 'active'].map(status => <button key={status} className="button" disabled={busy || needsRefresh} onClick={() => { if (status === 'active' && !window.confirm('Enable this ad? It can spend when its campaign and ad set are also enabled.')) return; act(async () => { await scopedRequest('ads/ad-status', { adId: live._id, status }); await readAd(live._id, true); }, `Ad switch ${status === 'active' ? 'enabled' : 'paused'}.`); }}>{status === 'active' ? 'Enable ad' : 'Pause ad'}</button>)}</div>}
       {smartPlus && <p className="field-help">This TikTok Smart+ ad supports its delivery switch here. Change its creative and audience in TikTok Ads Manager.</p>}
       {canWrite && !smartPlus && !['rejected', 'completed', 'cancelled'].includes(live.status) && <form onSubmit={edit}><fieldset disabled={busy || needsRefresh}>
         {['facebook', 'instagram'].includes(platform) && <Field label="Ad name" name="name" value={live.name}/>}

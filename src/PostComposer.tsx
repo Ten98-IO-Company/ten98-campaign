@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PLATFORM_RULES, captionLimitForVariant, countCaption, normalizePostVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms } from '../shared/social-posts.mjs';
 import './post-composer.css';
 
@@ -11,9 +11,10 @@ type Props = {
   onValidate?: (values: Record<string, any>) => Promise<any>;
   onLoadAccounts?: () => Promise<any>; onInspectMedia?: (item: MediaItem) => Promise<any>; providerPost?: boolean;
   onTikTokInfo?: (accountId: string, mediaType: 'video' | 'photo') => Promise<any>;
+  onShortenLinks?: (values: Record<string, any>) => Promise<{ content: string; platformOverrides: Record<string, any> }>;
   busy?: boolean; readOnly?: boolean; initialScheduledAt?: string;
 };
-const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
+const own = Object.hasOwn;
 const localTime = (value = '') => value && Number.isFinite(Date.parse(value)) ? new Date(Date.parse(value) - new Date(value).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
 const accountId = (account: Row) => String(account._id || account.id);
 const accountLabel = (account: Row) => account.displayName || account.username || account.name || accountId(account);
@@ -24,8 +25,9 @@ const bytesLabel = (size: number) => size >= 1024 * 1024 ? `${(size / 1024 / 102
 
 function MediaEditor({ items, onChange, label, disabled, onInspect }: { items: MediaItem[]; onChange: (items: MediaItem[]) => void; label: string; disabled?: boolean; onInspect?: (item: MediaItem) => Promise<any> }) {
   const [inspecting, setInspecting] = useState(-1), [notice, setNotice] = useState('');
-  const current = useRef(items); current.current = items;
-  function update(index: number, patch: Record<string, any>) { onChange(current.current.map((item, position) => position === index ? Object.fromEntries(Object.entries({ ...item, ...patch }).filter(([, value]) => value !== undefined)) as MediaItem : item)); }
+  const current = useRef(items), active = useRef(true); current.current = items;
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  function update(index: number, patch: Record<string, any>) { if (!active.current) return; onChange(current.current.map((item, position) => position === index ? Object.fromEntries(Object.entries({ ...item, ...patch }).filter(([, value]) => value !== undefined)) as MediaItem : item)); }
   async function inspect(index: number) {
     const item = current.current[index], url = previewUrl(item.url);
     if (!url || !['image', 'gif', 'video'].includes(item.type)) { setNotice('Enter a public HTTPS image or video URL before checking its dimensions.'); return; }
@@ -124,7 +126,7 @@ export function PostVariantPreview({ platform, variant, accountName = 'Your bran
   </section>;
 }
 
-export default function PostComposer({ post, assets = [], campaigns = [], accounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, providerPost = false, busy = false, readOnly = false, initialScheduledAt }: Props) {
+export default function PostComposer({ post, assets = [], campaigns = [], accounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onShortenLinks, providerPost = false, busy = false, readOnly = false, initialScheduledAt }: Props) {
   const [content, setContent] = useState(post?.content || ''), [platforms, setPlatforms] = useState<string[]>(post?.platforms || []), [selectedAccounts, setAccounts] = useState<string[]>(post?.accounts || []);
   const [assetId, setAssetId] = useState(post?.assetId || ''), [campaignId, setCampaignId] = useState(post?.campaignId || ''), [scheduledAt, setScheduledAt] = useState(localTime(post?.scheduledAt) || initialScheduledAt || '');
   const [baseMode, setBaseMode] = useState(Array.isArray(post?.mediaItems) ? post.mediaItems.length ? 'custom' : 'none' : post?.assetId ? 'asset' : 'none'), [baseMedia, setBaseMedia] = useState<MediaItem[]>(post?.mediaItems || []);
@@ -134,10 +136,18 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   const [accountsTouched, setAccountsTouched] = useState(false), [loadingAccounts, setLoadingAccounts] = useState(false);
   const [tikTokPermissions, setTikTokPermissions] = useState<Record<string, { mediaType: string; result: any }>>({}), [loadingTikTok, setLoadingTikTok] = useState(false);
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({}), headingRef = useRef<HTMLHeadingElement>(null);
-  const disabled = busy || saving || !canWrite || readOnly || post?.status === 'published' || !!post?.externalId && !providerPost;
+  const [shortening, setShortening] = useState(false), alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const disabled = busy || saving || shortening || !canWrite || readOnly || post?.status === 'published' || !!post?.externalId && !providerPost;
   const selected = platforms.includes(activePlatform) ? activePlatform : platforms[0] || '', rule = PLATFORM_RULES[selected], override = overrides[selected] || {};
   const values = useMemo(() => ({ content, platforms, ...(post?.accounts !== undefined || accountsTouched || accounts.some(account => platforms.includes(account.platform) && PLATFORM_RULES[account.platform] && account.isActive !== false) ? { accounts: selectedAccounts } : {}), assetId: baseMode === 'asset' ? assetId : '', campaignId, scheduledAt: scheduledAt && Number.isFinite(Date.parse(scheduledAt)) ? new Date(scheduledAt).toISOString() : '', status: scheduledAt ? 'scheduled' : 'draft', mediaItems: baseMode === 'asset' ? null : baseMode === 'custom' ? baseMedia : [], platformOverrides: Object.fromEntries(Object.entries(overrides).filter(([platform]) => platforms.includes(platform))) }), [content, platforms, selectedAccounts, accountsTouched, accounts, post?.accounts, baseMode, assetId, campaignId, scheduledAt, baseMedia, overrides]);
   const checks = validatePostForPlatforms(values, platforms, { assets }), variant = selected ? resolveVariant(values, selected, assets) : null;
+  async function shortenLinks() {
+    if (!onShortenLinks || disabled) return; setShortening(true); setError('');
+    try { const result = await onShortenLinks(values); if (alive.current) { setContent(result.content); setOverrides(result.platformOverrides); setProviderCheck(null); } }
+    catch (failure) { if (alive.current && (failure as Error).name !== 'AbortError') setError((failure as Error).message); }
+    finally { if (alive.current) setShortening(false); }
+  }
   const errors = checks.errors.filter((item: any) => item.platform === selected), warnings = checks.warnings.filter((item: any) => item.platform === selected);
   const socialAccounts = accounts.filter(account => PLATFORM_RULES[account.platform] && account.isActive !== false), activeAccounts = socialAccounts.filter(account => platforms.includes(account.platform));
   function changeOverride(patch: Override, remove: string[] = []) {
@@ -197,7 +207,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
         {providerPost && <p className="field-help post-inline-help">Destinations are fixed for this provider post. Caption, media, options and timing changes update the existing unpublished post.</p>}
         {platforms.some(platform => !selectedAccounts.some(id => socialAccounts.find(account => accountId(account) === id)?.platform === platform)) && <p className="post-validation-warning">Choose an account for every platform before publishing. If accounts have not been loaded, existing account IDs are retained.</p>}
       </section>
-      <section className="post-compose-section"><h3>2. Shared content</h3><label className="field"><span>Shared caption</span><textarea value={content} maxLength={100000} onChange={event => setContent(event.target.value)} placeholder="Write your main message…"/></label><p className="field-help post-inline-help">Platforms inherit this caption until you enable a separate caption below.</p>
+      <section className="post-compose-section"><h3>2. Shared content</h3><label className="field"><span>Shared caption</span><textarea value={content} maxLength={100000} onChange={event => setContent(event.target.value)} placeholder="Write your main message…"/></label><p className="field-help post-inline-help">Platforms inherit this caption until you enable a separate caption below.</p>{onShortenLinks && <><button className="button" type="button" disabled={disabled} onClick={shortenLinks}>{shortening ? 'Creating short links…' : 'Shorten caption links'}</button><p className="field-help">Uses this project’s short domain for shared and separate captions. Review the result before saving; media delivery URLs stay intact.</p></>}
         <label className="field"><span>Shared media source</span><select value={baseMode} onChange={event => setBaseMode(event.target.value)}><option value="none">Text only / no shared media</option><option value="asset">Asset library</option><option value="custom">Custom media URLs</option></select></label>
         {baseMode === 'asset' && <label className="field"><span>Shared creative asset</span><select value={assetId} onChange={event => setAssetId(event.target.value)}><option value="">Choose an asset</option>{assets.map(asset => <option key={asset.id} value={asset.id}>{asset.name} · {asset.kind}{asset.approval !== 'approved' ? ' · Approval required' : ''}</option>)}</select></label>}
         {baseMode === 'custom' && <MediaEditor items={baseMedia} onChange={setBaseMedia} label="Shared" disabled={disabled} onInspect={onInspectMedia}/>}
@@ -208,7 +218,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
           <label className="field"><span>{rule.label} caption{!own(override, 'content') && ' (using shared caption)'}</span><textarea value={variant.content} maxLength={100000} readOnly={!own(override, 'content')} onChange={event => changeOverride({ content: event.target.value })} aria-invalid={errors.some((item: any) => item.field === 'content')}/></label>
           <label className="field"><span>{rule.label} media source</span><select value={mediaMode} onChange={event => { const mode = event.target.value; setPlatformMediaModes(previous => ({ ...previous, [selected]: mode })); if (mode === 'shared') changeOverride({}, ['mediaItems', 'assetId']); else if (mode === 'none') changeOverride({ mediaItems: [] }, ['assetId']); else if (mode === 'asset') changeOverride({ assetId: '' }, ['mediaItems']); else changeOverride({ mediaItems: variant.mediaItems.map((item: MediaItem) => ({ ...item })) }, ['assetId']); }}><option value="shared">Use shared media</option><option value="none">Text only / no media</option><option value="asset">Choose a different asset</option><option value="custom">Separate media URLs</option></select></label>
           {mediaMode === 'asset' && <label className="field"><span>{rule.label} creative asset</span><select value={override.assetId || ''} onChange={event => changeOverride({ assetId: event.target.value })}><option value="">Choose an asset</option>{assets.map(asset => <option key={asset.id} value={asset.id}>{asset.name} · {asset.kind}{asset.approval !== 'approved' ? ' · Approval required' : ''}</option>)}</select></label>}
-          {mediaMode === 'custom' && <MediaEditor items={override.mediaItems || []} onChange={mediaItems => changeOverride({ mediaItems })} label={rule.label} disabled={disabled} onInspect={onInspectMedia}/>}
+          {mediaMode === 'custom' && <MediaEditor key={selected} items={override.mediaItems || []} onChange={mediaItems => changeOverride({ mediaItems })} label={rule.label} disabled={disabled} onInspect={onInspectMedia}/>}
           {selected === 'tiktok' && <p className="field-help post-inline-help">Privacy choices, creator permissions and your posting consent are checked against the connected TikTok creator before submission.</p>}
           {selected === 'tiktok' && onTikTokInfo && <div className="post-tiktok-permissions"><button className="button" type="button" disabled={disabled || loadingTikTok || !tikTokAccounts.length} onClick={loadTikTokPermissions}>{loadingTikTok ? 'Loading TikTok permissions…' : 'Load TikTok publishing permissions'}</button>{!tikTokAccounts.length && <p>Select a connected TikTok account to load its allowed privacy settings.</p>}{tikTokAccounts.map(account => {
             const saved = tikTokPermissions[accountId(account)], permissions = saved?.result;

@@ -49,6 +49,7 @@ export async function handleAgent(context) {
   tables(db); const path = url.pathname.slice(prefix.length), env = context.config?.env || process.env;
   const configured = Boolean(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL);
   const steps = Math.min(8, Math.max(1, Number(env.OPENROUTER_MAX_STEPS) || 4));
+  const assertAccess = () => { try { context.assertIntegrationSettings?.(); } catch (error) { const denied = [403, 404].includes(error.status); throw new AgentError(denied ? error.status : 409, denied ? 'Your project access changed. Refresh before continuing.' : 'Integration credentials changed. Start a new request with the current settings.'); } };
   try {
     if (path === 'status' && req.method === 'GET') { send(200, { configured, model: env.OPENROUTER_MODEL || '', maxSteps: steps }); return true; }
     if (path === 'history' && req.method === 'GET') { send(200, { runs: db.prepare("SELECT * FROM agent_runs WHERE project_id=? AND user_id=? ORDER BY CASE WHEN status IN ('running','uncertain') THEN 0 ELSE 1 END,rowid DESC LIMIT 20").all(project.id, user.id).map(row => publicRun(db, row)) }); return true; }
@@ -88,12 +89,13 @@ export async function handleAgent(context) {
     const proposals = []; let answer = '', unknownCost = false, totalCost = 0;
     try {
       for (let step = 0; step < steps; step++) {
-        try { context.assertIntegrationSettings?.(); } catch { throw new AgentError(409, 'Integration credentials changed. Start a new request with the current settings.'); }
+        assertAccess();
         const result = await completion(env, messages, tools), message = result.choices[0].message;
         usage.requests++; for (const [field, source] of [['promptTokens', 'prompt_tokens'], ['completionTokens', 'completion_tokens']]) { const value = result.usage?.[source]; usage[field] = usage[field] !== null && Number.isSafeInteger(value) && value >= 0 ? usage[field] + value : null; }
         if (typeof result.usage?.cost === 'number' && Number.isFinite(result.usage.cost)) totalCost += result.usage.cost; else unknownCost = true;
         usage.cost = unknownCost ? null : totalCost;
         db.prepare('UPDATE agent_runs SET usage=? WHERE id=?').run(JSON.stringify(usage), id);
+        assertAccess();
         if (typeof message.content === 'string') answer = message.content.slice(0, 50000);
         if (!message.tool_calls?.length) break;
         if (!Array.isArray(message.tool_calls) || message.tool_calls.length > 8) throw new AgentError(400, 'The model requested too many tools. Refine the request.');
@@ -123,7 +125,7 @@ export async function handleAgent(context) {
     } catch (error) {
       const uncertain = !(error instanceof AgentError) || error.uncertain, message = error instanceof AgentError ? error.message : 'The model request outcome needs review before retrying.';
       db.prepare('UPDATE agent_runs SET status=?,error=? WHERE id=?').run(uncertain ? 'uncertain' : 'failed', message, id);
-      send(uncertain ? 409 : error.status, { error: message, run: publicRun(db, db.prepare('SELECT * FROM agent_runs WHERE id=?').get(id)) });
+      send(uncertain ? 409 : error.status, { error: message, ...([403, 404].includes(error.status) ? {} : { run: publicRun(db, db.prepare('SELECT * FROM agent_runs WHERE id=?').get(id)) }) });
     }
     return true;
   } catch (error) { send(error instanceof AgentError || error instanceof HttpError ? error.status : 500, { error: error instanceof AgentError || error instanceof HttpError ? error.message : 'The agent could not complete this action.' }); return true; }

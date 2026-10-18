@@ -1,4 +1,27 @@
-# End-to-end verification — v0.6.0
+# End-to-end verification — v0.7.0
+
+## Replies, short links and tracking
+
+Verified on 18 October 2026 with the production frontend, an isolated local database, synthetic contacts and mocked providers. External provider requests were blocked except for the recorded mock contracts. No real SMS, WhatsApp or email was sent, and no DNS or TLS configuration was changed.
+
+| Area | Result |
+| --- | --- |
+| SMS replies | Open replies from the selected campaign, read its verified incoming message, submit one reply from the original Twilio sender, and read back the queued receipt. |
+| WhatsApp replies | Open the campaign's scoped account and incoming conversation, reply inside the service window, and read back the provider acknowledgement/history. |
+| Short links | Save a branded HTTPS origin and website allowlist, create a campaign-associated URL with UTM parameters, and render its QR preview. Save shortened social and SMS drafts without publishing. |
+| Campaign association | A new direct draft requires its first save before shortening. Browser save → shorten → save retained the campaign ID and the exact Wikipedia destination with balanced parentheses. |
+| QR and tracking | Decode the actual HTTP SVG with an independent QR decoder; verify its exact URL and fixed redirect destination. Submit one ordinary visit, one QR-tagged visit, one pageview and one named event. Repeating the event ID counted once; the report showed each counter as one and omitted query strings/fragments. |
+| Email reply routing | Native provider checks verify Cloudflare's configured `reply_to` field. Receiving and forwarding remain external Cloudflare Email Routing configuration. |
+
+![Campaign QR and measured activity](tracking-verification.png)
+
+![Two-way SMS replies](sms-replies-verification.png)
+
+The full native suite passes **149** checks. The v0.7.0 production build and actual non-root Docker image smoke check pass; the production dependency audit reports no known vulnerabilities. Regression coverage includes signed incoming/status callbacks, durable instance-wide hashed SMS opt-outs across future projects, HTTP 400 Twilio opt-out receipts, duplicate/uncertain replies, original-sender attribution, contact imports, stale asynchronous editors and provider reconciliation, link permissions and immutability, redirect host/destination checks, tracking privacy signals, CORS, intake limits and SPA page changes.
+
+Live provider acceptance still requires configured credentials, approved accounts and public HTTPS callbacks. The branded domain was fictional in QA: DNS, TLS and reverse-proxy routes must be provisioned by the operator. The domain-check challenge does not independently verify ownership. Tracking measures requests/events, not unique people or independently verified ad conversions. See [setup and limits](tracking.md) and [inbox setup](inbox.md).
+
+The browser walkthroughs below were recorded in earlier releases with the same isolated-provider approach. Their native regressions also pass in this release.
 
 ## Unified inbox release
 
@@ -11,7 +34,7 @@ Verified on 18 October 2026 with the production frontend, an isolated local app,
 | Comments | Open a scoped post/thread, send a public child reply, read it back, like a comment and read back the changed reaction. |
 | Reviews | Load a Google Business review, add a public response, then explicitly approve replacing it and read the updated text back. |
 
-The recorded mock requests confirm durable operation keys and exact scoped account/resource payloads. All **112** native checks and the v0.6.0 production build pass. Native HTTP checks also cover signed replay/conflicts, contact atomicity, permissions and reply windows, attachments, duplicate/uncertain sends, deep comment replies, Meta ad routing, Instagram hidden-comment recovery, malformed provider data, stale review versions, permission changes during preflight, and project isolation. Live acceptance requires configured accounts, permissions and webhook subscriptions; see [inbox setup](inbox.md).
+The recorded mock requests confirm durable operation keys and exact scoped account/resource payloads. Native HTTP checks also cover signed replay/conflicts, contact atomicity, permissions and reply windows, attachments, duplicate/uncertain sends, deep comment replies, Meta ad routing, Instagram hidden-comment recovery, malformed provider data, stale review versions, permission changes during preflight, and project isolation. Live acceptance requires configured accounts, permissions and webhook subscriptions; see [inbox setup](inbox.md).
 
 ![Unified inbox and linked Messenger contact](inbox-verification.png)
 
@@ -32,7 +55,7 @@ Verified on 18 October 2026 in an isolated local app with synthetic contacts, th
 
 ![WhatsApp recipient delivery evidence](direct-delivery-verification.png)
 
-All **89** native checks pass with the v0.5.0 build. New checks cover contact hygiene and consent evidence, CSV dry runs/deduplication, MX/null-MX/A/AAAA outcomes, durable destination suppression, email purpose and unsubscribe, exact provider payloads, approved WhatsApp media/button options, queue scheduling, in-flight cancellation, stale confirmations, lost acknowledgements/restart recovery, signed callbacks and opt-outs, stale delivery readback, and actual frontend handlers. The earlier five-area browser walkthrough is retained below; its native regressions also pass in this release.
+Native checks cover contact hygiene and consent evidence, CSV dry runs/deduplication, MX/null-MX/A/AAAA outcomes, durable destination suppression, email purpose and unsubscribe, exact provider payloads, approved WhatsApp media/button options, queue scheduling, in-flight cancellation, stale confirmations, lost acknowledgements/restart recovery, signed callbacks and opt-outs, stale delivery readback, and actual frontend handlers.
 
 Real delivery remains dependent on configured credentials, account approval and provider access. Cloudflare permits transactional email only; queued email has no per-message delivery lookup, and suppression refresh is not an open/click report. DNS and disposable/typo heuristics do not prove that an individual mailbox exists. Voice campaigns remain excluded. See [direct campaign setup and limitations](direct-campaigns.md).
 

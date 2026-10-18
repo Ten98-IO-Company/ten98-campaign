@@ -39,7 +39,7 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
   async function invoke(path, options = {}) {
     const { method = 'GET', body = {}, key = 'agent-key-001', userId = 'user-a', role = 'editor', selectedProject = project, selectedConfig = config } = options;
     let response;
-    const handled = await handleAgent({ req: { method, headers: { 'idempotency-key': key } }, url: new URL(`http://localhost/api/projects/${selectedProject.id}/agent/${path}`), body, project: selectedProject, user: { id: userId }, role, db, store, config: selectedConfig, prepareDraft: (collection, fields) => prepareDraft(selectedProject, collection, fields), send(status, data) { response = { status, data }; } });
+    const handled = await handleAgent({ req: { method, headers: { 'idempotency-key': key } }, url: new URL(`http://localhost/api/projects/${selectedProject.id}/agent/${path}`), body, project: selectedProject, user: { id: userId }, role, db, store, config: selectedConfig, assertIntegrationSettings: options.assertIntegrationSettings, prepareDraft: (collection, fields) => prepareDraft(selectedProject, collection, fields), send(status, data) { response = { status, data }; } });
     assert.equal(handled, true); return response;
   }
   try {
@@ -96,5 +96,12 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
     responses = [completion({ role: 'assistant', content: 'The explicitly retried result.' }, { prompt_tokens: 5, completion_tokens: 3 })];
     result = await invoke('run', { method: 'POST', key: 'uncertain-0003', body: uncertainBody }); assert.equal(result.status, 200); assert.equal(result.data.run.usage.cost, null, 'An absent provider cost must remain unknown rather than zero.');
     assert.equal(responses.length, 0);
+    let checks = 0;
+    responses = [completion({ role: 'assistant', content: 'PRIVATE_MODEL_RESPONSE', tool_calls: [tool('read-after-revocation', 'read_campaigns', {})] })];
+    const denied = await invoke('run', { method: 'POST', key: 'access-revoked-0001', body: { message: 'Inspect a campaign with pending access.' }, assertIntegrationSettings() { if (++checks > 1) throw Object.assign(new Error('Access revoked'), { status: 403 }); } });
+    assert.equal(denied.status, 403); assert.equal(denied.data.run, undefined); assert.equal(JSON.stringify(denied).includes('PRIVATE_MODEL_RESPONSE'), false);
+    const stopped = db.prepare("SELECT * FROM agent_runs WHERE request_key='access-revoked-0001'").get();
+    assert.equal(stopped.status, 'failed'); assert.equal(JSON.parse(stopped.usage).requests, 1, 'An acknowledged model completion retains its actual usage even when access changes.');
+    assert.equal(db.prepare('SELECT count(*) AS count FROM agent_actions WHERE run_id=?').get(stopped.id).count, 0);
   } finally { globalThis.fetch = originalFetch; db.close(); }
 });

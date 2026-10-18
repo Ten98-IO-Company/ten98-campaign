@@ -8,6 +8,22 @@ function fixture() {
   return { db, contacts: createContacts({ db }) };
 }
 
+test('verified SMS opt-outs survive future projects, deletion and opt-in imports without changing manual or other-channel scope', () => {
+  const { db, contacts } = fixture();
+  try {
+    const phone = '+971501234567', other = '+971509876543', source = { phone, consents: { sms: true, whatsapp: true }, consentSource: 'Signup evidence' };
+    const existing = contacts.save('a', source); contacts.save('b', { phone: other, consents: { sms: true }, consentSource: 'Other signup' });
+    contacts.suppressDestination('a', 'sms', other, 'Project-only manual suppression'); assert.equal(contacts.get('b', contacts.list('b')[0].id).consents.sms, true); assert.equal(contacts.smsSuppression(other), undefined);
+    contacts.suppressSmsGlobally(phone, 'Recipient opted out'); assert.equal(contacts.get('a', existing.id).consents.sms, false); assert.equal(contacts.get('a', existing.id).consents.whatsapp, true);
+    const original = contacts.smsSuppression(phone); contacts.suppressSmsGlobally(phone, 'Repeated verified opt-out'); assert.deepEqual(contacts.smsSuppression(phone), original);
+    db.exec("INSERT INTO projects VALUES('future')"); const future = contacts.save('future', source); assert.equal(future.consents.sms, false); assert.equal(future.consentEvidence.sms, undefined); assert.equal(future.suppression.sms.reason, 'Recipient opted out');
+    contacts.remove('future', future.id); const imported = contacts.import('future', { csv: 'phone,name\n' + phone + ',Reimported', consents: { sms: true }, consentSource: 'Import cannot clear an opt-out' }).contacts[0]; assert.equal(imported.consents.sms, false);
+    db.exec('DELETE FROM projects'); assert.equal(db.prepare('SELECT count(*) AS n FROM direct_sms_suppressions').get().n, 1); assert.equal(JSON.stringify(db.prepare('SELECT * FROM direct_sms_suppressions').all()).includes(phone), false);
+    db.exec("INSERT INTO projects VALUES('rebuilt')"); assert.equal(createContacts({ db }).save('rebuilt', source).consents.sms, false);
+    assert.throws(() => contacts.suppressSmsGlobally('invalid', 'Recipient opted out'), error => error.status === 400);
+  } finally { db.close(); }
+});
+
 test('contacts normalize destinations, isolate projects, preserve consent evidence and reject identity collisions', () => {
   const { db, contacts } = fixture();
   try {

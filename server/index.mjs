@@ -17,6 +17,8 @@ import { handleAgent } from './agent.mjs';
 import { handleOoh } from './ooh.mjs';
 import { createDirectCampaigns } from './direct-campaigns.mjs';
 import { handleInbox } from './inbox.mjs';
+import { createSmsInbox } from './sms-inbox.mjs';
+import { createLinks } from './links.mjs';
 import { normalizePostVariants, normalizeMediaItems } from '../shared/social-posts.mjs';
 
 const roles = ['owner', 'admin', 'editor', 'viewer'];
@@ -104,6 +106,9 @@ export function createApp(options = {}) {
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
   const integrationSettings = createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
+  const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts, store });
+  direct.attachSmsInbox(smsInbox);
+  const links = createLinks({ db, appUrl });
   const directTimer = options.directScheduler === false ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
   const webhooks = createWebhookService({ db, store, contacts: direct.contacts, env });
   const drainWebhooks = () => { try { webhooks.processPending(); } catch { console.error('Webhook processing deferred.'); } };
@@ -128,10 +133,11 @@ export function createApp(options = {}) {
     const send = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
     try {
       const url = new URL(req.url, appUrl), path = url.pathname, mutating = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+      if (await links.publicHandle({ req, res, url })) return;
       if (path.startsWith('/api/')) {
         res.setHeader('Cache-Control', 'no-store');
         if (path === '/api/webhooks/zernio' && req.method === 'POST') { const result = webhooks.receive(await readRawBody(req, WEBHOOK_MAX_BYTES), req.headers); return send(result.status, result.body); }
-        if (/^\/api\/webhooks\/twilio\/(?:inbound|status\/[\w-]+)$/.test(path) && req.method === 'POST') { direct.receiveTwilio({ rawBody: await readRawBody(req, 65536), headers: req.headers, url }); res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' }); return res.end('<Response/>'); }
+        if (/^\/api\/webhooks\/twilio\/(?:inbound(?:\/[\w-]+)?|status\/[\w-]+)$/.test(path) && req.method === 'POST') { direct.receiveTwilio({ rawBody: await readRawBody(req, 65536), headers: req.headers, url }); res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' }); return res.end('<Response/>'); }
         const unsubscribe = path.match(/^\/api\/direct\/unsubscribe\/([A-Za-z0-9_.-]+)$/);
         if (unsubscribe && ['GET', 'POST'].includes(req.method)) { if (req.method === 'POST') await readRawBody(req, 4096); const html = direct.handleUnsubscribe(unsubscribe[1], req.method); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Email preferences</title><main>' + html + '</main></html>'); }
         if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
@@ -249,6 +255,8 @@ export function createApp(options = {}) {
           context.assertPublishingApproval = post => assertPublishingApproval(context, post);
           context.assertProviderPostEdit = () => assertProviderPostEdit(context);
           context.contacts = direct.contacts; context.webhooks = webhooks;
+          if (projectRoute[2]?.startsWith('sms-inbox') && await smsInbox.handle(context)) return;
+          if (projectRoute[2]?.startsWith('links') && await links.handle(context)) return;
           if (projectRoute[2]?.startsWith('integrations/inbox') && await handleInbox(context)) return;
           if (projectRoute[2]?.startsWith('direct/') && await direct.handle(context)) return;
           if (projectRoute[2]?.startsWith('operations') && await handleOperationRecovery(context)) return;
@@ -303,7 +311,7 @@ export function createApp(options = {}) {
     } catch (error) { if (!res.headersSent) send(error instanceof HttpError || error instanceof IntegrationError ? error.status : 500, { error: error instanceof HttpError ? error.message : error instanceof IntegrationError ? { code: error.code, message: error.message } : 'The request could not be completed.' }); else res.end(); }
   });
   server.requestTimeout = 30000; server.headersTimeout = 10000;
-  return { server, db, store, config, webhooks, direct, close: async () => { clearInterval(directTimer); direct.close(); await direct.idle(); return new Promise((resolveClose, reject) => { clearInterval(webhookTimer); if (!server.listening) { db.close(); resolveClose(); return; } server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); server.closeIdleConnections(); }); } };
+  return { server, db, store, config, webhooks, direct, smsInbox, links, close: async () => { clearInterval(directTimer); direct.close(); await direct.idle(); return new Promise((resolveClose, reject) => { clearInterval(webhookTimer); if (!server.listening) { db.close(); resolveClose(); return; } server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); server.closeIdleConnections(); }); } };
 }
 function checkProfileMapping(db, profileId, projectId = '') { if (profileId && db.prepare('SELECT id FROM projects WHERE zernio_profile_id=? AND id<>?').get(profileId, projectId)) throw new HttpError(409, 'This Zernio profile is already mapped to another project. Use one profile per project for publishing and analytics.'); }
 function projectInput(data) {
