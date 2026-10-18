@@ -245,7 +245,14 @@ export async function handleInbox(context) {
         }
         if (!payload.message && !payload.attachmentUrl && !payload.template) fail(400, 'EMPTY_MESSAGE', 'Enter a message or choose an attachment or approved template.');
         if (['facebook', 'instagram', 'whatsapp', 'tiktok'].includes(account.platform) && !payload.template) {
-          const messages = await history(api, account, conversationId, {}, row.id), lastIncoming = messages.messages.filter(message => message.direction === 'incoming').map(message => Date.parse(message.createdAt)).filter(Number.isFinite).sort((a, b) => b - a)[0], age = Date.now() - lastIncoming;
+          const messages = await history(api, account, conversationId, {}, row.id), seen = new Set();
+          // ponytail: scan at most 2,000 recent messages; use the provider dashboard for longer reply-window history.
+          for (let page = 1; !messages.messages.some(message => message.direction === 'incoming' && Number.isFinite(Date.parse(message.createdAt))) && messages.pagination.hasMore; page++) {
+            if (page >= 20) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This conversation exceeds the reply-window history limit. Open it in the provider dashboard.');
+            const cursor = messages.pagination.nextCursor; if (seen.has(cursor)) invalid(); seen.add(cursor);
+            const next = await history(api, account, conversationId, { cursor }, row.id); messages.messages.push(...next.messages); messages.pagination = next.pagination;
+          }
+          const lastIncoming = messages.messages.filter(message => message.direction === 'incoming').map(message => Date.parse(message.createdAt)).filter(Number.isFinite).sort((a, b) => b - a)[0], age = Date.now() - lastIncoming;
           if (account.platform === 'tiktok' && (!(age >= 0 && age <= 2 * 86400000) || messages.messages.filter(message => message.direction === 'outgoing' && Date.parse(message.createdAt) >= lastIncoming).length >= 10)) fail(409, 'MESSAGING_WINDOW_CLOSED', 'TikTok permits up to ten replies within 48 hours of the customer’s last message.');
           if (body.messageTag) {
             const tags = account.platform === 'instagram' ? ['HUMAN_AGENT'] : account.platform === 'facebook' ? ['CONFIRMED_EVENT_UPDATE', 'POST_PURCHASE_UPDATE', 'ACCOUNT_UPDATE', 'HUMAN_AGENT'] : [];

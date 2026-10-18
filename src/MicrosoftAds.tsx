@@ -6,17 +6,20 @@ const lines = (value: FormDataEntryValue | null) => String(value || '').split('\
 const today = () => new Date().toISOString().slice(0, 10);
 
 export default function MicrosoftAds({ projectId, role, isOperator, request, onChanged }: Props) {
-  const path = `/projects/${encodeURIComponent(projectId)}/microsoft-ads`, active = useRef(true), pending = useRef(false), keys = useRef(new Map<string, string>()), requester = useRef(request); requester.current = request;
+  const path = `/projects/${encodeURIComponent(projectId)}/microsoft-ads`, active = useRef(true), readVersion = useRef(0), pending = useRef(false), keys = useRef(new Map<string, string>()), requester = useRef(request); requester.current = request;
   const [status, setStatus] = useState<Row | null>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [report, setReport] = useState<Row | null>(null);
   const canWrite = ['owner', 'admin', 'editor'].includes(role), canMap = isOperator && ['owner', 'admin'].includes(role);
   async function load() {
     if (!active.current) return;
-    const result = await requester.current(path + '/status'); if (!active.current) return; setStatus(result); setReport(previous => previous || result.latestReport || null);
-    if (result.configured && result.mapping) { const listed = await requester.current(path + '/campaigns'); if (active.current) setCampaigns(listed.campaigns); }
+    const read = ++readVersion.current;
+    try {
+      const result = await requester.current(path + '/status'); if (!active.current || read !== readVersion.current) return; setStatus(result); setReport(previous => previous || result.latestReport || null);
+      if (result.configured && result.mapping) { const listed = await requester.current(path + '/campaigns'); if (active.current && read === readVersion.current) setCampaigns(listed.campaigns); }
+    } catch (failure) { if (active.current && read === readVersion.current) throw failure; }
   }
-  useEffect(() => { active.current = true; load().catch(failure => { if (active.current) setError(failure.message); }); return () => { active.current = false; }; }, [projectId]);
+  useEffect(() => { active.current = true; const loading = load(), read = readVersion.current; loading.catch(failure => { if (active.current && read === readVersion.current) setError(failure.message); }); return () => { active.current = false; }; }, [projectId]);
   async function action(run: () => Promise<void>) {
-    if (pending.current || !active.current) return; pending.current = true; setBusy(true); setError(''); setNotice('');
+    if (pending.current || !active.current) return; readVersion.current++; pending.current = true; setBusy(true); setError(''); setNotice('');
     try { await run(); } catch (failure) { if (active.current) setError((failure as Error).message || 'Microsoft Advertising could not complete this action.'); }
     finally { if (active.current) { pending.current = false; setBusy(false); } }
   }

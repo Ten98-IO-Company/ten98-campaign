@@ -660,7 +660,8 @@ function validateRemotePayload(payload, assets = [], post = {}) {
 }
 async function savePostSnapshot(store, projectId, post, remote, extra = {}, targets, source = post) {
   assertPostResult(remote, post.zernioProfileId, { id: post.externalId, targets });
-  const model = Array.isArray(remote.platforms) && remote.platforms.every(target => target.platform && target.accountId) ? await remotePostModel(store, projectId, post, remote) : {};
+  // Creation receipts can omit the submitted platform configuration; retain the draft until a full status read.
+  const model = source.externalId && Array.isArray(remote.platforms) && remote.platforms.every(target => target.platform && target.accountId) ? await remotePostModel(store, projectId, post, remote) : {};
   const current = store.get(projectId, 'posts', post.id);
   if (current && canonical(current) !== canonical(source)) throw new IntegrationError(409, 'POST_CHANGED', 'The post changed during the provider request. Refresh it before continuing and review any unconfirmed provider action.', true);
   const updated = await store.update(projectId, 'posts', post.id, { ...model, status: localStatus(remote.status), providerStatus: remote.status, ...(Array.isArray(remote.platforms) ? { providerResults: redact(remote.platforms) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(remote.publishedAt ? { publishedAt: remote.publishedAt } : {}), ...extra });
@@ -895,8 +896,7 @@ export async function handleIntegration(context) {
         if (payload.scheduledFor && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'The scheduled time passed during the provider checks. Choose a future time before submitting.');
         const result = await api('/posts', {}, payload, key);
         assertPostResult(result.post, profileId, { targets: payload.platforms });
-        const updated = await store.update(project.id, 'posts', post.id, { externalId: result.post._id, zernioProfileId: profileId, status: localStatus(result.post.status), providerStatus: result.post.status, providerResults: redact(result.post.platforms || []) });
-        if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The post was removed while Zernio accepted it. Reconcile the provider outcome.', true);
+        const updated = await savePostSnapshot(store, project.id, { ...post, externalId: result.post._id, zernioProfileId: profileId }, result.post, { externalId: result.post._id, zernioProfileId: profileId }, payload.platforms, post);
         await store.activity(project.id, 'Submitted a social post to Zernio.');
         return { post: updated, provider: { id: result.post._id, status: result.post.status } };
       }); send(outcome.status, outcome.data); return true;

@@ -9,12 +9,16 @@ function link(value?: string) { try { const url = new URL(value || ''); return u
 
 export default function ContentApprovals({ projectId, role, request, onChanged }: Props) {
   const [data, setData] = useState<any>(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [filter, setFilter] = useState('all'), [notes, setNotes] = useState<Record<string, string>>({});
-  const active = useRef(true), path = `/projects/${encodeURIComponent(projectId)}/approvals`, canReview = ['owner', 'admin'].includes(role), canRequest = ['owner', 'admin', 'editor'].includes(role);
+  const active = useRef(true), readVersion = useRef(0), path = `/projects/${encodeURIComponent(projectId)}/approvals`, canReview = ['owner', 'admin'].includes(role), canRequest = ['owner', 'admin', 'editor'].includes(role);
   function acceptItem(item: any) { if (active.current) setData((previous: any) => previous ? { ...previous, posts: previous.posts.map((entry: any) => entry.post.id === item.post.id ? item : entry) } : previous); }
-  async function load() { const result = await request(path + '/posts'); if (active.current) setData(result); }
-  useEffect(() => { active.current = true; load().catch(err => { if (active.current) setError(err.message); }); return () => { active.current = false; }; }, [projectId]);
+  async function load() {
+    if (!active.current) return; const read = ++readVersion.current;
+    try { const result = await request(path + '/posts'); if (active.current && read === readVersion.current) setData(result); }
+    catch (err) { if (active.current && read === readVersion.current) throw err; }
+  }
+  useEffect(() => { active.current = true; const loading = load(), read = readVersion.current; loading.catch(err => { if (active.current && read === readVersion.current) setError(err.message); }); return () => { active.current = false; }; }, [projectId]);
   async function action(name: string, run: () => Promise<void>) {
-    if (busy) return; setBusy(name); setError(''); setNotice('');
+    if (busy || !active.current) return; readVersion.current++; setBusy(name); setError(''); setNotice('');
     try { await run(); } catch (err) { if (active.current) setError((err as Error).message || 'This review could not be saved.'); }
     finally { if (active.current) setBusy(''); }
   }

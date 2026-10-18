@@ -73,3 +73,42 @@ test('Microsoft status-only changes omit shared or unchanged budgets while expli
     assert.deepEqual(calls[0][1], { status: values.status, confirmed: true, ...(values.dailyBudget === '30' ? { dailyBudget: 30 } : {}) });
   }
 });
+
+test('Shopping disconnection remains available when credentials are absent while verification stays disabled', async () => {
+  const source = await readFile(new URL('../src/NativeGoogleAds.tsx', import.meta.url), 'utf8'), start = source.indexOf('<details><summary>Advertising account'), end = source.indexOf('</details>', start) + '</details>'.length;
+  assert.ok(start > 0 && end > start);
+  const { code } = await transformWithOxc(`const render = (status,busy) => (${source.slice(start,end)});`, 'AccountMapping.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', 'map', code + '; return render;')(React, () => {});
+  const all = node => React.isValidElement(node) ? [node, ...[node.props.children].flat(Infinity).flatMap(all)] : [];
+  const nodes = all(render({ configured: false, mapped: true, customerId: '1234567890' }, false));
+  assert.equal(nodes.find(node => node.type === 'fieldset').props.disabled, false);
+  assert.equal(nodes.find(node => node.type === 'input').props.disabled, true);
+  assert.equal(nodes.find(node => node.type === 'button' && node.props.children === 'Verify and map customer').props.disabled, true);
+  assert.notEqual(nodes.find(node => node.type === 'button' && node.props.children === 'Disconnect customer').props.disabled, true);
+});
+
+test('Demand Gen exposes target CPC while Performance Max retains conversion-only bidding options', async () => {
+  const source = await readFile(new URL('../src/GoogleAdsTools.tsx', import.meta.url), 'utf8'), start = source.indexOf('<select name="bidStrategy"'), end = source.indexOf('</select>', start) + '</select>'.length;
+  assert.ok(start > 0 && end > start);
+  const { code } = await transformWithOxc(`const render = (campaign,bidding) => (${source.slice(start,end)});`, 'CampaignBidding.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', code + '; return render;')(React);
+  for (const channel of ['SEARCH','DEMAND_GEN','PERFORMANCE_MAX']) {
+    const options = [render({ advertisingChannelType: channel }, {}).props.children].flat(Infinity).filter(React.isValidElement);
+    const cap = options.find(option => option.props.value === 'LOWEST_COST_WITH_BID_CAP');
+    assert.equal(Boolean(cap), channel !== 'PERFORMANCE_MAX');
+    if (channel === 'DEMAND_GEN') assert.equal(cap.props.children, 'Target cost per click');
+  }
+});
+
+test('render and lazy-load failures show a reload action without exposing the original error', async () => {
+  const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), start = source.indexOf('class AppBoundary '), end = source.indexOf('\nfunction App()', start);
+  assert.ok(start > 0 && end > start); assert.match(source, /render\(<AppBoundary><App\/><\/AppBoundary>\)/);
+  const { code } = await transformWithOxc(source.slice(start,end), 'AppBoundary.tsx', { jsx: { runtime: 'classic' } });
+  let reloads = 0;
+  const Boundary = new Function('React','window',code + '; return AppBoundary;')(React,{location:{reload:()=>{reloads++}}}), boundary = new Boundary({children:'Ready'});
+  assert.equal(boundary.render(),'Ready'); boundary.state = Boundary.getDerivedStateFromError(new Error('Private request payload'));
+  const all = node => React.isValidElement(node) ? [node, ...[node.props.children].flat(Infinity).flatMap(all)] : [];
+  const nodes = all(boundary.render()), action = nodes.find(node=>node.type==='button');
+  assert.equal(action.props.children,'Reload app'); assert.ok(nodes.some(node=>node.props.role==='alert'));
+  assert.ok(!JSON.stringify(boundary.render()).includes('Private request payload')); action.props.onClick(); assert.equal(reloads,1);
+});
