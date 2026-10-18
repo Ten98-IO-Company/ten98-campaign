@@ -96,7 +96,10 @@ export async function handleAgent(context) {
         usage.cost = unknownCost ? null : totalCost;
         db.prepare('UPDATE agent_runs SET usage=? WHERE id=?').run(JSON.stringify(usage), id);
         assertAccess();
+        if (result.choices[0].error || result.choices[0].finish_reason === 'error') throw new AgentError(409, 'OpenRouter reported an incomplete provider result. Review its activity and usage before retrying.', true);
+        if (!Array.isArray(result.choices) || typeof message !== 'object' || Array.isArray(message) || message.role !== 'assistant' || (message.content != null && typeof message.content !== 'string') || (message.tool_calls != null && !Array.isArray(message.tool_calls))) throw new AgentError(409, 'OpenRouter did not return a readable assistant message. Review its usage before retrying.', true);
         if (typeof message.content === 'string') answer = message.content.slice(0, 50000);
+        if (!message.content && typeof message.refusal === 'string') answer = message.refusal.slice(0, 50000);
         if (!message.tool_calls?.length) break;
         if (!Array.isArray(message.tool_calls) || message.tool_calls.length > 8) throw new AgentError(400, 'The model requested too many tools. Refine the request.');
         messages.push({ role: 'assistant', content: message.content || null, tool_calls: message.tool_calls, ...(Array.isArray(message.reasoning_details) ? { reasoning_details: message.reasoning_details } : {}) });

@@ -2,7 +2,7 @@
 
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.7.3 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.7.4 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
 
@@ -18,6 +18,8 @@ npm start
 ```
 
 Open [http://127.0.0.1:3018](http://127.0.0.1:3018) and create the first owner account. This account is also the instance operator. Public signup then closes. Optional sample records are marked and excluded from live publishing and calendar-plan sync. Owners/admins can remove all sample data from Project settings; cleanup refuses when your own work still refers to a sample record. Assigned campaigns, assets, and media providers must be unassigned before deletion so drafts and bookings keep valid references.
+
+Signed-in accounts without project access can refresh after an invitation, create their own workspace, or manage their account from the starting screen.
 
 For development, run `npm run dev` and open [http://127.0.0.1:5178](http://127.0.0.1:5178). The runner starts the API and Vite with the matching browser origin. Configure provider credentials in **Integrations**, or use `.env` as an operator-managed fallback. Changes saved in the app apply immediately; Google Maps browser changes require a page reload. Editing `.env` requires restarting the server. Keep `.env` and `data/` private.
 

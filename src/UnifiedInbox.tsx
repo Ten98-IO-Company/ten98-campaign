@@ -45,7 +45,6 @@ function SmsInbox({ projectId, request, readOnly = false, initialSearch }: Props
   }
   async function openSms(item: Row, cursor = '') {
     if (pending.current) return;
-    if (!cursor && selected?.id !== item.id) version.current++;
     await smsAction('Loading SMS conversation', async generation => { await smsThread(item, generation, cursor); if (generation === version.current && !cursor && selected?.id !== item.id) setMessage(''); });
   }
   useEffect(() => {
