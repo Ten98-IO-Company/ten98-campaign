@@ -6,6 +6,7 @@ const scope = 'https://www.googleapis.com/auth/calendar.events';
 const DAY = 86400000;
 const text = (value, max = 500) => { if (typeof value !== 'string' || !value.trim() || value.length > max) fail(400, 'Enter a valid calendar event title or description.'); return value.trim(); };
 function isoDate(value) { return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value; }
+const isoTime = value => typeof value === 'string' && isoDate(value.slice(0, 10)) && /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(value) && Number.isFinite(Date.parse(value));
 function validEvent(event) {
   const boundary = value => value && typeof value === 'object' && (value.date === undefined || isoDate(value.date)) && (value.dateTime === undefined || typeof value.dateTime === 'string' && isoDate(value.dateTime.slice(0, 10)) && Number.isFinite(Date.parse(value.dateTime))) && Boolean(value.date || value.dateTime);
   return event && typeof event === 'object' && typeof event.id === 'string' && event.id.length > 0 && event.id.length <= 1024 && ['summary', 'description', 'htmlLink', 'status'].every(key => event[key] === undefined || typeof event[key] === 'string') && boundary(event.start) && boundary(event.end) && (event.extendedProperties?.private?.ten98ProjectId === undefined || typeof event.extendedProperties.private.ten98ProjectId === 'string');
@@ -16,8 +17,7 @@ function range(body) {
     if (!isoDate(body.start) || !isoDate(body.end) || body.end <= body.start) fail(400, 'All-day events need an end date after their start date. The end date is exclusive.');
     return { start: { date: body.start }, end: { date: body.end } };
   }
-  const valid = value => typeof value === 'string' && isoDate(value.slice(0, 10)) && /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
-  if (!valid(body.start) || !valid(body.end) || Date.parse(body.end) <= Date.parse(body.start)) fail(400, 'Choose valid start and end times with a timezone.');
+  if (!isoTime(body.start) || !isoTime(body.end) || Date.parse(body.end) <= Date.parse(body.start)) fail(400, 'Choose valid start and end times with a timezone.');
   return { start: { dateTime: new Date(body.start).toISOString() }, end: { dateTime: new Date(body.end).toISOString() } };
 }
 export function calendarPlan(store, projectId) {
@@ -75,13 +75,17 @@ export async function handleCalendar(context) {
     };
     async function list(managedOnly = false) {
       let pageToken; const events = [];
-      const from = url.searchParams.get('fromDate'), to = url.searchParams.get('toDate');
+      const from = url.searchParams.get('fromDate'), to = url.searchParams.get('toDate'), timeMin = url.searchParams.get('timeMin'), timeMax = url.searchParams.get('timeMax');
       if ((from && !isoDate(from)) || (to && !isoDate(to)) || (from && to && (from > to || Date.parse(to) - Date.parse(from) > 366 * DAY))) fail(400, 'Choose a valid calendar window of at most 366 days.');
+      if ((timeMin !== null || timeMax !== null) && (!isoTime(timeMin) || !isoTime(timeMax) || Date.parse(timeMax) <= Date.parse(timeMin) || Date.parse(timeMax) - Date.parse(timeMin) > 368 * DAY)) fail(400, 'Choose valid calendar window boundaries with a timezone.');
+      const lower = timeMin || (from ? from + 'T00:00:00Z' : new Date(Date.now() - 30 * DAY).toISOString()), upper = timeMax || (to ? new Date(Date.parse(to) + DAY).toISOString() : new Date(Date.now() + 90 * DAY).toISOString());
+      if (!managedOnly && (Date.parse(upper) <= Date.parse(lower) || Date.parse(upper) - Date.parse(lower) > 368 * DAY)) fail(400, 'Choose a valid bounded calendar window.');
       for (let page = 0; page < 10; page++) {
-        const query = new URLSearchParams({ maxResults: '250', singleEvents: 'true', ...(managedOnly ? { privateExtendedProperty: `ten98ProjectId=${project.id}` } : { orderBy: 'startTime', timeMin: from ? from + 'T00:00:00Z' : new Date(Date.now() - 30 * DAY).toISOString(), timeMax: to ? new Date(Date.parse(to) + DAY).toISOString() : new Date(Date.now() + 90 * DAY).toISOString() }), ...(pageToken ? { pageToken } : {}) });
+        const query = new URLSearchParams({ maxResults: '250', singleEvents: 'true', ...(managedOnly ? { privateExtendedProperty: `ten98ProjectId=${project.id}` } : { orderBy: 'startTime', timeMin: lower, timeMax: upper }), ...(pageToken ? { pageToken } : {}) });
         const data = await call('?' + query);
-        if (!Array.isArray(data.items) || data.items.length > 250 || data.items.some(event => !validEvent(event)) || data.nextPageToken !== undefined && (typeof data.nextPageToken !== 'string' || !data.nextPageToken)) fail(502, 'Google Calendar returned an unreadable event list.');
-        events.push(...data.items);
+        const items = data.items === undefined && data.kind === 'calendar#events' ? [] : data.items;
+        if (!Array.isArray(items) || items.length > 250 || items.some(event => !validEvent(event)) || data.nextPageToken !== undefined && (typeof data.nextPageToken !== 'string' || !data.nextPageToken)) fail(502, 'Google Calendar returned an unreadable event list.');
+        events.push(...items);
         if (!data.nextPageToken) return events;
         if (data.nextPageToken === pageToken) break;
         pageToken = data.nextPageToken;

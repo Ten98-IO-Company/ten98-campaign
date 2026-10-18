@@ -1,0 +1,95 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { stripTypeScriptTypes } from 'node:module';
+import { openDatabase, createStore } from '../server/database.mjs';
+import { handleCalendar } from '../server/calendar.mjs';
+
+const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+
+test('Calendar listing accepts a genuine empty collection and honors browser-local instant boundaries', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ten98-calendar-window-')), db = openDatabase(directory), store = createStore(db), originalFetch = globalThis.fetch;
+  db.prepare('INSERT INTO workspaces VALUES(?,?)').run('workspace', 'Calendar audit');
+  db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run('project', 'workspace', 'Calendar audit');
+  const calls = [], events = [{ id: 'lateoctober', summary: 'October 31 late in New York', start: { dateTime: '2026-11-01T03:30:00Z' }, end: { dateTime: '2026-11-01T03:45:00Z' } }, { id: 'septemberlate', summary: 'September 30 late in New York', start: { dateTime: '2026-10-01T03:30:00Z' }, end: { dateTime: '2026-10-01T03:45:00Z' } }];
+  let empty = false;
+  globalThis.fetch = async (target, options) => {
+    const url = new URL(target);
+    if (url.hostname === 'oauth2.googleapis.com') return Response.json({ access_token: 'calendar-window-token' });
+    assert.equal(url.hostname, 'www.googleapis.com'); assert.equal(options.method, 'GET'); calls.push(url);
+    return Response.json(empty ? { kind: 'calendar#events', etag: 'empty-calendar' } : { kind: 'calendar#events', items: events.filter(event => Date.parse(event.end.dateTime) > Date.parse(url.searchParams.get('timeMin')) && Date.parse(event.start.dateTime) < Date.parse(url.searchParams.get('timeMax'))) });
+  };
+  async function invoke(suffix, method = 'GET', body = {}) {
+    let response;
+    await handleCalendar({ req: { method, headers: {} }, url: new URL(`http://localhost/api/projects/project/calendar/${suffix}`), project: { id: 'project' }, user: { isOperator: true }, role: 'owner', db, store, body, config: { env: { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'calendar@example.test', GOOGLE_PRIVATE_KEY: privateKey } }, send(status, data) { response = { status, data }; } });
+    return response;
+  }
+  try {
+    assert.equal((await invoke('connection', 'POST', { calendarId: 'shared@example.test' })).status, 200);
+    const query = new URLSearchParams({ fromDate: '2026-10-01', toDate: '2026-10-31', timeMin: '2026-10-01T04:00:00.000Z', timeMax: '2026-11-01T04:00:00.000Z' });
+    const local = await invoke('events?' + query);
+    assert.equal(local.status, 200); assert.deepEqual(local.data.events.map(event => event.id), ['lateoctober'], 'The October view must include October 31 at 23:30 in the browser timezone.');
+    const utc = await invoke('events?fromDate=2026-10-01&toDate=2026-10-31');
+    assert.equal(utc.status, 200); assert.deepEqual(utc.data.events.map(event => event.id), ['septemberlate'], 'Existing date-only API clients retain UTC date bounds.');
+    for (const bounds of [{ timeMin: 'bad', timeMax: '2026-11-01T04:00:00Z' }, { timeMin: '2026-10-01T04:00:00Z' }, { timeMin: '2026-10-01T04:00:00Z', timeMax: '2026-10-01T04:00:00Z' }, { timeMin: '2026-10-01T04:00:00Z', timeMax: '2028-11-01T04:00:00Z' }, { timeMin: '2026-10-01T24:00:00Z', timeMax: '2026-10-03T04:00:00Z' }, { fromDate: '1900-01-01' }, { toDate: '9998-01-01' }]) {
+      const before = calls.length, invalid = await invoke('events?' + new URLSearchParams(bounds));
+      assert.equal(invalid.status, 400); assert.equal(calls.length, before, 'Invalid bounds must not reach Google event reads.');
+    }
+    empty = true;
+    const cleared = await invoke('events?fromDate=2026-10-01&toDate=2026-10-31');
+    assert.equal(cleared.status, 200); assert.deepEqual(cleared.data.events, []); assert.equal(cleared.data.complete, true);
+  } finally { globalThis.fetch = originalFetch; db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Calendar UI sends local month boundaries across daylight saving', async () => {
+  const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
+  const loadSource = stripTypeScriptTypes(source.slice(source.indexOf('async function load()'), source.indexOf('  async function mapCalendar(')));
+  const previousTZ = process.env.TZ; process.env.TZ = 'America/New_York';
+  try {
+    const requests = [], load = new Function('request', 'path', 'from', 'to', 'active', 'scope', 'view', 'updateEvents', 'setLoaded', `return (${loadSource});`)(async path => { requests.push(path); return { events: [] }; }, '/calendar', '2026-11-01', '2026-11-30', { current: true }, { current: 'november' }, 'november', () => {}, () => {});
+    await load(); const query = new URL('http://localhost' + requests[0]).searchParams;
+    assert.equal(query.get('timeMin'), '2026-11-01T04:00:00.000Z'); assert.equal(query.get('timeMax'), '2026-12-01T05:00:00.000Z', 'Month endpoints use their own UTC offsets across DST.');
+  } finally { if (previousTZ === undefined) delete process.env.TZ; else process.env.TZ = previousTZ; }
+});
+
+test('Calendar mapping callbacks preserve newer month drafts and use the confirmed mapping without another fallible read', async () => {
+  const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
+  const handler = stripTypeScriptTypes(source.slice(source.indexOf('async function mapCalendar('), source.indexOf('  async function save(')));
+  const writeHandler = stripTypeScriptTypes(source.slice(source.indexOf('async function write('), source.indexOf('  async function load(')));
+  for (const stale of ['current', 'during-write', 'unmounted']) {
+    const active = { current: true }, scope = { current: 'october' }, changes = [], calls = []; let finish;
+    const request = async path => { calls.push(path); if (calls.length > 1) throw new Error('A following status read is offline.'); return new Promise(resolve => { finish = resolve; }); };
+    const write = new Function('path', 'keys', 'request', 'active', 'scope', 'view', `return (${writeHandler});`)('/calendar', { current: new Map() }, request, active, scope, 'october');
+    const dependencies = { FormData: class { get() { return 'shared@example.test'; } }, action: run => run(), request, path: '/calendar', active, scope, view: 'october', write, status: { configured: true, mapped: false }, setStatus: value => changes.push(value), updateEvents() {}, setLoaded() {}, setEditing: value => changes.push(value), setDraft: value => changes.push(value), blank: { summary: 'A new draft' }, setNotice() {} };
+    const mapCalendar = new Function(...Object.keys(dependencies), `return (${handler});`)(...Object.values(dependencies));
+    const pending = mapCalendar({ preventDefault() {}, currentTarget: {} });
+    if (stale === 'unmounted') active.current = false; else if (stale !== 'current') scope.current = 'november';
+    finish({ calendarId: 'shared@example.test', mapped: true });
+    await pending.catch(error => { if (error.name !== 'AbortError') throw error; });
+    assert.equal(changes.length, stale === 'current' ? 3 : 0, 'A mapping response must not reset a newer month’s event draft.');
+    assert.equal(calls.length, 1); if (stale === 'current') assert.deepEqual(changes[0], { configured: true, mapped: true, calendarId: 'shared@example.test' });
+  }
+});
+
+test('Drive and Calendar credential forms edit one shared draft without discarding either card’s input', async () => {
+  const source = await readFile(new URL('../src/IntegrationSettings.tsx', import.meta.url), 'utf8');
+  const changeSource = stripTypeScriptTypes(source.slice(source.indexOf('function change('), source.indexOf('  function dirty(')));
+  const saveSource = stripTypeScriptTypes(source.slice(source.indexOf('async function save('), source.indexOf('  async function reset(')));
+  let drafts = {}; const requests = [];
+  const setDrafts = update => { drafts = update(drafts); }, change = new Function('setDrafts', `return (${changeSource});`)(setDrafts);
+  change('openrouter', 'model', 'other/unsaved-model');
+  change('googleDrive', 'privateKey', 'new-unsaved-private-key');
+  change('googleCalendar', 'serviceAccountEmail', 'replacement-service@example.test');
+  assert.deepEqual(drafts.googleDrive, { privateKey: 'new-unsaved-private-key', serviceAccountEmail: 'replacement-service@example.test' });
+  assert.deepEqual(drafts.googleCalendar, drafts.googleDrive, 'Both cards configure the same service account and must reflect the same pending edits.');
+  const dependencies = { action: (_provider, run) => run(), drafts, request: async (...args) => { requests.push(args); }, refresh: async () => {}, active: { current: true }, setDrafts, setResults() {}, mapsTested: { current: false }, cancelMapProbe: { current: null }, setMapsReload() {}, setNotice() {}, onChanged: undefined };
+  const save = new Function(...Object.keys(dependencies), `return (${saveSource});`)(...Object.values(dependencies));
+  await save({ id: 'googleDrive', label: 'Google Drive', secretFields: { privateKey: {} } }, { preventDefault() {} });
+  assert.deepEqual(requests, [['/settings/integrations/googleDrive', 'PUT', { fields: { privateKey: 'new-unsaved-private-key', serviceAccountEmail: 'replacement-service@example.test' } }]]);
+  assert.deepEqual(drafts.googleDrive, {}); assert.deepEqual(drafts.googleCalendar, {});
+  assert.deepEqual(drafts.openrouter, { model: 'other/unsaved-model' }, 'Saving shared Google credentials must preserve unrelated drafts.');
+});

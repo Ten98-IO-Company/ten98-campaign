@@ -38,14 +38,15 @@ export default function GoogleCalendar({ projectId, isOperator, canWrite, reques
   }
   async function load() {
     if (!active.current || scope.current !== view) return;
-    const result = await request(`${path}/events?${new URLSearchParams({ fromDate: from, toDate: to })}`);
+    const first = new Date(from + 'T00:00'), last = new Date(to + 'T00:00'); last.setDate(last.getDate() + 1);
+    const result = await request(`${path}/events?${new URLSearchParams({ fromDate: from, toDate: to, timeMin: first.toISOString(), timeMax: last.toISOString() })}`);
     if (!active.current || scope.current !== view) return;
     if (!Array.isArray(result.events)) throw new Error('The Google Calendar event list could not be read.');
     updateEvents(result.events); setLoaded(true);
   }
   async function mapCalendar(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const calendarId = String(new FormData(event.currentTarget).get('calendarId') || '').trim();
-    await action(async () => { await request(`${path}/connection`, 'POST', { calendarId }); setStatus(await request(`${path}/status`)); updateEvents([]); setLoaded(false); setEditing(null); setDraft(blank); setNotice(calendarId ? 'Shared calendar connected to this project.' : 'Calendar disconnected.'); });
+    await action(async () => { const result = await write('connection', 'POST', { calendarId }); setStatus({ ...status, ...result }); updateEvents([]); setLoaded(false); setEditing(null); setDraft(blank); setNotice(calendarId ? 'Shared calendar connected to this project.' : 'Calendar disconnected.'); });
   }
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

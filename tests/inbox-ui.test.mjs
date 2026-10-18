@@ -147,3 +147,24 @@ test('campaign WhatsApp navigation loads only its explicit scoped account and ne
   await compile(handler, { ...context, initialAccountId: 'unavailable' })({ accounts }); assert.equal(calls.length, 1); assert.match(errors[0], /unavailable/);
   const match = compile(section('function conversationMatches(', 'function SmsInbox(')); assert.equal(match({ participantId: '971501234567' }, '+971501234567'), true); assert.equal(match({ participantId: 'BSUID.opaque' }, '+971501234567'), false);
 });
+
+test('a failed SMS thread selection keeps the current poll alive while rejecting reads from before the selection', async () => {
+  const smsSource = source.slice(source.indexOf('function SmsInbox('), source.indexOf('export default function UnifiedInbox('));
+  const part = (start, end) => smsSource.slice(smsSource.indexOf(start), smsSource.indexOf(end, smsSource.indexOf(start)));
+  const version = { current: 1 }, pending = { current: false }, revision = { current: 0 }, selected = { id: 'current-thread' }, accepted = [], errors = [];
+  let oldResolve; const oldRead = new Promise(resolve => { oldResolve = resolve; }); let firstPoll = true;
+  const requester = { current: async route => {
+    if (route.includes('/unavailable-thread/')) throw new Error('Transient thread failure');
+    if (route.endsWith('/conversations')) { if (firstPoll) { firstPoll = false; return oldRead; } return { conversations: [{ ...selected, blocked: true }], pagination: {} }; }
+    return { conversation: { ...selected, blocked: true }, messages: [] };
+  } };
+  const common = { version, pending, revision, selected, requester, path: '/projects/p/sms-inbox', setRows() {}, setPagination() {}, setSelected: value => accepted.push(value), setDetail() {}, setMessage() {}, merge };
+  const smsAction = compile(part('async function smsAction(', '  async function smsList('), { ...common, setBusy() {}, setError: value => errors.push(value), setNotice() {} });
+  const smsThread = compile(part('async function smsThread(', '  async function openSms('), common);
+  const open = compile(part('async function openSms(', '  useEffect(() => {'), { ...common, smsAction, smsThread });
+  const polling = part('const pollSms = async () =>', '    const timer = window.setInterval(pollSms').replace('const pollSms = ', '').trim().replace(/;$/, '');
+  const poll = compile(polling, { ...common, generation: 1, checking: false, closed: false });
+  const earlier = poll(); await open({ id: 'unavailable-thread' }); oldResolve({ conversations: [{ ...selected, blocked: false }], pagination: {} }); await earlier;
+  assert.deepEqual(accepted, [], 'A poll started before the selection must not overwrite a later action.'); assert.equal(pending.current, false); assert.match(errors.at(-1), /Transient/);
+  await poll(); assert.equal(accepted.at(-1)?.blocked, true, 'A later STOP or message must still update the currently selected thread after the failed selection.');
+});

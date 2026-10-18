@@ -33,7 +33,7 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
     request(`/projects/${project.id}/calendar/status`).then(data => { if (current) { setMapping(items => ({ ...items, calendarId: data.calendarId || '' })); setCalendarLoaded(true); } }).catch(err => { if (current) setError(err.message); });
     return () => { current = false; active.current = false; cancelMapProbe.current?.(); window.removeEventListener('ten98-maps-error', mapFailure); };
   }, [project.id, isOperator]);
-  function change(provider: string, field: string, value: string | null) { setDrafts(items => ({ ...items, [provider]: { ...items[provider], [field]: value } })); }
+  function change(provider: string, field: string, value: string | null) { setDrafts(items => { const draft = { ...items[provider], [field]: value }; return { ...items, [provider]: draft, ...(['googleDrive', 'googleCalendar'].includes(provider) ? { googleDrive: draft, googleCalendar: draft } : {}) }; }); }
   function dirty(provider: Provider) { return Object.entries(drafts[provider.id] || {}).some(([name, value]) => value === null || (provider.secretFields?.[name] ? Boolean(value.trim()) : value !== String(provider.fields?.[name] ?? ''))); }
   async function action(name: string, run: () => Promise<void>) {
     if (busy) return; setBusy(name); setError(''); setNotice('');
