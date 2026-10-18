@@ -1,4 +1,21 @@
-# End-to-end verification — v0.5.0
+# End-to-end verification — v0.6.0
+
+## Unified inbox release
+
+Verified on 18 October 2026 with the production frontend, an isolated local app, synthetic identities and mocked Zernio responses. No real private message, public comment or review response was sent.
+
+| Area | Browser result |
+| --- | --- |
+| Messenger | Load only the project's connected page, open incoming history, send one private reply, mark read, archive and reopen; the reopened row returns to the active list. Account-specific character limits are visible. |
+| Contacts | Signed incoming webhook creates Alex's contact; opening older incoming history creates Sam's contact. Repeated reads retain two identities. Both appear in Direct campaigns with Messenger source and no email/SMS/WhatsApp consent. |
+| Comments | Open a scoped post/thread, send a public child reply, read it back, like a comment and read back the changed reaction. |
+| Reviews | Load a Google Business review, add a public response, then explicitly approve replacing it and read the updated text back. |
+
+The recorded mock requests confirm durable operation keys and exact scoped account/resource payloads. All **112** native checks and the v0.6.0 production build pass. Native HTTP checks also cover signed replay/conflicts, contact atomicity, permissions and reply windows, attachments, duplicate/uncertain sends, deep comment replies, Meta ad routing, Instagram hidden-comment recovery, malformed provider data, stale review versions, permission changes during preflight, and project isolation. Live acceptance requires configured accounts, permissions and webhook subscriptions; see [inbox setup](inbox.md).
+
+![Unified inbox and linked Messenger contact](inbox-verification.png)
+
+![Automatically created contacts without campaign consent](messenger-contacts-verification.png)
 
 ## Direct campaigns release
 
@@ -17,7 +34,7 @@ Verified on 18 October 2026 in an isolated local app with synthetic contacts, th
 
 All **89** native checks pass with the v0.5.0 build. New checks cover contact hygiene and consent evidence, CSV dry runs/deduplication, MX/null-MX/A/AAAA outcomes, durable destination suppression, email purpose and unsubscribe, exact provider payloads, approved WhatsApp media/button options, queue scheduling, in-flight cancellation, stale confirmations, lost acknowledgements/restart recovery, signed callbacks and opt-outs, stale delivery readback, and actual frontend handlers. The earlier five-area browser walkthrough is retained below; its native regressions also pass in this release.
 
-Real delivery remains dependent on configured credentials, account approval and provider access. Cloudflare permits transactional email only; queued email has no per-message delivery lookup, and suppression refresh is not an open/click report. DNS and disposable/typo heuristics do not prove that an individual mailbox exists. Voice campaigns and unified inbox remain excluded. See [direct campaign setup and limitations](direct-campaigns.md).
+Real delivery remains dependent on configured credentials, account approval and provider access. Cloudflare permits transactional email only; queued email has no per-message delivery lookup, and suppression refresh is not an open/click report. DNS and disposable/typo heuristics do not prove that an individual mailbox exists. Voice campaigns remain excluded. See [direct campaign setup and limitations](direct-campaigns.md).
 
 ## Existing campaign workflows
 
@@ -47,7 +64,7 @@ Read-only checks of the recorded requests and isolated database verified the sam
 
 ## Runnable checks
 
-Run `npm run build` and `npm test`. All 89 native Node checks pass. Temporary HTTP servers/databases, provider mocks and actual frontend handlers cover authentication/OIDC, roles, invitations, encrypted integration settings, calendar/maps behavior, provider recovery, approvals, direct campaigns and the five areas above.
+Run `npm run build` and `npm test`. Temporary HTTP servers/databases, provider mocks and actual frontend handlers cover authentication/OIDC, roles, invitations, encrypted integration settings, calendar/maps behavior, provider recovery, approvals, direct campaigns, the unified inbox and the five areas above.
 
 The ads HTTP check creates 20 supported format combinations: Meta image/video/carousel, Google Search/Display/Performance Max and Demand Gen variants, LinkedIn image/video, TikTok video, Pinterest image, X cards, ChatGPT cards, and Reddit image/video/carousel/text. It also checks creative/status/budget changes, supported renames, partial-post boosts, malformed acknowledgements, date handling, isolation and connection races.
 

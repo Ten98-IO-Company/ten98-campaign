@@ -2,7 +2,7 @@
 
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.5.0 adds **Direct campaigns**: Cloudflare transactional email, Twilio SMS, and Zernio WhatsApp broadcasts, with contact hygiene, consent, previews, scheduling and delivery evidence. It also includes per-platform social publishing, advertising, analytics, OOH, and Drive DAM workflows. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Unified inbox and comment/review feeds remain removed. Voice calling is excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.6.0 restores the **Unified inbox** with private messages, public comments, reviews and automatic Facebook Messenger contacts. It also includes Cloudflare transactional email, Twilio SMS, Zernio WhatsApp broadcasts, per-platform social publishing, advertising, analytics, OOH, and Drive DAM workflows. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Voice calling is excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
 
@@ -28,6 +28,7 @@ For development, run `npm run dev` and open [http://127.0.0.1:5178](http://127.0
 | Campaigns | Workspace/project organization, roles, dates, budgets, separate currency totals, local results, and CSV export. |
 | Social | Per-platform captions, media and options; previews and restriction checks; content approvals; explicit publish/schedule submission; status reconciliation, rescheduling, cancellation, eligible retries, and supported published-copy changes. Zernio executes submitted schedules. |
 | Direct campaigns | Cloudflare transactional email, Twilio SMS, and Zernio approved WhatsApp templates; consent-aware contacts; CSV import preview and deduplication; disposable/role/typo flags, DNS mail-route checks, suppression, signed unsubscribe/opt-out handling, scheduling and delivery receipts. |
+| Unified inbox | Scoped private messages, conversation history, explicit replies/read/archive, public comment replies and supported moderation, Facebook/Google Business reviews, and automatic Messenger contacts without inferred campaign consent. |
 | Advertising | Campaign/ad-group/ad reporting; supported status, budget, targeting, and creative changes; paused ad creation and eligible post boosting. |
 | OOH | Local provider/booking ledger, verified Broadsign inventory, proposals, availability, explicit booking/cancellation, delivery totals, and mapped locations. |
 | DAM | Asset links, public delivery URLs, tags, approvals, Google Drive metadata sync, and Shared Drive uploads. Originals remain in Drive. |
@@ -111,7 +112,13 @@ Other provider changes remain in the native dashboard. Confirmations distinguish
 
 Approval never publishes automatically. With the policy enabled, publishing and retries need current approval, while changes to submitted post content are restricted to owners/admins. Editors retain explicitly confirmed stop/removal controls. A provider post with every copy confirmed failed can receive a fresh review after its latest provider content is reconciled; partially live posts cannot use that path.
 
-## Zernio publishing-status webhooks
+## Unified inbox, comments and reviews
+
+Open **Unified inbox**, choose Messages, Comments or Reviews, select a connected account, then load its feed. Supported actions follow each platform's permissions: private replies and attachments, mark read/archive, public comment threads/replies/hide/like/delete/YouTube moderation, and review replies. Google Business supports replacing or removing the owner reply; a version check prevents silently overwriting a reply changed elsewhere.
+
+Verified incoming Facebook Messenger messages create contacts under **Direct campaigns → Contacts**. Identity is scoped to project, page account and participant ID. Signed incoming webhooks and opening verified incoming history both link the same person; names never merge unrelated people. New contacts have no inferred email, phone or email/SMS/WhatsApp campaign permission. See the [inbox setup and limitations](docs/inbox.md).
+
+## Zernio publishing and inbox webhooks
 
 Set a strong `ZERNIO_WEBHOOK_SECRET`, then register **`https://your-app.example/api/webhooks/zernio`** in Zernio using the same secret. The endpoint must be publicly reachable over HTTPS. Configure its profile filter to match this installation's projects.
 
@@ -119,7 +126,7 @@ Subscribe to post lifecycle events: `post.scheduled`, `post.published`, `post.fa
 
 The receiver verifies the raw-body HMAC-SHA256 signature before parsing, accepts up to 1 MB, persists events before acknowledgement, and deduplicates by the stable event UUID. A local worker processes pending events and resumes after restart. Use **one unique Zernio profile per project**: unmapped or ambiguous profile mappings stay pending instead of updating another project. Routing uses provider profile IDs, never arbitrary event metadata. Delayed legitimate deliveries remain valid; replay protection comes from durable deduplication. Out-of-order events cannot overwrite a newer post status.
 
-Direct-message, conversation, comment and review subscriptions are no longer needed. Valid signed non-post events are acknowledged and ignored: only event ID, event name, timestamp and raw-body hash are retained, with no new message/comment/review content stored. Older queued inbox events are marked ignored without processing. Legacy private inbox records and tables are retained in the database for operator-managed retention; they are excluded from application state and have no inbox API, UI or assistant access. Removing the feature does not silently delete existing private data.
+Subscribe to `message.received`, other relevant `message.*`/`conversation.*` events, `comment.received`, `review.new` and `review.updated` for inbox updates. Incoming Messenger contact creation requires a verified incoming message, not a conversation-start event. New inbox webhook payloads retain only routing/identity metadata; message, comment and review bodies are fetched from the provider on demand. Local update polling makes no paid provider calls; new relevant events refresh an already loaded feed. Pre-connect Messenger history does not emit new-message webhooks, so opening verified incoming history also creates contacts. Unknown/test events remain metadata-only and ignored. Legacy private inbox tables are retained for operator-managed retention and remain outside generic app state and assistant access.
 
 ## Google Drive DAM
 
@@ -202,7 +209,7 @@ npm run build
 npm test
 ```
 
-CI builds and runs native Node regression tests against temporary databases/HTTP servers and mocked provider responses. Coverage includes authentication, invitations, session/account controls, encrypted integration settings, project isolation, per-platform draft persistence, publishing/scheduling/retries with exact variant payloads and mandatory preflight, content approvals, provider reconciliation, removed-inbox boundaries and privacy, signed post webhook replay/order/restart behavior, ad formats, Broadsign contracts, Google Calendar/Drive, and agent review/usage flows. **CI makes no paid API calls.** Successful tests verify application behavior and mocked contracts; they do not establish live acceptance by Zernio, an ad account, Google, Broadsign, OpenRouter, or an identity provider. Use the explicit connection tests and verify intended live workflows with your own accounts before production use.
+CI builds and runs native Node regression tests against temporary databases/HTTP servers and mocked provider responses. Coverage includes authentication, invitations, session/account controls, encrypted integration settings, project isolation, per-platform draft persistence, publishing/scheduling/retries with exact variant payloads and mandatory preflight, content approvals, provider reconciliation, scoped inbox replies/moderation/reviews, automatic Messenger contacts, signed webhook replay/order/restart behavior, ad formats, Broadsign contracts, Google Calendar/Drive, and agent review/usage flows. **CI makes no paid API calls.** Successful tests verify application behavior and mocked contracts; they do not establish live acceptance by Zernio, an ad account, Google, Broadsign, OpenRouter, or an identity provider. Use the explicit connection tests and verify intended live workflows with your own accounts before production use.
 
 Provider coverage follows the exposed API contracts and account permissions. Rare ad formats, comprehensive bulk/audience tooling, raw OOH proof-of-play, automated retention, and high-availability storage are outside this release. Large views expose pagination or explicit limits. Use the OIDC provider for MFA; local email-based password recovery and automatic invitation delivery are not configured. The application uses one server process with SQLite.
 

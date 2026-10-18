@@ -117,3 +117,49 @@ test('destination suppression targets the originally mailed address after edits 
     db.prepare('DELETE FROM projects WHERE id=?').run('b'); assert.deepEqual(contacts.suppressDestination('b', 'email', 'original@example.test', 'Unsubscribed'), { suppressed: 0 });
   } finally { db.close(); }
 });
+
+test('verified Messenger identities create scoped replay-safe contacts without inferred destinations or campaign permissions', async () => {
+  const { db, contacts } = fixture();
+  try {
+    const incoming = { accountId: 'facebook-page-a', participantId: 'page-scoped-person', conversationId: 'conversation-a', name: 'Alex Messenger', avatarUrl: 'https://cdn.example.test/avatar.jpg' };
+    const manual = contacts.save('a', { name: incoming.name, email: 'alex@example.test' });
+    assert.equal(contacts.findMessenger('a', incoming.accountId, incoming.participantId), null);
+    const [first, replay, poll] = await Promise.all([contacts, createContacts({ db }), contacts].map(service => Promise.resolve().then(() => service.fromMessenger('a', incoming))));
+    assert.equal(first.id, replay.id); assert.equal(first.id, poll.id); assert.notEqual(first.id, manual.id, 'A matching display name cannot merge unrelated identities.');
+    assert.equal(contacts.list('a').length, 2); assert.equal(first.source, 'messenger'); assert.equal(first.email, ''); assert.equal(first.phone, '');
+    assert.deepEqual(first.consents, { email: false, sms: false, whatsapp: false }); assert.deepEqual(first.consentEvidence, {}); assert.equal(first.consentSource, ''); assert.deepEqual(first.suppression, {});
+    assert.deepEqual(first.identities.map(({ platform, accountId, participantId, conversationId }) => ({ platform, accountId, participantId, conversationId })), [{ platform: 'facebook', accountId: incoming.accountId, participantId: incoming.participantId, conversationId: incoming.conversationId }]);
+    assert.ok(first.identities[0].createdAt); assert.equal(first.identities[0].avatarUrl, incoming.avatarUrl);
+    const otherAccount = contacts.fromMessenger('a', { ...incoming, accountId: 'facebook-page-b' }); assert.notEqual(otherAccount.id, first.id);
+    const otherProject = contacts.fromMessenger('b', incoming); assert.notEqual(otherProject.id, first.id); assert.equal(contacts.findMessenger('b', incoming.accountId, incoming.participantId).id, otherProject.id);
+    assert.throws(() => db.prepare('INSERT INTO direct_contact_messenger_identities VALUES(?,?,?,?)').run('a', incoming.accountId, incoming.participantId, manual.id), /UNIQUE/, 'The database enforces identity uniqueness for independently created services.');
+    const renamed = contacts.fromMessenger('a', { ...incoming, name: 'Provider rename', conversationId: 'conversation-b' }); assert.equal(renamed.name, 'Provider rename'); assert.equal(renamed.identities[0].conversationId, 'conversation-b');
+    contacts.save('a', { name: 'My contact label', company: 'Studio', tags: ['customer'], email: '', phone: '' }, first.id);
+    assert.equal(contacts.fromMessenger('a', { ...incoming, name: 'My contact label' }).name, 'My contact label');
+    const preserved = contacts.fromMessenger('a', { ...incoming, name: 'Another provider rename' }); assert.equal(preserved.name, 'My contact label', 'Provider updates must never reclaim a manually edited name.'); assert.equal(preserved.identities[0].name, 'Another provider rename'); assert.equal(preserved.company, 'Studio'); assert.deepEqual(preserved.tags, ['customer']);
+    const enriched = contacts.save('a', { email: 'messenger@example.test', phone: '+971501234567', consents: { email: true, sms: true }, consentSource: 'Explicit destination opt-in' }, first.id); assert.equal(enriched.consents.email, false, 'An identity link must not transfer consent to a newly supplied address.');
+    contacts.save('a', { consents: { email: true, sms: true, whatsapp: true }, consentSource: 'Verified opt-in for these destinations' }, first.id); contacts.suppress('a', first.id, 'whatsapp', 'Explicit opt-out');
+    const before = contacts.get('a', first.id), after = contacts.fromMessenger('a', incoming);
+    for (const field of ['email', 'phone', 'consents', 'consentEvidence', 'consentUpdatedAt', 'consentSource', 'suppression', 'hygiene']) assert.deepEqual(after[field], before[field], `Incoming messages must preserve ${field}.`);
+    for (const body of [{ identities: first.identities }, { source: 'messenger' }, { nameSource: 'messenger' }]) assert.throws(() => contacts.save('a', body, first.id), error => error.status === 400, 'Normal contact writes cannot forge identity metadata.');
+    assert.throws(() => contacts.save('a', { name: 'A name alone is not an ordinary contact' }), error => error.status === 400);
+    for (const body of [{ ...incoming, participantId: '' }, { ...incoming, participantId: 123 }, { ...incoming, accountId: 'bad account' }, { ...incoming, conversationId: '' }, { ...incoming, name: 'bad\nname' }, { ...incoming, avatarUrl: 'https://127.0.0.1/avatar' }, { ...incoming, email: 'forged@example.test' }]) assert.throws(() => contacts.fromMessenger('a', body), error => error.status === 400);
+    assert.throws(() => contacts.fromMessenger('missing-project', incoming), error => error.status === 404);
+    contacts.remove('a', first.id); assert.equal(contacts.findMessenger('a', incoming.accountId, incoming.participantId), null, 'Contact deletion cascades its identity lookup.');
+    assert.notEqual(contacts.fromMessenger('a', incoming).id, first.id);
+  } finally { db.close(); }
+});
+
+test('Messenger contact and identity writes are atomic standalone and inside the webhook transaction', () => {
+  const { db, contacts } = fixture();
+  try {
+    const incoming = { accountId: 'page-a', participantId: 'sender-a', conversationId: 'thread-a' };
+    db.exec('BEGIN IMMEDIATE'); const nested = contacts.fromMessenger('a', incoming); assert.equal(contacts.get('a', nested.id).id, nested.id); db.exec('ROLLBACK');
+    assert.equal(contacts.list('a').length, 0); assert.equal(contacts.findMessenger('a', incoming.accountId, incoming.participantId), null, 'An outer webhook rollback also removes the auto-created contact.');
+    db.exec("CREATE TRIGGER fail_identity BEFORE INSERT ON direct_contact_messenger_identities WHEN NEW.participant_id='fail' BEGIN SELECT RAISE(ABORT,'identity storage failure'); END;");
+    assert.throws(() => contacts.fromMessenger('a', { ...incoming, participantId: 'fail' }), /identity storage failure/); assert.equal(contacts.list('a').length, 0, 'Standalone failure leaves no orphan contact.');
+    db.exec('BEGIN IMMEDIATE'); assert.throws(() => contacts.fromMessenger('a', { ...incoming, participantId: 'fail' }), /identity storage failure/);
+    const valid = contacts.fromMessenger('a', incoming); db.exec('COMMIT'); assert.equal(contacts.findMessenger('a', incoming.accountId, incoming.participantId).id, valid.id, 'A savepoint rollback preserves the caller transaction for valid subsequent work.');
+    db.prepare('DELETE FROM projects WHERE id=?').run('a'); assert.equal(db.prepare('SELECT COUNT(*) AS count FROM direct_contact_messenger_identities').get().count, 0);
+  } finally { db.close(); }
+});

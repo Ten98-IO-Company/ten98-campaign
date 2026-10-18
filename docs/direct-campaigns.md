@@ -1,6 +1,6 @@
 # Direct campaigns
 
-Direct campaigns sends project-scoped transactional email, SMS, and approved WhatsApp templates. It includes contacts, CSV import, consent records, audience previews, scheduling, suppression, and delivery receipts. Voice calling and a unified inbox are not included. Incoming SMS callbacks retain opt-outs, not conversations.
+Direct campaigns sends project-scoped transactional email, SMS, and approved WhatsApp templates. It includes contacts, CSV import, consent records, audience previews, scheduling, suppression, and delivery receipts. The separate [unified inbox](inbox.md) handles connected messages, comments and reviews and creates Messenger contacts without campaign consent. Voice calling is excluded. Incoming Twilio SMS callbacks retain opt-outs, not conversations.
 
 ## Connect the three channels
 

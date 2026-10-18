@@ -16,6 +16,7 @@ import { handleCalendar } from './calendar.mjs';
 import { handleAgent } from './agent.mjs';
 import { handleOoh } from './ooh.mjs';
 import { createDirectCampaigns } from './direct-campaigns.mjs';
+import { handleInbox } from './inbox.mjs';
 import { normalizePostVariants, normalizeMediaItems } from '../shared/social-posts.mjs';
 
 const roles = ['owner', 'admin', 'editor', 'viewer'];
@@ -104,7 +105,7 @@ export function createApp(options = {}) {
   const integrationSettings = createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
   const directTimer = options.directScheduler === false ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
-  const webhooks = createWebhookService({ db, store, env });
+  const webhooks = createWebhookService({ db, store, contacts: direct.contacts, env });
   const drainWebhooks = () => { try { webhooks.processPending(); } catch { console.error('Webhook processing deferred.'); } };
   drainWebhooks(); const webhookTimer = setInterval(drainWebhooks, 1000); webhookTimer.unref();
   function workspaceAccess(workspaceId, userId, write = false) {
@@ -231,7 +232,7 @@ export function createApp(options = {}) {
         const projectRoute = path.match(/^\/api\/projects\/([^/]+)(?:\/(.*))?$/);
         if (projectRoute) {
           const project = projectAccess(projectRoute[1], user.id), role = project.role;
-          if (/^(?:inbox|engagement|conversations|integrations\/inbox)(?:\/|$)/.test(projectRoute[2] || '')) throw new HttpError(404, 'API route not found.');
+          if (/^(?:inbox|engagement|conversations)(?:\/|$)/.test(projectRoute[2] || '')) throw new HttpError(404, 'API route not found.');
           if (mutating && role === 'viewer') throw new HttpError(403, 'Your workspace role is view only.');
           if (projectRoute[2] === 'sample-data' && req.method === 'DELETE') {
             if (!['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only a workspace owner or administrator can remove sample data.');
@@ -243,10 +244,12 @@ export function createApp(options = {}) {
           }
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
           const requestRevision = integrationSettings.revision;
-          const assertIntegrationSettings = () => { if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.'); };
+          const assertIntegrationSettings = () => { const current = projectAccess(project.id, user.id); if (mutating && current.role !== role) throw new HttpError(403, 'Your workspace role changed. Refresh this project before continuing.'); if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.'); };
           const context = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT zernio_profile_id FROM projects WHERE id=?').get(project.id); if (current?.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT drive_folder_id FROM projects WHERE id=?').get(project.id); if (current?.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: (collection, fields) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); checkReferences(store, project.id, data); return data; } };
           context.assertPublishingApproval = post => assertPublishingApproval(context, post);
           context.assertProviderPostEdit = () => assertProviderPostEdit(context);
+          context.contacts = direct.contacts; context.webhooks = webhooks;
+          if (projectRoute[2]?.startsWith('integrations/inbox') && await handleInbox(context)) return;
           if (projectRoute[2]?.startsWith('direct/') && await direct.handle(context)) return;
           if (projectRoute[2]?.startsWith('operations') && await handleOperationRecovery(context)) return;
           if (projectRoute[2]?.startsWith('approvals/') && await handleApprovals(context)) return;

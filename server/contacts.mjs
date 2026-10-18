@@ -3,11 +3,13 @@ import { Resolver } from 'node:dns/promises';
 import { domainToASCII } from 'node:url';
 import { HttpError } from './auth.mjs';
 import { transaction } from './database.mjs';
+import { publicMediaUrl } from '../shared/social-posts.mjs';
 
 const channels = ['email', 'sms', 'whatsapp'], own = (value, key) => Object.hasOwn(value, key);
 const fail = (status, message) => { throw new HttpError(status, message); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const text = (value, label, max = 200) => { if (typeof value !== 'string' || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) fail(400, `Enter a valid ${label}.`); return value.trim(); };
+const messengerId = (value, label) => { const id = text(value, label, 500); if (!id || /\s/.test(id)) fail(400, `Provide a valid Messenger ${label}.`); return id; };
 const disposableDomains = new Set(['mailinator.com', 'guerrillamail.com', 'guerrillamail.net', 'sharklasers.com', 'grr.la', 'tempmail.com', 'temp-mail.org', '10minutemail.com', 'yopmail.com', 'throwawaymail.com', 'getnada.com', 'dispostable.com']);
 const roleNames = new Set(['admin', 'info', 'sales', 'hello', 'support', 'contact', 'billing', 'marketing', 'office', 'team', 'postmaster', 'abuse', 'noreply', 'no-reply']);
 const typos = { 'gmal.com': 'gmail.com', 'gmial.com': 'gmail.com', 'gmai.com': 'gmail.com', 'gmail.con': 'gmail.com', 'hotmial.com': 'hotmail.com', 'outlok.com': 'outlook.com', 'yaho.com': 'yahoo.com', 'yahoo.con': 'yahoo.com' };
@@ -49,6 +51,7 @@ function parseCsv(csv) {
 export function createContacts({ db }) {
   db.exec(`CREATE TABLE IF NOT EXISTS direct_contacts(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,data TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS direct_contacts_project ON direct_contacts(project_id);
+    CREATE TABLE IF NOT EXISTS direct_contact_messenger_identities(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,account_id TEXT NOT NULL,participant_id TEXT NOT NULL,contact_id TEXT NOT NULL REFERENCES direct_contacts(id) ON DELETE CASCADE,PRIMARY KEY(project_id,account_id,participant_id));
     CREATE TABLE IF NOT EXISTS direct_contact_suppressions(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,channel TEXT NOT NULL,target_hash TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(project_id,channel,target_hash));`);
   const read = db.prepare('SELECT data FROM direct_contacts WHERE project_id=? ORDER BY rowid DESC'), find = db.prepare('SELECT data FROM direct_contacts WHERE project_id=? AND id=?');
   const hash = target => createHash('sha256').update(target).digest('hex');
@@ -56,13 +59,19 @@ export function createContacts({ db }) {
   const remember = db.prepare('INSERT INTO direct_contact_suppressions VALUES(?,?,?,?,?) ON CONFLICT(project_id,channel,target_hash) DO NOTHING');
   const list = projectId => read.all(projectId).map(row => JSON.parse(row.data));
   const get = (projectId, id) => { const row = find.get(projectId, id); return row ? JSON.parse(row.data) : null; };
-  function prepare(projectId, body, previous) {
+  const messengerContact = db.prepare('SELECT c.data FROM direct_contact_messenger_identities i JOIN direct_contacts c ON c.id=i.contact_id AND c.project_id=i.project_id WHERE i.project_id=? AND i.account_id=? AND i.participant_id=?');
+  function findMessenger(projectId, accountId, participantId) {
+    const row = messengerContact.get(projectId, messengerId(accountId, 'account ID'), messengerId(participantId, 'participant ID')); return row ? JSON.parse(row.data) : null;
+  }
+  function prepare(projectId, body, previous, messengerIdentity) {
     if (!object(body) || Object.keys(body).some(key => !['name', 'email', 'phone', 'company', 'tags', 'consents', 'consentSource'].includes(key))) fail(400, 'Use the supported contact fields.');
     const result = { name: '', email: '', phone: '', company: '', tags: [], ...previous };
     for (const field of ['name', 'company']) if (own(body, field)) result[field] = text(body[field], field);
+    if (messengerIdentity) Object.assign(result, { source: 'messenger', nameSource: 'messenger', identities: [messengerIdentity] });
+    if (previous?.identities?.length && own(body, 'name') && result.name !== previous.name) result.nameSource = 'manual';
     if (own(body, 'email')) result.email = emailAddress(body.email);
     if (own(body, 'phone')) { result.phone = text(body.phone, 'phone number', 16); if (result.phone && !/^\+[1-9]\d{6,14}$/.test(result.phone)) fail(400, 'Use an international E.164 phone number, for example +971501234567.'); }
-    if (!result.email && !result.phone) fail(400, 'Provide an email address or international phone number.');
+    if (!result.email && !result.phone && !result.identities?.length) fail(400, 'Provide an email address or international phone number.');
     if (own(body, 'tags')) { if (!Array.isArray(body.tags) || body.tags.length > 30) fail(400, 'Use at most 30 contact tags.'); result.tags = [...new Set(body.tags.map(tag => text(tag, 'contact tag', 50)).filter(Boolean))]; }
     if (body.consents !== undefined && (!object(body.consents) || Object.entries(body.consents).some(([channel, granted]) => !channels.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use an explicit true or false consent for each supported channel.');
     const source = own(body, 'consentSource') ? text(body.consentSource, 'consent source', 1000) : previous?.consentSource || '';
@@ -106,6 +115,33 @@ export function createContacts({ db }) {
       if (!previous && rows.size >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
       return persist(record);
     });
+  }
+  function fromMessenger(projectId, body) {
+    if (!object(body) || Object.keys(body).some(key => !['accountId', 'participantId', 'conversationId', 'name', 'avatarUrl'].includes(key))) fail(400, 'Use the verified Messenger identity fields.');
+    const accountId = messengerId(body.accountId, 'account ID'), participantId = messengerId(body.participantId, 'participant ID'), conversationId = messengerId(body.conversationId, 'conversation ID');
+    const name = body.name === undefined ? undefined : text(body.name, 'Messenger name');
+    let avatarUrl;
+    if (body.avatarUrl !== undefined && body.avatarUrl !== '') { try { avatarUrl = publicMediaUrl(body.avatarUrl); } catch { fail(400, 'Use a public HTTPS Messenger avatar URL.'); } }
+    // SAVEPOINT also works inside the caller's webhook transaction; a failed identity write must not leave an orphan contact.
+    db.exec('SAVEPOINT messenger_contact');
+    try {
+      if (!db.prepare('SELECT id FROM projects WHERE id=?').get(projectId)) fail(404, 'Project not found.');
+      let record = findMessenger(projectId, accountId, participantId);
+      const at = new Date().toISOString();
+      if (record) {
+        const identity = record.identities.find(row => row.platform === 'facebook' && row.accountId === accountId && row.participantId === participantId);
+        if (!identity) throw new Error('The stored Messenger identity is incomplete.');
+        if (name && record.nameSource === 'messenger') record.name = name;
+        Object.assign(identity, { conversationId, ...(name ? { name } : {}), ...(avatarUrl ? { avatarUrl } : {}), updatedAt: at });
+        record.updatedAt = at; persist(record);
+      } else {
+        if (db.prepare('SELECT COUNT(*) AS count FROM direct_contacts WHERE project_id=?').get(projectId).count >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
+        const identity = { platform: 'facebook', accountId, participantId, conversationId, name: name || '', ...(avatarUrl ? { avatarUrl } : {}), createdAt: at, updatedAt: at };
+        record = persist(prepare(projectId, { name: name || '' }, undefined, identity));
+        db.prepare('INSERT INTO direct_contact_messenger_identities VALUES(?,?,?,?)').run(projectId, accountId, participantId, record.id);
+      }
+      db.exec('RELEASE SAVEPOINT messenger_contact'); return record;
+    } catch (error) { db.exec('ROLLBACK TO SAVEPOINT messenger_contact; RELEASE SAVEPOINT messenger_contact'); throw error; }
   }
   function importCsv(projectId, options) {
     if (!object(options) || Object.keys(options).some(key => !['csv', 'dryRun', 'consents', 'consentSource'].includes(key)) || options.dryRun !== undefined && typeof options.dryRun !== 'boolean') fail(400, 'Use CSV text, optional consent evidence and an optional dry-run flag.');
@@ -198,5 +234,5 @@ export function createContacts({ db }) {
       current.hygiene = { ...current.hygiene, dnsStatus: outcomes.get(current.email.split('@')[1]) || 'unavailable', dnsCheckedAt: checkedAt }; current.updatedAt = checkedAt; persist(current); return [current];
     }), notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' }));
   }
-  return { list, get, save, import: importCsv, assessDNS, suppress, suppressDestination, remove(projectId, id) { return db.prepare('DELETE FROM direct_contacts WHERE project_id=? AND id=?').run(projectId, id).changes > 0; } };
+  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressDestination, remove(projectId, id) { return db.prepare('DELETE FROM direct_contacts WHERE project_id=? AND id=?').run(projectId, id).changes > 0; } };
 }

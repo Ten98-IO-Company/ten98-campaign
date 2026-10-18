@@ -5,14 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.mjs';
 
-test('removed inbox routes, sample records and agent access stay unavailable while legacy records are preserved privately', async () => {
+test('legacy inbox routes and sample records stay private while campaign agent access remains explicitly scoped', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-inbox-removal-')), origin = 'http://127.0.0.1:3000';
   const app = createApp({ dataDir, appUrl: origin, env: { ZERNIO_API_KEY: 'never-used-inbox-key', OPENROUTER_API_KEY: 'mock-agent-key', OPENROUTER_MODEL: 'fixture/model' } });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`, originalFetch = globalThis.fetch, modelCalls = []; let cookie;
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
-    assert.equal(url.href, 'https://openrouter.ai/api/v1/chat/completions', 'Removed inbox routes must never request Zernio.');
+    assert.equal(url.href, 'https://openrouter.ai/api/v1/chat/completions', 'Legacy inbox routes must never request Zernio.');
     const payload = JSON.parse(options.body); modelCalls.push(payload);
     return new Response(JSON.stringify({ choices: [{ message: modelCalls.length === 1 ? { role: 'assistant', content: null, tool_calls: [{ id: 'forbidden-inbox', type: 'function', function: { name: 'read_inbox', arguments: '{}' } }] } : { role: 'assistant', content: 'Only campaign tools are available.' } }], usage: { prompt_tokens: 1, completion_tokens: 1, cost: 0 } }));
   };
@@ -42,6 +42,6 @@ test('removed inbox routes, sample records and agent access stay unavailable whi
     const denied = modelCalls[1].messages.find(message => message.role === 'tool' && message.tool_call_id === 'forbidden-inbox');
     assert.ok(JSON.parse(denied.content).error); assert.equal(JSON.stringify(modelCalls).includes('PRIVATE_LEGACY'), false);
     assert.equal((await request(project + '/sample-data', 'DELETE')).status, 200);
-    assert.deepEqual(JSON.parse(app.db.prepare('SELECT data FROM records WHERE id=?').get(legacy.id).data), legacy, 'Removing the feature must not silently delete pre-existing private data.');
+    assert.deepEqual(JSON.parse(app.db.prepare('SELECT data FROM records WHERE id=?').get(legacy.id).data), legacy, 'Legacy records must not be silently imported or deleted by the new inbox.');
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }
 });

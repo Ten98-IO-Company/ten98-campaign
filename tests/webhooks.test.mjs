@@ -92,25 +92,28 @@ test('queued post work survives restart and its effects commit atomically with e
   } finally { if (reopened) reopened.close(); else { try { f.db.close(); } catch {} } rmSync(f.dir, { recursive: true, force: true }); }
 });
 
-test('removed inbox, comment and review events acknowledge without retaining private content or creating records', () => {
+test('malformed inbox payloads cannot create contacts, while unknown and test events retain metadata only', () => {
   const f = fixture(), originalFetch = globalThis.fetch;
   globalThis.fetch = async () => { throw new Error('Webhook workers must never call a provider.'); };
   try {
     for (const name of ['message.received', 'conversation.started', 'comment.received', 'review.new', 'review.updated']) {
       const payload = event(name, { post: undefined, message: { text: 'PRIVATE_INBOX_TEXT' }, comment: { text: 'PRIVATE_COMMENT_TEXT' }, review: { text: 'PRIVATE_REVIEW_TEXT' } });
+      assert.equal(signed(f.service, payload).status, 400);
+    }
+    for (const payload of [event('unsupported.message', { message: { text: 'PRIVATE_UNUSED_TEXT' } }), event('message.received', { test: true, message: { text: 'PRIVATE_TEST_TEXT' } })]) {
       assert.equal(signed(f.service, payload).status, 202); assert.equal(signed(f.service, payload).status, 200);
-      assert.equal(signed(f.service, { ...payload, message: { text: 'different' } }).status, 409, 'Ignored event IDs retain raw body conflict detection.');
+      assert.equal(signed(f.service, { ...payload, message: { text: 'different' } }).status, 409);
       const row = f.db.prepare('SELECT status,payload FROM webhook_events WHERE id=?').get(payload.id);
-      assert.equal(row.status, 'ignored'); assert.deepEqual(JSON.parse(row.payload), { id: payload.id, event: name, timestamp: payload.timestamp });
+      assert.equal(row.status, 'ignored'); assert.deepEqual(JSON.parse(row.payload), { id: payload.id, event: payload.event, timestamp: payload.timestamp });
     }
     assert.deepEqual(f.service.processPending(), { processed: 0, pending: 0 });
-    assert.equal(f.db.prepare("SELECT count(*) AS count FROM records WHERE collection='conversations'").get().count, 0);
-    assert.equal(f.db.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('webhook_messages','webhook_engagement_updates')").get().count, 0);
     const legacy = event('message.received', { post: undefined, message: { text: 'LEGACY_PRIVATE_DM' } });
     f.db.prepare('INSERT INTO webhook_events(id,event,payload,body_hash,status,received_at) VALUES(?,?,?,?,?,?)').run(legacy.id, legacy.event, JSON.stringify(legacy), 'legacy-hash', 'pending', new Date().toISOString());
     assert.deepEqual(f.service.processPending(), { processed: 0, pending: 0 });
-    assert.equal(f.db.prepare('SELECT status FROM webhook_events WHERE id=?').get(legacy.id).status, 'ignored');
-    assert.equal(f.db.prepare("SELECT count(*) AS count FROM records WHERE collection='conversations'").get().count, 0);
+    const row = f.db.prepare('SELECT status,payload FROM webhook_events WHERE id=?').get(legacy.id);
+    assert.equal(row.status, 'ignored'); assert.equal(row.payload.includes('LEGACY_PRIVATE_DM'), false);
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM direct_contacts').get().n, 0);
+    assert.equal(f.db.prepare('SELECT count(*) AS n FROM webhook_inbox_updates').get().n, 0);
     assert.equal(f.store.get('project-a', 'posts', f.post.id).status, 'submitted');
   } finally { globalThis.fetch = originalFetch; f.cleanup(); }
 });
