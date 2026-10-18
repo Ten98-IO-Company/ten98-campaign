@@ -52,10 +52,10 @@ test('record deletion preserves assignments and administrators can remove sample
     assert.deepEqual((await request('/api/state')).data, before, 'A blocked cleanup must not partially delete records or their activity.');
     assert.equal((await request(`${project}/posts/${realWithSample.id}`, { method: 'PATCH', body: { assetId: '' } })).status, 200);
     const cleanup = await request(project + '/sample-data', { method: 'DELETE', cookie: cookies.admin });
-    assert.equal(cleanup.status, 200); assert.equal(cleanup.data.removed, ['campaigns', 'posts', 'placements', 'assets', 'providers', 'conversations'].reduce((count, collection) => count + initial[collection].filter(row => row.sample).length, 0));
+    assert.equal(cleanup.status, 200); assert.equal(cleanup.data.removed, ['campaigns', 'posts', 'placements', 'assets', 'providers'].reduce((count, collection) => count + initial[collection].filter(row => row.sample).length, 0));
     assert.ok(cleanup.data.activityRemoved > 0);
     const final = (await request('/api/state')).data;
-    for (const collection of ['campaigns', 'posts', 'placements', 'assets', 'providers', 'conversations', 'activity']) assert.equal(final[collection].some(row => row.sample), false, collection);
+    for (const collection of ['campaigns', 'posts', 'placements', 'assets', 'providers', 'activity']) assert.equal(final[collection].some(row => row.sample), false, collection);
     for (const record of [post, realWithSample, providerPost]) assert.ok(final.posts.find(row => row.id === record.id));
     assert.ok(final.placements.find(row => row.id === placement.id));
     assert.ok(app.store.get(second.data.project.id, 'campaigns', otherSample.id));

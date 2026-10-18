@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../server/index.mjs';
 
-test('HTTP publishing approvals, Drive delivery links, engagement boundaries and provider outcome reviews are wired end to end', async () => {
+test('HTTP publishing approvals, Drive delivery links and provider outcome reviews are wired end to end', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-workflows-http-')), distDir = join(dataDir, 'dist');
   await mkdir(distDir); await writeFile(join(distDir, 'index.html'), '<!doctype html><title>Campaign</title>');
   const origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, distDir, appUrl: origin, env: { ZERNIO_API_KEY: 'private-workflows-key' } }), originalFetch = globalThis.fetch;
@@ -15,6 +15,7 @@ test('HTTP publishing approvals, Drive delivery links, engagement boundaries and
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
     assert.equal(url.origin, 'https://zernio.com'); assert.equal(options.redirect, 'error'); assert.equal(options.headers.Authorization, 'Bearer private-workflows-key');
+    if (url.pathname === '/api/v1/tools/validate/post') return new Response(JSON.stringify({ valid: true, warnings: [] }));
     const method = options.method || 'GET'; providerCalls.push({ url, method }); let result;
     if (url.pathname === '/api/v1/accounts') { assert.equal(url.searchParams.get('profileId'), profileId); result = { accounts: [account] }; }
     else if (method === 'POST' && url.pathname === '/api/v1/posts') {
@@ -54,11 +55,10 @@ test('HTTP publishing approvals, Drive delivery links, engagement boundaries and
     }
     const viewer = await member('workflow-viewer', 'viewer'), editor = await member('workflow-editor', 'editor'), admin = await member('workflow-admin', 'admin'), outsider = await member('workflow-outsider');
     const externalBeforeLocalChecks = providerCalls.length;
-    for (const suffix of ['/engagement/status', '/engagement/accounts', '/approvals/policy', '/approvals/posts', '/operations']) {
+    for (const suffix of ['/approvals/policy', '/approvals/posts', '/operations']) {
       assert.equal((await request(project + suffix, { cookie: null })).status, 401);
       assert.equal((await request(project + suffix, { cookie: outsider.cookie })).status, 404);
     }
-    assert.deepEqual((await request(project + '/engagement/status', { cookie: viewer.cookie })).data, { configured: true, mapped: true });
     assert.equal((await request(project + '/approvals/policy', { cookie: viewer.cookie })).status, 200);
     assert.equal((await request(project + '/approvals/posts', { cookie: viewer.cookie })).status, 200);
     assert.equal((await request(project + '/operations', { cookie: viewer.cookie })).status, 403);
@@ -66,7 +66,6 @@ test('HTTP publishing approvals, Drive delivery links, engagement boundaries and
     assert.equal((await request(project + '/operations', { cookie: admin.cookie })).status, 403, 'Workspace administration alone must not reveal operator recovery receipts.');
     assert.equal((await request(project + '/operations')).status, 200);
     assert.equal(providerCalls.length, externalBeforeLocalChecks, 'Local status, approval queues and recovery pages make no implicit provider calls.');
-    assert.equal((await post(project + '/engagement/comments/reply', { accountId, postId: 'forged', commentId: 'forged', message: 'Not allowed' }, { cookie: viewer.cookie, key: 'viewer-public-reply' })).status, 403);
     assert.equal((await post(project + '/approvals/policy', { requireApproval: true }, { cookie: editor.cookie })).status, 403);
     assert.equal((await post(project + '/approvals/policy', { requireApproval: true })).status, 200);
     async function draft(content, extra = {}, cookie = editor.cookie) {
@@ -102,7 +101,7 @@ test('HTTP publishing approvals, Drive delivery links, engagement boundaries and
     assert.equal(app.store.get(projectId, 'assets', driveAsset.id).deliveryUrl, deliveryUrl, 'Invalid URLs must not replace the last good delivery link.');
     assert.equal((await post(project + '/posts', { content: 'Forged provider evidence', platforms: ['facebook'], deliveryUrl })).status, 400);
     const assetPost = await draft('Campaign with a Drive creative', { assetId: driveAsset.id }); await approve(assetPost);
-    result = await publish(assetPost); assert.equal(result.status, 200); assert.deepEqual(providerWrites.at(-1).payload.mediaItems, [{ type: 'image', url: deliveryUrl }]);
+    result = await publish(assetPost); assert.equal(result.status, 200); assert.deepEqual(providerWrites.at(-1).payload.mediaItems, [{ type: 'image', url: deliveryUrl, size: 1234 }]);
     const changedAssetPost = await draft('Reviewed creative changes', { assetId: driveAsset.id }); await approve(changedAssetPost);
     await request(assetPath, { method: 'PATCH', body: { deliveryUrl: 'https://cdn.example.com/replaced.jpg' } });
     beforeWrites = providerWrites.length; result = await publish(changedAssetPost); assert.equal(result.status, 409); assert.equal(providerWrites.length, beforeWrites);
@@ -127,7 +126,6 @@ test('HTTP publishing approvals, Drive delivery links, engagement boundaries and
     beforeWrites = providerWrites.length; result = await publish(uncertain, editor.cookie, 'uncertain-create-key'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'OPERATION_REVIEWED'); assert.equal(providerWrites.length, beforeWrites);
     result = await publish(uncertain, editor.cookie, 'manually-retried-key'); assert.equal(result.status, 200); assert.equal(providerWrites.length, beforeWrites + 1);
     const privateWorkspace = await post('/api/workspaces', { name: 'Separate team' }, { cookie: outsider.cookie }); assert.equal(privateWorkspace.status, 201);
-    assert.equal((await request(`/api/projects/${privateWorkspace.data.projectId}/engagement/status`)).status, 404);
     assert.equal((await request(`/api/projects/${privateWorkspace.data.projectId}/operations`)).status, 404);
     assert.equal((await request(`${project}/operations/not-in-this-project/review`, { method: 'POST', body: review })).status, 404);
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }

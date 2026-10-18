@@ -3,21 +3,21 @@ import { useEffect, useRef, useState } from 'react';
 type Props = { projectId: string; canWrite: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onSaved: (collection: string) => void };
 const label: Record<string, string> = { campaigns: 'Campaign draft', posts: 'Social post draft', placements: 'OOH booking draft' };
 export default function CampaignAgent({ projectId, canWrite, request, onSaved }: Props) {
-  const [status, setStatus] = useState<any>(null), [runs, setRuns] = useState<any[]>([]), [message, setMessage] = useState(''), [includeInbox, setIncludeInbox] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const [status, setStatus] = useState<any>(null), [runs, setRuns] = useState<any[]>([]), [message, setMessage] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const key = useRef<{ input: string; value: string } | null>(null), active = useRef(true), path = `/projects/${projectId}/agent`;
   async function history() { const data = await request(path + '/history'); if (active.current) setRuns(data.runs); }
   useEffect(() => { active.current = true; Promise.all([request(path + '/status'), request(path + '/history')]).then(([config, data]) => { if (active.current) { setStatus(config); setRuns(data.runs); } }).catch(err => { if (active.current) setError(err.message); }); return () => { active.current = false; }; }, [projectId]);
   async function run(action: () => Promise<void>) { if (busy) return; setBusy(true); setError(''); try { await action(); } catch (err) { if (active.current) setError((err as Error).message); } finally { if (active.current) setBusy(false); } }
   async function send(event: React.FormEvent) {
-    event.preventDefault(); const input = JSON.stringify({ message, includeInbox });
+    event.preventDefault(); const input = JSON.stringify({ message });
     if (!key.current || key.current.input !== input) key.current = { input, value: crypto.randomUUID() };
     await run(async () => {
-      try { const result = await request(path + '/run', 'POST', { message, includeInbox }, key.current!.value); if (active.current) { setRuns(rows => [result.run, ...rows.filter(r => r.id !== result.run.id)]); setMessage(''); key.current = null; } }
+      try { const result = await request(path + '/run', 'POST', { message }, key.current!.value); if (active.current) { setRuns(rows => [result.run, ...rows.filter(r => r.id !== result.run.id)]); setMessage(''); key.current = null; } }
       catch (error) { const failure = error as any; if (failure.status && failure.run?.status !== 'uncertain') key.current = null; await history().catch(() => {}); throw error; }
     });
   }
   return <div className="agent-layout"><section className="panel agent-compose"><div className="panel-heading"><div><h2>Your campaign assistant</h2><p>Plan a launch, draft content, explore assets, or review tracked results.</p></div><span className="subtle-tag">OpenRouter</span></div>
-    <form onSubmit={send}><fieldset disabled={busy || !canWrite || !status?.configured}><label className="field"><span>What would you like to work on?</span><textarea required value={message} onChange={event => setMessage(event.target.value)} maxLength={12000} placeholder="Plan a two-week launch campaign using our approved assets. Suggest three social drafts and an OOH booking."/></label><label className="checkbox-label"><input type="checkbox" checked={includeInbox} onChange={event => setIncludeInbox(event.target.checked)}/>Include recent inbox snippets for this request</label><p className="field-help">Your prompt and requested project context are sent to the configured OpenRouter model. Inbox snippets are included only when selected. Draft suggestions stay local until you save them.</p><button className="button primary" disabled={!message.trim()}>{busy ? 'Agent is working…' : 'Ask agent'}</button></fieldset></form>
+    <form onSubmit={send}><fieldset disabled={busy || !canWrite || !status?.configured}><label className="field"><span>What would you like to work on?</span><textarea required value={message} onChange={event => setMessage(event.target.value)} maxLength={12000} placeholder="Plan a two-week launch campaign using our approved assets. Suggest three social drafts and an OOH booking."/></label><p className="field-help">Your prompt and requested project context are sent to the configured OpenRouter model. Draft suggestions stay local until you save them.</p><button className="button primary" disabled={!message.trim()}>{busy ? 'Agent is working…' : 'Ask agent'}</button></fieldset></form>
     {!status?.configured && status && <p className="alert">Your instance operator needs to configure the OpenRouter API key and a model with tool calling.</p>}{!canWrite && <p className="helper-note">Your workspace role is view only.</p>}
     <div className="agent-model"><span>Model: {status?.model || 'Not configured'}</span><span>Tools run on your application server.</span></div>
   </section>{error && <p className="alert error" role="alert">{error}</p>}

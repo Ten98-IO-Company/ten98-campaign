@@ -6,6 +6,15 @@ import { runInNewContext } from 'node:vm';
 
 const source = () => readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
 
+test('post labels show a platform caption when shared content is empty and identify media-only posts', () => {
+  const declaration = source().match(/^function postLabel\(post: Row\) \{[^\r\n]+\}$/m)?.[0];
+  assert.ok(declaration);
+  const label = runInNewContext(declaration.replace('(post: Row)', '(post)').replace('(platform: string)', '(platform)') + '; postLabel');
+  assert.equal(label({ content: 'Shared caption', platforms: ['twitter'], platformOverrides: { twitter: { content: 'Custom caption' } } }), 'Shared caption');
+  assert.equal(label({ content: '', platforms: ['instagram', 'twitter'], platformOverrides: { twitter: { content: 'Custom caption' } } }), 'Custom caption');
+  assert.equal(label({ content: '', platforms: ['instagram'], platformOverrides: { instagram: { mediaItems: [] } } }), 'Media post');
+});
+
 test('calendar dates stay on their intended day while timestamps follow the browser timezone', () => {
   const declaration = source().match(/^const date = .+;$/m)?.[0];
   assert.ok(declaration, 'Exercise the date formatter used by campaign and OOH cards.');
@@ -39,23 +48,6 @@ test('upcoming posts exclude past and completed work and sort by instant without
   assert.deepEqual(Array.from(result, row => row.id), ['offset-earliest', 'submitted', 'latest']);
   assert.deepEqual(posts, before);
   assert.equal(upcoming([], now).length, 0);
-});
-
-test('clearing every visible publishing destination is saved while unopened account controls preserve prior choices', () => {
-  const appSource = source(), start = appSource.indexOf("      if (kind === 'post') {"), end = appSource.indexOf("      if (kind === 'asset')", start);
-  assert.ok(start > -1 && end > start, 'Exercise the production post form normalization block.');
-  const normalize = new Function('values', 'form', 'FormData', `const kind = 'post'; ${appSource.slice(start, end)} return values;`);
-  class FormDataStub { constructor(form) { this.form = form; } getAll(name) { return name === 'platforms' ? this.form.platforms : this.form.accounts; } }
-  function form(controlsRendered, accounts = [], platforms = ['facebook']) { return { accounts, platforms, querySelector(selector) { assert.equal(selector, 'input[name="accounts"]'); return controlsRendered ? {} : null; } }; }
-  const saved = { content: 'Existing draft', accounts: ['previous-account'] };
-  const clear = normalize({ content: saved.content, scheduledAt: '' }, form(true), FormDataStub);
-  assert.deepEqual(clear.accounts, []); assert.deepEqual({ ...saved, ...clear }.accounts, [], 'PATCH must receive [] to clear the previously saved destinations.');
-  const untouched = normalize({ content: saved.content }, form(false), FormDataStub);
-  assert.equal(Object.hasOwn(untouched, 'accounts'), false); assert.deepEqual({ ...saved, ...untouched }.accounts, saved.accounts, 'Editing without loaded channel controls must retain saved recipients.');
-  const selected = normalize({ content: saved.content, scheduledAt: '2070-01-01T10:00:00Z' }, form(true, ['new-account']), FormDataStub);
-  assert.deepEqual(selected.accounts, ['new-account']); assert.equal(selected.status, 'scheduled'); assert.equal(selected.scheduledAt, '2070-01-01T10:00:00.000Z');
-  assert.equal(clear.status, 'draft'); assert.equal(clear.scheduledAt, '');
-  assert.throws(() => normalize({ content: saved.content }, form(true, [], []), FormDataStub), /Choose at least one social channel/);
 });
 
 test('asset previews select safe actual media and fall back after a thumbnail fails', () => {

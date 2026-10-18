@@ -4,7 +4,7 @@ ten98 Campaign's original application code is available under the [MIT license](
 
 ## Reference applications
 
-The following projects informed the advertising and messaging workflows:
+The following projects informed the original advertising and messaging workflows. The unified inbox feature was removed in version 0.4.0; its historical reference credit is retained:
 
 - [zernio-dev/ads-dashboard](https://github.com/zernio-dev/ads-dashboard), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/ads-dashboard/blob/main/LICENSE).
 - [zernio-dev/unified-inbox](https://github.com/zernio-dev/unified-inbox), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/unified-inbox/blob/main/LICENSE).
@@ -28,11 +28,11 @@ The lockfile records resolved direct/transitive packages and their license metad
 
 These integrations use remote services with separate account access, billing, content rights, and service terms. This repository's MIT license does not license those services, model weights, uploaded media, or provider trademarks.
 
-- **Zernio:** [API documentation](https://docs.zernio.com/), [ad creation](https://docs.zernio.com/ad-campaigns/create-standalone-ad), and [webhook contracts](https://docs.zernio.com/webhooks). Social publishing/lifecycle, advertising, direct messaging, supported organic comment/review replies, and analytics requests go through Zernio. Platform permissions and available endpoints determine coverage.
+- **Zernio:** [API documentation](https://docs.zernio.com/), [ad creation](https://docs.zernio.com/ad-campaigns/create-standalone-ad), and [webhook contracts](https://docs.zernio.com/webhooks). Social composition, publishing/lifecycle, restriction preflight, advertising, and analytics requests go through Zernio. Platform permissions and available endpoints determine coverage. Direct messaging and comment/review feeds are no longer part of this application.
 - **Broadsign:** [API-key authentication](https://docs.broadsign.com/broadsign-platform/en/Documentation_Settings/settings-api-keys.html) and [Guaranteed Campaigns workflow](https://docs.broadsign.com/broadsign-platform/en/Documentation_Gteed_Campaigns/g-c-new-campaign-rest.html). The application implements REST inventory, proposal, booking, cancellation, and delivery calls without embedding a Broadsign SDK. Creative bundles are managed in [Broadsign's separate application](https://app.broadsign.com/campaigns), under the provider's own permissions and terms; cancellation does not establish refunds.
 - **Google:** [Drive API](https://developers.google.com/workspace/drive/api/guides/about-sdk), [Calendar API](https://developers.google.com/workspace/calendar/api/guides/create-events), and [service-account authorization](https://developers.google.com/identity/protocols/oauth2/service-account). [Maps JavaScript API](https://developers.google.com/maps/documentation/javascript) loads Google's code from its servers when enabled; its API key is intentionally browser-visible and should use [Google's restrictions](https://developers.google.com/maps/api-security-best-practices).
 - **OpenRouter:** [tool calling](https://openrouter.ai/docs/guides/features/tool-calling) and [usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting). Orchestration runs locally; model requests are sent to OpenRouter and its selected model provider.
 
 Provider documentation is referenced for contracts; it is not bundled as application source. No provider credentials or customer media are included in this repository.
 
-The 0.3 integration settings, encryption, invitations, content approval, and operation-review workflows use the application's existing dependencies and Node.js built-ins. They introduce no additional third-party SDK or license requirement. Connection tests contact the configured provider explicitly; OpenRouter's test reads key metadata without requesting model inference, and Maps verification loads Google's browser service.
+The 0.3 integration settings, encryption, invitations, content approval, and operation-review workflows and the 0.4 per-platform composer use the application's existing dependencies and Node.js built-ins. They introduce no additional third-party SDK or license requirement. Platform option schemas are derived from the publicly documented Zernio API contract. Connection tests contact the configured provider explicitly; OpenRouter's test reads key metadata without requesting model inference, and Maps verification loads Google's browser service.

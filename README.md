@@ -1,8 +1,8 @@
 # ten98 Campaign
 
-An open-source, self-hosted campaign manager for social publishing, online advertising, messaging, out-of-home media, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
+An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.3 uses Zernio for social, advertising, inbox, and analytics; Google Drive for the DAM; Google Calendar for shared planning; Broadsign for OOH proposals and bookings; Google Maps for locations; and OpenRouter for an optional campaign assistant. It includes integration configuration and connection tests, team invitations, content approvals, and provider-operation reconciliation. The application is [MIT licensed](LICENSE). Provider accounts, API access, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.4.0 adds per-platform captions, media, publishing options, previews, and restriction checks. It uses Zernio for social publishing, advertising, and analytics; Google Drive for the DAM; Google Calendar for shared planning; Broadsign for OOH proposals and bookings; Google Maps for locations; and OpenRouter for an optional campaign assistant. It includes integration configuration and connection tests, team invitations, content approvals, and provider-operation reconciliation. Unified inbox, messaging, and comment/review feeds have been removed to focus on campaign management. The application is [MIT licensed](LICENSE). Provider accounts, API access, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign workspace](docs/preview.png)
 
@@ -26,14 +26,13 @@ For development, run `npm run dev` and open [http://127.0.0.1:5178](http://127.0
 | Area | Available behavior |
 | --- | --- |
 | Campaigns | Workspace/project organization, roles, dates, budgets, separate currency totals, local results, and CSV export. |
-| Social | Multi-channel drafts, content approvals, explicit publish/schedule submission, provider status reconciliation, rescheduling, cancellation, eligible retries, and supported published-copy changes. Zernio executes submitted schedules. |
+| Social | Per-platform captions, media and options; previews and restriction checks; content approvals; explicit publish/schedule submission; status reconciliation, rescheduling, cancellation, eligible retries, and supported published-copy changes. Zernio executes submitted schedules. |
 | Advertising | Campaign/ad-group/ad reporting; supported status, budget, targeting, and creative changes; paused ad creation and eligible post boosting. |
-| Inbox | Project-scoped direct messages, message history, replies and archiving, signed durable webhooks, and manually loaded organic comment/review feeds with supported replies. |
 | OOH | Local provider/booking ledger, verified Broadsign inventory, proposals, availability, explicit booking/cancellation, delivery totals, and mapped locations. |
 | DAM | Asset links, public delivery URLs, tags, approvals, Google Drive metadata sync, and Shared Drive uploads. Originals remain in Drive. |
 | Planning | Local publishing calendar and optional Google Calendar events and campaign-plan publishing. |
 | Analytics | Campaign totals and Zernio social dashboards, daily metrics, and top posts; missing live values remain unknown. |
-| Assistant | OpenRouter tool calls over the current project, optional inbox snippets, usage reporting, and draft suggestions saved only after review. |
+| Assistant | OpenRouter tool calls over the current project's campaigns, posts, placements and assets, usage reporting, and draft suggestions saved only after review. |
 | Team and account | Workspace invitations, roles, local/OIDC sign-in, account details, local password changes, and session revocation. |
 | Integrations | Encrypted saved configuration, explicit read-only connection tests, project mappings, and audited handling of uncertain provider outcomes. |
 
@@ -72,6 +71,20 @@ Pinterest, LinkedIn, and X campaign status changes currently show provider ackno
 
 Social media and ad creatives need public HTTPS delivery URLs. Private Drive previews remain DAM references and cannot be submitted as publishable binaries. Sample posts and assets cannot be sent to live publishing providers.
 
+## Per-platform social composition
+
+Create a shared caption and media set, choose destinations, then open each platform's tab to customise its copy. Each platform can use its own caption, a different approved DAM asset, a separate ordered set of public media URLs, or no media. Leaving an override off inherits the shared value; an explicitly empty caption or media set remains empty. Connected-account selections are preserved when drafts are reopened. Multiple accounts on the same platform share that platform's customisation.
+
+The composer supports Instagram, Facebook, LinkedIn, TikTok, X, YouTube, Pinterest, Threads, Bluesky, Reddit, Google Business Profile, Telegram, Discord, Slack, and Snapchat, subject to Zernio/account access. Snapchat requires Zernio's closed-beta access. WhatsApp is not a publishing destination.
+
+Publishing options follow the selected platform: examples include Instagram Stories, Reel covers, collaborators and disclosures; Facebook Stories/Reels and carousel cards; TikTok privacy, interactions, commercial disclosure and posting consent; YouTube title, visibility and audience settings; Pinterest board, title and destination; X/Threads threads, X reply settings and polls; LinkedIn documents, audience and polls; and Reddit community/title settings. Advanced structured options are validated against the supported Zernio contract. TikTok creator information supplies current privacy choices, interaction permissions, posting availability and video-duration limits.
+
+Each tab shows its effective caption/media preview and a character counter, including weighted X text and Bluesky graphemes. Previews show the selected content and attachment order; actual platform cropping, link rendering and controls vary by device. Local checks cover caption limits, required options/media, supported formats, attachment counts, incompatible combinations, and supplied size, MIME type, dimensions and video duration. Use **Check dimensions** or **Check file with Zernio** to inspect media. Unknown metadata is reported for verification instead of treated as a successful file check.
+
+Incomplete drafts can be saved locally. **Check with Zernio** explicitly checks the current draft without publishing it. Publishing, scheduling, scheduled updates, retries and supported published-copy edits run the applicable local restrictions and mandatory Zernio preflight against the exact outgoing copy; an unavailable, invalid or rejected provider check blocks the write. TikTok submissions also check creator permissions and explicit consent. Account access, delivered-file encoding and changing platform policies still require live provider acceptance with your configured credentials.
+
+A planned time is entered in your local timezone and submitted as a UTC instant. Saving a local draft does not submit it: choose **Publish** or **Schedule** from Publishing to send it to Zernio. Updating a provider schedule preserves its platform copies; replacing externally divergent copies on multiple accounts of one platform requires explicit confirmation.
+
 ## Social post lifecycle and approvals
 
 Submitted posts have provider controls in Publishing. Unpublished provider drafts and schedules can be updated or rescheduled; eligible unpublished copies can be cancelled with explicit confirmation. Only fully failed posts can be retried immediately, with a fresh provider status check to avoid duplicating partially published content.
@@ -83,21 +96,19 @@ Submitted posts have provider controls in Publishing. Unpublished provider draft
 
 Other provider changes remain in the native dashboard. Confirmations distinguish deleting an unpublished provider record from permanently removing a published copy.
 
-**Approvals** has an optional project policy, disabled by default. Owners/admins can require review; editors request it, and owners/admins approve or request changes with an audited actor, time, and note. Review covers the exact content, platforms/accounts, effective media, campaign/asset references, and schedule. Asset delivery/original URLs, approval state, type, and available Drive file version/checksum metadata are included. Relevant changes invalidate approval; cosmetic asset names and tags do not. Referenced assets must also be approved.
+**Approvals** has an optional project policy, disabled by default. Owners/admins can require review; editors request it, and owners/admins approve or request changes with an audited actor, time, and note. Review covers the shared content and every platform's effective caption, media and options, selected platforms/accounts, campaign/asset references, and schedule. Asset delivery/original URLs, approval state, type, and available Drive file version/checksum metadata are included for all shared and platform-specific DAM assets. Relevant changes invalidate approval; cosmetic asset names and tags do not. Referenced assets must also be approved.
 
 Approval never publishes automatically. With the policy enabled, publishing and retries need current approval, while changes to submitted post content are restricted to owners/admins. Editors retain explicitly confirmed stop/removal controls. A provider post with every copy confirmed failed can receive a fresh review after its latest provider content is reconciled; partially live posts cannot use that path.
 
-## Zernio inbox webhooks
+## Zernio publishing-status webhooks
 
 Set a strong `ZERNIO_WEBHOOK_SECRET`, then register **`https://your-app.example/api/webhooks/zernio`** in Zernio using the same secret. The endpoint must be publicly reachable over HTTPS. Configure its profile filter to match this installation's projects.
 
-Subscribe to the needed inbox events: `message.received`, `message.sent`, `message.edited`, `message.deleted`, `message.delivered`, `message.read`, `message.played`, `message.failed`, `conversation.started`, and `conversation.control_changed`. Post lifecycle and per-platform terminal events also update existing linked posts. Platform support varies. [Zernio delivery, signatures, and subscriptions](https://docs.zernio.com/webhooks); [inbox payload contracts](https://docs.zernio.com/webhooks/inbox).
+Subscribe to post lifecycle events: `post.scheduled`, `post.published`, `post.failed`, `post.partial`, `post.cancelled`, `post.recycled`, `post.platform.published`, `post.platform.failed`, `post.platform.deleted`, and `post.tiktok.url_resolved`. Events update status evidence for existing linked posts; they do not import unrelated provider captions, media or accounts. Platform support varies. [Zernio delivery, signatures, and subscriptions](https://docs.zernio.com/webhooks).
 
-The receiver verifies the raw-body HMAC-SHA256 signature before parsing, accepts up to 1 MB, persists events before acknowledgement, and deduplicates by the stable event UUID. A local worker processes pending events and resumes after restart. Use **one unique Zernio profile per project**: unmapped or ambiguous profile mappings stay pending instead of routing messages to another project. Routing uses provider profile IDs, never arbitrary event metadata. Delayed legitimate deliveries remain valid; replay protection comes from durable deduplication.
+The receiver verifies the raw-body HMAC-SHA256 signature before parsing, accepts up to 1 MB, persists events before acknowledgement, and deduplicates by the stable event UUID. A local worker processes pending events and resumes after restart. Use **one unique Zernio profile per project**: unmapped or ambiguous profile mappings stay pending instead of updating another project. Routing uses provider profile IDs, never arbitrary event metadata. Delayed legitimate deliveries remain valid; replay protection comes from durable deduplication. Out-of-order events cannot overwrite a newer post status.
 
-Cached conversations expose the latest 500 webhook messages; normalized message history and bounded event payloads remain in the private database. REST history reads up to 100 messages per page with explicit older-page loading. Loaded older messages remain visible when webhook updates arrive, and current deletion/receipt updates take precedence. Webhooks do not backfill earlier history. Reactions, test deliveries, and other unsupported events are acknowledged without creating live DMs. Subscribe to `comment.received`, `review.new`, and `review.updated` for durable change notices in their respective feeds; these events never create DMs or trigger paid provider polling. Attachment references are retained; expiring CDN links and authenticated WhatsApp media are not downloaded into permanent storage. Direct messaging includes Messenger through Zernio.
-
-The inbox also has manually refreshed **Comments** and **Reviews** feeds. Organic comments are supported for Facebook, Instagram, X, Bluesky, Threads, YouTube, LinkedIn, Reddit, and TikTok; reviews for Facebook and Google Business Profile. Load the account's feed before opening its threads or replying. Lists and supported thread pages use provider cursors, and reply permissions remain platform-specific. Replies are explicit user actions; replacing an existing review reply requires a separate confirmation. Signed comment/review events show a reload notice for the selected account. Reloading the feed remains an explicit action; ad comments and reactions still require the provider dashboard. Resolved direct-message conversations can be reopened, and replies/archive/reopen require a confirmed provider acknowledgement. [Zernio inbox API](https://docs.zernio.com/).
+Direct-message, conversation, comment and review subscriptions are no longer needed. Valid signed non-post events are acknowledged and ignored: only event ID, event name, timestamp and raw-body hash are retained, with no new message/comment/review content stored. Older queued inbox events are marked ignored without processing. Legacy private inbox records and tables are retained in the database for operator-managed retention; they are excluded from application state and have no inbox API, UI or assistant access. Removing the feature does not silently delete existing private data.
 
 ## Google Drive DAM
 
@@ -135,9 +146,9 @@ The map shows provider-supplied coordinates and team-entered placement coordinat
 
 ## OpenRouter campaign assistant
 
-Configure OpenRouter in Integrations or set `OPENROUTER_API_KEY` and a tool-capable `OPENROUTER_MODEL`. The assistant runs orchestration and project tools on this application server; **model inference runs remotely through OpenRouter**. Submitted prompts and requested project context leave the server. Inbox snippets are shared only when the user opts in for that request. [OpenRouter tool calling](https://openrouter.ai/docs/guides/features/tool-calling).
+Configure OpenRouter in Integrations or set `OPENROUTER_API_KEY` and a tool-capable `OPENROUTER_MODEL`. The assistant runs orchestration and project tools on this application server; **model inference runs remotely through OpenRouter**. Submitted prompts and requested campaign/post/placement/asset context leave the server. Inbox context and its old opt-in field are no longer accepted. [OpenRouter tool calling](https://openrouter.ai/docs/guides/features/tool-calling).
 
-The assistant can read scoped campaign/post/placement/asset data and propose local drafts. It cannot publish, send replies, activate ads, or book inventory. Users review each suggestion before saving it; saved suggestions are validated through the normal record rules. The default request loop allows four model calls and 2,048 completion tokens per call, configurable through `OPENROUTER_MAX_STEPS` (maximum eight) and `OPENROUTER_MAX_TOKENS` (maximum 8,192).
+The assistant can read scoped campaign/post/placement/asset data and propose local drafts. It cannot publish, activate ads, or book inventory. Users review each suggestion before saving it; saved suggestions are validated through the normal record rules. The default request loop allows four model calls and 2,048 completion tokens per call, configurable through `OPENROUTER_MAX_STEPS` (maximum eight) and `OPENROUTER_MAX_TOKENS` (maximum 8,192).
 
 History records the provider-reported token usage and cost; unavailable usage remains unknown. A failed connection can leave a billable outcome uncertain, so duplicate attempts are blocked until the user reviews the request in OpenRouter and marks it reviewed. [Usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting). Model quality and tool support depend on the chosen model.
 
@@ -165,21 +176,21 @@ To recover a local password, run `node --env-file-if-exists=.env server/cli.mjs 
 
 For Docker, configure `.env`, run `docker compose up --build -d`, and complete first-run setup locally. Compose binds port 3018 to loopback. Place the service behind an HTTPS reverse proxy and set `APP_URL` to the exact public origin before exposure; HTTPS enables secure session cookies. Forward the webhook route without changing its request bytes. The health endpoint is `GET /api/health`.
 
-Run one application process with the current SQLite store. Back up the entire private data directory and matching instance session secret using a consistent SQLite backup or stopping the app before copying files. Event payloads, messages, AI history, invitations, approval snapshots, encrypted credentials, and integration operations are stored there; retention and deletion policies need operator management. Startup, local status checks, and health checks make no paid provider requests; enabling a Google map loads Google's browser service when the map view opens.
+Run one application process with the current SQLite store. Back up the entire private data directory and matching instance session secret using a consistent SQLite backup or stopping the app before copying files. Post event payloads, legacy private inbox data, AI history, invitations, approval snapshots, encrypted credentials, and integration operations are stored there; retention and deletion policies need operator management. Startup, local status checks, and health checks make no paid provider requests; enabling a Google map loads Google's browser service when the map view opens.
 
 The **Settings** provider-operation panel prioritizes unconfirmed requests alongside recent receipts for an instance operator who also administers the workspace. Check the actual provider dashboard before reviewing an uncertain or interrupted outcome, then record a final decision, note, and optional reference. **Applied** keeps repeating that action blocked. **Not applied** permits a new manual attempt with a new action key; the original key remains closed. Reviews do not replay a request, refund a payment, invent a provider result, or update a campaign automatically. Active requests cannot be reviewed; interrupted requests from the same server session have a safety delay. OpenRouter requests use their separate usage-review controls in the assistant.
 
 ## Checks and current limits
 
-See the [v0.3.1 verification record](docs/verification.md) for the browser walkthrough and tested scope.
+See the [verification record](docs/verification.md) for the browser walkthrough and tested scope.
 
 ```sh
 npm run build
 npm test
 ```
 
-CI builds and runs native Node regression tests against temporary databases/HTTP servers and mocked provider responses. Coverage includes authentication, invitations, session/account controls, encrypted integration settings, project isolation, content approvals, provider reconciliation, engagement replies, signed webhook replay/order/restart behavior, ad formats, Broadsign contracts, Google Calendar/Drive, and agent review/usage flows. **CI makes no paid API calls.** Successful tests verify application behavior and mocked contracts; they do not establish live acceptance by Zernio, an ad account, Google, Broadsign, OpenRouter, or an identity provider. Use the explicit connection tests and verify intended live workflows with your own accounts before production use.
+CI builds and runs native Node regression tests against temporary databases/HTTP servers and mocked provider responses. Coverage includes authentication, invitations, session/account controls, encrypted integration settings, project isolation, per-platform draft persistence, publishing/scheduling/retries with exact variant payloads and mandatory preflight, content approvals, provider reconciliation, removed-inbox boundaries and privacy, signed post webhook replay/order/restart behavior, ad formats, Broadsign contracts, Google Calendar/Drive, and agent review/usage flows. **CI makes no paid API calls.** Successful tests verify application behavior and mocked contracts; they do not establish live acceptance by Zernio, an ad account, Google, Broadsign, OpenRouter, or an identity provider. Use the explicit connection tests and verify intended live workflows with your own accounts before production use.
 
 Provider coverage follows the exposed API contracts and account permissions. Rare ad formats, comprehensive bulk/audience tooling, raw OOH proof-of-play, automated retention, and high-availability storage are outside this release. Large views expose pagination or explicit limits. Use the OIDC provider for MFA; local email-based password recovery and automatic invitation delivery are not configured. The application uses one server process with SQLite.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Zernio [ads dashboard](https://github.com/zernio-dev/ads-dashboard) and [unified inbox](https://github.com/zernio-dev/unified-inbox) informed the workflows; they are referenced rather than embedded as separate applications.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Zernio [ads dashboard](https://github.com/zernio-dev/ads-dashboard) informed the advertising workflows; it is referenced rather than embedded as a separate application. Historical reference credits remain in the third-party notices.

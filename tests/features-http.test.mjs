@@ -78,21 +78,20 @@ test('HTTP feature wiring preserves signed bytes, project boundaries, protected 
       assert.equal((await request(`${project}/${collection}/${record.id}`, { method: 'DELETE' })).status, 400);
     }
     assert.equal((await request(`${project}/placements/${savedPlacement.data.record.id}`, { method: 'PATCH', body: { latitude: null } })).status, 400);
-    const message = 'مرحباً دبي 👋 — café', payload = { id: randomUUID(), event: 'message.received', timestamp: '2026-10-18T10:02:00Z', profiles: [{ id: 'profile-http-a', externalId: privateWorkspace.data.projectId }], account: { id: 'account-http-a', accountId: 'account-http-a', profileId: 'profile-http-a', platform: 'facebook' }, conversation: { id: 'internal-http-a', platformConversationId: 'platform-http-a', participantName: 'Alex', status: 'active' }, message: { id: 'message-http-a', conversationId: 'internal-http-a', platformMessageId: 'native-http-a', direction: 'incoming', text: message, sentAt: '2026-10-18T10:01:59Z', sender: { id: 'contact-http-a', name: 'Alex' } } };
+    const content = 'مرحباً دبي 👋 — café', linkedPost = app.store.create(projectId, 'posts', { content, externalId: 'remote-http-a', zernioProfileId: 'profile-http-a', status: 'submitted' });
+    const payload = { id: randomUUID(), event: 'post.published', timestamp: '2026-10-18T10:02:00Z', profiles: [{ id: 'profile-http-a', externalId: privateWorkspace.data.projectId }], post: { id: 'remote-http-a', status: 'published', content: 'External copy 👋 not imported' } };
     const bytes = Buffer.from(JSON.stringify(payload)), split = bytes.indexOf(Buffer.from('👋')) + 1;
     const streamed = await new Promise((resolve, reject) => {
       const req = httpRequest(base + '/api/webhooks/zernio', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': bytes.length, 'X-Zernio-Signature': sign(bytes) } }, res => { const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => resolve({ status: res.statusCode, data: JSON.parse(Buffer.concat(chunks)) })); });
       req.on('error', reject); req.setNoDelay(true); req.write(bytes.subarray(0, split)); setImmediate(() => req.end(bytes.subarray(split)));
     });
     assert.equal(streamed.status, 202); app.webhooks.processPending();
-    const cached = await request(project + '/inbox/cache'), conversation = cached.data.conversations[0];
-    assert.equal(cached.data.conversations.length, 1); assert.equal(conversation.externalConversationId, 'platform-http-a'); assert.equal(conversation.messages[0].content, message);
+    const updated = app.store.get(projectId, 'posts', linkedPost.id);
+    assert.equal(updated.status, 'published'); assert.equal(updated.content, content);
+    assert.equal(updated.providerEventAt, '2026-10-18T10:02:00.000Z');
     assert.equal((await webhook(payload)).status, 200); app.webhooks.processPending();
-    assert.equal((await request(project + '/inbox/cache')).data.conversations[0].messages.length, 1);
-    assert.deepEqual((await request(`/api/projects/${privateWorkspace.data.projectId}/inbox/cache`, { cookie: viewerCookie })).data.conversations, []);
-    assert.equal((await request(`${project}/conversations/${conversation.id}`, { method: 'PATCH', body: { status: 'resolved' } })).status, 400);
-    assert.equal((await request(`${project}/conversations/${conversation.id}`, { method: 'DELETE' })).status, 400);
-    assert.equal((await request(project + '/conversations', { method: 'POST', body: { contact: 'Forged live message', platform: 'facebook', messages: [], source: 'zernio' } })).status, 400);
-    assert.equal(externalRequests, 0, 'Status, mapping, cache, local drafts and webhook processing perform no paid or external provider requests.');
+    assert.equal(app.db.prepare('SELECT count(*) AS count FROM webhook_events WHERE id=?').get(payload.id).count, 1);
+    assert.equal(app.store.list(privateWorkspace.data.projectId, 'posts').length, 0, 'Webhook client metadata cannot route updates to another workspace.');
+    assert.equal(externalRequests, 0, 'Status, mapping, local drafts and webhook processing perform no paid or external provider requests.');
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }
 });

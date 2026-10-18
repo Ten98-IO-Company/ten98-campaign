@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export const collections = ['campaigns', 'posts', 'placements', 'assets', 'providers', 'conversations'];
+export const collections = ['campaigns', 'posts', 'placements', 'assets', 'providers'];
 export function openDatabase(dataDir) {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(join(dataDir, 'campaign.sqlite'));

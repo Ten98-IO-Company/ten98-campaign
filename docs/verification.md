@@ -1,32 +1,38 @@
-# End-to-end verification — v0.3.1
+# End-to-end verification — v0.4.0
 
-Verified on 18 October 2026 using an isolated local database and synthetic accounts. Saved user records, passwords and integration credentials were not changed.
+Verified on 18 October 2026 using an isolated database and synthetic accounts. Saved user records, passwords and integration credentials were not changed.
 
 ## Browser walkthrough
 
-The production frontend was exercised against the actual local HTTP server. Provider interactions used a local fetch mock that blocked external calls.
+The production frontend ran against the actual local HTTP server. An isolated Zernio mock recorded outgoing payloads and blocked external provider requests.
 
 | Workflow | Result |
 | --- | --- |
-| Local sign-in and project navigation | Passed; same-host port cookie collision fixed with independent session/OIDC cookies |
-| Campaign creation with budget and dates | Passed |
-| Asset creation, metadata, approval and real-media fallback | Passed |
-| Social draft with campaign, artwork and planned time | Passed |
-| Request review, review note and approval | Passed |
-| Submit schedule and return provider post to an unpublished draft | Passed with mocked Zernio |
-| Create Meta carousel and view its paused campaign/ad details | Passed with mocked Zernio |
-| Sync inbox, read thread, send reply, resolve and reopen | Passed with mocked Zernio |
-| Media partner and OOH booking with coordinates | Passed |
-| Integration status and explicit Zernio connection test feedback | Passed with mocked Zernio |
-| Create separate project, rename and switch back | Passed; records and settings remained scoped |
-| Sample cleanup control | Displayed only for project administrators; deletion, dependency conflicts and preservation are covered by HTTP checks |
+| Local sign-in and navigation | Passed; campaign navigation has no inbox. |
+| Instagram and X destination/account selection | Passed; selected accounts remained selected after reopening. |
+| Shared and separate captions | Passed; independent captions survived saving and reopening. |
+| Separate media and publishing options | Passed; Instagram image, alt text and first comment stayed independent from X's explicit text-only media set and reply settings. |
+| Media inspection and previews | Passed; file-check results retained size/MIME metadata and showed the effective platform content. |
+| Restriction feedback | Passed; required Instagram media appeared as a restriction; rejected provider preflight displayed its reason. |
+| Scheduling | Passed; 18 November at 09:30 Dubai time became `2026-11-18T05:30:00.000Z`. The recorded request contained the exact per-platform captions, media and options. |
+| Update and reschedule | Passed; the Instagram caption changed independently, the X version remained, and the new 10:45 Dubai time became 06:45 UTC. |
+| Return to provider draft | Passed; clearing the time submitted `isDraft: true`. A regression check also covers stale historical schedule metadata on later status reads. |
+| Immediate publishing | Passed; an empty shared caption and separate X caption/options reached the mocked provider with `publishNow: true`. |
+| Mandatory preflight | Passed; explicit checking and the Publish action both rejected a synthetic provider restriction. The recorded requests confirmed that no extra publication was created. |
+| Submitted-copy preview | Passed; the view displayed the exact X copy rather than the empty shared caption. |
+
+![Per-platform caption and media choices](post-composer.png)
+
+![Submitted-copy preview](post-preview.png)
+
+![Publishing result and campaign navigation](verification.png)
 
 ## Runnable checks
 
-Run `npm run build` and `npm test`. The release has 41 native checks, including temporary HTTP servers, provider mocks and actual frontend handler logic. They cover auth/OIDC/invitations, role boundaries, encrypted settings and connection probes, Drive/Calendar/Maps, approvals, social lifecycle, ad formats, signed webhook routing/replay/restarts, engagement replies, OOH proposals/cancellation, AI usage recovery, and record lifecycle.
+Run `npm run build` and `npm test`. All 51 native Node checks passed. These checks use temporary databases/HTTP servers, mocked provider responses, and actual frontend handler logic. They cover authentication/OIDC/invitations, role boundaries, encrypted settings, connection probes, Drive/Calendar/Maps, content approvals, social publishing lifecycle, advertising formats, Broadsign proposals/bookings, AI usage recovery, and record lifecycle.
 
-New regressions cover local-instance cookie isolation and legacy migration, stale Calendar views, preserved mapping edits, uncertain AI request warnings, native/webhook message identity and edits, delivery receipts and deletion, inbox scope/acknowledgements, sample cleanup, clearing publishing destinations, date-only timezone behavior, upcoming work, and safe preview fallbacks.
+This release adds checks for the shared platform contract, structured options, weighted counters, media restrictions, variant persistence and explicit resets, project-scoped DAM references, exact publishing/scheduling/update/retry payloads, provider preflight failures, creator permissions, divergent account copies, approval invalidation and races, and preview behavior. Removed inbox routes return 404 without contacting Zernio; application state and assistant tools cannot access retained private inbox records. Post webhooks retain signature, deduplication, tenant-isolation, ordering and restart checks. New unsupported events are ignored with their content redacted.
 
 ## Live acceptance
 
-No real Zernio, OpenRouter, Google, Broadsign or OIDC credentials were supplied for this verification. Live provider delivery, account permissions, Google Maps billing/referrer restrictions, webhook delivery over public HTTPS, and identity-provider configuration still require account-level acceptance. Passing mocks does not establish that external setup. Provider coverage and the release's explicit limits remain documented in the README.
+No real Zernio, OpenRouter, Google, Broadsign or OIDC credentials were supplied. Live delivery, account permissions, Google Maps billing/referrer restrictions, public HTTPS webhook delivery, and identity-provider configuration still require account-level acceptance. These checks establish application behavior and mocked contracts, not external account acceptance. The README documents provider-specific limits and workflows that remain in provider dashboards.

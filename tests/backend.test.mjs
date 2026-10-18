@@ -32,7 +32,7 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request('/api/auth/setup', { method: 'POST', body: setup })).status, 409);
     const state = (await request('/api/state')).data, projectId = state.projectId, workspaceId = state.workspaces[0].id;
     assert.equal(state.workspaces[0].role, 'owner'); assert.equal(state.user.isOperator, true); assert.ok(state.campaigns.length > 0);
-    for (const collection of ['campaigns', 'posts', 'assets', 'providers', 'placements', 'conversations']) assert.ok(state[collection].every(record => record.sample === true));
+    for (const collection of ['campaigns', 'posts', 'assets', 'providers', 'placements']) assert.ok(state[collection].every(record => record.sample === true));
     assert.equal(JSON.stringify(state).includes('scrypt$'), false);
     await request('/api/auth/logout', { method: 'POST', body: {} });
     assert.equal((await request('/api/state')).status, 401);

@@ -37,7 +37,7 @@ export default function OperationRecovery({ projectId, role, isOperator, request
         <label className="field"><span>What you checked *</span><textarea name="note" required minLength={10} maxLength={2000} rows={3} placeholder="Describe the provider dashboard, receipt, and result you checked."/></label>
         <label className="field"><span>Provider reference (optional)</span><input name="reference" maxLength={500} placeholder="Provider receipt or campaign reference"/></label>
         <p className="helper-note">Include references needed for the audit. Keep API keys and customer information out of the note. If any part was applied or is still processing, keep repeat requests blocked.</p>
-        <label className="checkbox-label"><input type="checkbox" name="confirmChecked" required/>I checked the provider directly and understand that an incorrect “not applied” review could cause duplicate publishing, messages, bookings, or charges.</label>
+        <label className="checkbox-label"><input type="checkbox" name="confirmChecked" required/>I checked the provider directly and understand that an incorrect “not applied” review could cause duplicate publishing, bookings, or charges.</label>
         <button className="button primary">Record final review</button><button type="button" className="button" onClick={() => setSelected(null)}>Cancel</button>
       </fieldset></form>}
     </>}

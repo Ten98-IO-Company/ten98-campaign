@@ -1,6 +1,6 @@
 {
   "name": "ten98-campaign",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -25,7 +25,7 @@
     "vite": "8.3.4"
   },
   "license": "MIT",
-  "description": "Open-source campaign management for social, advertising, inbox, OOH media and digital assets",
+  "description": "Open-source campaign management for per-platform social publishing, advertising, OOH media and digital assets",
   "repository": {
     "type": "git",
     "url": "https://github.com/Ten98-IO-Company/ten98-campaign.git"

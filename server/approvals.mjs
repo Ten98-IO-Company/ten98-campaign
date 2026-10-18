@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { IntegrationError } from './integrations.mjs';
+import { IntegrationError, targetConfiguration } from './integrations.mjs';
+import { resolveVariant } from '../shared/social-posts.mjs';
 
 const initialized = new WeakSet(), administrators = new Set(['owner', 'admin']);
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
@@ -15,9 +16,30 @@ function policy(db, projectId) {
   return row ? { ...row, requireApproval: Boolean(row.requireApproval) } : { requireApproval: false, updatedBy: null, updatedAt: null };
 }
 function postSnapshot(context, post) {
-  const asset = post.assetId ? context.store.get(context.project.id, 'assets', post.assetId) : null;
-  const mediaItems = post.mediaItems?.length ? post.mediaItems.map(item => ({ type: item.type, url: item.url })) : asset && ['image', 'video'].includes(asset.kind) ? [{ type: asset.kind, url: asset.deliveryUrl || asset.url }] : [];
-  return { content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', asset: post.assetId ? asset ? { id: asset.id, url: asset.url || '', deliveryUrl: asset.deliveryUrl || '', approval: asset.approval || 'pending', kind: asset.kind || '', size: asset.size ?? null, modifiedTime: asset.modifiedTime || '', md5Checksum: asset.md5Checksum || '' } : { id: post.assetId, missing: true } : null };
+  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map(item => item?.assetId)].filter(Boolean))];
+  const records = ids.map(id => context.store.get(context.project.id, 'assets', id));
+  const assets = ids.map((id, index) => {
+    const asset = records[index];
+    return asset ? { id: asset.id, url: asset.url || '', deliveryUrl: asset.deliveryUrl || '', approval: asset.approval || 'pending', kind: asset.kind || '', size: asset.size ?? null, mimeType: asset.mimeType || '', width: asset.width ?? null, height: asset.height ?? null, duration: asset.duration ?? null, modifiedTime: asset.modifiedTime || '', md5Checksum: asset.md5Checksum || '' } : { id, missing: true };
+  });
+  const variants = Object.fromEntries((post.platforms || []).map(platform => {
+    const variant = resolveVariant(post, platform, records.filter(Boolean));
+    return [platform, { content: variant.content, mediaItems: variant.mediaItems, options: variant.options }];
+  }));
+  const mediaItems = resolveVariant({ ...post, platformOverrides: {} }, 'facebook', records.filter(Boolean)).mediaItems;
+  const wireItems = items => items.map(({ width, height, duration, ...item }) => item);
+  const configuration = target => {
+    const current = targetConfiguration(target);
+    const options = Array.isArray(current.options?.threadItems) ? { ...current.options, threadItems: current.options.threadItems.map(item => ({ ...item, ...(Array.isArray(item.mediaItems) ? { mediaItems: wireItems(item.mediaItems) } : {}) })) } : current.options;
+    return { ...(typeof current.content === 'string' ? { customContent: current.content } : {}), ...(current.mediaItems ? { customMedia: wireItems(current.mediaItems) } : {}), ...(options && Object.keys(options).length ? { platformSpecificData: options } : {}) };
+  };
+  const providerVariants = (post.providerResults || []).filter(target => target.platform && target.accountId).flatMap(target => {
+    const override = post.platformOverrides?.[target.platform] || {}, variant = resolveVariant(post, target.platform, records.filter(Boolean));
+    const actual = configuration(target), expected = configuration({ platform: target.platform, ...(Object.hasOwn(override, 'content') ? { customContent: variant.content } : {}), ...(Object.hasOwn(override, 'mediaItems') || Object.hasOwn(override, 'assetId') ? { customMedia: variant.mediaItems } : {}), platformSpecificData: variant.options });
+    const scheduledFor = typeof target.scheduledFor === 'string' && Date.parse(target.scheduledFor) !== Date.parse(post.scheduledAt || post.scheduledFor) ? target.scheduledFor : '';
+    return JSON.stringify(actual) === JSON.stringify(expected) && !scheduledFor ? [] : [{ platform: target.platform, accountId: String(target.accountId?._id || target.accountId), ...actual, ...(scheduledFor ? { scheduledFor } : {}) }];
+  });
+  return { content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null };
 }
 const fingerprint = snapshot => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
 const latest = (db, projectId, postId) => db.prepare('SELECT * FROM post_approval_reviews WHERE project_id=? AND post_id=? ORDER BY rowid DESC LIMIT 1').get(projectId, postId);
@@ -30,7 +52,7 @@ function localPost(context, id) {
   return post;
 }
 function assetApproved(snapshot) {
-  if (snapshot.asset && (snapshot.asset.missing || snapshot.asset.approval !== 'approved')) fail(409, 'APPROVAL_ASSET_REQUIRED', 'Approve the referenced creative asset before approving or publishing this post.');
+  if (snapshot.assets.some(asset => asset.missing || asset.approval !== 'approved')) fail(409, 'APPROVAL_ASSET_REQUIRED', 'Approve every referenced creative asset before approving or publishing this post.');
 }
 function publicReview(db, row) {
   if (!row) return null;
@@ -43,7 +65,7 @@ function fields(body, allowed) {
 function queueItem(context, post) {
   const snapshot = postSnapshot(context, post), review = latest(context.db, context.project.id, post.id);
   const status = submitted(post) && !fullyFailed(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
-  return { post: { id: post.id, status: post.status, providerFailed: fullyFailed(post), sample: Boolean(post.sample), content: snapshot.content, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, asset: snapshot.asset, status, review: publicReview(context.db, review) };
+  return { post: { id: post.id, status: post.status, providerFailed: fullyFailed(post), sample: Boolean(post.sample), content: snapshot.content, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
 }
 
 export function assertPublishingApproval(context, post) {

@@ -10,12 +10,12 @@ import { handleIntegration, IntegrationError, mediaUrl } from './integrations.mj
 import { createIntegrationSettings } from './integration-settings.mjs';
 import { handleInvitations } from './invitations.mjs';
 import { handleOperationRecovery } from './operation-recovery.mjs';
-import { handleEngagement } from './engagement.mjs';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from './approvals.mjs';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.mjs';
 import { handleCalendar } from './calendar.mjs';
 import { handleAgent } from './agent.mjs';
 import { handleOoh } from './ooh.mjs';
+import { normalizePostVariants, normalizeMediaItems } from '../shared/social-posts.mjs';
 
 const roles = ['owner', 'admin', 'editor', 'viewer'];
 const projectFields = 'p.id,p.workspace_id AS workspaceId,p.name,p.color,p.zernio_profile_id AS zernioProfileId,p.drive_folder_id AS driveFolderId';
@@ -40,21 +40,23 @@ function safeUrl(value) { let url; try { url = new URL(value); } catch { bad('Us
 function validateRecord(collection, raw) {
   const data = { ...object(raw) };
   for (const key of ['id', 'projectId', 'createdAt', 'updatedAt', 'sample']) delete data[key];
-  for (const [key, value] of Object.entries(data)) if (typeof value === 'string' && value.length > 16000) bad(`${key} is too long.`);
+  for (const [key, value] of Object.entries(data)) if (typeof value === 'string' && value.length > (collection === 'posts' && key === 'content' ? 100000 : 16000)) bad(`${key} is too long.`);
   if (collection === 'campaigns') {
     data.name = text(data.name, 'Campaign name'); data.channel = choice(data.channel ?? 'mixed', ['social', 'paid', 'ooh', 'mixed'], 'Channel');
     data.status = choice(data.status ?? 'draft', ['draft', 'active', 'paused', 'completed'], 'Status'); data.budget = money(data.budget ?? 0, 'Budget'); data.spent = money(data.spent ?? 0, 'Spend');
   } else if (collection === 'posts') {
-    data.content = text(data.content, 'Post content', 10000); data.platforms = strings(data.platforms ?? [], 'Platforms', 20);
+    data.content ??= '';
+    if (typeof data.content !== 'string' || data.content.length > 100000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(data.content)) bad('Post content must be text of at most 100,000 characters.');
+    data.platforms = strings(data.platforms ?? [], 'Platforms', 20);
     data.status = choice(data.status ?? 'draft', ['draft', 'scheduled', 'published', 'failed', 'cancelled'], 'Status');
     if (data.scheduledFor && !data.scheduledAt) data.scheduledAt = data.scheduledFor;
     date(data.scheduledAt, 'Scheduled time');
     if (data.status === 'scheduled' && (!data.scheduledAt || Date.parse(data.scheduledAt) <= Date.now())) bad('Scheduled posts need a future scheduled time.');
     if (data.accounts !== undefined) data.accounts = strings(data.accounts, 'Accounts', 20);
-    if (data.mediaItems !== undefined) {
-      if (!Array.isArray(data.mediaItems) || data.mediaItems.length > 10) bad('Use at most 10 media items.');
-      data.mediaItems = data.mediaItems.map(item => ({ url: safeUrl(text(item?.url, 'Media URL', 4096)), type: choice(item.type, ['image', 'video'], 'Media type') }));
-    }
+    try {
+      if (data.mediaItems !== undefined && data.mediaItems !== null) data.mediaItems = normalizeMediaItems(data.mediaItems);
+      if (data.platformOverrides !== undefined) data.platformOverrides = normalizePostVariants(data);
+    } catch (error) { bad(error.message); }
   } else if (collection === 'placements') {
     data.name = text(data.name, 'Placement name'); data.type = choice(data.type ?? 'billboard', ['billboard', 'digital', 'transit', 'street'], 'Placement type');
     data.location = text(data.location, 'Location', 500); data.cost = money(data.cost ?? 0, 'Cost'); data.status = choice(data.status ?? 'draft', ['draft', 'requested', 'booked', 'live', 'completed', 'cancelled'], 'Status');
@@ -66,10 +68,7 @@ function validateRecord(collection, raw) {
     if (data.tags !== undefined) data.tags = strings(data.tags, 'Tags');
   } else if (collection === 'providers') {
     data.name = text(data.name, 'Provider name'); data.type = choice(data.type ?? 'ooh', ['ooh', 'media'], 'Provider type'); data.contact = data.contact ? email(data.contact) : '';
-  } else if (collection === 'conversations') {
-    data.contact = text(data.contact, 'Contact'); data.platform = text(data.platform, 'Platform', 80); data.status = choice(data.status ?? 'open', ['open', 'resolved'], 'Status');
-    if (!Array.isArray(data.messages) || data.messages.length > 500) bad('Messages must be a list of at most 500 entries.');
-    data.messages = data.messages.map(item => { object(item); const message = { ...item, content: text(item.content || item.text, 'Message', 10000) }; if (message.createdAt) date(message.createdAt, 'Message date'); return message; });
+
   }
   for (const key of ['startDate', 'endDate', 'startAt', 'endAt']) date(data[key], key);
   for (const [start, end] of [['startDate', 'endDate'], ['startAt', 'endAt']]) if (data[start] && data[end] && Date.parse(data[start]) > Date.parse(data[end])) bad('The end date must be after the start date.');
@@ -130,7 +129,7 @@ export function createApp(options = {}) {
         if (path === '/api/webhooks/zernio' && req.method === 'POST') { const result = webhooks.receive(await readRawBody(req, WEBHOOK_MAX_BYTES), req.headers); return send(result.status, result.body); }
         if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
         if (mutating && req.headers.origin !== appUrl) throw new HttpError(403, 'A matching Origin header is required.');
-        const body = mutating && req.method !== 'DELETE' ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : 65536) : {};
+        const body = mutating && req.method !== 'DELETE' ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : /^\/api\/projects\/[^/]+\/(?:posts(?:\/[^/]+)?|integrations\/social\/(?:validate|update))$/.test(path) ? 2 * 1024 * 1024 : 65536) : {};
         if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(auth.user(req, res)), setupRequired: !db.prepare('SELECT id FROM users LIMIT 1').get(), oidcEnabled: config.oidcEnabled });
         if (path === '/api/auth/setup' && req.method === 'POST') {
           auth.limit('setup:' + req.socket.remoteAddress, 10);
@@ -226,6 +225,7 @@ export function createApp(options = {}) {
         const projectRoute = path.match(/^\/api\/projects\/([^/]+)(?:\/(.*))?$/);
         if (projectRoute) {
           const project = projectAccess(projectRoute[1], user.id), role = project.role;
+          if (/^(?:inbox|engagement|conversations|integrations\/inbox)(?:\/|$)/.test(projectRoute[2] || '')) throw new HttpError(404, 'API route not found.');
           if (mutating && role === 'viewer') throw new HttpError(403, 'Your workspace role is view only.');
           if (projectRoute[2] === 'sample-data' && req.method === 'DELETE') {
             if (!['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only a workspace owner or administrator can remove sample data.');
@@ -236,7 +236,6 @@ export function createApp(options = {}) {
             return send(200, { removed: samples.length, activityRemoved });
           }
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
-          if (projectRoute[2] === 'inbox/cache' && req.method === 'GET') return send(200, { conversations: store.list(project.id, 'conversations') });
           const requestRevision = integrationSettings.revision;
           const assertIntegrationSettings = () => { if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.'); };
           const context = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT zernio_profile_id FROM projects WHERE id=?').get(project.id); if (current?.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT drive_folder_id FROM projects WHERE id=?').get(project.id); if (current?.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: (collection, fields) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); checkReferences(store, project.id, data); return data; } };
@@ -244,7 +243,6 @@ export function createApp(options = {}) {
           context.assertProviderPostEdit = () => assertProviderPostEdit(context);
           if (projectRoute[2]?.startsWith('operations') && await handleOperationRecovery(context)) return;
           if (projectRoute[2]?.startsWith('approvals/') && await handleApprovals(context)) return;
-          if (projectRoute[2]?.startsWith('engagement/') && await handleEngagement(context)) return;
           if (projectRoute[2]?.startsWith('calendar/') && await handleCalendar(context)) return;
           if (projectRoute[2]?.startsWith('agent/') && await handleAgent(context)) return;
           if (projectRoute[2]?.startsWith('ooh/') && await handleOoh(context)) return;
@@ -268,7 +266,7 @@ export function createApp(options = {}) {
             }
             if (id && ['PATCH', 'DELETE'].includes(req.method)) {
               const previous = store.get(project.id, collection, id); if (!previous) throw new HttpError(404, 'Record not found.');
-              if ((collection === 'conversations' && previous.source === 'zernio') || (collection === 'placements' && previous.source === 'broadsign') || (collection === 'campaigns' && previous.externalId) || (collection === 'posts' && (previous.externalId || previous.status === 'published'))) bad('Provider-managed records must be changed through their connected provider controls.');
+              if ((collection === 'placements' && previous.source === 'broadsign') || (collection === 'campaigns' && previous.externalId) || (collection === 'posts' && (previous.externalId || previous.status === 'published'))) bad('Provider-managed records must be changed through their connected provider controls.');
               if (req.method === 'DELETE') { checkDependants(store, project.id, collection, id); store.remove(project.id, collection, id); store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
               rejectProviderFields(body, collection);
               if (collection === 'posts' && (body.status === 'published' || previous.status === 'published' || previous.externalId)) bad('Provider posts must be managed through their connected provider.');
@@ -297,18 +295,19 @@ export function createApp(options = {}) {
   server.requestTimeout = 30000; server.headersTimeout = 10000;
   return { server, db, store, config, webhooks, close: () => new Promise((resolveClose, reject) => { clearInterval(webhookTimer); if (!server.listening) { db.close(); resolveClose(); return; } server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); server.closeIdleConnections(); }) };
 }
-function checkProfileMapping(db, profileId, projectId = '') { if (profileId && db.prepare('SELECT id FROM projects WHERE zernio_profile_id=? AND id<>?').get(profileId, projectId)) throw new HttpError(409, 'This Zernio profile is already mapped to another project. Use one profile per project for inbox routing.'); }
+function checkProfileMapping(db, profileId, projectId = '') { if (profileId && db.prepare('SELECT id FROM projects WHERE zernio_profile_id=? AND id<>?').get(profileId, projectId)) throw new HttpError(409, 'This Zernio profile is already mapped to another project. Use one profile per project for publishing and analytics.'); }
 function projectInput(data) {
   const color = data.color || '#5943ce'; if (typeof color !== 'string' || !/^#[\da-f]{6}$/i.test(color)) bad('Use a six digit hex color.');
   return { name: text(data.name, 'Project name'), color, zernioProfileId: text(data.zernioProfileId, 'Zernio profile', 200, true), driveFolderId: text(data.driveFolderId, 'Drive folder', 200, true) };
 }
 function checkReferences(store, projectId, data) {
   for (const [key, collection] of [['campaignId', 'campaigns'], ['assetId', 'assets'], ['providerId', 'providers']]) if (data[key] && !store.get(projectId, collection, data[key])) bad(`${key} does not belong to this project.`);
+  for (const variant of Object.values(data.platformOverrides || {})) if (variant?.assetId && !store.get(projectId, 'assets', variant.assetId)) bad('A platform creative asset does not belong to this project.');
 }
 function checkDependants(store, projectId, collection, id, realOnly = false) {
   const field = { campaigns: 'campaignId', assets: 'assetId', providers: 'providerId' }[collection];
   // ponytail: scan local project records for references; use indexed relationships if project size makes deletion checks slow.
-  if (field && collections.some(name => store.list(projectId, name).some(record => record[field] === id && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
+  if (field && collections.some(name => store.list(projectId, name).some(record => (record[field] === id || (collection === 'assets' && Object.values(record.platformOverrides || {}).some(variant => variant?.assetId === id))) && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
 }
 function rejectProviderFields(body, collection = '') {
   if (['externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'modifiedTime', 'md5Checksum', 'approvalStatus', 'approvedBy', 'reviewedBy', 'providerDeletedAt', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key) && !(collection === 'assets' && key === 'deliveryUrl'))) bad('Provider identifiers and publication evidence are managed by integrations.');

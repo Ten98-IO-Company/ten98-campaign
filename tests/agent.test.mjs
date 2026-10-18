@@ -16,8 +16,6 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
   const campaign = store.create(project.id, 'campaigns', { name: 'Current project campaign', channel: 'paid', status: 'draft', budget: 100, accessToken: 'SECRET_CAMPAIGN_TOKEN' });
   const foreignCampaign = store.create('project-b', 'campaigns', { name: 'OTHER_PROJECT_PRIVATE_CAMPAIGN', budget: 999 });
   store.create(project.id, 'assets', { name: 'Approved creative', kind: 'image', approval: 'approved', url: 'https://example.com/SECRET_SIGNED_ASSET_URL', credentials: 'SECRET_ASSET_CREDENTIAL' });
-  store.create(project.id, 'conversations', { contact: 'Customer A', platform: 'facebook', status: 'open', messages: [{ content: 'PRIVATE_INBOX_OPT_IN_TEXT', from: 'Customer A' }] });
-  store.create('project-b', 'conversations', { contact: 'OTHER_PROJECT_INBOX', messages: [{ content: 'OTHER_PROJECT_MESSAGE' }] });
   const config = { env: { OPENROUTER_API_KEY: 'SECRET_OPENROUTER_KEY', OPENROUTER_MODEL: 'operator/model', OPENROUTER_MAX_STEPS: '4', OPENROUTER_MAX_TOKENS: '500' } };
   let responses = [];
   globalThis.fetch = async (target, options) => {
@@ -80,11 +78,9 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
     result = await invoke(`actions/${action.id}/apply`, { method: 'POST' }); assert.equal(result.status, 201); assert.equal(result.data.record.status, 'draft'); assert.equal(result.data.record.projectId, project.id);
     result = await invoke(`actions/${action.id}/apply`, { method: 'POST' }); assert.equal(result.status, 200); assert.equal(result.data.alreadyApplied, true); assert.equal(store.list(project.id, 'campaigns').length, 2); assert.equal(calls.length, 2);
 
-    responses = [completion({ role: 'assistant', content: null, tool_calls: [tool('read-shared-inbox', 'read_inbox', {})] }), completion({ role: 'assistant', content: 'Suggested inbox reply for review.' })];
     const beforeInbox = calls.length;
-    result = await invoke('run', { method: 'POST', key: 'inbox-opt-in-001', body: { message: 'Review my recent messages.', includeInbox: true } }); assert.equal(result.status, 200);
-    assert.equal(calls[beforeInbox].tools.some(entry => entry.function.name === 'read_inbox'), true);
-    const inboxContext = JSON.stringify(calls[beforeInbox + 1].messages); assert.equal(inboxContext.includes('PRIVATE_INBOX_OPT_IN_TEXT'), true); assert.equal(inboxContext.includes('OTHER_PROJECT_MESSAGE'), false);
+    result = await invoke('run', { method: 'POST', key: 'removed-inbox-opt-in-001', body: { message: 'Review my recent messages.', includeInbox: true } }); assert.equal(result.status, 400);
+    assert.equal(calls.length, beforeInbox, 'Removed inbox opt-in cannot send private messages to the model.');
 
     responses = [new Error('SECRET_FROM_PROVIDER_OR_NETWORK')];
     const uncertainBody = { message: 'Prepare a separate uncertain run.' }, beforeUncertain = calls.length;

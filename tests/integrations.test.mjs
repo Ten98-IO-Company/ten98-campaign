@@ -21,6 +21,7 @@ test('social lifecycle updates, cancellation, failed retry, published-copy edits
   }
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target), method = options.method || 'GET'; let result;
+    if (url.pathname === '/api/v1/tools/validate/post') return new Response(JSON.stringify({ valid: true, warnings: [] }));
     if (url.pathname === '/api/v1/accounts') result = { accounts: [account] };
     else if (url.pathname === '/api/v1/posts/remote-social' && method === 'GET') {
       if (failedReadback) throw new Error('Read unavailable'); result = { post: remote };
@@ -96,6 +97,7 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
   };
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); calls.push({ url, options });
+    if (url.pathname === '/api/v1/tools/validate/post') return new Response(JSON.stringify({ valid: true, warnings: [] }));
     assert.equal(url.protocol, 'https:');
     assert.equal(options.redirect, 'error');
     const data = await provider(url, options);
@@ -146,7 +148,7 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     assert.equal(result.status, 200); assert.equal(result.data.post.status, 'submitted');
     const replay = await invoke('social/publish', { method: 'POST', body: { postId: post.id }, key: 'publish-0001' });
     assert.deepEqual(replay, result); assert.equal(sends, 1);
-    const other = store.create(project.id, 'posts', { content: 'Another post', platforms: ['instagram'] });
+    const other = store.create(project.id, 'posts', { content: 'Another post', platforms: ['instagram'], assetId: creative.id });
     result = await invoke('social/publish', { method: 'POST', body: { postId: other.id }, key: 'publish-0001' });
     assert.equal(result.data.error.code, 'IDEMPOTENCY_CONFLICT'); assert.equal(sends, 1);
 
@@ -163,7 +165,7 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     await invoke('social/publish', { method: 'POST', body: { postId: other.id }, key: 'new-key-0001' });
     assert.equal(ambiguousSends, 1, 'A fresh action key must not bypass an uncertain publication.');
 
-    const racePost = store.create(project.id, 'posts', { content: 'Submit exactly once', platforms: ['instagram'] });
+    const racePost = store.create(project.id, 'posts', { content: 'Submit exactly once', platforms: ['instagram'], assetId: creative.id });
     let reads = 0; let raceSends = 0; let releaseSecond;
     const secondReady = new Promise(resolve => { releaseSecond = resolve; });
     provider = async url => {
@@ -178,27 +180,15 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
 
     provider = async url => {
       if (url.pathname.endsWith('/accounts')) return { accounts: [account] };
-      if (url.pathname.endsWith('/inbox/conversations')) return { data: [{ id: 'conversation-a', accountId: 'account-a' }], pagination: { hasMore: false } };
       if (url.pathname.endsWith('/ads/tree')) return { campaigns: [{ id: 'campaign-a', platform: 'instagram', profileId: project.zernioProfileId }], pagination: { pages: 1 } };
       throw new Error('Unexpected request');
     };
+    const callsBeforeRemovedInbox = calls.length;
     result = await invoke('inbox/conversation-b/reply', { method: 'POST', body: { accountId: 'account-a', message: 'Hello' }, key: 'reply-00001' });
-    assert.equal(result.status, 403);
+    assert.equal(result.status, 404); assert.equal(calls.length, callsBeforeRemovedInbox);
+    assert.equal((await invoke('inbox')).status, 404); assert.equal(calls.length, callsBeforeRemovedInbox);
     result = await invoke('ads/status', { method: 'POST', body: { campaignId: 'campaign-b', platform: 'instagram', status: 'active' }, key: 'ad-status01' });
     assert.equal(result.status, 403);
-    provider = async (url, options) => {
-      if (url.pathname.endsWith('/accounts')) return { accounts: [account] };
-      if (url.pathname.endsWith('/inbox/conversations')) return { data: [{ id: 'conversation-a', accountId: 'account-a' }], pagination: { hasMore: false } };
-      assert.equal(url.pathname, '/api/v1/inbox/conversations/conversation-a/messages');
-      assert.equal(url.searchParams.get('sortOrder'), 'desc');
-      return { data: [{ id: 'message-2', message: 'Reply', direction: 'outgoing' }, { id: 'message-1', message: 'Question', direction: 'incoming' }], pagination: { hasMore: true, nextCursor: 'older' } };
-    };
-    result = await invoke('inbox/conversation-a/messages?accountId=account-a');
-    assert.deepEqual(result.data.messages.map(item => item.id), ['message-1', 'message-2']);
-    assert.equal(result.data.pagination.nextCursor, 'older');
-    provider = async url => url.pathname.endsWith('/accounts') ? { accounts: [account] } : { data: [], pagination: { hasMore: true, nextCursor: 'same-cursor' } };
-    result = await invoke('inbox');
-    assert.equal(result.data.error.code, 'INCOMPLETE_PROVIDER_DATA');
 
     const metaAccount = { ...account, _id: 'meta-connection', platform: 'metaads' };
     const googleAccount = { ...account, _id: 'google-connection', platform: 'googleads' };

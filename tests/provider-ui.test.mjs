@@ -38,8 +38,8 @@ test('a delayed calendar status response preserves integration mapping edits', a
 test('an agent history refresh failure preserves the uncertain paid request error and retry key', async () => {
   const source = await readFile(new URL('../src/CampaignAgent.tsx', import.meta.url), 'utf8');
   const sendSource = source.slice(source.indexOf('async function send('), source.indexOf('  return <div')).replace('event: React.FormEvent', 'event').replace('key.current!.value', 'key.current.value').replace('error as any', 'error');
-  const failure = Object.assign(new Error('Review OpenRouter usage before retrying.'), { status: 409, run: { status: 'uncertain' } }), key = { current: null }, input = { message: 'Plan a launch', includeInbox: false };
-  const send = new Function('message', 'includeInbox', 'key', 'crypto', 'run', 'request', 'path', 'active', 'setRuns', 'setMessage', 'history', `return (${sendSource});`)(input.message, input.includeInbox, key, { randomUUID: () => 'original-paid-request-key' }, action => action(), async () => { throw failure; }, '/projects/a/agent', { current: true }, () => {}, () => {}, async () => { throw new Error('History could not be loaded.'); });
+  const failure = Object.assign(new Error('Review OpenRouter usage before retrying.'), { status: 409, run: { status: 'uncertain' } }), key = { current: null }, input = { message: 'Plan a launch' };
+  const send = new Function('message', 'key', 'crypto', 'run', 'request', 'path', 'active', 'setRuns', 'setMessage', 'history', `return (${sendSource});`)(input.message, key, { randomUUID: () => 'original-paid-request-key' }, action => action(), async () => { throw failure; }, '/projects/a/agent', { current: true }, () => {}, () => {}, async () => { throw new Error('History could not be loaded.'); });
   await assert.rejects(send({ preventDefault() {} }), error => error === failure);
   assert.deepEqual(key.current, { input: JSON.stringify(input), value: 'original-paid-request-key' });
 });

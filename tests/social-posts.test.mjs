@@ -1,0 +1,107 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { PLATFORM_RULES, normalizeMediaItems, normalizePostVariants, normalizePlatformOptions, resolveVariant, buildPlatformEntry, validatePostForPlatforms, countCaption, captionLimitForVariant } from '../shared/social-posts.mjs';
+
+const image = (extra = {}) => ({ type: 'image', url: 'https://cdn.example.com/creative.jpg', width: 1080, height: 1080, size: 100000, mimeType: 'image/jpeg', ...extra });
+const video = (extra = {}) => ({ type: 'video', url: 'https://cdn.example.com/video.mp4', width: 1080, height: 1920, duration: 30, size: 1000000, mimeType: 'video/mp4', ...extra });
+const valid = (post, platforms) => validatePostForPlatforms(post, platforms).valid;
+
+test('post variants preserve inheritance, explicit empty values, DAM changes and exact provider wire fields', () => {
+  const assets = [{ id: 'base', kind: 'image', deliveryUrl: 'https://cdn.example.com/base.jpg', size: '0' }, { id: 'reel', kind: 'video', deliveryUrl: 'https://cdn.example.com/reel.mp4', size: '123', duration: 30 }];
+  const post = { content: 'Shared caption', assetId: 'base', mediaItems: null, platformOverrides: { twitter: { content: '', mediaItems: [] }, instagram: { content: 'Reel caption', assetId: 'reel', options: { shareToFeed: false } } } };
+  assert.deepEqual(resolveVariant(post, 'twitter', assets), { platform: 'twitter', content: '', mediaItems: [], options: {} });
+  assert.equal(resolveVariant(post, 'facebook', assets).mediaItems[0].url, 'https://cdn.example.com/base.jpg');
+  assert.equal(resolveVariant(post, 'facebook', assets).mediaItems[0].size, undefined, 'Unknown zero-byte Drive metadata must not invalidate a creative');
+  assert.deepEqual(buildPlatformEntry(post, 'instagram', 'account', assets), { platform: 'instagram', accountId: 'account', customContent: 'Reel caption', customMedia: [{ type: 'video', url: 'https://cdn.example.com/reel.mp4', size: 123 }], platformSpecificData: { shareToFeed: false } });
+  assert.deepEqual(buildPlatformEntry(post, 'facebook', 'account', assets), { platform: 'facebook', accountId: 'account' });
+  assert.deepEqual(buildPlatformEntry(post, 'twitter', 'account', assets), { platform: 'twitter', accountId: 'account', customContent: '', customMedia: [] });
+  assert.equal(resolveVariant({ ...post, mediaItems: [] }, 'facebook', assets).mediaItems.length, 0);
+  assert.equal(resolveVariant({ ...post, platformOverrides: { facebook: { assetId: '' } } }, 'facebook', assets).mediaItems.length, 0);
+  assert.equal(resolveVariant({ ...post, platformOverrides: { facebook: { assetId: 'reel', mediaItems: [] } } }, 'facebook', assets).mediaItems.length, 0);
+});
+
+test('draft schema rejects malformed fields and unsafe URLs, keeps incomplete drafts and normalizes supplied metadata', () => {
+  assert.deepEqual(normalizePostVariants({ platformOverrides: { youtube: { content: '', options: {} }, discord: { options: {} } } }), { youtube: { content: '', options: {} }, discord: { options: {} } });
+  assert.throws(() => normalizePostVariants({ platformOverrides: { x: { content: 'Wrong provider key' } } }), /Unsupported/);
+  assert.throws(() => normalizePostVariants({ platformOverrides: { twitter: { caption: 'Typo' } } }), /unsupported field/);
+  assert.throws(() => normalizePostVariants({ platformOverrides: { twitter: { mediaItems: null } } }), /array/);
+  assert.throws(() => normalizePostVariants({ platformOverrides: { youtube: { options: { madeforKids: true } } } }), /not a supported option/);
+  assert.throws(() => normalizePostVariants({ platformOverrides: { youtube: { options: { madeForKids: 'false' } } } }), /true or false/);
+  assert.throws(() => normalizePostVariants({ platformOverrides: { youtube: { options: { visibility: 'friends' } } } }), /unsupported value/);
+  assert.throws(() => normalizePostVariants({ platformOverrides: { facebook: { options: { facebookSettings: { carousel: [] } } } } }), /not a supported option/);
+  for (const url of ['http://cdn.example.com/a.jpg', 'https://localhost/a.jpg', 'https://127.1/a.jpg', 'https://10.0.0.1/a.jpg', 'https://172.31.0.1/a.jpg', 'https://192.168.0.1/a.jpg', 'https://[::1]/a.jpg', 'https://drive.google.com/file/d/id/view', 'https://docs.google.com/a', 'https://user:pass@example.com/a.jpg']) assert.throws(() => normalizeMediaItems([image({ url })]), /HTTPS|Private/);
+  for (const field of ['width', 'height', 'duration', 'size']) for (const value of [NaN, Infinity, -1, 0, '100']) assert.throws(() => normalizeMediaItems([video({ [field]: value })]), /finite positive/);
+  assert.equal(normalizeMediaItems([image({ bytes: 200, size: undefined })])[0].size, 200);
+  assert.throws(() => normalizeMediaItems([image({ subtitles: [{ url: 'https://cdn.example.com/en.vtt', language: 'en' }, { url: 'https://cdn.example.com/en2.vtt', language: 'EN' }] })]), /unique/);
+  const normalized = normalizePostVariants({ platformOverrides: { threads: { options: { threadItems: [{ content: 'Root', mediaItems: [image()] }] } } } });
+  assert.equal(normalized.threads.options.threadItems[0].mediaItems[0].width, 1080);
+  assert.equal(buildPlatformEntry({ platformOverrides: normalized }, 'threads', 'account').platformSpecificData.threadItems[0].mediaItems[0].width, undefined);
+});
+
+test('every supported platform exposes its complete typed options and has a valid minimal post', () => {
+  const options = { instagram: { shareToFeed: false }, facebook: { firstComment: 'First' }, linkedin: { disableLinkPreview: true }, tiktok: { privacyLevel: 'PUBLIC_TO_EVERYONE', allowComment: false, allowDuet: false, allowStitch: false, contentPreviewConfirmed: true, expressConsentGiven: true }, twitter: { replySettings: 'following' }, youtube: { title: 'Launch', visibility: 'unlisted', madeForKids: false }, pinterest: { title: 'Launch', boardId: 'board' }, threads: { topic_tag: 'Campaign' }, bluesky: { langs: ['en-US'] }, reddit: { subreddit: 'example', title: 'Launch', nsfw: false }, googlebusiness: { topicType: 'STANDARD' }, telegram: { parseMode: 'HTML' }, discord: { channelId: '123456789012345678' }, slack: { unfurlMedia: false }, snapchat: { contentType: 'story' } };
+  for (const [platform, rule] of Object.entries(PLATFORM_RULES)) {
+    if (!rule.supported) continue;
+    assert.ok(rule.options.length, `${platform} needs option controls`);
+    const mediaItems = ['youtube', 'tiktok'].includes(platform) ? [video()] : ['instagram', 'pinterest', 'snapchat'].includes(platform) ? [image()] : [];
+    const result = validatePostForPlatforms({ content: 'Launch', mediaItems, platformOverrides: { [platform]: { options: options[platform] } } }, [platform]);
+    assert.equal(result.valid, true, `${platform}: ${JSON.stringify(result.errors)}`);
+    assert.equal(result.variants[platform].options, options[platform]);
+  }
+  assert.equal(valid({ content: 'Hello' }, ['whatsapp']), false);
+  assert.equal(valid({ content: 'Hello' }, ['instagram']), false);
+  assert.equal(valid({ content: 'Hello' }, ['youtube']), false);
+  assert.equal(valid({ content: 'Hello' }, ['tiktok']), false);
+  assert.equal(valid({ content: 'Hello' }, ['discord']), false, 'Discord channel selection is mandatory');
+  assert.equal(valid({ content: 'Hello' }, []), false);
+});
+
+test('restriction checks apply to each resolved caption, media set and platform option combination', () => {
+  const long = 'A'.repeat(501), shared = { content: long, mediaItems: [image()], platformOverrides: { threads: { content: 'Short Threads copy' }, twitter: { content: 'Short X copy', mediaItems: [] } } };
+  assert.equal(valid(shared, ['threads', 'twitter', 'instagram']), true);
+  assert.equal(valid({ ...shared, platformOverrides: {} }, ['threads']), false);
+  assert.equal(valid({ content: 'A'.repeat(1025), mediaItems: [image()] }, ['telegram']), false);
+  assert.equal(valid({ content: 'A'.repeat(4096) }, ['telegram']), true);
+  assert.equal(captionLimitForVariant(resolveVariant({ content: '', mediaItems: [image()] }, 'telegram')), 1024);
+  assert.equal(captionLimitForVariant(resolveVariant({ content: '', mediaItems: [image()] }, 'tiktok')), 4000);
+  assert.equal(valid({ content: 'Images', mediaItems: Array.from({ length: 5 }, () => image()) }, ['twitter']), false);
+  assert.equal(valid({ content: 'Mixed', mediaItems: [image(), video()] }, ['facebook']), false);
+  assert.equal(valid({ content: 'Mixed carousel', mediaItems: [image(), video()] }, ['instagram']), true);
+  assert.equal(valid({ content: 'Reel', mediaItems: [image()], platformOverrides: { facebook: { options: { contentType: 'reel' } } } }, ['facebook']), false);
+  assert.equal(valid({ content: 'Reel', mediaItems: [video({ width: 1920, height: 1080 })], platformOverrides: { facebook: { options: { contentType: 'reel' } } } }, ['facebook']), false);
+  assert.equal(valid({ content: 'Bad ratio', mediaItems: [image({ width: 3000, height: 1000 })] }, ['instagram']), false);
+  assert.equal(valid({ content: 'Too long', mediaItems: [video({ duration: 301 })] }, ['threads']), false);
+  assert.equal(valid({ content: 'Large document', mediaItems: [{ type: 'document', url: 'https://cdn.example.com/a.pdf', size: 101 * 1024 * 1024 }] }, ['linkedin']), false);
+  assert.equal(valid({ content: 'Incompatible type', mediaItems: [image({ mimeType: 'video/mp4' })] }, ['instagram']), false);
+  assert.equal(valid({ content: 'Unsupported format', mediaItems: [image({ mimeType: 'image/webp' })] }, ['threads']), false);
+  assert.equal(valid({ content: 'Required event', platformOverrides: { googlebusiness: { options: { topicType: 'EVENT' } } } }, ['googlebusiness']), false);
+  assert.equal(valid({ content: 'Invalid topic', platformOverrides: { threads: { options: { topic_tag: 'Bad.Topic' } } } }, ['threads']), false);
+  assert.equal(valid({ content: 'Poll', mediaItems: [image()], platformOverrides: { linkedin: { options: { poll: { question: 'Which?', options: ['A', 'B'] } } } } }, ['linkedin']), false);
+  assert.equal(valid({ content: 'Bad quote', mediaItems: [image()], platformOverrides: { twitter: { options: { quoteTweetId: '123' } } } }, ['twitter']), false);
+  assert.equal(valid({ content: 'Background', mediaItems: [image()], platformOverrides: { facebook: { options: { facebookSettings: { textFormatPresetId: '123' } } } } }, ['facebook']), false);
+  assert.equal(valid({ content: 'Tags', mediaItems: [image()], platformOverrides: { instagram: { options: { userTags: [{ username: 'friend' }] } } } }, ['instagram']), false);
+  assert.equal(valid({ content: 'Photos', mediaItems: [image()], platformOverrides: { tiktok: { options: { draft: true, photoCoverIndex: 1 } } } }, ['tiktok']), false);
+});
+
+test('nested options, threads, weighted counters and unknown metadata remain honest', () => {
+  assert.equal(countCaption('Hello https://example.com/very-long-path', 'twitter'), 6 + 23);
+  assert.equal(countCaption('😀👨‍👩‍👧‍👦中', 'twitter'), 6);
+  assert.equal(countCaption('👨‍👩‍👧‍👦', 'bluesky'), 1);
+  const premium = validatePostForPlatforms({ content: 'A'.repeat(281) }, ['twitter']);
+  assert.equal(premium.valid, true);
+  assert.ok(premium.warnings.some(item => item.message.includes('paid X account')));
+  assert.equal(valid({ content: 'A'.repeat(25001) }, ['twitter']), false);
+  assert.equal(valid({ content: 'A'.repeat(281), platformOverrides: { twitter: { options: { poll: { options: ['A', 'B'], duration_minutes: 5 } } } } }, ['twitter']), false);
+  assert.equal(valid({ content: 'Display only'.repeat(100), platformOverrides: { threads: { options: { threadItems: [{ content: 'First' }, { content: 'Second' }] } } } }, ['threads']), true);
+  assert.equal(valid({ content: 'Display only', platformOverrides: { threads: { options: { threadItems: [{ content: 'A'.repeat(501) }] } } } }, ['threads']), false);
+  assert.equal(valid({ content: 'Empty thread', platformOverrides: { bluesky: { options: { threadItems: [] } } } }, ['bluesky']), false);
+  assert.throws(() => normalizePlatformOptions('twitter', { poll: { options: ['Only one'], duration_minutes: 5 } }, { required: true }), /2–4/);
+  assert.throws(() => normalizePlatformOptions('instagram', { audioConfiguration: { audioId: 'track', audioVolume: 101 } }), /invalid number/);
+  assert.throws(() => normalizePlatformOptions('googlebusiness', { callToAction: { type: 'LEARN_MORE' } }, { required: true }), /url is required/);
+  const unknown = validatePostForPlatforms({ content: 'Unknown file metadata', mediaItems: [{ type: 'image', url: image().url }] }, ['instagram']);
+  assert.equal(unknown.valid, true);
+  assert.ok(unknown.warnings.some(issue => issue.message.includes('unknown')));
+  assert.equal(validatePostForPlatforms({ content: 'Unknown file metadata', mediaItems: [{ type: 'image', url: image().url }] }, ['instagram'], { requireMediaMetadata: true }).valid, false);
+  const event = { title: 'Launch', schedule: { startDate: { year: 2026, month: 10, day: 18 }, endDate: { year: 2026, month: 10, day: 19 } } };
+  assert.equal(valid({ content: 'Grand opening', platformOverrides: { googlebusiness: { options: { topicType: 'EVENT', event } } } }, ['googlebusiness']), true);
+});

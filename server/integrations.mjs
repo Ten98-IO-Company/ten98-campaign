@@ -1,4 +1,5 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
+import { buildPlatformEntry, normalizeMediaItems, normalizePostVariants, resolveVariant, validatePostForPlatforms, wireMediaItems } from '../shared/social-posts.mjs';
 
 const ZERNIO = 'https://zernio.com/api/v1';
 const GOOGLE = 'https://www.googleapis.com';
@@ -96,23 +97,6 @@ function requireAccount(accounts, accountId) {
   const account = accounts.find(item => item._id === accountId);
   if (!account) fail(403, 'ACCOUNT_OUTSIDE_PROJECT', 'This account is not connected to this project.');
   return account;
-}
-async function conversations(api, profileId, accounts) {
-  accounts ||= await scopedAccounts(api, profileId);
-  const all = []; let cursor; let meta;
-  // ponytail: cap at 1,000 conversations; add background indexed sync for larger inboxes.
-  for (let page = 0; page < 10; page++) {
-    const result = await api('/inbox/conversations', { profileId, limit: 100, cursor });
-    if (!Array.isArray(result.data)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return conversations.');
-    if (result.meta?.accountsFailed) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'Some messaging accounts could not be read. Reconnect them before continuing.');
-    if (result.data.some(row => { const account = accounts.find(item => item._id === row?.accountId); return !account || (row.platform && row.platform !== account.platform) || (row.profileId && String(row.profileId?._id || row.profileId) !== profileId) || sample(row); })) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned inbox data outside this project’s connected accounts.');
-    all.push(...result.data); meta = result.meta;
-    if (!result.pagination?.hasMore) return { conversations: all, pagination: { hasMore: false, nextCursor: null }, meta };
-    const next = result.pagination.nextCursor;
-    if (!next || next === cursor) break;
-    cursor = next;
-  }
-  fail(503, 'INCOMPLETE_PROVIDER_DATA', 'The inbox exceeds the current sync limit. Narrow the connection before continuing.');
 }
 async function campaignTree(api, profileId, dates = {}) {
   const all = []; let last; let backfillPending = false;
@@ -374,7 +358,7 @@ export async function operation(context, action) {
   }
   if (db.prepare("SELECT id FROM integration_operations WHERE project_id = ? AND request_hash = ? AND status IN ('pending', 'uncertain', 'reviewed-applied')").get(project.id, hash)) fail(409, 'OPERATION_UNCERTAIN', 'This action has an unresolved or externally applied provider outcome. Review its receipt before trying again.');
   const id = randomUUID();
-  const known = new Set(['integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'inbox', 'reply', 'resolve', 'reopen', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'ooh', 'bookings', 'submit', 'engagement', 'comments', 'reviews', 'thread']);
+  const known = new Set(['integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'ooh', 'bookings', 'submit']);
   const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
   db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString(), actionPath, operation.runId);
   active.add(id);
@@ -396,36 +380,102 @@ export function mediaUrl(value) {
   if (url.protocol !== 'https:' || url.username || url.password || url.hostname.includes(':') || /^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.)/i.test(url.hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(url.hostname) || /\.(local|internal)$/.test(url.hostname) || ['drive.google.com', 'docs.google.com'].includes(url.hostname)) fail(400, 'INVALID_MEDIA', 'Media needs a public HTTPS delivery URL. Private Drive preview links cannot be published.');
   return url.href;
 }
-function publishBody(post, accounts) {
+async function postAssets(store, projectId, post) {
+  normalizedVariants(post);
+  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map(item => item?.assetId)].filter(Boolean))];
+  if (ids.some(id => typeof id !== 'string' || id.length > 200)) fail(400, 'INVALID_ASSET', 'Choose a creative asset from this project.');
+  return Promise.all(ids.map(async id => {
+    const asset = await store.get(projectId, 'assets', id);
+    if (!asset) fail(404, 'ASSET_NOT_FOUND', 'An attached asset was not found in this project.');
+    if (sample(asset)) fail(400, 'SAMPLE_RECORD', 'Sample assets cannot be sent to live providers. Add your own asset.');
+    return asset;
+  }));
+}
+function normalizedVariants(post) {
+  try {
+    if (post.content !== undefined && typeof post.content !== 'string') throw new TypeError('The shared caption must be text.');
+    if (post.mediaItems !== undefined && post.mediaItems !== null) normalizeMediaItems(post.mediaItems);
+    if (post.assetId !== undefined && (typeof post.assetId !== 'string' || post.assetId.length > 200)) throw new TypeError('Choose a creative asset from this project.');
+    if (post.platforms !== undefined && (!Array.isArray(post.platforms) || post.platforms.some(platform => typeof platform !== 'string'))) throw new TypeError('Choose the post’s publishing platforms.');
+    return normalizePostVariants(post);
+  } catch (error) { fail(400, 'INVALID_PLATFORM_OVERRIDES', error.message); }
+}
+function commonMedia(post, assets) { return resolveVariant({ ...post, platformOverrides: {} }, 'facebook', assets).mediaItems; }
+function checkMediaUrls(items) {
+  for (const item of items) {
+    mediaUrl(item.url);
+    for (const key of ['thumbnail', 'instagramThumbnail']) if (typeof item[key] === 'string') mediaUrl(item[key]);
+    if (Array.isArray(item.subtitles)) for (const subtitle of item.subtitles) if (subtitle?.url) mediaUrl(subtitle.url);
+  }
+}
+function postRestrictions(post, platforms, assets) {
+  const result = validatePostForPlatforms(post, platforms, { assets });
+  for (const variant of Object.values(result.variants)) checkMediaUrls(variant.mediaItems);
+  return result;
+}
+function assertPostRestrictions(result) {
+  if (!result.valid) fail(422, 'POST_RESTRICTIONS', result.errors.map(item => `${item.platform}: ${item.message}`).join(' ').slice(0, 4000));
+}
+async function providerPostValidation(api, payload) {
+  let result;
+  try { result = await api('/tools/validate/post', {}, payload); }
+  catch (error) { if (error instanceof IntegrationError) error.uncertain = false; throw error; }
+  const validRows = (rows, field) => rows === undefined || (Array.isArray(rows) && rows.length <= 200 && rows.every(item => item && typeof item.platform === 'string' && item.platform.length <= 100 && typeof item[field] === 'string' && item[field].length <= 10000));
+  if (!result || typeof result.valid !== 'boolean' || !validRows(result.errors, 'error') || !validRows(result.warnings, 'warning') || (!result.valid && !result.errors?.length) || (result.valid && result.errors?.length)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return a valid post restriction check.');
+  return { valid: result.valid, errors: (result.errors || []).map(item => ({ platform: item.platform, field: 'provider', message: item.error })), warnings: (result.warnings || []).map(item => ({ platform: item.platform, field: 'provider', message: item.warning })) };
+}
+async function tiktokCreatorInfo(api, accountId, mediaType) {
+  const result = await api(`/accounts/${encodeURIComponent(accountId)}/tiktok/creator-info`, { mediaType });
+  const descriptors = result?.postingLimits?.interactionSettings;
+  if (!result?.creator || typeof result.creator.canPostMore !== 'boolean' || !Array.isArray(result.privacyLevels) || result.privacyLevels.length > 20 || result.privacyLevels.some(item => typeof item?.value !== 'string' || item.value.length > 100 || typeof item.label !== 'string' || item.label.length > 200) || !descriptors || ['allow_comment', ...(mediaType === 'video' ? ['allow_duet', 'allow_stitch'] : [])].some(name => !descriptors[name] || typeof descriptors[name].enabled !== 'boolean' || typeof descriptors[name].required !== 'boolean')) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return valid TikTok creator posting permissions.');
+  const max = result.postingLimits.maxVideoDurationSec;
+  if (max !== undefined && (!Number.isSafeInteger(max) || max < 1 || max > 86400)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return a valid TikTok video duration limit.');
+  return { creator: { nickname: String(result.creator.nickname || '').slice(0, 200), isVerified: result.creator.isVerified === true, canPostMore: result.creator.canPostMore }, privacyLevels: result.privacyLevels.map(item => ({ value: item.value, label: item.label })), postingLimits: { ...(max ? { maxVideoDurationSec: max } : {}), interactionSettings: Object.fromEntries(['allow_comment', 'allow_duet', 'allow_stitch'].map(name => [name, descriptors[name] ? { enabled: descriptors[name].enabled, required: descriptors[name].required, default: descriptors[name].default === true, label: String(descriptors[name].label || name).slice(0, 200) } : null])) } };
+}
+async function assertTikTokCreatorRestrictions(api, payload, mediaMetadata = []) {
+  for (const target of payload.platforms.filter(item => item.platform === 'tiktok')) {
+    const media = target.customMedia ?? payload.mediaItems ?? [], mediaType = media.some(item => item.type === 'video') ? 'video' : 'photo';
+    const info = await tiktokCreatorInfo(api, target.accountId, mediaType), options = { ...target.platformSpecificData?.tiktokSettings, ...target.platformSpecificData };
+    if (!info.creator.canPostMore) fail(422, 'TIKTOK_ACCOUNT_RESTRICTIONS', 'This TikTok account cannot publish more posts right now.');
+    if (!options.draft) {
+      if (!info.privacyLevels.some(level => level.value === (options.privacyLevel ?? options.privacy_level))) fail(422, 'TIKTOK_ACCOUNT_RESTRICTIONS', 'Choose a privacy level currently permitted by this TikTok account.');
+      for (const [snake, camel] of [['allow_comment', 'allowComment'], ['allow_duet', 'allowDuet'], ['allow_stitch', 'allowStitch']]) {
+        const descriptor = info.postingLimits.interactionSettings[snake], selected = options[camel] ?? options[snake];
+        if (descriptor?.required && typeof selected !== 'boolean') fail(422, 'TIKTOK_ACCOUNT_RESTRICTIONS', 'Explicitly choose the TikTok comment, duet and stitch permissions shown for this account.');
+        if (selected === true && (!descriptor || !descriptor.enabled)) fail(422, 'TIKTOK_ACCOUNT_RESTRICTIONS', 'A selected TikTok interaction is disabled by this account.');
+      }
+    }
+    const limit = info.postingLimits.maxVideoDurationSec;
+    if (limit && media.some(item => (mediaMetadata.find(meta => meta.url === item.url)?.duration || item.duration || 0) > limit)) fail(422, 'TIKTOK_ACCOUNT_RESTRICTIONS', `This TikTok account permits videos up to ${limit} seconds.`);
+  }
+}
+function publishBody(post, accounts, assets = [], { validate = true } = {}) {
   if (sample(post)) fail(400, 'SAMPLE_RECORD', 'Sample posts cannot be sent to live providers. Create a new post.');
-  const content = typeof post.content === 'string' ? post.content.trim() : '';
-  if (!content || content.length > 50000) fail(400, 'INVALID_CONTENT', 'Post content is required and must be under 50,000 characters.');
+  const content = typeof post.content === 'string' ? post.content : '';
+  if (content.length > 100000) fail(400, 'INVALID_CONTENT', 'Post content must be under 100,000 characters.');
+  normalizedVariants(post);
   const requested = post.accounts;
   if (requested !== undefined && (!Array.isArray(requested) || requested.length === 0 || requested.length > 50 || requested.some(id => typeof id !== 'string'))) fail(400, 'INVALID_ACCOUNTS', 'Select one or more connected account IDs.');
   const platforms = post.platforms;
   if (!requested && (!Array.isArray(platforms) || !platforms.length)) fail(400, 'INVALID_PLATFORMS', 'Select a platform or connected account for this post.');
   const selected = requested ? [...new Set(requested)].map(id => requireAccount(accounts, id)) : accounts.filter(account => platforms.includes(account.platform));
   if (!selected.length || selected.some(account => account.isActive === false)) fail(400, 'ACCOUNT_UNAVAILABLE', 'A selected publishing account needs connection or reconnection.');
-  if (selected.some(account => !SOCIAL_CONNECT.has(account.platform) && !['bluesky', 'telegram'].includes(account.platform))) fail(400, 'INVALID_PUBLISHING_ACCOUNT', 'Choose a social publishing account, rather than an advertising connection.');
-  const result = { content, platforms: selected.map(account => ({ platform: account.platform, accountId: account._id })) };
-  if (post.mediaItems !== undefined) {
-    if (!Array.isArray(post.mediaItems) || post.mediaItems.length > 20) fail(400, 'INVALID_MEDIA', 'A post supports up to 20 media items.');
-    result.mediaItems = post.mediaItems.map(item => {
-      if (!item || !['image', 'video'].includes(item.type)) fail(400, 'INVALID_MEDIA', 'Choose image or video media.');
-      return { type: item.type, url: mediaUrl(item.url) };
-    });
-  }
+  if (Array.isArray(platforms) && platforms.length && selected.some(account => !platforms.includes(account.platform))) fail(400, 'ACCOUNT_PLATFORM_MISMATCH', 'Every selected account must belong to one of the post’s selected platforms.');
+  if (selected.some(account => !SOCIAL_CONNECT.has(account.platform) && !['bluesky', 'telegram', 'snapchat'].includes(account.platform))) fail(400, 'INVALID_PUBLISHING_ACCOUNT', 'Choose a social publishing account, rather than an advertising connection.');
+  const result = { content, platforms: selected.map(account => buildPlatformEntry(post, account.platform, account._id, assets)) };
+  if (post.mediaItems !== undefined || post.assetId) result.mediaItems = wireMediaItems(commonMedia(post, assets));
   const scheduledAt = post.scheduledAt || post.scheduledFor;
-  if (scheduledAt && Number.isNaN(Date.parse(scheduledAt))) fail(400, 'INVALID_DATE', 'The post schedule is invalid.');
-  if (post.status === 'scheduled' && (!scheduledAt || Date.parse(scheduledAt) <= Date.now())) fail(409, 'SCHEDULE_PASSED', 'This scheduled time has passed. Choose a new time before scheduling the post.');
+  if (scheduledAt && (typeof scheduledAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(scheduledAt) || Number.isNaN(Date.parse(scheduledAt)) || new Date(scheduledAt.slice(0, 10)).toISOString().slice(0, 10) !== scheduledAt.slice(0, 10))) fail(400, 'INVALID_DATE', 'Choose a valid scheduled time with a timezone.');
+  if (post.status === 'scheduled' && !scheduledAt || scheduledAt && Date.parse(scheduledAt) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'This scheduled time has passed. Choose a new time before scheduling the post.');
   if (scheduledAt && Date.parse(scheduledAt) > Date.now()) { result.scheduledFor = new Date(scheduledAt).toISOString(); result.timezone = 'UTC'; }
   else result.publishNow = true;
+  if (validate) assertPostRestrictions(postRestrictions(post, [...new Set(selected.map(account => account.platform))], assets));
   return result;
 }
 function localStatus(status) {
   return ['published', 'failed', 'scheduled', 'draft', 'partial', 'cancelled'].includes(status) ? status : 'submitted';
 }
-async function scopedPost(api, profileId, post) {
+async function scopedPost(api, profileId, post, activeOnly = false) {
   if (!post?.externalId || post.zernioProfileId !== profileId) fail(404, 'POST_NOT_SUBMITTED', 'No submitted post was found for this project.');
   if (post.providerDeletedAt) fail(409, 'POST_CANCELLED', 'This provider record was removed. Create a new draft to publish again.');
   const result = await api(`/posts/${encodeURIComponent(post.externalId)}`), accounts = await scopedAccounts(api, profileId);
@@ -433,12 +483,61 @@ async function scopedPost(api, profileId, post) {
   for (const item of result.post.platforms) {
     const account = requireAccount(accounts, String(item.accountId?._id || item.accountId));
     if (account.platform !== item.platform) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned a post with an inconsistent account platform.');
+    if (activeOnly && account.isActive === false) fail(409, 'ACCOUNT_UNAVAILABLE', 'A selected publishing account needs reconnection before this post can be submitted.');
   }
   return result.post;
 }
+export function targetConfiguration(target) {
+  let options = target.platformSpecificData;
+  if (target.platform === 'tiktok' && options && typeof options === 'object') {
+    const { isDraft, tiktokSettings, ...settings } = options;
+    options = Object.fromEntries(Object.entries({ ...tiktokSettings, ...settings }).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]));
+    if (isDraft === true) options.draft = true;
+  }
+  return { ...(typeof target.customContent === 'string' ? { content: target.customContent } : {}), ...(Array.isArray(target.customMedia) ? { mediaItems: target.customMedia } : {}), ...(options && typeof options === 'object' ? { options } : {}) };
+}
+async function remotePostModel(store, projectId, post, remote) {
+  const assetIds = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map(item => item?.assetId)].filter(id => typeof id === 'string' && id))];
+  const assets = (await Promise.all(assetIds.map(id => store.get(projectId, 'assets', id)))).filter(Boolean), platformOverrides = {};
+  for (const platform of new Set(remote.platforms.map(target => target.platform))) {
+    const copies = remote.platforms.filter(target => target.platform === platform), first = targetConfiguration(copies[0]);
+    if (copies.some(target => canonical(targetConfiguration(target)) !== canonical(first))) continue;
+    if (!Object.keys(first).length) continue;
+    const previous = post.platformOverrides?.[platform];
+    let expected = {};
+    try { if (previous) expected = targetConfiguration(buildPlatformEntry(post, platform, '', assets)); } catch { expected = null; }
+    platformOverrides[platform] = previous && canonical(expected) === canonical(first) ? previous : first;
+  }
+  return { ...post, ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: remote.mediaItems } : {}), platforms: [...new Set(remote.platforms.map(target => target.platform))], accounts: remote.platforms.map(target => String(target.accountId?._id || target.accountId)), platformOverrides, providerResults: redact(remote.platforms), scheduledAt: remote.status === 'draft' || remote.isDraft === true ? '' : remote.scheduledFor || '' };
+}
+function remoteRestrictionPayload(post, remote, { content = remote.content ?? post.content, mediaItems = remote.mediaItems ?? post.mediaItems, overrides, assets = [] } = {}) {
+  const platforms = remote.platforms.map(target => {
+    const base = { platform: target.platform, accountId: String(target.accountId?._id || target.accountId) };
+    if (overrides !== undefined) {
+      const entry = buildPlatformEntry({ ...post, content, mediaItems, platformOverrides: overrides }, target.platform, base.accountId, assets), namespace = target.platform === 'facebook' ? 'facebookSettings' : target.platform === 'tiktok' ? 'tiktokSettings' : null;
+      if (namespace && target.platformSpecificData?.[namespace] && !Object.hasOwn(entry.platformSpecificData || {}, namespace)) entry.platformSpecificData = { ...entry.platformSpecificData, [namespace]: {} };
+      return { ...entry, ...(target.scheduledFor ? { scheduledFor: target.scheduledFor } : {}) };
+    }
+    const configuration = targetConfiguration(target);
+    return { ...base, ...(typeof configuration.content === 'string' ? { customContent: configuration.content } : {}), ...(configuration.mediaItems ? { customMedia: wireMediaItems(configuration.mediaItems) } : {}), ...(configuration.options ? { platformSpecificData: configuration.options } : {}), ...(target.scheduledFor ? { scheduledFor: target.scheduledFor } : {}) };
+  });
+  return { content: content || '', ...(mediaItems !== undefined ? { mediaItems: wireMediaItems(mediaItems) } : {}), platforms };
+}
+function validateRemotePayload(payload, assets = [], post = {}) {
+  for (const target of payload.platforms) {
+    const variant = resolveVariant(post, target.platform, assets), known = [...variant.mediaItems, ...commonMedia(post, assets), ...(variant.options.threadItems || []).flatMap(item => item.mediaItems || [])];
+    const metadata = items => items.map(item => ({ ...known.find(existing => existing.type === item.type && existing.url === item.url), ...item }));
+    const configuration = targetConfiguration(target);
+    if (configuration.mediaItems) configuration.mediaItems = metadata(configuration.mediaItems);
+    if (configuration.options?.threadItems) configuration.options = { ...configuration.options, threadItems: configuration.options.threadItems.map(item => ({ ...item, ...(item.mediaItems ? { mediaItems: metadata(item.mediaItems) } : {}) })) };
+    const single = { content: payload.content, mediaItems: metadata(payload.mediaItems || []), platformOverrides: { [target.platform]: configuration } };
+    assertPostRestrictions(postRestrictions(single, [target.platform], assets));
+  }
+}
 async function savePostSnapshot(store, projectId, post, remote, extra = {}) {
   if (remote?._id !== post.externalId || typeof remote.status !== 'string') throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the post change.', true);
-  const updated = await store.update(projectId, 'posts', post.id, { status: localStatus(remote.status), providerStatus: remote.status, ...(Array.isArray(remote.platforms) ? { providerResults: redact(remote.platforms) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(remote.publishedAt ? { publishedAt: remote.publishedAt } : {}), ...extra });
+  const model = Array.isArray(remote.platforms) && remote.platforms.every(target => target.platform && target.accountId) ? await remotePostModel(store, projectId, post, remote) : {};
+  const updated = await store.update(projectId, 'posts', post.id, { ...model, status: localStatus(remote.status), providerStatus: remote.status, ...(Array.isArray(remote.platforms) ? { providerResults: redact(remote.platforms) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(remote.publishedAt ? { publishedAt: remote.publishedAt } : {}), ...extra });
   if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The local post was removed while the provider accepted this action. Reconcile the provider outcome.', true);
   return updated;
 }
@@ -477,6 +576,7 @@ export async function handleIntegration(context) {
   const path = url.pathname.slice(prefix.length);
   const env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) };
   try {
+    if (path === 'inbox' || path.startsWith('inbox/')) fail(404, 'INTEGRATION_NOT_FOUND', 'This integration action was not found.');
     if (req.method === 'GET' && path === 'status') {
       send(200, { zernio: { configured: Boolean(env.ZERNIO_API_KEY), mapped: Boolean(project.zernioProfileId) }, drive: { configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY), mapped: Boolean(project.driveFolderId) } }); return true;
     }
@@ -602,25 +702,40 @@ export async function handleIntegration(context) {
       if (!dashboard.totals || !Array.isArray(dashboard.daily)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return an analytics dashboard.');
       send(200, redact(dashboard)); return true;
     }
-    if (req.method === 'GET' && path === 'inbox') { send(200, redact(await conversations(api, profileId))); return true; }
+    if (req.method === 'GET' && path === 'social/tiktok-creator-info') {
+      const accountId = identifier(url.searchParams.get('accountId'), 'TikTok account ID'), account = requireAccount(await scopedAccounts(api, profileId), accountId), mediaType = url.searchParams.get('mediaType') || 'video';
+      if (account.platform !== 'tiktok' || !['video', 'photo'].includes(mediaType)) fail(400, 'INVALID_TIKTOK_ACCOUNT', 'Choose a connected TikTok account and video or photo media.');
+      send(200, await tiktokCreatorInfo(api, accountId, mediaType)); return true;
+    }
+    if (req.method === 'POST' && path === 'social/validate-media') {
+      fields(body, ['url'], 'media inspection');
+      const result = await api('/tools/validate/media', {}, { url: mediaUrl(body.url) });
+      if (!result || typeof result.valid !== 'boolean' || (result.size !== undefined && result.size !== null && (!Number.isSafeInteger(result.size) || result.size < 0)) || (result.contentType !== undefined && (typeof result.contentType !== 'string' || result.contentType.length > 200))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return valid media inspection details.');
+      send(200, { valid: result.valid, ...(typeof result.error === 'string' ? { error: result.error.slice(0, 2000) } : {}), contentType: result.contentType || null, size: result.size ?? null }); return true;
+    }
+    if (req.method === 'POST' && path === 'social/validate') {
+      fields(body, ['content', 'platforms', 'accounts', 'mediaItems', 'assetId', 'platformOverrides', 'status', 'scheduledAt', 'campaignId'], 'post validation');
+      const assets = await postAssets(store, project.id, body), accounts = await scopedAccounts(api, profileId);
+      const payload = publishBody(body, accounts, assets, { validate: false }), local = postRestrictions(body, [...new Set(payload.platforms.map(item => item.platform))], assets);
+      if (local.valid) await assertTikTokCreatorRestrictions(api, payload, Object.values(local.variants).flatMap(variant => variant.mediaItems));
+      const provider = await providerPostValidation(api, payload);
+      send(200, { valid: local.valid && provider.valid, errors: [...local.errors, ...provider.errors], warnings: [...local.warnings, ...provider.warnings], local, provider }); return true;
+    }
     if (req.method === 'POST' && path === 'social/publish') {
       const postId = identifier(body.postId, 'post ID'); const post = await store.get(project.id, 'posts', postId);
       if (!post) fail(404, 'POST_NOT_FOUND', 'The post was not found in this project.');
-      let publishingPost = post;
-      if (post.assetId && !post.mediaItems?.length) {
-        const asset = await store.get(project.id, 'assets', post.assetId);
-        if (!asset) fail(404, 'ASSET_NOT_FOUND', 'The attached asset was not found in this project.');
-        if (sample(asset)) fail(400, 'SAMPLE_RECORD', 'Sample assets cannot be sent to live providers. Add your own asset.');
-        publishingPost = { ...post, mediaItems: [{ type: asset.kind, url: asset.deliveryUrl || asset.url }] };
-      }
-      const accounts = await scopedAccounts(api, profileId); const payload = publishBody(publishingPost, accounts);
+      const assets = await postAssets(store, project.id, post), accounts = await scopedAccounts(api, profileId), payload = publishBody(post, accounts, assets);
+      const publishingPost = { ...post, ...(post.assetId && !Array.isArray(post.mediaItems) ? { mediaItems: commonMedia(post, assets) } : {}), platformOverrides: Object.fromEntries(Object.entries(post.platformOverrides || {}).map(([platform, variant]) => [platform, { ...variant, ...(variant.assetId && !Array.isArray(variant.mediaItems) ? { mediaItems: resolveVariant(post, platform, assets).mediaItems } : {}) }])) };
       const outcome = await operation(context, async key => {
         const current = await store.get(project.id, 'posts', post.id);
         if (!current) fail(404, 'POST_NOT_FOUND', 'The post was removed before it could be submitted.');
         if (current.externalId) fail(409, 'POST_ALREADY_SUBMITTED', 'This post has already been submitted. Refresh its provider status.');
         if (current.updatedAt && current.updatedAt !== post.updatedAt) fail(409, 'POST_CHANGED', 'The post changed while preparing publication. Review it and submit again.');
         if (current.status === 'scheduled' && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'This scheduled time has passed. Choose a new time before scheduling the post.');
+        await assertTikTokCreatorRestrictions(api, payload, Object.values(postRestrictions(post, payload.platforms.map(item => item.platform), assets).variants).flatMap(variant => variant.mediaItems));
+        assertPostRestrictions(await providerPostValidation(api, payload));
         context.assertPublishingApproval?.(publishingPost);
+        if (payload.scheduledFor && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'The scheduled time passed during the provider checks. Choose a future time before submitting.');
         const result = await api('/posts', {}, payload, key);
         if (!result.post?._id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the submitted post.', true);
         const updated = await store.update(project.id, 'posts', post.id, { externalId: result.post._id, zernioProfileId: profileId, status: localStatus(result.post.status), providerStatus: result.post.status, providerResults: redact(result.post.platforms || []) });
@@ -634,15 +749,15 @@ export async function handleIntegration(context) {
       if (!post?.externalId || post.zernioProfileId !== profileId) fail(404, 'POST_NOT_SUBMITTED', 'No submitted post was found for this project.');
       if (post.providerDeletedAt) { send(200, { post, provider: { id: post.externalId, status: 'cancelled', deleted: true } }); return true; }
       const remote = await scopedPost(api, profileId, post);
-      const updated = await savePostSnapshot(store, project.id, post, remote, { ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: remote.mediaItems } : {}), ...(remote.scheduledFor ? { scheduledAt: remote.scheduledFor } : {}) });
+      const updated = await savePostSnapshot(store, project.id, post, remote);
       send(200, { post: updated, provider: { id: post.externalId, status: remote.status } }); return true;
     }
     if (req.method === 'POST' && ['social/update', 'social/cancel', 'social/retry', 'social/edit-published', 'social/unpublish'].includes(path)) {
-      const allowed = path === 'social/update' ? ['postId', 'content', 'mode', 'scheduledAt'] : path === 'social/retry' ? ['postId', 'confirmPublish'] : path === 'social/edit-published' ? ['postId', 'accountId', 'content', 'confirmEdit'] : path === 'social/unpublish' ? ['postId', 'accountId', 'confirmRemoval'] : ['postId', 'confirmCancellation'];
+      const allowed = path === 'social/update' ? ['postId', 'content', 'mediaItems', 'assetId', 'platformOverrides', 'confirmReplaceVariants', 'mode', 'scheduledAt'] : path === 'social/retry' ? ['postId', 'confirmPublish'] : path === 'social/edit-published' ? ['postId', 'accountId', 'content', 'confirmEdit'] : path === 'social/unpublish' ? ['postId', 'accountId', 'confirmRemoval'] : ['postId', 'confirmCancellation'];
       fields(body, allowed, 'post action');
       const postId = identifier(body.postId, 'post ID');
       const outcome = await operation(context, async key => {
-        const post = await store.get(project.id, 'posts', postId), remote = await scopedPost(api, profileId, post), endpoint = `/posts/${encodeURIComponent(post.externalId)}`;
+        const post = await store.get(project.id, 'posts', postId), remote = await scopedPost(api, profileId, post, ['social/retry', 'social/edit-published'].includes(path) || path === 'social/update' && body.mode === 'scheduled'), endpoint = `/posts/${encodeURIComponent(post.externalId)}`;
         if (sample(post)) fail(400, 'SAMPLE_RECORD', 'Sample posts cannot be sent to live providers.');
         if (path === 'social/cancel') {
           if (body.confirmCancellation !== true) fail(400, 'CANCELLATION_CONFIRMATION_REQUIRED', 'Confirm removal of this unpublished provider record.');
@@ -655,7 +770,8 @@ export async function handleIntegration(context) {
         if (path === 'social/update') {
           context.assertProviderPostEdit?.();
           if (!['draft', 'scheduled', 'failed', 'cancelled'].includes(remote.status) || remote.platforms.some(item => ['published', 'publishing'].includes(item.status))) fail(409, 'POST_NOT_EDITABLE', 'Only unpublished posts can be rescheduled or changed here.');
-          const content = text(body.content, 'post content', 10000);
+          const content = body.content === undefined ? remote.content ?? post.content ?? '' : body.content;
+          if (typeof content !== 'string' || content.length > 100000) fail(400, 'INVALID_CONTENT', 'Use a caption of at most 100,000 characters.');
           if (!['draft', 'scheduled'].includes(body.mode)) fail(400, 'INVALID_POST_MODE', 'Save as a draft or choose a future schedule.');
           const payload = { content, isDraft: body.mode === 'draft' }; let scheduledAt = '';
           if (body.mode === 'scheduled') {
@@ -665,15 +781,29 @@ export async function handleIntegration(context) {
             if (Date.parse(scheduledAt) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'Choose a future time before scheduling.');
             Object.assign(payload, { scheduledFor: scheduledAt, timezone: 'UTC' });
           }
+          const model = await remotePostModel(store, project.id, post, remote), changed = { ...model, content, ...(Object.hasOwn(body, 'mediaItems') ? { mediaItems: body.mediaItems } : {}), ...(Object.hasOwn(body, 'assetId') ? { assetId: body.assetId } : {}), ...(Object.hasOwn(body, 'platformOverrides') ? { platformOverrides: body.platformOverrides } : {}) };
+          normalizedVariants(changed);
+          const assets = await postAssets(store, project.id, changed), replacingVariants = Object.hasOwn(body, 'platformOverrides'), replacingMedia = Object.hasOwn(body, 'mediaItems') || Object.hasOwn(body, 'assetId');
+          if (Object.hasOwn(body, 'confirmReplaceVariants') && typeof body.confirmReplaceVariants !== 'boolean') fail(400, 'INVALID_VARIANT_CONFIRMATION', 'Explicitly confirm replacement of account-specific provider copies.');
+          const divergent = remote.platforms.some(target => remote.platforms.some(other => other.platform === target.platform && canonical(targetConfiguration(other)) !== canonical(targetConfiguration(target))));
+          if (replacingVariants && divergent && body.confirmReplaceVariants !== true) fail(409, 'PROVIDER_VARIANT_CONFIRMATION_REQUIRED', 'Accounts on the same platform have different provider captions, media or options. Confirm replacing those copies with one shared customization for each platform.');
+          const checkPayload = remoteRestrictionPayload(changed, remote, { content, mediaItems: replacingMedia ? commonMedia(changed, assets) : remote.mediaItems ?? model.mediaItems, ...(replacingVariants ? { overrides: changed.platformOverrides } : {}), assets });
+          if (replacingMedia) payload.mediaItems = checkPayload.mediaItems;
+          if (replacingVariants) payload.platforms = checkPayload.platforms;
+          if (body.mode === 'scheduled') { validateRemotePayload(checkPayload, assets, changed); await assertTikTokCreatorRestrictions(api, checkPayload, Object.values(postRestrictions(changed, changed.platforms, assets).variants).flatMap(variant => variant.mediaItems)); assertPostRestrictions(await providerPostValidation(api, { ...checkPayload, scheduledFor: scheduledAt, timezone: 'UTC' })); }
+          context.assertProviderPostEdit?.();
+          if (payload.scheduledFor && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'The scheduled time passed during the provider checks. Choose a future time before submitting.');
           const result = await api(endpoint, {}, payload, key, 'PUT');
-          const updated = await savePostSnapshot(store, project.id, post, result.post, { content: result.post?.content ?? content, scheduledAt });
+          const updated = await savePostSnapshot(store, project.id, changed, result.post, { content: result.post?.content ?? content, scheduledAt });
           await store.activity(project.id, 'Updated an unpublished social post in Zernio.');
           return { post: updated, provider: { id: post.externalId, status: result.post.status } };
         }
         if (path === 'social/retry') {
           if (body.confirmPublish !== true) fail(400, 'PUBLISH_CONFIRMATION_REQUIRED', 'Confirm that this failed post should publish immediately.');
           if (remote.status !== 'failed' || remote.platforms.some(item => ['published', 'publishing'].includes(item.status))) fail(409, 'POST_NOT_FAILED', 'Only a fully failed post can be retried. Manage partial results per account to avoid duplicate publishing.');
-          context.assertPublishingApproval?.({ ...post, ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: remote.mediaItems } : {}) });
+          const model = await remotePostModel(store, project.id, post, remote), assets = await postAssets(store, project.id, model), payload = remoteRestrictionPayload(model, remote);
+          validateRemotePayload(payload, assets, model); await assertTikTokCreatorRestrictions(api, payload, Object.values(postRestrictions(model, model.platforms, assets).variants).flatMap(variant => variant.mediaItems)); assertPostRestrictions(await providerPostValidation(api, { ...payload, publishNow: true }));
+          context.assertPublishingApproval?.(model);
           const result = await api(endpoint + '/retry', {}, {}, key);
           const updated = await savePostSnapshot(store, project.id, post, result.post);
           await store.activity(project.id, 'Retried a failed social post through Zernio.');
@@ -685,7 +815,12 @@ export async function handleIntegration(context) {
         if (editing) context.assertProviderPostEdit?.();
         if (!supported.includes(target.platform)) fail(422, 'POST_ACTION_UNSUPPORTED', 'This platform does not support this action through Zernio. Use its native dashboard.');
         if (body[editing ? 'confirmEdit' : 'confirmRemoval'] !== true) fail(400, 'POST_ACTION_CONFIRMATION_REQUIRED', editing ? 'Confirm the text change to this published copy.' : 'Confirm permanent removal of this published copy.');
-        const payload = { platform: target.platform, accountId, ...(editing ? { content: text(body.content, 'post content', target.platform === 'linkedin' ? 3000 : target.platform === 'pinterest' ? 800 : target.platform === 'slack' ? 4000 : 10000) } : {}) };
+        const payload = { platform: target.platform, accountId, ...(editing ? { content: text(body.content, 'post content', 100000) } : {}) };
+        if (editing) {
+          const checkPayload = remoteRestrictionPayload(post, { ...remote, platforms: [{ ...target, customContent: payload.content }] });
+          validateRemotePayload(checkPayload, [], post); assertPostRestrictions(await providerPostValidation(api, checkPayload));
+          context.assertProviderPostEdit?.();
+        }
         const result = await api(endpoint + (editing ? '/edit' : '/unpublish'), {}, payload, key);
         if (result.success !== true) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the published-post action.', true);
         let confirmed;
@@ -695,34 +830,6 @@ export async function handleIntegration(context) {
         await store.activity(project.id, editing ? 'Edited the text of a published social copy.' : 'Removed a published social copy through Zernio.');
         return { post: updated, provider: { id: post.externalId, status: confirmed.status, accountId, action: editing ? 'edited' : 'unpublished' } };
       }); send(outcome.status, outcome.data); return true;
-    }
-    const inboxMatch = /^inbox\/([^/]+)\/(messages|reply|resolve|reopen)$/.exec(path);
-    if (inboxMatch) {
-      const conversationId = identifier(decodeURIComponent(inboxMatch[1]), 'conversation ID');
-      const accountId = identifier(req.method === 'GET' ? url.searchParams.get('accountId') : body.accountId, 'account ID');
-      const accounts = await scopedAccounts(api, profileId); requireAccount(accounts, accountId);
-      const listed = await conversations(api, profileId, accounts);
-      if (!listed.conversations.some(item => item.id === conversationId && item.accountId === accountId)) fail(403, 'CONVERSATION_OUTSIDE_PROJECT', 'This conversation is not in this project.');
-      const endpoint = `/inbox/conversations/${encodeURIComponent(conversationId)}`;
-      if (req.method === 'GET' && inboxMatch[2] === 'messages') {
-        const cursor = url.searchParams.get('cursor'); if (cursor && cursor.length > 4000) fail(400, 'INVALID_CURSOR', 'The message cursor is invalid.');
-        const result = await api(`${endpoint}/messages`, { accountId, limit: 100, sortOrder: 'desc', cursor });
-        const messages = result.messages || result.data?.messages || result.data;
-        if (!Array.isArray(messages)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return conversation messages.');
-        send(200, { messages: redact([...messages].reverse()), pagination: redact(result.pagination || result.data?.pagination || {}), sortOrder: 'asc' }); return true;
-      }
-      if (req.method === 'POST' && ['reply', 'resolve', 'reopen'].includes(inboxMatch[2])) {
-        fields(body, inboxMatch[2] === 'reply' ? ['accountId', 'message'] : ['accountId'], 'inbox action');
-        const message = inboxMatch[2] === 'reply' ? text(body.message, 'message', 10000) : undefined;
-        const status = inboxMatch[2] === 'reopen' ? 'active' : 'archived';
-        const outcome = await operation(context, async key => {
-          const result = await api(inboxMatch[2] === 'reply' ? `${endpoint}/messages` : endpoint, {}, inboxMatch[2] === 'reply' ? { accountId, message } : { accountId, status }, key, inboxMatch[2] === 'reply' ? 'POST' : 'PUT');
-          if (result.success !== true || (inboxMatch[2] !== 'reply' && (result.data?.accountId !== accountId || result.data?.status !== status))) throw new IntegrationError(502, 'INBOX_ACTION_NOT_CONFIRMED', 'Zernio did not confirm the inbox action. Check the provider conversation before repeating it.', true);
-          return { result: redact(result) };
-        });
-        send(outcome.status, outcome.data); return true;
-      }
-      fail(405, 'METHOD_NOT_ALLOWED', 'This inbox action does not support that method.');
     }
     if (req.method === 'POST' && path === 'ads/status') {
       fields(body, ['campaignId', 'platform', 'status']);

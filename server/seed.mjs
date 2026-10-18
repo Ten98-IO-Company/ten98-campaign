@@ -12,7 +12,5 @@ export function seedSample(store, projectId) {
   add('posts', { content: 'Meet your new everyday favorites. Explore the details that make a difference.', platforms: ['instagram'], status: 'published', publishedAt: '2026-10-15T09:00:00.000Z', campaignId: campaign.id, assetId: asset.id, impressions: 18400, engagement: 842 });
   add('placements', { name: 'Sheikh Zayed Road — North', providerId: provider.id, type: 'digital', location: 'Dubai, UAE', cost: 6500, status: 'live', startDate: '2026-10-01', endDate: '2026-10-31', impressions: 125000 });
   add('placements', { name: 'Downtown boulevard', providerId: provider.id, type: 'billboard', location: 'Downtown Dubai', cost: 4500, status: 'booked', startDate: '2026-11-01', endDate: '2026-11-30', impressions: 0 });
-  add('conversations', { contact: 'Alex Morgan', platform: 'instagram', status: 'open', avatar: 'AM', messages: [{ id: 'sample-message-1', content: 'Love the new collection! Is it available in store?', from: 'contact', createdAt: '2026-10-18T07:40:00.000Z' }] });
-  add('conversations', { contact: 'Jamie Chen', platform: 'facebook', status: 'open', avatar: 'JC', messages: [{ id: 'sample-message-2', content: 'Hi! Could you share more details about the launch?', from: 'contact', createdAt: '2026-10-18T06:15:00.000Z' }] });
-  store.activity(projectId, 'Sample campaign workspace created. These figures and messages are illustrative.', true);
+  store.activity(projectId, 'Sample campaign workspace created. These figures are illustrative.', true);
 }
