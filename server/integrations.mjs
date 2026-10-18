@@ -356,27 +356,39 @@ export async function operation(context, action) {
   const { db, project, req, url, body } = context;
   const key = req.headers['idempotency-key'];
   if (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{8,200}$/.test(key)) fail(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Send a unique Idempotency-Key header for this action.');
-  db.exec(`CREATE TABLE IF NOT EXISTS integration_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_key TEXT NOT NULL, request_hash TEXT NOT NULL, status TEXT NOT NULL, response TEXT, http_status INTEGER, created_at TEXT NOT NULL, UNIQUE(project_id, request_key))`);
+  db.exec(`CREATE TABLE IF NOT EXISTS integration_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_key TEXT NOT NULL, request_hash TEXT NOT NULL, status TEXT NOT NULL, response TEXT, http_status INTEGER, created_at TEXT NOT NULL, action_path TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', UNIQUE(project_id, request_key))`);
+  const columns = new Set(db.prepare('PRAGMA table_info(integration_operations)').all().map(column => column.name));
+  for (const name of ['action_path', 'run_id']) if (!columns.has(name)) db.exec(`ALTER TABLE integration_operations ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
+  operation.active ||= new WeakMap(); operation.runId ||= randomUUID();
+  if (!operation.active.has(db)) operation.active.set(db, new Set());
+  const active = operation.active.get(db);
   const hash = createHash('sha256').update(canonical({ method: req.method, path: url.pathname, body })).digest('hex');
   const existing = db.prepare('SELECT * FROM integration_operations WHERE project_id = ? AND request_key = ?').get(project.id, key);
   if (existing) {
     if (existing.request_hash !== hash) fail(409, 'IDEMPOTENCY_CONFLICT', 'This action key belongs to a different request.');
     if (existing.status === 'uncertain' || existing.status === 'pending') fail(409, 'OPERATION_UNCERTAIN', 'The provider outcome needs reconciliation. This action cannot be retried automatically.');
+    if (existing.status.startsWith('reviewed-')) return { status: 409, data: { operation: { id: existing.id, status: existing.status }, error: { code: 'OPERATION_REVIEWED', message: 'This action key is closed after an operator review. Reuse of this key cannot send another provider request.' } } };
     return { status: existing.http_status, data: JSON.parse(existing.response) };
   }
-  if (db.prepare("SELECT id FROM integration_operations WHERE project_id = ? AND request_hash = ? AND status IN ('pending', 'uncertain')").get(project.id, hash)) fail(409, 'OPERATION_UNCERTAIN', 'This action has an unresolved provider outcome. Reconcile it before trying again.');
+  if (db.prepare("SELECT id FROM integration_operations WHERE project_id = ? AND request_hash = ? AND status IN ('pending', 'uncertain', 'reviewed-applied')").get(project.id, hash)) fail(409, 'OPERATION_UNCERTAIN', 'This action has an unresolved or externally applied provider outcome. Review its receipt before trying again.');
   const id = randomUUID();
-  db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString());
-  let outcome;
-  try { outcome = { status: 200, data: { operation: { id, status: 'complete' }, ...await action(key) } }; }
-  catch (error) {
-    const uncertain = !(error instanceof IntegrationError) || error.uncertain;
-    outcome = { status: uncertain ? 409 : error.status, data: { operation: { id, status: uncertain ? 'uncertain' : 'failed' }, error: { code: uncertain ? 'OPERATION_UNCERTAIN' : error.code, message: uncertain ? 'The provider outcome needs reconciliation. Check the provider before making another attempt.' : error.message } } };
-  }
-  db.prepare('UPDATE integration_operations SET status = ?, response = ?, http_status = ? WHERE id = ?').run(outcome.data.operation.status, JSON.stringify(outcome.data), outcome.status, id);
-  return outcome;
+  const known = new Set(['integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'inbox', 'reply', 'resolve', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'ooh', 'bookings', 'submit', 'engagement', 'comments', 'reviews', 'thread']);
+  const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
+  db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString(), actionPath, operation.runId);
+  active.add(id);
+  try {
+    let outcome;
+    try { outcome = { status: 200, data: { operation: { id, status: 'complete' }, ...await action(key) } }; }
+    catch (error) {
+      const uncertain = !(error instanceof IntegrationError) || error.uncertain;
+      outcome = { status: uncertain ? 409 : error.status, data: { operation: { id, status: uncertain ? 'uncertain' : 'failed' }, error: { code: uncertain ? 'OPERATION_UNCERTAIN' : error.code, message: uncertain ? 'The provider outcome needs reconciliation. Check the provider before making another attempt.' : error.message } } };
+    }
+    const updated = db.prepare("UPDATE integration_operations SET status = ?, response = ?, http_status = ? WHERE id = ? AND status = 'pending'").run(outcome.data.operation.status, JSON.stringify(outcome.data), outcome.status, id);
+    if (!updated.changes) fail(409, 'OPERATION_REVIEWED', 'This action was closed by an operator review. Its review and original receipt were preserved.');
+    return outcome;
+  } finally { active.delete(id); }
 }
-function mediaUrl(value) {
+export function mediaUrl(value) {
   let url;
   try { url = new URL(value); } catch { fail(400, 'INVALID_MEDIA', 'Media must have a public HTTPS delivery URL.'); }
   if (url.protocol !== 'https:' || url.username || url.password || url.hostname.includes(':') || /^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.)/i.test(url.hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(url.hostname) || /\.(local|internal)$/.test(url.hostname) || ['drive.google.com', 'docs.google.com'].includes(url.hostname)) fail(400, 'INVALID_MEDIA', 'Media needs a public HTTPS delivery URL. Private Drive preview links cannot be published.');
@@ -409,7 +421,24 @@ function publishBody(post, accounts) {
   return result;
 }
 function localStatus(status) {
-  return ['published', 'failed', 'scheduled', 'draft', 'partial'].includes(status) ? status : 'submitted';
+  return ['published', 'failed', 'scheduled', 'draft', 'partial', 'cancelled'].includes(status) ? status : 'submitted';
+}
+async function scopedPost(api, profileId, post) {
+  if (!post?.externalId || post.zernioProfileId !== profileId) fail(404, 'POST_NOT_SUBMITTED', 'No submitted post was found for this project.');
+  if (post.providerDeletedAt) fail(409, 'POST_CANCELLED', 'This provider record was removed. Create a new draft to publish again.');
+  const result = await api(`/posts/${encodeURIComponent(post.externalId)}`), accounts = await scopedAccounts(api, profileId);
+  if (result.post?._id !== post.externalId || !Array.isArray(result.post.platforms) || !result.post.platforms.length) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return the submitted post.');
+  for (const item of result.post.platforms) {
+    const account = requireAccount(accounts, String(item.accountId?._id || item.accountId));
+    if (account.platform !== item.platform) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned a post with an inconsistent account platform.');
+  }
+  return result.post;
+}
+async function savePostSnapshot(store, projectId, post, remote, extra = {}) {
+  if (remote?._id !== post.externalId || typeof remote.status !== 'string') throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the post change.', true);
+  const updated = await store.update(projectId, 'posts', post.id, { status: localStatus(remote.status), providerStatus: remote.status, ...(Array.isArray(remote.platforms) ? { providerResults: redact(remote.platforms) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(remote.publishedAt ? { publishedAt: remote.publishedAt } : {}), ...extra });
+  if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The local post was removed while the provider accepted this action. Reconcile the provider outcome.', true);
+  return updated;
 }
 async function driveToken(env, scope = 'https://www.googleapis.com/auth/drive') {
   const now = Math.floor(Date.now() / 1000);
@@ -423,17 +452,18 @@ async function driveToken(env, scope = 'https://www.googleapis.com/auth/drive') 
   return result.access_token;
 }
 function driveAsset(file) {
-  return { name: file.name, url: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`, thumbnailUrl: file.thumbnailLink || '', kind: file.mimeType?.startsWith('image/') ? 'image' : file.mimeType?.startsWith('video/') ? 'video' : 'document', mimeType: file.mimeType, size: Number(file.size || 0), driveId: file.id, source: 'google-drive', tags: [], approval: 'pending' };
+  return { name: file.name, url: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`, thumbnailUrl: file.thumbnailLink || '', kind: file.mimeType?.startsWith('image/') ? 'image' : file.mimeType?.startsWith('video/') ? 'video' : 'document', mimeType: file.mimeType, size: Number(file.size || 0), modifiedTime: typeof file.modifiedTime === 'string' ? file.modifiedTime : '', md5Checksum: typeof file.md5Checksum === 'string' ? file.md5Checksum : '', driveId: file.id, source: 'google-drive', tags: [], approval: 'pending' };
 }
 
-export { driveToken as googleToken, request as providerRequest };
+export { driveToken as googleToken, request as providerRequest, zernioClient, scopedAccounts, requireAccount };
 async function saveDriveFiles(store, projectId, files, assertMapping) {
   const assets = await store.list(projectId, 'assets'); const saved = [];
   for (const file of files) {
     if (!file.id || file.mimeType === 'application/vnd.google-apps.folder') continue;
     const data = driveAsset(file); const existing = assets.find(asset => asset.driveId === file.id);
     checkMapping(assertMapping);
-    saved.push(existing ? await store.update(projectId, 'assets', existing.id, { ...data, tags: existing.tags || [], approval: existing.approval || 'pending' }) : await store.create(projectId, 'assets', data));
+    const changed = existing && ['size', 'mimeType', 'modifiedTime', 'md5Checksum'].some(field => existing[field] !== data[field]);
+    saved.push(existing ? await store.update(projectId, 'assets', existing.id, { ...data, tags: existing.tags || [], approval: changed ? 'pending' : existing.approval || 'pending' }) : await store.create(projectId, 'assets', data));
   }
   return saved;
 }
@@ -459,7 +489,7 @@ export async function handleIntegration(context) {
         const token = await driveToken(env); const files = []; let pageToken;
         for (let page = 0; page < 20; page++) {
           const target = new URL(`${GOOGLE}/drive/v3/files`);
-          target.search = new URLSearchParams({ q: `'${project.driveFolderId}' in parents and trashed = false`, pageSize: '100', fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,thumbnailLink,size)', supportsAllDrives: 'true', includeItemsFromAllDrives: 'true', ...(pageToken ? { pageToken } : {}) }).toString();
+          target.search = new URLSearchParams({ q: `'${project.driveFolderId}' in parents and trashed = false`, pageSize: '100', fields: 'nextPageToken,incompleteSearch,files(id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum)', supportsAllDrives: 'true', includeItemsFromAllDrives: 'true', ...(pageToken ? { pageToken } : {}) }).toString();
           const result = await driveRequest(target, { headers: { Authorization: `Bearer ${token}` } });
           if (!Array.isArray(result.files)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not return a file list.');
           if (result.incompleteSearch) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'Google Drive could not complete the folder search. No assets were changed.');
@@ -486,7 +516,7 @@ export async function handleIntegration(context) {
         const outcome = await operation(context, async () => {
           const boundary = `ten98-${randomUUID()}`;
           const multipart = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, parents: [project.driveFolderId] })}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`), bytes, Buffer.from(`\r\n--${boundary}--\r\n`)]);
-          const file = await driveRequest(`${GOOGLE}/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,webViewLink,thumbnailLink,size`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart });
+          const file = await driveRequest(`${GOOGLE}/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart });
           if (!file.id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not confirm the uploaded file.', true);
           const [asset] = await saveDriveFiles(store, project.id, [file], assertDrive);
           return { asset };
@@ -511,7 +541,7 @@ export async function handleIntegration(context) {
       } else if (accountId) requireAccount(await scopedAccounts(api, profileId), identifier(accountId, 'account ID'));
       const origin = new URL(context.config?.appUrl || env.APP_URL || 'http://127.0.0.1:3000');
       if (origin.username || origin.password || (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)))) fail(503, 'INVALID_CALLBACK', 'Configure a valid app origin before connecting providers.');
-      const callback = new URL('/', origin); callback.search = new URLSearchParams({ view: 'settings', project: project.id }).toString();
+      const callback = new URL('/', origin); callback.search = new URLSearchParams({ view: 'integrations', project: project.id }).toString();
       const result = await api(`/connect/${platform}${kind === 'ads' ? '/ads' : ''}`, { profileId, redirect_url: callback.href, ...(accountId ? { accountId } : {}) });
       if (result.alreadyConnected) { send(200, { alreadyConnected: true, accountId: result.accountId }); return true; }
       let authUrl;
@@ -588,6 +618,7 @@ export async function handleIntegration(context) {
         if (current.externalId) fail(409, 'POST_ALREADY_SUBMITTED', 'This post has already been submitted. Refresh its provider status.');
         if (current.updatedAt && current.updatedAt !== post.updatedAt) fail(409, 'POST_CHANGED', 'The post changed while preparing publication. Review it and submit again.');
         if (current.status === 'scheduled' && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'This scheduled time has passed. Choose a new time before scheduling the post.');
+        context.assertPublishingApproval?.(publishingPost);
         const result = await api('/posts', {}, payload, key);
         if (!result.post?._id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the submitted post.', true);
         const updated = await store.update(project.id, 'posts', post.id, { externalId: result.post._id, zernioProfileId: profileId, status: localStatus(result.post.status), providerStatus: result.post.status, providerResults: redact(result.post.platforms || []) });
@@ -599,12 +630,69 @@ export async function handleIntegration(context) {
     if (req.method === 'GET' && path === 'social/status') {
       const post = await store.get(project.id, 'posts', identifier(url.searchParams.get('postId'), 'post ID'));
       if (!post?.externalId || post.zernioProfileId !== profileId) fail(404, 'POST_NOT_SUBMITTED', 'No submitted post was found for this project.');
-      const result = await api(`/posts/${encodeURIComponent(post.externalId)}`);
-      const accounts = await scopedAccounts(api, profileId);
-      if (result.post?._id !== post.externalId || !Array.isArray(result.post.platforms) || !result.post.platforms.length) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return the submitted post.');
-      for (const item of result.post.platforms) requireAccount(accounts, typeof item.accountId === 'object' ? item.accountId._id : item.accountId);
-      const updated = await store.update(project.id, 'posts', post.id, { status: localStatus(result.post.status), providerStatus: result.post.status, providerResults: redact(result.post.platforms) });
-      send(200, { post: updated, provider: { id: post.externalId, status: result.post.status } }); return true;
+      if (post.providerDeletedAt) { send(200, { post, provider: { id: post.externalId, status: 'cancelled', deleted: true } }); return true; }
+      const remote = await scopedPost(api, profileId, post);
+      const updated = await savePostSnapshot(store, project.id, post, remote, { ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: remote.mediaItems } : {}), ...(remote.scheduledFor ? { scheduledAt: remote.scheduledFor } : {}) });
+      send(200, { post: updated, provider: { id: post.externalId, status: remote.status } }); return true;
+    }
+    if (req.method === 'POST' && ['social/update', 'social/cancel', 'social/retry', 'social/edit-published', 'social/unpublish'].includes(path)) {
+      const allowed = path === 'social/update' ? ['postId', 'content', 'mode', 'scheduledAt'] : path === 'social/retry' ? ['postId', 'confirmPublish'] : path === 'social/edit-published' ? ['postId', 'accountId', 'content', 'confirmEdit'] : path === 'social/unpublish' ? ['postId', 'accountId', 'confirmRemoval'] : ['postId', 'confirmCancellation'];
+      fields(body, allowed, 'post action');
+      const postId = identifier(body.postId, 'post ID');
+      const outcome = await operation(context, async key => {
+        const post = await store.get(project.id, 'posts', postId), remote = await scopedPost(api, profileId, post), endpoint = `/posts/${encodeURIComponent(post.externalId)}`;
+        if (sample(post)) fail(400, 'SAMPLE_RECORD', 'Sample posts cannot be sent to live providers.');
+        if (path === 'social/cancel') {
+          if (body.confirmCancellation !== true) fail(400, 'CANCELLATION_CONFIRMATION_REQUIRED', 'Confirm removal of this unpublished provider record.');
+          if (!['draft', 'scheduled', 'failed', 'cancelled'].includes(remote.status) || remote.platforms.some(item => item.status === 'published' || item.status === 'publishing')) fail(409, 'POST_NOT_CANCELLABLE', 'This post is live or publishing on at least one account. Refresh its status and manage each published copy separately.');
+          await api(endpoint, {}, undefined, key, 'DELETE');
+          const updated = await savePostSnapshot(store, project.id, post, { ...remote, status: 'cancelled' }, { providerDeletedAt: new Date().toISOString() });
+          await store.activity(project.id, 'Cancelled an unpublished social post in Zernio.');
+          return { post: updated, provider: { id: post.externalId, status: 'cancelled', deleted: true } };
+        }
+        if (path === 'social/update') {
+          context.assertProviderPostEdit?.();
+          if (!['draft', 'scheduled', 'failed', 'cancelled'].includes(remote.status) || remote.platforms.some(item => ['published', 'publishing'].includes(item.status))) fail(409, 'POST_NOT_EDITABLE', 'Only unpublished posts can be rescheduled or changed here.');
+          const content = text(body.content, 'post content', 10000);
+          if (!['draft', 'scheduled'].includes(body.mode)) fail(400, 'INVALID_POST_MODE', 'Save as a draft or choose a future schedule.');
+          const payload = { content, isDraft: body.mode === 'draft' }; let scheduledAt = '';
+          if (body.mode === 'scheduled') {
+            const value = body.scheduledAt;
+            if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value.slice(0, 10)).toISOString().slice(0, 10) !== value.slice(0, 10)) fail(400, 'INVALID_DATE', 'Choose a valid scheduled time with a timezone.');
+            scheduledAt = new Date(value).toISOString();
+            if (Date.parse(scheduledAt) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'Choose a future time before scheduling.');
+            Object.assign(payload, { scheduledFor: scheduledAt, timezone: 'UTC' });
+          }
+          const result = await api(endpoint, {}, payload, key, 'PUT');
+          const updated = await savePostSnapshot(store, project.id, post, result.post, { content: result.post?.content ?? content, scheduledAt });
+          await store.activity(project.id, 'Updated an unpublished social post in Zernio.');
+          return { post: updated, provider: { id: post.externalId, status: result.post.status } };
+        }
+        if (path === 'social/retry') {
+          if (body.confirmPublish !== true) fail(400, 'PUBLISH_CONFIRMATION_REQUIRED', 'Confirm that this failed post should publish immediately.');
+          if (remote.status !== 'failed' || remote.platforms.some(item => ['published', 'publishing'].includes(item.status))) fail(409, 'POST_NOT_FAILED', 'Only a fully failed post can be retried. Manage partial results per account to avoid duplicate publishing.');
+          context.assertPublishingApproval?.({ ...post, ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: remote.mediaItems } : {}) });
+          const result = await api(endpoint + '/retry', {}, {}, key);
+          const updated = await savePostSnapshot(store, project.id, post, result.post);
+          await store.activity(project.id, 'Retried a failed social post through Zernio.');
+          return { post: updated, provider: { id: post.externalId, status: result.post.status } };
+        }
+        const accountId = identifier(body.accountId, 'account ID'), target = remote.platforms.find(item => String(item.accountId?._id || item.accountId) === accountId);
+        if (!target || target.status !== 'published') fail(403, 'POST_ACCOUNT_NOT_PUBLISHED', 'Choose a published copy belonging to this project.');
+        const editing = path === 'social/edit-published', supported = editing ? ['twitter', 'discord', 'facebook', 'reddit', 'linkedin', 'telegram', 'pinterest', 'googlebusiness', 'youtube', 'slack'] : ['threads', 'facebook', 'twitter', 'linkedin', 'youtube', 'pinterest', 'reddit', 'bluesky', 'googlebusiness', 'telegram'];
+        if (editing) context.assertProviderPostEdit?.();
+        if (!supported.includes(target.platform)) fail(422, 'POST_ACTION_UNSUPPORTED', 'This platform does not support this action through Zernio. Use its native dashboard.');
+        if (body[editing ? 'confirmEdit' : 'confirmRemoval'] !== true) fail(400, 'POST_ACTION_CONFIRMATION_REQUIRED', editing ? 'Confirm the text change to this published copy.' : 'Confirm permanent removal of this published copy.');
+        const payload = { platform: target.platform, accountId, ...(editing ? { content: text(body.content, 'post content', target.platform === 'linkedin' ? 3000 : target.platform === 'pinterest' ? 800 : target.platform === 'slack' ? 4000 : 10000) } : {}) };
+        const result = await api(endpoint + (editing ? '/edit' : '/unpublish'), {}, payload, key);
+        if (result.success !== true) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the published-post action.', true);
+        let confirmed;
+        try { confirmed = await scopedPost(api, profileId, post); }
+        catch { throw new IntegrationError(502, 'POST_RECONCILIATION_REQUIRED', 'The provider accepted this action, but its latest state could not be read. Check Zernio before repeating it.', true); }
+        const updated = await savePostSnapshot(store, project.id, post, confirmed);
+        await store.activity(project.id, editing ? 'Edited the text of a published social copy.' : 'Removed a published social copy through Zernio.');
+        return { post: updated, provider: { id: post.externalId, status: confirmed.status, accountId, action: editing ? 'edited' : 'unpublished' } };
+      }); send(outcome.status, outcome.data); return true;
     }
     const inboxMatch = /^inbox\/([^/]+)\/(messages|reply|resolve)$/.exec(path);
     if (inboxMatch) {

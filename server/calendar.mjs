@@ -61,7 +61,7 @@ export async function handleCalendar(context) {
     if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(req.method)) fail(405, 'This calendar action is not available.');
     if (req.method !== 'GET' && !['owner', 'admin', 'editor'].includes(role)) fail(403, 'Editing permission is required.');
     const token = await googleToken(env, scope), base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(connection.calendarId)}/events`;
-    const currentMapping = () => db.prepare('SELECT calendar_id FROM calendar_connections WHERE project_id=?').get(project.id)?.calendar_id === connection.calendarId;
+    const currentMapping = () => { try { context.assertIntegrationSettings?.(); return db.prepare('SELECT calendar_id FROM calendar_connections WHERE project_id=?').get(project.id)?.calendar_id === connection.calendarId; } catch { return false; } };
     const call = async (suffix = '', method = 'GET', payload) => {
       if (!currentMapping()) fail(409, 'The calendar mapping changed. Refresh this project.');
       const result = await providerRequest(base + suffix, { method, headers: { Authorization: `Bearer ${token}`, ...(payload ? { 'Content-Type': 'application/json' } : {}) }, ...(payload ? { body: JSON.stringify(payload) } : {}) }, 'Google Calendar');

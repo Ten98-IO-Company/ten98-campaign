@@ -3,17 +3,20 @@ import { useEffect, useRef, useState } from 'react';
 type Location = { id: string; name: string; location?: string; latitude?: number | null; longitude?: number | null; status?: string; sample?: boolean; locationSource?: string };
 type Props = { locations: Location[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; projectId: string; onSelect: (item: Location) => void };
 declare global { interface Window { google?: any; __ten98MapsReady?: () => void; gm_authFailure?: () => void } }
-let loader: Promise<any> | undefined;
-function maps(key: string) {
-  if (window.google?.maps?.marker) return Promise.resolve(window.google.maps);
+let loader: Promise<any> | undefined, loadedKey = '', authenticationError = '';
+export function loadGoogleMaps(key: string) {
+  if (authenticationError) return Promise.reject(new Error(authenticationError));
+  if (loadedKey && loadedKey !== key) return Promise.reject(new Error('Reload this page to use the updated Google Maps key.'));
+  if (loader) return loader;
+  loadedKey = key;
   if (!loader) loader = new Promise((resolve, reject) => {
     const script = document.createElement('script');
     const timer = setTimeout(() => reject(new Error('Google Maps did not load. Check the key restrictions and Maps JavaScript API configuration.')), 20000);
     window.__ten98MapsReady = () => { clearTimeout(timer); resolve(window.google.maps); };
-    window.gm_authFailure = () => { clearTimeout(timer); reject(new Error('Google Maps could not authorize this site. Check billing and HTTP referrer restrictions.')); };
+    window.gm_authFailure = () => { const message = 'Google Maps could not authorize this site. Check billing and HTTP referrer restrictions, then reload the page.'; authenticationError = message; window.dispatchEvent(new CustomEvent('ten98-maps-error', { detail: message })); clearTimeout(timer); reject(new Error(message)); };
     script.onerror = () => { clearTimeout(timer); reject(new Error('The map could not load. Check your connection.')); };
     script.src = 'https://maps.googleapis.com/maps/api/js?' + new URLSearchParams({ key, v: 'quarterly', loading: 'async', libraries: 'marker', callback: '__ten98MapsReady', auth_referrer_policy: 'origin' });
-    script.nonce = document.querySelector('script[nonce]')?.getAttribute('nonce') || ''; script.async = true; script.referrerPolicy = 'strict-origin-when-cross-origin'; document.head.append(script);
+    script.nonce = document.querySelector<HTMLScriptElement>('script[nonce]')?.nonce || ''; script.async = true; script.referrerPolicy = 'strict-origin-when-cross-origin'; document.head.append(script);
   }).catch(error => { loader = undefined; throw error; });
   return loader;
 }
@@ -24,13 +27,15 @@ export default function OohMap({ locations, request, projectId, onSelect }: Prop
   const located = locations.filter(row => typeof row.latitude === 'number' && Number.isFinite(row.latitude) && Math.abs(row.latitude) <= 90 && typeof row.longitude === 'number' && Number.isFinite(row.longitude) && Math.abs(row.longitude) <= 180);
   useEffect(() => {
     let active = true; setConfig(null); setError(''); setReady(false);
+    const authError = (event: Event) => { if (active) setError((event as CustomEvent<string>).detail); };
+    window.addEventListener('ten98-maps-error', authError);
     request(`/projects/${projectId}/maps/config`).then(async value => {
       if (!active) return; setConfig(value); if (!value.configured) return;
-      const google = await maps(value.browserKey); if (!active || !container.current) return;
+      const google = await loadGoogleMaps(value.browserKey); if (!active || !container.current) return;
       mapRef.current = new google.Map(container.current, { center: { lat: 25.2048, lng: 55.2708 }, zoom: 10, mapId: value.mapId || 'DEMO_MAP_ID', streetViewControl: false, mapTypeControl: true, fullscreenControl: true });
       setReady(true);
     }).catch(err => { if (active) setError(err.message); });
-    return () => { active = false; markers.current.forEach(marker => { marker.map = null; }); markers.current = []; mapRef.current = null; };
+    return () => { active = false; window.removeEventListener('ten98-maps-error', authError); markers.current.forEach(marker => { marker.map = null; }); markers.current = []; mapRef.current = null; };
   }, [projectId]);
   useEffect(() => {
     if (!ready || !mapRef.current) return;

@@ -1,0 +1,88 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { createApp } from '../server/index.mjs';
+
+test('HTTP invitation links safely onboard new accounts, require the existing identity, preserve workspace scope and cannot reset passwords', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'ten98-collaboration-http-')), origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, env: {}, appUrl: origin });
+  await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); });
+  const base = `http://127.0.0.1:${app.server.address().port}`, ownerPassword = 'fixture owner personal password'; let ownerCookie;
+  async function request(path, { method = 'GET', body, cookie = ownerCookie, originHeader = origin } = {}) {
+    const response = await fetch(base + path, { method, headers: { ...(method !== 'GET' && originHeader ? { Origin: originHeader } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0], cookieHeader: response.headers.get('set-cookie') };
+  }
+  const token = result => new URL(result.data.url).searchParams.get('invite');
+  try {
+    const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Workspace owner', email: 'collaboration-owner@example.test', password: ownerPassword, sample: false } });
+    assert.equal(setup.status, 201); ownerCookie = setup.cookie;
+    const ownerState = (await request('/api/state')).data, workspaceId = ownerState.workspaces[0].id, projectId = ownerState.projectId, team = `/api/workspaces/${workspaceId}`;
+    assert.equal((await request(team + '/invitations', { cookie: null })).status, 401);
+    assert.equal((await request(team + '/invitations', { method: 'POST', body: { email: 'new-colleague@example.test', role: 'editor' }, originHeader: null })).status, 403);
+    const created = await request(team + '/invitations', { method: 'POST', body: { email: 'NEW-COLLEAGUE@example.test', role: 'editor' } });
+    assert.equal(created.status, 201); assert.equal(new URL(created.data.url).origin, origin);
+    const inviteToken = token(created), invitation = '/api/invitations/' + inviteToken;
+    assert.match(inviteToken, /^[A-Za-z0-9_-]{43}$/);
+    const stored = app.db.prepare('SELECT * FROM workspace_invitations WHERE id=?').get(created.data.invitation.id);
+    assert.equal(stored.token_hash, createHash('sha256').update(inviteToken).digest('hex')); assert.equal(JSON.stringify(stored).includes(inviteToken), false);
+    const publicRead = await request(invitation, { cookie: null, originHeader: null });
+    assert.equal(publicRead.status, 200); assert.equal(publicRead.data.accountExists, false); assert.equal(publicRead.data.requiresSignIn, false); assert.equal(publicRead.data.invitation.email, 'new-colleague@example.test');
+    assert.deepEqual(Object.keys(publicRead.data.invitation).sort(), ['email', 'expiresAt', 'role', 'workspaceName']);
+    assert.equal((await request('/api/invitations/not-a-token', { cookie: null })).status, 404);
+    const newPassword = 'new colleague chooses this password', signup = { name: 'New colleague', password: newPassword };
+    assert.equal((await request(invitation, { method: 'POST', body: signup, cookie: null, originHeader: null })).status, 403);
+    assert.equal((await request(invitation, { method: 'POST', body: signup, cookie: null, originHeader: 'https://other.example.test' })).status, 403);
+    assert.equal((await request(invitation, { method: 'POST', body: signup })).status, 403, 'A different signed-in account cannot claim a new-account invitation.');
+    assert.equal((await request(invitation, { method: 'POST', body: { ...signup, isOperator: true }, cookie: null })).status, 400);
+    assert.equal((await request(invitation, { method: 'POST', body: { ...signup, password: 'short' }, cookie: null })).status, 400);
+    const accepted = await request(invitation, { method: 'POST', body: signup, cookie: null });
+    assert.equal(accepted.status, 200); assert.equal(accepted.data.created, true); assert.equal(accepted.data.role, 'editor'); assert.equal(accepted.data.workspaceId, workspaceId); assert.equal(accepted.data.user.isOperator, false);
+    assert.ok(accepted.cookie); assert.match(accepted.cookieHeader, /HttpOnly/); assert.match(accepted.cookieHeader, /SameSite=Lax/);
+    const colleagueCookie = accepted.cookie, colleagueId = accepted.data.user.id, colleague = app.db.prepare('SELECT * FROM users WHERE id=?').get(colleagueId);
+    assert.match(colleague.password, /^scrypt\$/); assert.equal(colleague.password.includes(newPassword), false);
+    assert.equal(app.db.prepare('SELECT * FROM instance_operators WHERE user_id=?').get(colleagueId), undefined);
+    const colleagueState = (await request('/api/state', { cookie: colleagueCookie })).data;
+    assert.equal(colleagueState.user.id, colleagueId); assert.deepEqual(colleagueState.workspaces.map(workspace => [workspace.id, workspace.role]), [[workspaceId, 'editor']]);
+    assert.equal((await request(`/api/projects/${projectId}/campaigns`, { method: 'POST', body: { name: 'Editor campaign' }, cookie: colleagueCookie })).status, 201);
+    assert.equal((await request(team + '/members', { cookie: colleagueCookie })).status, 403);
+    assert.equal((await request(team + '/invitations', { method: 'POST', body: { email: 'unapproved@example.test' }, cookie: colleagueCookie })).status, 403);
+    assert.equal((await request('/api/settings/integrations', { cookie: colleagueCookie })).status, 403);
+    assert.equal((await request(invitation, { cookie: null })).status, 410);
+    assert.equal((await request(invitation, { method: 'POST', body: signup, cookie: null })).status, 410);
+    assert.equal((await request('/api/auth/setup', { method: 'POST', body: { name: 'Uninvited', email: 'uninvited@example.test', password: newPassword }, cookie: null })).status, 409, 'Open signup remains closed after instance setup.');
+    assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: colleague.email, password: ownerPassword }, cookie: null })).status, 401);
+    const ownLogin = await request('/api/auth/login', { method: 'POST', body: { email: colleague.email, password: newPassword }, cookie: null }); assert.equal(ownLogin.status, 200); assert.equal(ownLogin.data.user.id, colleagueId);
+    assert.equal(app.db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(workspaceId, ownerState.user.id).role, 'owner');
+    assert.equal((await request(team + '/members')).status, 200);
+
+    const existingId = randomUUID(), ownerHash = app.db.prepare('SELECT password FROM users WHERE id=?').get(ownerState.user.id).password;
+    app.db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(existingId, 'Existing account', 'existing-colleague@example.test', ownerHash);
+    const existingCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: ownerPassword }, cookie: null })).cookie;
+    const separate = await request('/api/workspaces', { method: 'POST', body: { name: 'Existing private workspace' }, cookie: existingCookie }); assert.equal(separate.status, 201);
+    assert.equal((await request(`/api/state?projectId=${separate.data.projectId}`)).status, 404);
+    assert.equal((await request(`/api/state?projectId=${separate.data.projectId}`, { cookie: colleagueCookie })).status, 404);
+    const existingInvitation = await request(team + '/invitations', { method: 'POST', body: { email: 'existing-colleague@example.test', role: 'viewer' } });
+    assert.equal(existingInvitation.status, 201); assert.notEqual(token(existingInvitation), inviteToken);
+    const existingPath = '/api/invitations/' + token(existingInvitation), existingRead = await request(existingPath, { cookie: null });
+    assert.equal(existingRead.status, 200); assert.equal(existingRead.data.accountExists, true); assert.equal(existingRead.data.requiresSignIn, true);
+    assert.equal((await request(existingPath, { method: 'POST', body: { name: 'Reset attempt', password: newPassword }, cookie: null })).status, 401);
+    assert.equal((await request(existingPath, { method: 'POST', body: {} })).status, 403);
+    assert.equal((await request(existingPath, { method: 'POST', body: { password: newPassword }, cookie: existingCookie })).status, 400);
+    assert.equal((await request(existingPath, { cookie: existingCookie })).data.requiresSignIn, false);
+    const joinedExisting = await request(existingPath, { method: 'POST', body: {}, cookie: existingCookie });
+    assert.equal(joinedExisting.status, 200); assert.equal(joinedExisting.data.created, false); assert.equal(joinedExisting.data.user.id, existingId); assert.equal(joinedExisting.data.role, 'viewer'); assert.equal(joinedExisting.cookie, undefined, 'Accepting with an existing identity does not mint a replacement session.');
+    assert.equal(app.db.prepare('SELECT password FROM users WHERE id=?').get(existingId).password, ownerHash);
+    assert.equal(app.db.prepare('SELECT name FROM users WHERE id=?').get(existingId).name, 'Existing account');
+    assert.equal(app.db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(separate.data.workspace.id, existingId).role, 'owner');
+    const existingState = (await request(`/api/state?projectId=${projectId}`, { cookie: existingCookie })).data;
+    assert.equal(existingState.workspaces.find(workspace => workspace.id === workspaceId).role, 'viewer');
+    assert.equal((await request(`/api/projects/${projectId}/campaigns`, { method: 'POST', body: { name: 'Blocked viewer campaign' }, cookie: existingCookie })).status, 403);
+    assert.equal((await request(existingPath, { method: 'POST', body: {}, cookie: existingCookie })).status, 410);
+    const list = await request(team + '/invitations'); assert.equal(list.status, 200); assert.equal(list.data.invitations.filter(item => item.status === 'accepted').length, 2);
+    assert.equal(JSON.stringify(list.data).includes(inviteToken), false); assert.equal(JSON.stringify(list.data).includes(token(existingInvitation)), false); assert.equal(JSON.stringify(list.data).includes('token_hash'), false);
+    assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: newPassword }, cookie: null })).status, 401);
+    assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: ownerPassword }, cookie: null })).status, 200);
+  } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+});

@@ -6,7 +6,12 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import { openDatabase, createStore, collections, transaction } from './database.mjs';
 import { createAuth, sessionSecret, hashPassword, HttpError, publicUser } from './auth.mjs';
 import { seedSample } from './seed.mjs';
-import { handleIntegration } from './integrations.mjs';
+import { handleIntegration, IntegrationError, mediaUrl } from './integrations.mjs';
+import { createIntegrationSettings } from './integration-settings.mjs';
+import { handleInvitations } from './invitations.mjs';
+import { handleOperationRecovery } from './operation-recovery.mjs';
+import { handleEngagement } from './engagement.mjs';
+import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from './approvals.mjs';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.mjs';
 import { handleCalendar } from './calendar.mjs';
 import { handleAgent } from './agent.mjs';
@@ -41,7 +46,7 @@ function validateRecord(collection, raw) {
     data.status = choice(data.status ?? 'draft', ['draft', 'active', 'paused', 'completed'], 'Status'); data.budget = money(data.budget ?? 0, 'Budget'); data.spent = money(data.spent ?? 0, 'Spend');
   } else if (collection === 'posts') {
     data.content = text(data.content, 'Post content', 10000); data.platforms = strings(data.platforms ?? [], 'Platforms', 20);
-    data.status = choice(data.status ?? 'draft', ['draft', 'scheduled', 'published', 'failed'], 'Status');
+    data.status = choice(data.status ?? 'draft', ['draft', 'scheduled', 'published', 'failed', 'cancelled'], 'Status');
     if (data.scheduledFor && !data.scheduledAt) data.scheduledAt = data.scheduledFor;
     date(data.scheduledAt, 'Scheduled time');
     if (data.status === 'scheduled' && (!data.scheduledAt || Date.parse(data.scheduledAt) <= Date.now())) bad('Scheduled posts need a future scheduled time.');
@@ -57,6 +62,7 @@ function validateRecord(collection, raw) {
     if (data.proofUrl) data.proofUrl = safeUrl(text(data.proofUrl, 'Proof URL', 4096));
   } else if (collection === 'assets') {
     data.name = text(data.name, 'Asset name', 250); data.kind = choice(data.kind ?? 'image', ['image', 'video', 'document'], 'Asset kind'); data.url = safeUrl(text(data.url, 'Asset URL', 4096)); data.approval = choice(data.approval ?? 'pending', ['pending', 'approved', 'rejected'], 'Approval');
+    if (data.deliveryUrl !== undefined) data.deliveryUrl = data.deliveryUrl === '' ? '' : mediaUrl(text(data.deliveryUrl, 'Public delivery URL', 4096));
     if (data.tags !== undefined) data.tags = strings(data.tags, 'Tags');
   } else if (collection === 'providers') {
     data.name = text(data.name, 'Provider name'); data.type = choice(data.type ?? 'ooh', ['ooh', 'media'], 'Provider type'); data.contact = data.contact ? email(data.contact) : '';
@@ -86,15 +92,16 @@ async function readBody(req, maximum = 65536) {
 }
 
 export function createApp(options = {}) {
-  const env = options.env || process.env, dataDir = resolve(options.dataDir || env.DATA_DIR || 'data');
+  const env = options.env || { ...process.env }, dataDir = resolve(options.dataDir || env.DATA_DIR || 'data');
   const appUrl = (options.appUrl || env.APP_URL || 'http://127.0.0.1:3018').replace(/\/$/, '');
   const parsed = new URL(appUrl);
   if (!['https:', 'http:'].includes(parsed.protocol) || parsed.origin !== appUrl || parsed.username || parsed.password || (parsed.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname))) throw new Error('APP_URL must be an HTTPS origin, or HTTP loopback for local use.');
   const db = openDatabase(dataDir), store = createStore(db);
-  const config = { ...options, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean) };
+  const config = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean) };
   config.oidcEnabled = Boolean(config.oidcIssuer && config.oidcClientId);
   if (config.oidcEnabled && new URL(config.oidcIssuer).protocol !== 'https:') throw new Error('OIDC_ISSUER must use HTTPS.');
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
+  const integrationSettings = createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const webhooks = createWebhookService({ db, store, env });
   const drainWebhooks = () => { try { webhooks.processPending(); } catch { console.error('Webhook processing deferred.'); } };
   drainWebhooks(); const webhookTimer = setInterval(drainWebhooks, 1000); webhookTimer.unref();
@@ -145,7 +152,35 @@ export function createApp(options = {}) {
         if (path === '/api/auth/logout' && req.method === 'POST') { auth.logout(req, res); return send(200, { ok: true }); }
         if (path === '/api/auth/oidc/start' && req.method === 'GET') return await auth.oidcStart(req, res);
         if (path === '/api/auth/oidc/callback' && req.method === 'GET') return await auth.oidcCallback(req, res, url);
+        if (await handleInvitations({ req, url, body, user: auth.user(req), db, auth, config, send, workspaceAccess, establish: id => auth.establish(res, id) })) return;
         const user = auth.user(req); if (!user) throw new HttpError(401, 'Sign in to continue.');
+        if (path === '/api/account' && req.method === 'GET') return send(200, { user, ...auth.account(user.id) });
+        if (path === '/api/account' && req.method === 'PATCH') { if (Object.keys(body).some(key => key !== 'name')) bad('Only your display name can be changed here.'); db.prepare('UPDATE users SET name=? WHERE id=?').run(text(body.name, 'Name'), user.id); return send(200, { user: auth.user(req) }); }
+        if (path === '/api/account/password' && req.method === 'POST') { if (Object.keys(body).some(key => !['currentPassword', 'newPassword'].includes(key))) bad('Use the password fields.'); await auth.changePassword(req, res, user.id, loginPassword(body.currentPassword), password(body.newPassword)); return send(200, { changed: true }); }
+        if (path === '/api/account/sessions/revoke' && req.method === 'POST') return send(200, { revoked: auth.revokeOtherSessions(req, user.id) });
+        const settingsRoute = path.match(/^\/api\/settings\/integrations(?:\/([A-Za-z]+)(?:\/(test))?)?$/);
+        if (settingsRoute) {
+          if (!user.isOperator) throw new HttpError(403, 'Only instance operators can configure shared integrations.');
+          const [, provider, action] = settingsRoute;
+          if (!provider && req.method === 'GET') return send(200, integrationSettings.describe());
+          if (provider && !action && req.method === 'PUT') { if (Object.keys(body).some(key => key !== 'fields')) bad('Use the integration settings fields.'); return send(200, integrationSettings.save(provider, body.fields)); }
+          if (provider && !action && req.method === 'DELETE') return send(200, integrationSettings.reset(provider));
+          if (provider && action === 'test' && req.method === 'POST') {
+            if (Object.keys(body).some(key => key !== 'projectId')) bad('Choose a project to test its mapped connection.');
+            auth.limit('integration-tests:' + user.id, 60);
+            const mapped = body.projectId ? projectAccess(text(body.projectId, 'Project', 100), user.id) : null;
+            const calendarTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='calendar_connections'").get();
+            const calendar = mapped && calendarTable ? db.prepare('SELECT calendar_id FROM calendar_connections WHERE project_id=?').get(mapped.id) : null;
+            const result = await integrationSettings.test(provider, { driveFolderId: mapped?.driveFolderId, calendarId: calendar?.calendar_id });
+            if (mapped) {
+              const current = projectAccess(mapped.id, user.id);
+              const currentCalendar = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='calendar_connections'").get() ? db.prepare('SELECT calendar_id FROM calendar_connections WHERE project_id=?').get(mapped.id) : null;
+              if ((provider === 'googleDrive' && current.driveFolderId !== mapped.driveFolderId) || (provider === 'googleCalendar' && currentCalendar?.calendar_id !== calendar?.calendar_id)) throw new HttpError(409, 'The project connection changed during this test. Test the current mapping again.');
+            }
+            return send(200, result);
+          }
+          throw new HttpError(405, 'This integration settings action is not available.');
+        }
         if (path === '/api/state' && req.method === 'GET') {
           const workspaces = db.prepare('SELECT w.id,w.name,m.role FROM workspaces w JOIN memberships m ON m.workspace_id=w.id WHERE m.user_id=? ORDER BY w.rowid').all(user.id);
           const projects = db.prepare(`SELECT ${projectFields} FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id WHERE m.user_id=? ORDER BY p.rowid`).all(user.id);
@@ -194,7 +229,14 @@ export function createApp(options = {}) {
           if (mutating && role === 'viewer') throw new HttpError(403, 'Your workspace role is view only.');
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
           if (projectRoute[2] === 'inbox/cache' && req.method === 'GET') return send(200, { conversations: store.list(project.id, 'conversations') });
-          const context = { req, res, url, body, user, project, role, db, send, store, config, assertProjectMapping: expected => { const current = db.prepare('SELECT zernio_profile_id FROM projects WHERE id=?').get(project.id); if (current?.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: expected => { const current = db.prepare('SELECT drive_folder_id FROM projects WHERE id=?').get(project.id); if (current?.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: (collection, fields) => { rejectProviderFields(fields); const data = validateRecord(collection, { ...fields, status: 'draft' }); checkReferences(store, project.id, data); return data; } };
+          const requestRevision = integrationSettings.revision;
+          const assertIntegrationSettings = () => { if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.'); };
+          const context = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT zernio_profile_id FROM projects WHERE id=?').get(project.id); if (current?.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT drive_folder_id FROM projects WHERE id=?').get(project.id); if (current?.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: (collection, fields) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); checkReferences(store, project.id, data); return data; } };
+          context.assertPublishingApproval = post => assertPublishingApproval(context, post);
+          context.assertProviderPostEdit = () => assertProviderPostEdit(context);
+          if (projectRoute[2]?.startsWith('operations') && await handleOperationRecovery(context)) return;
+          if (projectRoute[2]?.startsWith('approvals/') && await handleApprovals(context)) return;
+          if (projectRoute[2]?.startsWith('engagement/') && await handleEngagement(context)) return;
           if (projectRoute[2]?.startsWith('calendar/') && await handleCalendar(context)) return;
           if (projectRoute[2]?.startsWith('agent/') && await handleAgent(context)) return;
           if (projectRoute[2]?.startsWith('ooh/') && await handleOoh(context)) return;
@@ -210,18 +252,23 @@ export function createApp(options = {}) {
           const [collection, id, extra] = (projectRoute[2] || '').split('/');
           if (collections.includes(collection) && !extra) {
             if (!id && req.method === 'POST') {
-              rejectProviderFields(body);
+              rejectProviderFields(body, collection);
               if (collection === 'posts' && body.status === 'published') bad('Publish through a connected provider to confirm publication.');
               const data = validateRecord(collection, collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { ...body, locationSource: 'manual' } : body); checkReferences(store, project.id, data);
+              if (collection === 'assets' && data.approval !== 'pending' && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
               const record = store.create(project.id, collection, data); store.activity(project.id, `${collection.slice(0, -1)} created.`); return send(201, { record });
             }
             if (id && ['PATCH', 'DELETE'].includes(req.method)) {
               const previous = store.get(project.id, collection, id); if (!previous) throw new HttpError(404, 'Record not found.');
-              if ((collection === 'conversations' && previous.source === 'zernio') || (collection === 'placements' && previous.source === 'broadsign') || (collection === 'campaigns' && previous.externalId)) bad('Provider-managed records must be changed through their connected provider controls.');
+              if ((collection === 'conversations' && previous.source === 'zernio') || (collection === 'placements' && previous.source === 'broadsign') || (collection === 'campaigns' && previous.externalId) || (collection === 'posts' && (previous.externalId || previous.status === 'published'))) bad('Provider-managed records must be changed through their connected provider controls.');
               if (req.method === 'DELETE') { store.remove(project.id, collection, id); store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
-              rejectProviderFields(body);
+              rejectProviderFields(body, collection);
               if (collection === 'posts' && (body.status === 'published' || previous.status === 'published' || previous.externalId)) bad('Provider posts must be managed through their connected provider.');
               const data = validateRecord(collection, { ...previous, ...body, ...(collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { locationSource: 'manual' } : {}) }); checkReferences(store, project.id, data);
+              if (collection === 'assets') {
+                if (body.approval !== undefined && body.approval !== previous.approval && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
+                if (['url', 'deliveryUrl', 'kind'].some(key => data[key] !== previous[key])) data.approval = 'pending';
+              }
               const record = store.update(project.id, collection, id, data); store.activity(project.id, `${collection.slice(0, -1)} updated.`); return send(200, { record });
             }
           }
@@ -237,7 +284,7 @@ export function createApp(options = {}) {
       if (extname(file) === '.html') contents = Buffer.from(contents.toString('utf8').replace(/<script\b/g, `<script nonce="${nonce}"`));
       const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
       res.writeHead(200, { 'Content-Type': (mime[extname(file)] || 'application/octet-stream') + (['.html', '.js', '.css'].includes(extname(file)) ? '; charset=utf-8' : ''), 'Cache-Control': extname(file) === '.html' ? 'no-cache' : 'public, max-age=3600' }); res.end(req.method === 'HEAD' ? undefined : contents);
-    } catch (error) { if (!res.headersSent) send(error instanceof HttpError ? error.status : 500, { error: error instanceof HttpError ? error.message : 'The request could not be completed.' }); else res.end(); }
+    } catch (error) { if (!res.headersSent) send(error instanceof HttpError || error instanceof IntegrationError ? error.status : 500, { error: error instanceof HttpError ? error.message : error instanceof IntegrationError ? { code: error.code, message: error.message } : 'The request could not be completed.' }); else res.end(); }
   });
   server.requestTimeout = 30000; server.headersTimeout = 10000;
   return { server, db, store, config, webhooks, close: () => new Promise((resolveClose, reject) => { clearInterval(webhookTimer); if (!server.listening) { db.close(); resolveClose(); return; } server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); server.closeIdleConnections(); }) };
@@ -250,8 +297,8 @@ function projectInput(data) {
 function checkReferences(store, projectId, data) {
   for (const [key, collection] of [['campaignId', 'campaigns'], ['assetId', 'assets'], ['providerId', 'providers']]) if (data[key] && !store.get(projectId, collection, data[key])) bad(`${key} does not belong to this project.`);
 }
-function rejectProviderFields(body) {
-  if (['externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key))) bad('Provider identifiers and publication evidence are managed by integrations.');
+function rejectProviderFields(body, collection = '') {
+  if (['externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'modifiedTime', 'md5Checksum', 'approvalStatus', 'approvedBy', 'reviewedBy', 'providerDeletedAt', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key) && !(collection === 'assets' && key === 'deliveryUrl'))) bad('Provider identifiers and publication evidence are managed by integrations.');
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app = createApp();

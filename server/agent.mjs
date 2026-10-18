@@ -89,6 +89,7 @@ export async function handleAgent(context) {
     const proposals = []; let answer = '', unknownCost = false, totalCost = 0;
     try {
       for (let step = 0; step < steps; step++) {
+        try { context.assertIntegrationSettings?.(); } catch { throw new AgentError(409, 'Integration credentials changed. Start a new request with the current settings.'); }
         const result = await completion(env, messages, body.includeInbox ? [...tools, inboxTool] : tools), message = result.choices[0].message;
         usage.requests++; for (const [field, source] of [['promptTokens', 'prompt_tokens'], ['completionTokens', 'completion_tokens']]) { const value = result.usage?.[source]; usage[field] = usage[field] !== null && Number.isSafeInteger(value) && value >= 0 ? usage[field] + value : null; }
         if (typeof result.usage?.cost === 'number' && Number.isFinite(result.usage.cost)) totalCost += result.usage.cost; else unknownCost = true;

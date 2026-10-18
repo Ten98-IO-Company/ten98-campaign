@@ -63,10 +63,25 @@ export function createAuth(db, config) {
   }
   return {
     user, establish, limit,
+    account(userId) { return { localPassword: Boolean(db.prepare('SELECT password FROM users WHERE id=?').get(userId)?.password), activeSessions: db.prepare('SELECT count(*) AS count FROM sessions WHERE user_id=? AND expires_at>?').get(userId, Date.now()).count }; },
+    revokeOtherSessions(req, userId) { return db.prepare('DELETE FROM sessions WHERE user_id=? AND token<>?').run(userId, digest(cookies(req).ten98_session || '')).changes; },
+    async changePassword(req, res, userId, currentPassword, newPassword) {
+      limit('password:' + userId);
+      const previous = db.prepare('SELECT password FROM users WHERE id=?').get(userId)?.password;
+      if (!previous || !await verify(currentPassword, previous)) throw new HttpError(400, 'The current password is incorrect.');
+      const next = await hashPassword(newPassword);
+      transaction(db, () => {
+        if (db.prepare('SELECT password FROM users WHERE id=?').get(userId)?.password !== previous) throw new HttpError(409, 'Your password changed during this request. Sign in again.');
+        db.prepare('UPDATE users SET password=? WHERE id=?').run(next, userId);
+        db.prepare('DELETE FROM sessions WHERE user_id=?').run(userId);
+      });
+      establish(res, userId);
+    },
     async login(req, res, body) {
       limit('ip:' + req.socket.remoteAddress, 30); limit('email:' + digest(body.email));
       const found = db.prepare('SELECT u.*,EXISTS(SELECT 1 FROM instance_operators o WHERE o.user_id=u.id) AS isOperator FROM users u WHERE email=?').get(body.email);
       if (!await verify(body.password, found?.password)) throw new HttpError(401, 'Email or password is incorrect.');
+      if (db.prepare('SELECT password FROM users WHERE id=?').get(found.id)?.password !== found.password) throw new HttpError(401, 'Your password changed. Sign in again.');
       db.prepare('DELETE FROM login_limits WHERE key=?').run('email:' + digest(body.email));
       establish(res, found.id); return publicUser(found);
     },
@@ -78,9 +93,12 @@ export function createAuth(db, config) {
       if (!config.oidcEnabled || !db.prepare('SELECT id FROM users LIMIT 1').get()) throw new HttpError(400, 'Identity sign-in is unavailable.');
       limit('oidc:' + req.socket.remoteAddress, 30);
       const { client, provider } = await oidc();
+      const invite = new URL(req.url || '/api/auth/oidc/start', config.appUrl).searchParams.get('invite');
+      if (invite && !/^[A-Za-z0-9_-]{43}$/.test(invite)) throw new HttpError(400, 'Use a valid invitation link before signing in.');
       const state = client.randomState(), nonce = client.randomNonce(), verifier = client.randomPKCECodeVerifier(), browser = randomBytes(32).toString('base64url');
       db.prepare('DELETE FROM oidc_flows WHERE expires_at<=?').run(Date.now());
       db.prepare('INSERT INTO oidc_flows VALUES(?,?,?,?,?)').run(digest(state), digest(browser), verifier, nonce, Date.now() + 600000);
+      if (invite) db.prepare('INSERT INTO oidc_return_targets VALUES(?,?)').run(digest(state), invite);
       const location = client.buildAuthorizationUrl(provider, { redirect_uri: config.appUrl + '/api/auth/oidc/callback', scope: 'openid email profile', state, nonce, code_challenge: await client.calculatePKCECodeChallenge(verifier), code_challenge_method: 'S256' });
       res.setHeader('Set-Cookie', cookie('ten98_oidc', browser, 600)); res.writeHead(302, { Location: location.href }); res.end();
     },
@@ -88,7 +106,7 @@ export function createAuth(db, config) {
       const state = url.searchParams.get('state'), browser = cookies(req).ten98_oidc;
       if (!state || !browser || url.searchParams.getAll('state').length !== 1) throw new HttpError(400, 'Identity sign-in expired. Start again.');
       const flow = transaction(db, () => {
-        const found = db.prepare('SELECT * FROM oidc_flows WHERE state=? AND browser=? AND expires_at>?').get(digest(state), digest(browser), Date.now());
+          const found = db.prepare('SELECT f.*,r.invite_token FROM oidc_flows f LEFT JOIN oidc_return_targets r ON r.state=f.state WHERE f.state=? AND f.browser=? AND f.expires_at>?').get(digest(state), digest(browser), Date.now());
         if (found) db.prepare('DELETE FROM oidc_flows WHERE state=?').run(found.state);
         return found;
       });
@@ -113,7 +131,7 @@ export function createAuth(db, config) {
           return id;
         });
         establish(res, userId); res.setHeader('Set-Cookie', [res.getHeader('Set-Cookie'), cookie('ten98_oidc', '', 0)]);
-        res.writeHead(302, { Location: config.appUrl + '/' }); res.end();
+        res.writeHead(302, { Location: config.appUrl + '/' + (flow.invite_token ? '?invite=' + encodeURIComponent(flow.invite_token) : '') }); res.end();
       } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, 'Identity sign-in could not be verified. Start again.'); }
     },
   };

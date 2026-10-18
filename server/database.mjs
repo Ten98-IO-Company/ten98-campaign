@@ -18,6 +18,7 @@ export function openDatabase(dataDir) {
     CREATE INDEX IF NOT EXISTS records_project ON records(project_id,collection);
     CREATE TABLE IF NOT EXISTS activity(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,message TEXT NOT NULL,created_at TEXT NOT NULL,sample INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS oidc_flows(state TEXT PRIMARY KEY,browser TEXT NOT NULL,verifier TEXT NOT NULL,nonce TEXT NOT NULL,expires_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS oidc_return_targets(state TEXT PRIMARY KEY REFERENCES oidc_flows(state) ON DELETE CASCADE,invite_token TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS oidc_identities(issuer TEXT NOT NULL,subject TEXT NOT NULL,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(issuer,subject));
     CREATE TABLE IF NOT EXISTS login_limits(key TEXT PRIMARY KEY,count INTEGER NOT NULL,expires_at INTEGER NOT NULL);`);
   return db;

@@ -52,7 +52,7 @@ export default function TeamPanel({ workspaceId, role, currentUserId, request }:
           <button className="button primary">{busy ? 'Saving…' : 'Add existing account'}</button>
         </fieldset>
       </form>
-      <p className="helper-note">New local accounts must be created by the instance operator. Organization accounts can sign in through the configured single sign-on service before being added here.</p>
+      <p className="helper-note">Invite new members using a secure invitation link below. Organization accounts can also sign in through the configured single sign-on service before being added here.</p>
     </>}
   </section>;
 }

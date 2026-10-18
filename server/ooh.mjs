@@ -35,6 +35,11 @@ function mapping(db, projectId) {
 }
 function list(db, table, projectId) { return db.prepare(`SELECT data FROM ${table} WHERE project_id=? ORDER BY rowid DESC`).all(projectId).map(row => JSON.parse(row.data)); }
 function saveBooking(db, projectId, booking) { db.prepare('INSERT INTO project_ooh_bookings VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE project_ooh_bookings.project_id=excluded.project_id').run(booking.id, projectId, JSON.stringify(booking)); return booking; }
+function canRetryCancellation(db, projectId, booking) {
+  const id = booking.cancellationOperationId;
+  if (booking.stage !== 'cancellation-requested' || !id || operation.active?.get(db)?.has(id) || !db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operation_reviews'").get()) return false;
+  return Boolean(db.prepare("SELECT o.id FROM integration_operations o JOIN integration_operation_reviews r ON r.operation_id=o.id AND r.project_id=o.project_id WHERE o.id=? AND o.project_id=? AND o.status='reviewed-not-applied' AND r.resolution='not_applied' AND o.action_path='POST /ooh/bookings/:id/cancel'").get(id, projectId));
+}
 function coordinate(value, limit) { return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= limit ? value : null; }
 function screenView(screen) {
   return { id: screen.id, name: String(screen.name || screen.id).slice(0, 250), location: String(screen.address || '').slice(0, 500), resolution: String(screen.resolution || '').slice(0, 80), latitude: coordinate(screen.lat, 90), longitude: coordinate(screen.long, 180), syncedAt: new Date().toISOString() };
@@ -50,20 +55,29 @@ function placementRecords({ db, store, project }, booking) {
     return previous ? store.update(project.id, 'placements', previous.id, data) : store.create(project.id, 'placements', data);
   }));
 }
-async function provider(env, path, body) {
+async function provider(env, path, body, method = body === undefined ? 'GET' : 'POST') {
   const base = HOSTS[env.BROADSIGN_ENVIRONMENT || 'sandbox'];
   if (!base) fail(503, 'INVALID_OOH_ENVIRONMENT', 'BROADSIGN_ENVIRONMENT must be sandbox or production.');
   if (!env.BROADSIGN_API_KEY) fail(503, 'OOH_NOT_CONFIGURED', 'Configure the Broadsign API key on the server.');
-  const writing = body !== undefined;
+  const writing = method !== 'GET';
+  try { env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed. Refresh this project before continuing.'); }
   let response;
-  try { response = await fetch(`${base}${path}`, { method: writing ? 'POST' : 'GET', headers: { Authorization: `Broadsign ${env.BROADSIGN_API_KEY}`, Accept: 'application/json', ...(writing ? { 'Content-Type': 'application/json' } : {}) }, ...(writing ? { body: JSON.stringify(body) } : {}), redirect: 'error', signal: AbortSignal.timeout(20000) }); }
+  try { response = await fetch(`${base}${path}`, { method, headers: { Authorization: `Broadsign ${env.BROADSIGN_API_KEY}`, Accept: 'application/json', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'error', signal: AbortSignal.timeout(20000) }); }
   catch { fail(502, 'OOH_UNAVAILABLE', 'Broadsign did not confirm the request.', writing); }
-  if (!response.ok) fail(response.status === 429 ? 429 : response.status >= 500 ? 502 : 400, 'OOH_PROVIDER_REJECTED', 'Broadsign could not complete this request. Check the connection and request details.', writing && response.status >= 500);
+  if (!response.ok) fail(response.status === 429 ? 429 : response.status >= 500 ? 502 : 400, 'OOH_PROVIDER_REJECTED', 'Broadsign could not complete this request. Check the connection and request details.', writing && (response.status >= 500 || [408, 409].includes(response.status)));
   try {
+    // The cancellation contract has no response body; a scoped GET below verifies the actual state.
+    if (method === 'POST' && path.endsWith('/cancel')) {
+      await response.body?.cancel();
+      try { env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', true); }
+      return {};
+    }
     const reader = response.body.getReader(), chunks = []; let size = 0;
     for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > 2 * 1024 * 1024) { await reader.cancel(); throw new Error(); } chunks.push(next.value); }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  } catch { fail(502, 'INVALID_OOH_RESPONSE', 'Broadsign returned an unreadable response.', writing); }
+    const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    try { env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', writing); }
+    return result;
+  } catch (error) { if (error instanceof IntegrationError) throw error; fail(502, 'INVALID_OOH_RESPONSE', 'Broadsign returned an unreadable response.', writing); }
 }
 async function verifyDomain(env, connection) {
   if (env.BROADSIGN_DOMAIN_ID !== undefined && env.BROADSIGN_DOMAIN_ID !== '') {
@@ -132,7 +146,7 @@ export async function handleOoh(context) {
       store?.activity(project.id, 'Approved Broadsign project inventory mapping.'); send(200, { connection }); return true;
     }
     if (path === 'inventory' && req.method === 'GET') { send(200, { inventory: list(db, 'project_ooh_inventory', project.id) }); return true; }
-    if (path === 'bookings' && req.method === 'GET') { send(200, { bookings: list(db, 'project_ooh_bookings', project.id) }); return true; }
+    if (path === 'bookings' && req.method === 'GET') { send(200, { bookings: list(db, 'project_ooh_bookings', project.id).map(booking => ({ ...booking, canRetryCancellation: canRetryCancellation(db, project.id, booking) })) }); return true; }
     const connection = requireMapping(db, project.id, env);
     if (path === 'sync' && req.method === 'POST') {
       fields(body, []); await verifyDomain(env, connection); const inventory = [];
@@ -175,7 +189,7 @@ export async function handleOoh(context) {
         } catch { fail(409, 'OOH_PARTIAL_DRAFT', 'A provider proposal was created but its line item needs reconciliation in Broadsign. Do not create it again automatically.', true); }
       }); send(result.status, result.data); return true;
     }
-    const route = path.match(/^bookings\/([^/]+)\/(availability|submit|report)$/);
+    const route = path.match(/^bookings\/([^/]+)\/(availability|submit|report|cancel)$/);
     if (route) {
       const row = db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(route[1], project.id);
       if (!row) fail(404, 'OOH_BOOKING_NOT_FOUND', 'This booking does not belong to this project.');
@@ -189,7 +203,42 @@ export async function handleOoh(context) {
       if (route[2] === 'report' && req.method === 'GET') {
         const { proposal, item } = await checkedProposal(env, connection, booking, true);
         const report = { actualImpressions: typeof item.actual_impressions === 'number' ? item.actual_impressions : null, actualPlays: typeof item.actual_repetitions === 'number' ? item.actual_repetitions : null, updatedAt: item.performance_update_tm || null, rawProofOfPlay: false };
-        Object.assign(booking, { providerStatus: Number(proposal.status), report }); saveBooking(db, project.id, booking); send(200, { booking, report, placements: placementRecords(context, booking) }); return true;
+        Object.assign(booking, { providerStatus: Number(proposal.status), report, ...([12, 14, 15].includes(Number(proposal.status)) ? { stage: Number(proposal.status) === 12 ? 'cancelled' : Number(proposal.status) === 14 ? 'ended' : 'cancelling' } : {}) }); saveBooking(db, project.id, booking); send(200, { booking, report, placements: placementRecords(context, booking) }); return true;
+      }
+      if (route[2] === 'cancel' && req.method === 'POST') {
+        fields(body, ['confirmCancellation']);
+        if (body.confirmCancellation !== true) fail(400, 'OOH_CANCELLATION_CONFIRMATION_REQUIRED', 'Confirm cancellation under the media provider’s terms. Refunds and charges are not determined by this app.');
+        const result = await operation(context, async () => {
+          // Re-read inside the durable operation so concurrent requests cannot reuse a stale local stage.
+          const current = JSON.parse(db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id).data);
+          const { proposal } = await checkedProposal(env, connection, current, true), before = Number(proposal.status);
+          if ([12, 15].includes(before)) {
+            Object.assign(current, { providerStatus: before, stage: before === 12 ? 'cancelled' : 'cancelling' }); saveBooking(db, project.id, current);
+            return { booking: current, cancellation: { requested: true, confirmed: before === 12 }, placements: placementRecords(context, current) };
+          }
+          if (['cancellation-requested', 'cancelling', 'cancelled'].includes(current.stage) && !canRetryCancellation(db, project.id, current)) fail(409, 'OOH_CANCELLATION_PENDING', 'A cancellation was already requested. Refresh the delivery report or review Broadsign before taking another action.');
+          if (![3, 9, 10, 11].includes(before)) fail(409, 'OOH_NOT_CANCELLABLE', 'Only submitted, booked, or live proposals can be cancelled here. Review saved or ended proposals in Broadsign.');
+          const latest = JSON.parse(db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id).data);
+          if (['cancellation-requested', 'cancelling', 'cancelled'].includes(latest.stage) && !canRetryCancellation(db, project.id, latest)) fail(409, 'OOH_CANCELLATION_PENDING', 'A cancellation was already requested. Refresh its provider status before continuing.');
+          // This synchronous receipt blocks another local cancellation while the provider request is in flight.
+          const previousCancellation = { stage: current.stage, cancellationOperationId: current.cancellationOperationId, cancellationRequestedAt: current.cancellationRequestedAt };
+          const receipt = db.prepare("SELECT id FROM integration_operations WHERE project_id=? AND request_key=? AND status='pending'").get(project.id, req.headers['idempotency-key']);
+          if (!receipt) fail(409, 'OOH_CANCELLATION_RECEIPT_REQUIRED', 'A durable cancellation receipt is required before contacting Broadsign.');
+          current.providerStatus = before; current.stage = 'cancellation-requested'; current.cancellationOperationId = receipt.id; current.cancellationRequestedAt = new Date().toISOString(); saveBooking(db, project.id, current);
+          try { await provider(env, `/api/v1/proposal/proposal_item/${current.lineItemId}/cancel`, undefined, 'POST'); }
+          catch (error) {
+            if (error instanceof IntegrationError && !error.uncertain) { Object.assign(current, previousCancellation); saveBooking(db, project.id, current); }
+            throw error;
+          }
+          let checked;
+          try { checked = await checkedProposal(env, connection, current, true); }
+          catch { fail(409, 'OOH_CANCELLATION_UNCONFIRMED', 'Broadsign accepted the cancellation request, but its latest state could not be read. Reconcile it before retrying.', true); }
+          const actual = Number(checked.proposal.status);
+          Object.assign(current, { providerStatus: actual, stage: actual === 12 ? 'cancelled' : actual === 14 ? 'ended' : actual === 15 ? 'cancelling' : 'cancellation-requested' }); saveBooking(db, project.id, current);
+          const placements = placementRecords(context, current);
+          store?.activity(project.id, actual === 12 ? 'Broadsign confirmed an OOH cancellation.' : 'Requested an OOH cancellation; awaiting Broadsign confirmation.');
+          return { booking: current, cancellation: { requested: true, confirmed: actual === 12 }, placements };
+        }); send(result.status, result.data); return true;
       }
       if (route[2] === 'submit' && req.method === 'POST') {
         fields(body, ['confirmBooking']);

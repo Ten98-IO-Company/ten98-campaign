@@ -1,13 +1,13 @@
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { openDatabase } from './database.mjs';
+import { openDatabase, transaction } from './database.mjs';
 import { hashPassword } from './auth.mjs';
 
 // Read JSON from stdin so passwords never appear in process arguments or output.
 let db;
 try {
   const command = process.argv[2];
-  if (!['create-user', 'grant-operator'].includes(command) || process.stdin.isTTY) throw new Error('Usage: pipe JSON account input to node server/cli.mjs create-user, or {email} to grant-operator.');
+  if (!['create-user', 'grant-operator', 'reset-password'].includes(command) || process.stdin.isTTY) throw new Error('Usage: pipe JSON account input to node server/cli.mjs create-user, reset-password, or {email} to grant-operator.');
   let raw = '';
   for await (const chunk of process.stdin) { raw += chunk; if (Buffer.byteLength(raw) > 8192) throw new Error('Account input is too large.'); }
   let input; try { input = JSON.parse(raw); } catch { throw new Error('Supply valid JSON account input.'); }
@@ -20,6 +20,12 @@ try {
     if (!existing) throw new Error('The account does not exist. Create it first.');
     db.prepare('INSERT OR IGNORE INTO instance_operators VALUES(?)').run(existing.id);
     console.log(`Granted instance operator authority to ${email}. Workspace membership is still required.`);
+  } else if (command === 'reset-password') {
+    if (!existing || !db.prepare('SELECT password FROM users WHERE id=?').get(existing.id)?.password) throw new Error('A local password account was not found. Use your identity provider for SSO recovery.');
+    if (typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) throw new Error('Use a password between 12 and 128 characters.');
+    const next = await hashPassword(input.password);
+    transaction(db, () => { db.prepare('UPDATE users SET password=? WHERE id=?').run(next, existing.id); db.prepare('DELETE FROM sessions WHERE user_id=?').run(existing.id); });
+    console.log('Local password reset. All account sessions were signed out.');
   } else {
     if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 120 || /[\u0000-\u001f]/.test(input.name)) throw new Error('Use a name between 1 and 120 characters.');
     if (typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) throw new Error('Use a password between 12 and 128 characters.');

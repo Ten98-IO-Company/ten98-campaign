@@ -54,8 +54,20 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
       await write(`${path}/bookings/${encodeURIComponent(booking.id)}/submit`, { confirmBooking: true }); setNotice('Booking submitted. Broadsign reports the final booking and delivery status.');
     });
   }
+  async function cancelBooking(event: React.FormEvent<HTMLFormElement>, booking: any) {
+    event.preventDefault();
+    await action(async () => {
+      const target = `${path}/bookings/${encodeURIComponent(booking.id)}/cancel`, body = { confirmCancellation: true };
+      if (booking.canRetryCancellation) pendingKeys.current.delete(JSON.stringify([target, body]));
+      let result;
+      try { result = await write(target, body); }
+      catch (error) { await load().catch(() => {}); throw error; }
+      setNotice(result.cancellation.confirmed ? 'Broadsign confirmed cancellation. Review any charges or refunds with the media provider.' : 'Cancellation requested. Delivery may continue until Broadsign confirms it. Refresh the delivery report for its actual status.');
+    });
+  }
   return <section className="panel settings-panel">
     <div className="section-heading"><div><h2>Broadsign OOH</h2><p>Sync approved screens and static faces, prepare proposals, and submit confirmed bookings.</p></div></div>
+    <p className="helper-note">Upload and schedule creative bundles in <a href="https://app.broadsign.com/campaigns" target="_blank" rel="noreferrer">Broadsign Guaranteed Campaigns</a> using the proposal ID below. Your provider account controls creative permissions and approvals.</p>
     {error && <p className="alert" role="alert">{error}</p>}
     {notice && <p className="helper-note" role="status">{notice}</p>}
     {status && <p className="helper-note">{status.configured ? `Server credentials configured · ${status.environment}` : 'Add the Broadsign API key to the server to connect this provider.'}{status.connection ? ` · Domain ${status.connection.domainId} · ${status.connection.clientName}` : ' · Project mapping required'}</p>}
@@ -92,12 +104,16 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
     {bookings.length > 0 && <><h3>Provider proposals</h3>{bookings.map(booking => <article className="panel" key={booking.id}>
       <h3>{booking.name}</h3><p>{booking.startDate} – {booking.endDate} · {booking.screenIds.length} screens · Quote {booking.price} in account currency</p>
       <p className="helper-note">Broadsign proposal {booking.proposalId || 'ID unconfirmed'} · {['creating', 'proposal-created'].includes(booking.stage) ? 'Incomplete draft: review in Broadsign before continuing.' : statuses[booking.providerStatus] || `Provider status ${booking.providerStatus}`}</p>
+      {booking.stage === 'cancellation-requested' && <p className="helper-note" role="status">{booking.canRetryCancellation ? 'An operator reviewed this cancellation as not applied. This is a human review, not provider confirmation. You may explicitly request a fresh cancellation below; Broadsign’s current scope and status will be checked again.' : 'Cancellation requested; provider confirmation is pending. Delivery may continue. Refresh the delivery report before taking another action.'}</p>}
       <div className="button-row"><button type="button" className="button" disabled={busy || !booking.lineItemId} onClick={() => action(async () => { const result = await request(`${path}/bookings/${encodeURIComponent(booking.id)}/availability`); setAvailability(previous => ({ ...previous, [booking.id]: `${result.availability} · ${result.bookableScreens ?? '—'} / ${result.requestedScreens ?? '—'} screens bookable` })); await onChanged?.(); })}>Check availability</button>
         <button type="button" className="button" disabled={busy || !booking.lineItemId} onClick={() => action(async () => { await request(`${path}/bookings/${encodeURIComponent(booking.id)}/report`); await load(); await onChanged?.(); })}>Refresh delivery report</button></div>
       {availability[booking.id] && <p className="helper-note" role="status">{availability[booking.id]}</p>}
       {booking.report && <p>Actual impressions: {booking.report.actualImpressions ?? 'Not reported'} · Actual plays: {booking.report.actualPlays ?? 'Not reported'}{booking.report.updatedAt ? ` · Updated ${booking.report.updatedAt}` : ''}</p>}
       {canWrite && booking.stage === 'draft' && Number(booking.providerStatus) === 1 && <form onSubmit={event => submitBooking(event, booking)}><fieldset disabled={busy}>
         <label><input type="checkbox" required/> I approve submitting this paid booking at the provider quote.</label><p><button className="button primary">Submit for booking</button></p>
+      </fieldset></form>}
+      {canWrite && booking.lineItemId && [3, 9, 10, 11].includes(Number(booking.providerStatus)) && (booking.canRetryCancellation || !['cancellation-requested', 'cancelling', 'cancelled'].includes(booking.stage)) && <form onSubmit={event => cancelBooking(event, booking)}><fieldset disabled={busy}>
+        <label><input type="checkbox" required/> I approve cancelling this booking under the media provider’s terms.</label><p className="helper-note">Cancellation can incur charges and does not guarantee a refund. Booked or live delivery may continue until the provider confirms cancellation.</p><p><button className="button danger">{booking.canRetryCancellation ? 'Request fresh cancellation' : 'Request cancellation'}</button></p>
       </fieldset></form>}
     </article>)}<p className="helper-note">Verified provider bookings also update your shared OOH plan. Per-location costs remain unknown when the provider reports only a combined quote. Delivery totals come from Broadsign’s line-item performance fields. Raw proof-of-play logs require a separate Broadsign Control / POP integration.</p></>}
   </section>;

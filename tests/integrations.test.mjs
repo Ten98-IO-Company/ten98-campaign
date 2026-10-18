@@ -4,6 +4,79 @@ import { DatabaseSync } from 'node:sqlite';
 import { generateKeyPairSync, verify } from 'node:crypto';
 import { handleIntegration, providerRequest } from '../server/integrations.mjs';
 
+test('social lifecycle updates, cancellation, failed retry, published-copy edits and removal stay scoped and durable', async () => {
+  const originalFetch = globalThis.fetch, db = new DatabaseSync(':memory:'), writes = [], records = new Map();
+  const project = { id: 'social-project', zernioProfileId: 'profile-social' }, account = { _id: 'facebook-a', profileId: project.zernioProfileId, platform: 'facebook' };
+  let remote = { _id: 'remote-social', status: 'scheduled', content: 'Original', scheduledFor: '2070-01-01T10:00:00Z', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] }, mappedProfile = project.zernioProfileId, remapOnWrite = false, failedReadback = false;
+  const store = {
+    get(projectId, collection, id) { const record = records.get(id); return record?.projectId === projectId && collection === 'posts' ? { ...record } : null; },
+    update(projectId, collection, id, data) { const record = this.get(projectId, collection, id); if (!record) return null; const result = { ...record, ...data }; records.set(id, result); return result; },
+    activity() {},
+  };
+  const local = { id: 'local-post', projectId: project.id, externalId: remote._id, zernioProfileId: project.zernioProfileId, content: 'Original', status: 'scheduled' }; records.set(local.id, local);
+  let keySequence = 0;
+  async function invoke(path, body, { key = `lifecycle-${++keySequence}`, role = 'editor' } = {}) {
+    let response; const method = body === undefined ? 'GET' : 'POST';
+    await handleIntegration({ req: { method, headers: { 'idempotency-key': key } }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/${path}`), body: body || {}, project, role, db, store, config: { env: {}, ZERNIO_API_KEY: 'sk_private' }, assertProjectMapping(expected) { if (expected !== mappedProfile) throw new Error('Mapping changed'); }, send(status, data) { response = { status, data }; } }); return response;
+  }
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(target), method = options.method || 'GET'; let result;
+    if (url.pathname === '/api/v1/accounts') result = { accounts: [account] };
+    else if (url.pathname === '/api/v1/posts/remote-social' && method === 'GET') {
+      if (failedReadback) throw new Error('Read unavailable'); result = { post: remote };
+    } else {
+      const payload = options.body ? JSON.parse(options.body) : undefined; writes.push({ url, method, payload, key: options.headers['Idempotency-Key'] });
+      if (method === 'PUT') { remote = { ...remote, ...payload, status: payload.isDraft ? 'draft' : 'scheduled' }; result = { post: remote }; }
+      else if (method === 'DELETE') result = { message: 'Post deleted successfully' };
+      else if (url.pathname.endsWith('/retry')) { remote = { ...remote, status: 'publishing' }; result = { post: remote }; }
+      else if (url.pathname.endsWith('/edit')) { remote = { ...remote, content: payload.content }; result = { success: true }; }
+      else if (url.pathname.endsWith('/unpublish')) { remote = { ...remote, status: 'cancelled', platforms: remote.platforms.map(item => item.accountId === payload.accountId ? { ...item, status: 'cancelled' } : item) }; result = { success: true }; }
+      else throw new Error('Unexpected provider path');
+      if (remapOnWrite) mappedProfile = 'other-profile';
+    }
+    return new Response(JSON.stringify(result), { status: 200 });
+  };
+  try {
+    let result = await invoke('social/update', { postId: local.id, content: 'Changed', mode: 'scheduled', scheduledAt: '2070-02-30T10:00:00Z' });
+    assert.equal(result.status, 400); assert.equal(writes.length, 0);
+    assert.equal((await invoke('social/update', { postId: local.id, content: 'Changed', mode: 'scheduled', scheduledAt: '2020-01-01T10:00:00Z' })).status, 409);
+    assert.equal((await invoke('social/update', { postId: local.id, content: 'Changed', mode: 'draft', publishNow: true })).status, 400);
+    result = await invoke('social/update', { postId: local.id, content: 'Changed', mode: 'scheduled', scheduledAt: '2070-02-28T10:00:00+04:00' }, { key: 'update-social-01' });
+    assert.equal(result.status, 200); assert.deepEqual(writes.at(-1).payload, { content: 'Changed', isDraft: false, scheduledFor: '2070-02-28T06:00:00.000Z', timezone: 'UTC' }); assert.equal(writes.at(-1).method, 'PUT');
+    const beforeReplay = writes.length;
+    await invoke('social/update', { postId: local.id, content: 'Changed', mode: 'scheduled', scheduledAt: '2070-02-28T10:00:00+04:00' }, { key: 'update-social-01' }); assert.equal(writes.length, beforeReplay);
+    result = await invoke('social/update', { postId: local.id, content: 'Draft text', mode: 'draft' }); assert.equal(result.status, 200); assert.equal(result.data.post.status, 'draft'); assert.equal(result.data.post.scheduledAt, ''); assert.deepEqual(writes.at(-1).payload, { content: 'Draft text', isDraft: true });
+    assert.equal((await invoke('social/cancel', { postId: local.id })).status, 400);
+    result = await invoke('social/cancel', { postId: local.id, confirmCancellation: true }, { key: 'cancel-social-01' }); assert.equal(result.status, 200); assert.equal(result.data.post.status, 'cancelled'); assert.ok(result.data.post.providerDeletedAt); assert.equal(writes.at(-1).method, 'DELETE');
+    const cancelWrites = writes.length;
+    await invoke('social/cancel', { postId: local.id, confirmCancellation: true }, { key: 'cancel-social-01' }); assert.equal(writes.length, cancelWrites);
+    assert.equal((await invoke('social/status?postId=' + local.id)).data.provider.deleted, true);
+    assert.equal((await invoke('social/retry', { postId: local.id, confirmPublish: true })).status, 409);
+    records.set(local.id, { ...local, status: 'failed' }); remote = { ...remote, status: 'failed', platforms: [{ platform: 'facebook', accountId: account._id, status: 'failed' }] };
+    assert.equal((await invoke('social/retry', { postId: local.id })).status, 400);
+    result = await invoke('social/retry', { postId: local.id, confirmPublish: true }); assert.equal(result.status, 200); assert.equal(writes.at(-1).url.pathname, '/api/v1/posts/remote-social/retry');
+    remote.status = 'published'; remote.platforms[0].status = 'published';
+    assert.equal((await invoke('social/cancel', { postId: local.id, confirmCancellation: true })).status, 409);
+    assert.equal((await invoke('social/update', { postId: local.id, content: 'Unsafe', mode: 'draft' })).status, 409);
+    assert.equal((await invoke('social/edit-published', { postId: local.id, accountId: 'outside-account', content: 'Unsafe', confirmEdit: true })).status, 403);
+    assert.equal((await invoke('social/edit-published', { postId: local.id, accountId: account._id, content: 'Live text', confirmEdit: true }, { role: 'viewer' })).status, 403);
+    result = await invoke('social/edit-published', { postId: local.id, accountId: account._id, content: 'Live text', confirmEdit: true }); assert.equal(result.status, 200); assert.equal(result.data.post.content, 'Live text'); assert.deepEqual(writes.at(-1).payload, { platform: 'facebook', accountId: account._id, content: 'Live text' });
+    remote.platforms[0].accountId = 'foreign-account'; const beforeForeign = writes.length;
+    assert.equal((await invoke('social/unpublish', { postId: local.id, accountId: account._id, confirmRemoval: true })).status, 403); assert.equal(writes.length, beforeForeign); remote.platforms[0].accountId = account._id;
+    remote.platforms[0].platform = 'instagram';
+    assert.equal((await invoke('social/unpublish', { postId: local.id, accountId: account._id, confirmRemoval: true })).status, 502);
+    account.platform = 'instagram';
+    assert.equal((await invoke('social/unpublish', { postId: local.id, accountId: account._id, confirmRemoval: true })).status, 422); remote.platforms[0].platform = 'facebook'; account.platform = 'facebook';
+    result = await invoke('social/unpublish', { postId: local.id, accountId: account._id, confirmRemoval: true }); assert.equal(result.status, 200); assert.equal(result.data.post.providerResults[0].status, 'cancelled');
+    remote.status = 'scheduled'; remote.platforms[0].status = 'pending'; remapOnWrite = true;
+    result = await invoke('social/update', { postId: local.id, content: 'Old mapping write', mode: 'draft' }); assert.equal(result.data.operation.status, 'uncertain'); assert.notEqual(records.get(local.id).content, 'Old mapping write');
+    mappedProfile = project.zernioProfileId; remapOnWrite = false; remote.status = 'published'; remote.platforms[0].status = 'published';
+    const beforeFailedReadback = globalThis.fetch;
+    globalThis.fetch = async (target, options) => { const response = await beforeFailedReadback(target, options); if (new URL(target).pathname.endsWith('/edit')) failedReadback = true; return response; };
+    result = await invoke('social/edit-published', { postId: local.id, accountId: account._id, content: 'Accepted without readback', confirmEdit: true }); assert.equal(result.data.operation.status, 'uncertain');
+  } finally { globalThis.fetch = originalFetch; db.close(); }
+});
+
 test('provider contracts, tenant boundaries, durable retries, and private Drive metadata', async () => {
   const originalFetch = globalThis.fetch;
   const db = new DatabaseSync(':memory:');
@@ -190,7 +263,7 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
       assert.equal(url.searchParams.get('profileId'), 'profile-a');
       const callback = new URL(url.searchParams.get('redirect_url'));
       assert.equal(callback.origin, 'https://campaign.example.com');
-      assert.equal(callback.searchParams.get('view'), 'settings');
+      assert.equal(callback.searchParams.get('view'), 'integrations');
       assert.equal(callback.searchParams.get('project'), project.id);
       return { authUrl: 'https://www.instagram.com/oauth/authorize?state=server-state' };
     };
@@ -207,6 +280,7 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     assert.equal(result.data.totals.impressions, 42); assert.equal(result.data.totals.clicks, undefined); assert.equal(result.data.followers.current, null);
 
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    let driveRevision = '1'.repeat(32);
     const driveConfig = { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'service@example.iam.gserviceaccount.com', GOOGLE_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }) };
     provider = async (url, options) => {
       if (url.hostname === 'oauth2.googleapis.com') {
@@ -219,13 +293,21 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
       assert.equal(url.pathname, '/drive/v3/files');
       assert.equal(url.searchParams.get('q'), "'folder_a' in parents and trashed = false");
       assert.equal(options.headers.Authorization, 'Bearer GOOGLE_PRIVATE_TOKEN');
-      return { files: [{ id: 'drive-image', name: 'Creative', mimeType: 'image/png', webViewLink: 'https://drive.google.com/file/d/drive-image/view', size: '64' }] };
+      return { files: [{ id: 'drive-image', name: 'Creative', mimeType: 'image/png', webViewLink: 'https://drive.google.com/file/d/drive-image/view', size: '64', modifiedTime: '2026-10-01T10:00:00Z', md5Checksum: driveRevision }] };
     };
     result = await invoke('drive/sync', { method: 'POST', config: driveConfig });
     assert.equal(result.data.synced, 1); assert.equal(result.data.assets[0].source, 'google-drive');
     assert.equal(JSON.stringify(result).includes('GOOGLE_PRIVATE_TOKEN'), false);
+    const syncedAsset = result.data.assets[0];
+    store.update(project.id, 'assets', syncedAsset.id, { approval: 'approved', deliveryUrl: 'https://cdn.example.com/delivery.png', tags: ['brand'] });
     await invoke('drive/sync', { method: 'POST', config: driveConfig });
     assert.equal(store.list(project.id, 'assets').filter(asset => asset.source === 'google-drive').length, 1, 'Drive sync upserts metadata.');
+    assert.equal(store.get(project.id, 'assets', syncedAsset.id).approval, 'approved', 'An unchanged Drive file keeps its reviewed approval.');
+    driveRevision = '2'.repeat(32); await invoke('drive/sync', { method: 'POST', config: driveConfig });
+    const revisedAsset = store.get(project.id, 'assets', syncedAsset.id);
+    assert.equal(revisedAsset.approval, 'pending', 'A changed Drive file must be reviewed again.');
+    assert.equal(revisedAsset.deliveryUrl, 'https://cdn.example.com/delivery.png'); assert.deepEqual(revisedAsset.tags, ['brand']);
+
     let uploaded = 0;
     provider = async (url, options) => {
       if (url.hostname === 'oauth2.googleapis.com') return { access_token: 'GOOGLE_PRIVATE_TOKEN' };
