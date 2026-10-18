@@ -19,7 +19,8 @@ function twilio(env) {
 }
 function smsReceipt(data, env, uncertain, expectedId, expectedRecipient) {
   if (!plain(data) || !sid(data.sid, 'SM') || data.account_sid !== env.TWILIO_ACCOUNT_SID || !phone(data.to) || !SMS_STATUSES.has(data.status) || expectedId && data.sid !== expectedId || expectedRecipient && data.to !== expectedRecipient) invalid('Twilio', uncertain);
-  return { providerId: data.sid, status: data.status, recipient: data.to, ...(data.error_code != null ? { errorCode: String(data.error_code).slice(0, 100) } : {}) };
+  if (data.from != null && !phone(data.from) || data.messaging_service_sid != null && !sid(data.messaging_service_sid, 'MG')) invalid('Twilio', uncertain);
+  return { providerId: data.sid, status: data.status === 'canceled' ? 'cancelled' : data.status, recipient: data.to, ...(data.from ? { sender: data.from } : {}), ...(data.messaging_service_sid ? { messagingServiceSid: data.messaging_service_sid } : {}), ...(data.error_code != null ? { errorCode: String(data.error_code).slice(0, 100) } : {}) };
 }
 function cloudflare(env) {
   if (!/^[a-fA-F0-9]{32}$/.test(env.CLOUDFLARE_ACCOUNT_ID || '') || !env.CLOUDFLARE_EMAIL_API_TOKEN || !email(env.CLOUDFLARE_EMAIL_FROM_ADDRESS)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure the Cloudflare account, Email Sending API token, and sender address in Integrations.');
@@ -38,6 +39,7 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
       if (!phone(env.TWILIO_FROM_NUMBER)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure a Twilio sender number or Messaging Service in Integrations.');
       body.set('From', env.TWILIO_FROM_NUMBER);
     }
+    if (delivery.sender !== undefined) { if (!phone(delivery.sender)) fail(400, 'INVALID_SENDER', 'Choose the original Twilio sender.'); body.set('From', delivery.sender); }
     if (delivery.callbackUrl) {
       let callback;
       try { callback = publicMediaUrl(delivery.callbackUrl); if (new URL(callback).origin !== new URL(appUrl).origin) throw new Error(); }
@@ -45,7 +47,9 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
       body.set('StatusCallback', callback);
     }
     const data = await providerRequest(`${api.base}/Messages.json`, { method: 'POST', headers: { ...api.headers, 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() }, 'Twilio', assertMapping);
-    return smsReceipt(data, env, true, undefined, contact.phone);
+    const receipt = smsReceipt(data, env, true, undefined, contact.phone);
+    if (delivery.sender !== undefined && receipt.sender !== delivery.sender || body.has('From') && receipt.sender && receipt.sender !== body.get('From') || receipt.messagingServiceSid && receipt.messagingServiceSid !== (env.TWILIO_MESSAGING_SERVICE_SID || '')) invalid('Twilio', true);
+    return receipt;
   }
   if (channel !== 'email') fail(400, 'UNSUPPORTED_CHANNEL', 'Use the WhatsApp broadcast workflow for WhatsApp campaigns.');
   if (campaign.emailPurpose !== 'transactional') fail(400, 'TRANSACTIONAL_EMAIL_ONLY', 'Cloudflare Email Sending supports transactional email only.');
@@ -54,6 +58,7 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
   const subject = text(campaign.subject, 'email subject', 998); if (/[\r\n]/.test(subject)) fail(400, 'INVALID_DIRECT_CONTENT', 'Email subjects cannot contain line breaks.');
   const body = { from: env.CLOUDFLARE_EMAIL_FROM_NAME ? { address: env.CLOUDFLARE_EMAIL_FROM_ADDRESS, name: text(env.CLOUDFLARE_EMAIL_FROM_NAME, 'sender name', 200) } : env.CLOUDFLARE_EMAIL_FROM_ADDRESS, to: [contact.email], subject, text: text(campaign.text, 'plain-text email', 100000) };
   if (campaign.html) body.html = text(campaign.html, 'HTML email', 500000);
+  if (env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS) { if (!email(env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS)) fail(409, 'INVALID_REPLY_TO', 'Configure a valid email reply address.'); body.reply_to = env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS; }
   if (unsubscribeUrl) {
     let url;
     try { url = publicMediaUrl(unsubscribeUrl); if (new URL(url).origin !== new URL(appUrl).origin) throw new Error(); }
@@ -72,6 +77,10 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
   }
   if (matches.length !== 1 || data.result.message_id != null && !validId(data.result.message_id)) invalid('Cloudflare Email Sending', true);
   return { providerId: data.result.message_id || null, status: matches[0], recipient: contact.email, ...(matches[0] === 'failed' ? { suppressionReason: 'hard-bounce' } : matches[0] === 'suppressed' ? { suppressionReason: 'Provider suppression' } : {}) };
+}
+
+export function sendSmsReply({ env, sender, recipient, message, callbackUrl, appUrl, assertMapping }) {
+  return sendDirect({ channel: 'sms', env, contact: { phone: recipient }, campaign: { text: message }, delivery: { sender, callbackUrl }, appUrl, assertMapping });
 }
 
 export async function getSmsStatus({ env, providerId, assertMapping }) {

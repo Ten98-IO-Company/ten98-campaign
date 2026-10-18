@@ -20,6 +20,9 @@ export default function AdComposer({ request, posts = [], onCreated, onCancel }:
   const requester = useRef(request); requester.current = request;
   const [connections, setConnections] = useState<Connection[]>([]), [adAccounts, setAdAccounts] = useState<AdAccount[]>([]);
   const [accountId, setAccountId] = useState(''), [adAccountId, setAdAccountId] = useState(''), [format, setFormat] = useState('image'), [mode, setMode] = useState('create'), [goal, setGoal] = useState('traffic'), [cards, setCards] = useState(2);
+  const identity = JSON.stringify([accountId, adAccountId, format, mode]), currentIdentity = useRef(identity), mounted = useRef(true); currentIdentity.current = identity;
+  const isCurrent = () => mounted.current && currentIdentity.current === identity;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [loading, setLoading] = useState(true), [loadingAds, setLoadingAds] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState(0);
   const connection = connections.find(item => item._id === accountId), platform = networks[connection?.platform || ''];
   const adAccount = adAccounts.find(item => item.id === adAccountId), currency = adAccount?.currency;
@@ -42,7 +45,7 @@ export default function AdComposer({ request, posts = [], onCreated, onCancel }:
     return () => { active = false; };
   }, [accountId, retry]);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (busy) return;
+    event.preventDefault(); if (busy || !isCurrent()) return;
     const values = Object.fromEntries(new FormData(event.currentTarget)) as Record<string, string>; setError('');
     try {
       if (!connection || !adAccount || adAccount.selectable === false || !currency) throw new Error('Choose an available advertising account with a reported currency.');
@@ -86,8 +89,8 @@ export default function AdComposer({ request, posts = [], onCreated, onCancel }:
           if (platform === 'openai' && goal === 'awareness') { payload.bidStrategy = 'LOWEST_COST_WITH_BID_CAP'; payload.bidAmount = Number(values.bidAmount); }
         }
       }
-      setBusy(true); await requester.current(boosting ? 'ads/boost' : 'ads/create', payload); onCreated();
-    } catch (err) { setError((err as Error).message || 'The ad could not be created. Your entries are still here.'); } finally { setBusy(false); }
+      setBusy(true); await requester.current(boosting ? 'ads/boost' : 'ads/create', payload); if (isCurrent()) onCreated();
+    } catch (err) { if (isCurrent() && (err as Error).name !== 'AbortError') setError((err as Error).message || 'The ad could not be created. Your entries are still here.'); } finally { if (isCurrent()) setBusy(false); }
   }
   return <form onSubmit={submit}>
     <p className="field-help">Ads and boosts start with their campaign paused. Review them before activation.</p>

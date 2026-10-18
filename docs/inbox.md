@@ -1,6 +1,6 @@
-# Unified inbox and Messenger contacts
+# Unified inbox, SMS replies and Messenger contacts
 
-The unified inbox brings connected messages, comments and reviews into their project's provider scope. Provider accounts must belong to that project's Zernio profile. Inbox replies use the connected provider; an incoming conversation does not grant permission to send a separate email, SMS or WhatsApp campaign.
+The unified inbox brings connected Zernio messages, comments and reviews into their project's provider scope, alongside locally stored Twilio SMS conversations. Zernio accounts must belong to that project's profile. An incoming conversation does not grant permission to send a separate email, SMS or WhatsApp campaign. Email replies are handled by your external receiving mailbox or group, not an email inbox in this app.
 
 ## Setup and supported actions
 
@@ -12,11 +12,33 @@ Comments support published-post feeds, nested threads, public replies, and platf
 
 Writes use the shared durable operation ledger. A lost or malformed acknowledgement stops duplicate submission and remains available for operator reconciliation in Settings. Confirmed replies clear the composer even if refreshing the thread fails; failed replies preserve the draft. Provider acknowledgement does not establish delivery or read status.
 
+**Open replies** in Direct campaigns navigates to SMS replies or the campaign's connected WhatsApp account. An optional recipient search helps find a thread; it does not automatically identify or create the conversation. WhatsApp participants may use business-specific identifiers rather than phone numbers, so inspect the thread before sending. Outside the customer-service reply window, send an approved template through Direct campaigns.
+
+## Twilio SMS conversations
+
+Configure Twilio's Account SID, Auth Token and sender number or Messaging Service in Integrations. Open **SMS replies**, copy its project-specific incoming webhook URL, and configure Twilio to POST there:
+
+```text
+https://your-app.example/api/webhooks/twilio/inbound/PROJECT_ID
+```
+
+Use a public HTTPS `APP_URL`. The receiver checks the standard Twilio Auth Token signature against the exact URL and form fields, configured account and sender. Delivery callbacks use a separate per-message URL set by the app. Preserve request bytes and the public path/query through your proxy. Signature verification occurs before any message is attributed or stored.
+
+An incoming message is attributed through a confirmed outbound account/sender/recipient record. The project-specific URL narrows the candidates to that project; it does not bypass the outbound proof. The legacy global `/api/webhooks/twilio/inbound` route accepts a message into history only when one project matches. Unknown or ambiguous messages retain a hashed receipt without their private body or attachments. Message SID and payload-hash checks prevent duplicates and conflicting replay. A signed callback for another project cannot copy a stored message there.
+
+To test attribution, explicitly send an SMS campaign from this project to a test number whose consent you recorded, wait for Twilio's acknowledgement, then reply from that number. This creates the outbound proof the incoming route needs; provider charges may apply.
+
+Attributed SMS bodies, attachment references, incoming/outgoing history and delivery states are stored in the private database and remain available after restart. Incoming attachment references are restricted to that Twilio account/message's HTTPS media path; the app does not copy those files or embed API credentials in the links. History reads and five-second polling use local records. No incoming SMS automatically creates a contact, invents an email address or grants campaign permission.
+
+Viewers can read history; editors can explicitly send a text reply of up to 1,600 characters through the original sender. Replies check current project access, credentials, sender mapping and suppression. They can span multiple billable SMS segments. Outbound media, voice calls and an SMS archive/read workflow are not implemented. Delivery callbacks update status separately; an acknowledgement does not mean delivered or read. In-flight replies interrupted by a restart become uncertain and are not replayed automatically.
+
+Verified STOP requests and Twilio opt-out rejections create durable installation-wide phone-hash suppression. It blocks campaigns and replies across existing and future projects, survives contact deletion/reimport and sender configuration changes, and cannot be cleared by importing consent. A later incoming message or START does not automatically resubscribe the recipient. Keep this suppression ledger with the private database backups.
+
 ## Incoming updates
 
 Register the public HTTPS `/api/webhooks/zernio` address in Zernio and use the same signing secret configured in Integrations. Subscribe to `message.received`, other needed `message.*`/`conversation.*` events, `comment.received`, `review.new` and `review.updated`, alongside existing post subscriptions. Configure the profile filter for this installation.
 
-The raw body is verified before parsing. Event IDs and raw-body hashes prevent replay conflicts; processing, contact identity and the notification commit together. Ambiguous or missing project mappings remain pending. New inbox payloads store routing and contact identity only; message/comment/review bodies and attachments remain at the provider. The browser polls local notifications every five seconds, fetching a provider feed only after relevant activity or an explicit load/refresh.
+The Zernio raw body is verified before parsing. Event IDs and raw-body hashes prevent replay conflicts; processing, contact identity and the notification commit together. Ambiguous or missing project mappings remain pending. Zernio inbox payloads store routing and contact identity only; message/comment/review bodies and attachments remain at the provider. The browser polls local notifications every five seconds, fetching a provider feed only after relevant activity or an explicit load/refresh. Twilio SMS follows the separate durable local-history flow above.
 
 Messenger/Instagram history imported before an account connects does not emit incoming-message webhooks. Opening verified incoming history supplies the automatic contact path below. Provider history/replay limits still apply. Comment feeds may lag provider changes by up to ten minutes. Instagram connections through Facebook Login omit hidden comments from reads: this app can unhide a comment it previously hid when the exact completed action is among the latest 500 receipts; use the provider dashboard for older hidden comments. Scope scans stop after 2,000 posts/comments or 1,000 reviews and return an explicit limit error for older items.
 

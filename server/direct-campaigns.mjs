@@ -56,7 +56,7 @@ function exclusion(contact, channel) {
   if (channel === 'email' && ['no_mx', 'null_mx', 'nxdomain'].includes(contact.hygiene?.dnsStatus)) return 'Email domain cannot receive mail';
   return '';
 }
-const credentialFields = { email: ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN', 'CLOUDFLARE_EMAIL_FROM_ADDRESS', 'CLOUDFLARE_EMAIL_FROM_NAME'], sms: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'TWILIO_MESSAGING_SERVICE_SID'], whatsapp: ['ZERNIO_API_KEY'] };
+const credentialFields = { email: ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN', 'CLOUDFLARE_EMAIL_FROM_ADDRESS', 'CLOUDFLARE_EMAIL_FROM_NAME', 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS'], sms: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'TWILIO_MESSAGING_SERVICE_SID'], whatsapp: ['ZERNIO_API_KEY'] };
 const fingerprint = (env, channel) => createHash('sha256').update(JSON.stringify(credentialFields[channel].map(key => env[key] || ''))).digest('hex');
 const statuses = ['pending', 'sending', 'accepted', 'queued', 'sent', 'delivered', 'read', 'failed', 'undelivered', 'suppressed', 'cancelled', 'uncertain'];
 const terminal = new Set(['delivered', 'read', 'failed', 'undelivered', 'suppressed', 'cancelled', 'uncertain']);
@@ -69,14 +69,20 @@ function nextStatus(previous, incoming) {
 
 export function createDirectCampaigns({ db, env, appUrl, secret, store }) {
   const contacts = createContacts({ db });
+  let smsInbox;
   db.exec(`CREATE TABLE IF NOT EXISTS direct_campaigns(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,data TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS direct_campaigns_project ON direct_campaigns(project_id);
     CREATE TABLE IF NOT EXISTS direct_deliveries(id TEXT PRIMARY KEY,campaign_id TEXT NOT NULL REFERENCES direct_campaigns(id) ON DELETE CASCADE,contact_id TEXT NOT NULL,data TEXT NOT NULL,UNIQUE(campaign_id,contact_id));`);
   const campaignRows = projectId => db.prepare('SELECT data FROM direct_campaigns WHERE project_id=? ORDER BY rowid DESC').all(projectId).map(row => JSON.parse(row.data));
   const find = (projectId, id) => { const row = db.prepare('SELECT data FROM direct_campaigns WHERE project_id=? AND id=?').get(projectId, id); if (!row) fail(404, 'CAMPAIGN_NOT_FOUND', 'Campaign not found.'); return JSON.parse(row.data); };
-  const save = campaign => { const current = db.prepare('SELECT data FROM direct_campaigns WHERE id=?').get(campaign.id); if (current && JSON.parse(current.data).status === 'cancelled') campaign.status = 'cancelled'; campaign.updatedAt = nowISO(); db.prepare('UPDATE direct_campaigns SET data=? WHERE id=? AND project_id=?').run(JSON.stringify(campaign), campaign.id, campaign.projectId); return campaign; };
+  const save = campaign => {
+    const row = db.prepare('SELECT data FROM direct_campaigns WHERE id=?').get(campaign.id), current = row && JSON.parse(row.data);
+    if (current?.status === 'cancelled') { campaign.status = 'cancelled'; if (current.providerStatus === 'cancelled') campaign.providerStatus = 'cancelled'; }
+    campaign.updatedAt = nowISO(); db.prepare('UPDATE direct_campaigns SET data=? WHERE id=? AND project_id=?').run(JSON.stringify(campaign), campaign.id, campaign.projectId); return campaign;
+  };
   const deliveries = id => db.prepare('SELECT data FROM direct_deliveries WHERE campaign_id=? ORDER BY rowid').all(id).map(row => JSON.parse(row.data));
   const putDelivery = delivery => { delivery.updatedAt = nowISO(); db.prepare('UPDATE direct_deliveries SET data=? WHERE id=?').run(JSON.stringify(delivery), delivery.id); return delivery; };
+  const recordSms = (campaign, delivery) => smsInbox?.recordOutbound({ id: delivery.id, projectId: campaign.projectId, campaignId: campaign.id, accountSid: delivery.smsAccountSid, sender: delivery.smsSender, recipient: delivery.recipient, messagingServiceSid: delivery.smsMessagingServiceSid || '', providerId: delivery.providerId, message: delivery.message || '', status: delivery.status });
   function decorate(campaign) {
     const counts = { pending: 0, accepted: 0, delivered: 0, failed: 0, suppressed: 0, uncertain: 0 };
     for (const delivery of deliveries(campaign.id)) counts[['pending', 'sending'].includes(delivery.status) ? 'pending' : ['delivered', 'read'].includes(delivery.status) ? 'delivered' : ['failed', 'undelivered'].includes(delivery.status) ? 'failed' : ['suppressed', 'cancelled'].includes(delivery.status) ? 'suppressed' : delivery.status === 'uncertain' ? 'uncertain' : 'accepted']++;
@@ -162,14 +168,18 @@ export function createDirectCampaigns({ db, env, appUrl, secret, store }) {
             if (!delivery) { finish(campaign); continue; }
             const contact = contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, campaign.channel);
             if (reason || (campaign.channel === 'email' ? contact.email : contact.phone) !== delivery.recipient) { delivery.status = 'suppressed'; delivery.error = reason || 'Contact address changed'; putDelivery(delivery); finish(campaign); continue; }
+            const rendered = content(campaign, contact);
+            if (campaign.channel === 'sms') Object.assign(delivery, { smsAccountSid: currentEnv.TWILIO_ACCOUNT_SID, smsSender: currentEnv.TWILIO_MESSAGING_SERVICE_SID ? '' : currentEnv.TWILIO_FROM_NUMBER, smsMessagingServiceSid: currentEnv.TWILIO_MESSAGING_SERVICE_SID || '', message: rendered.text });
             delivery.status = 'sending'; putDelivery(delivery);
             try {
-              const result = await sendDirect({ channel: campaign.channel, campaign: content(campaign, contact), contact, delivery: { ...delivery, callbackUrl: `${appUrl}/api/webhooks/twilio/status/${delivery.id}` }, env: currentEnv, project, appUrl, unsubscribeUrl: `${appUrl}/api/direct/unsubscribe/${unsubscribeToken(campaign.projectId, contact.email)}`, assertMapping });
+              const result = await sendDirect({ channel: campaign.channel, campaign: rendered, contact, delivery: { ...delivery, callbackUrl: `${appUrl}/api/webhooks/twilio/status/${delivery.id}` }, env: currentEnv, project, appUrl, unsubscribeUrl: `${appUrl}/api/direct/unsubscribe/${unsubscribeToken(campaign.projectId, contact.email)}`, assertMapping });
               const latest = deliveries(campaign.id).find(row => row.id === delivery.id);
               if (latest.providerId && result.providerId !== latest.providerId) throw new IntegrationError(502, 'DELIVERY_MISMATCH', 'The provider acknowledgement conflicts with a delivery callback.', true);
-              latest.providerId = result.providerId; latest.status = nextStatus(latest.status, result.status); putDelivery(latest);
+              latest.providerId = result.providerId; latest.status = nextStatus(latest.status, result.status); if (campaign.channel === 'sms') { latest.smsSender = result.sender || latest.smsSender; latest.smsMessagingServiceSid = result.messagingServiceSid || latest.smsMessagingServiceSid; } putDelivery(latest);
+              if (campaign.channel === 'sms') recordSms(campaign, latest);
+              if (campaign.channel === 'sms' && result.errorCode === '21610') contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
               if (result.suppressionReason) contacts.suppressDestination(campaign.projectId, campaign.channel, delivery.recipient, result.suppressionReason);
-            } catch (error) { const latest = deliveries(campaign.id).find(row => row.id === delivery.id); if (!latest.providerId) { latest.status = error.uncertain ? 'uncertain' : 'failed'; latest.error = error instanceof IntegrationError ? error.message : 'The provider did not confirm the message.'; putDelivery(latest); } if (error.uncertain || error.status === 429) { campaign.status = 'attention'; campaign.lastError = latest.error || 'Review the provider acknowledgement before continuing.'; } }
+            } catch (error) { if (campaign.channel === 'sms' && error.providerCode === 21610) contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out'); const latest = deliveries(campaign.id).find(row => row.id === delivery.id); if (!latest.providerId) { latest.status = error.uncertain ? 'uncertain' : 'failed'; latest.error = error instanceof IntegrationError ? error.message : 'The provider did not confirm the message.'; putDelivery(latest); } if (error.uncertain || error.status === 429) { campaign.status = 'attention'; campaign.lastError = latest.error || 'Review the provider acknowledgement before continuing.'; } }
             finish(campaign);
           }
         } catch (error) { campaign.status = 'attention'; campaign.lastError = error instanceof IntegrationError ? error.message : 'The campaign could not continue. Check its provider status.'; save(campaign); }
@@ -227,21 +237,35 @@ export function createDirectCampaigns({ db, env, appUrl, secret, store }) {
     if (action === 'cancel') {
       campaign.status = 'cancelled'; save(campaign);
       for (const delivery of deliveries(id)) if (delivery.status === 'pending') { delivery.status = 'cancelled'; putDelivery(delivery); }
-      if (campaign.channel === 'whatsapp' && campaign.providerId && campaign.providerStatus !== 'cancelled') { try { guard(campaign, false); const result = await cancelWhatsAppBroadcast({ env: { ...env }, project, campaign, providerId: campaign.providerId, idempotencyKey: campaign.id + '-cancel', assertMapping: () => guard(campaign, false) }); campaign.providerStatus = result.status; delete campaign.lastError; } catch (error) { campaign.lastError = error instanceof IntegrationError ? error.message : 'Local sending stopped. Provider cancellation was not confirmed; check Zernio.'; } save(campaign); }
-      send(200, { campaign: decorate(campaign), deliveries: deliveries(id) }); return true;
+      if (campaign.channel === 'whatsapp' && campaign.providerId && campaign.providerStatus !== 'cancelled') {
+        const assertMapping = () => { context.assertIntegrationSettings(); guard(campaign, false); };
+        try {
+          assertMapping(); const result = await cancelWhatsAppBroadcast({ env: { ...env }, project, campaign, providerId: campaign.providerId, idempotencyKey: campaign.id + '-cancel', assertMapping });
+          const latest = find(project.id, id); latest.providerStatus = result.status; delete latest.lastError; save(latest);
+        } catch (error) {
+          const latest = find(project.id, id); latest.lastError = error instanceof IntegrationError ? error.message : 'Local sending stopped. Provider cancellation was not confirmed; check Zernio.'; save(latest);
+        }
+      }
+      context.assertIntegrationSettings(); send(200, { campaign: decorate(find(project.id, id)), deliveries: deliveries(id) }); return true;
     }
     if (action === 'refresh') {
-      if (campaign.channel === 'whatsapp' && campaign.providerId) { guard(campaign, false); const result = await getWhatsAppBroadcast({ env: { ...env }, project, campaign, providerId: campaign.providerId, assertMapping: () => guard(campaign, false) }); campaign.providerStatus = result.status; campaign.stats = result.stats; save(campaign); for (const delivery of deliveries(id)) { const remote = result.recipients?.find(recipient => recipient.phone === delivery.recipient || recipient.phone === delivery.recipient.replace(/^\+/, '')); if (remote) { delivery.status = nextStatus(delivery.status, remote.status); putDelivery(delivery); } } }
-      if (campaign.channel === 'sms' && deliveries(id).some(row => row.providerId)) { guard(campaign, false); for (const delivery of deliveries(id).filter(row => row.providerId && !terminal.has(row.status)).slice(0, 25)) { const result = await getSmsStatus({ env: { ...env }, providerId: delivery.providerId, assertMapping: () => guard(campaign, false) }); if (result.recipient !== delivery.recipient) fail(502, 'DELIVERY_MISMATCH', 'The provider returned another recipient.'); const latest = deliveries(id).find(row => row.id === delivery.id); latest.status = nextStatus(latest.status, result.status); if (result.errorCode) latest.errorCode = result.errorCode; putDelivery(latest); if (result.errorCode === '21610') contacts.suppressDestination(project.id, 'sms', delivery.recipient, 'Recipient opted out'); } }
+      const assertMapping = () => { context.assertIntegrationSettings(); guard(campaign, false); };
+      if (campaign.channel === 'whatsapp' && campaign.providerId) {
+        assertMapping(); const result = await getWhatsAppBroadcast({ env: { ...env }, project, campaign, providerId: campaign.providerId, assertMapping }), latest = find(project.id, id);
+        // Preserve worker/cancellation progress and receipts written while this provider read was in flight.
+        if (latest.providerStatus === campaign.providerStatus && JSON.stringify(latest.stats) === JSON.stringify(campaign.stats)) { latest.providerStatus = result.status; latest.stats = result.stats; save(latest); }
+        for (const delivery of deliveries(id)) { const remote = result.recipients?.find(recipient => recipient.phone === delivery.recipient || recipient.phone === delivery.recipient.replace(/^\+/, '')); if (remote) { delivery.status = nextStatus(delivery.status, remote.status); putDelivery(delivery); } }
+      }
+      if (campaign.channel === 'sms' && deliveries(id).some(row => row.providerId)) { assertMapping(); for (const delivery of deliveries(id).filter(row => row.providerId && !terminal.has(row.status)).slice(0, 25)) { const result = await getSmsStatus({ env: { ...env }, providerId: delivery.providerId, assertMapping }); if (result.recipient !== delivery.recipient) fail(502, 'DELIVERY_MISMATCH', 'The provider returned another recipient.'); const latest = deliveries(id).find(row => row.id === delivery.id); latest.status = nextStatus(latest.status, result.status); if (result.errorCode) latest.errorCode = result.errorCode; if (result.sender) Object.assign(latest, { smsSender: result.sender, smsAccountSid: env.TWILIO_ACCOUNT_SID, smsMessagingServiceSid: result.messagingServiceSid || latest.smsMessagingServiceSid || '' }); putDelivery(latest); recordSms(campaign, latest); if (result.errorCode === '21610') contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out'); } }
       if (campaign.channel === 'email' && ready('email')) { const result = await syncEmailSuppressions({ env: { ...env }, assertMapping: () => context.assertIntegrationSettings() }); const suppressed = (result.suppressions || []).filter(row => (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()) && (row.scope?.type !== 'sending_domain' || row.scope.value.toLowerCase() === env.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase())); for (const contact of contacts.list(project.id)) { const match = suppressed.find(row => row.email?.toLowerCase() === contact.email); if (match) contacts.suppress(project.id, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason); } }
-      finish(campaign); send(200, { campaign: decorate(find(project.id, id)), deliveries: deliveries(id) }); return true;
+      context.assertIntegrationSettings(); finish(find(project.id, id)); send(200, { campaign: decorate(find(project.id, id)), deliveries: deliveries(id) }); return true;
     }
     return false;
   }
   function receiveTwilio({ rawBody, headers, url }) {
     if (!env.TWILIO_AUTH_TOKEN || !env.TWILIO_ACCOUNT_SID) fail(503, 'WEBHOOK_NOT_CONFIGURED', 'Twilio is not configured.');
     if (!(headers['content-type'] || '').toLowerCase().startsWith('application/x-www-form-urlencoded')) fail(415, 'INVALID_WEBHOOK', 'Twilio form content is required.');
-    const form = new URLSearchParams(new TextDecoder('utf-8', { fatal: true }).decode(rawBody)), keys = [...form.keys()];
+    let form; try { form = new URLSearchParams(new TextDecoder('utf-8', { fatal: true }).decode(rawBody)); } catch { fail(400, 'INVALID_WEBHOOK', 'Twilio form content must use UTF-8.'); } const keys = [...form.keys()];
     if (new Set(keys).size !== keys.length || keys.length > 100 || headers['x-twilio-webhooks-signature-settings']) fail(400, 'INVALID_WEBHOOK', 'Use the standard Twilio Auth Token signature.');
     const signed = appUrl + url.pathname + url.search + keys.sort().map(key => key + form.get(key)).join(''), expected = createHmac('sha1', env.TWILIO_AUTH_TOKEN).update(signed).digest('base64'), signature = headers['x-twilio-signature'];
     if (typeof signature !== 'string' || !/^[A-Za-z0-9+/]{27}=$/.test(signature) || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) fail(401, 'INVALID_SIGNATURE', 'The Twilio signature is invalid.');
@@ -249,20 +273,27 @@ export function createDirectCampaigns({ db, env, appUrl, secret, store }) {
     const id = url.pathname.match(/^\/api\/webhooks\/twilio\/status\/([\w-]+)$/)?.[1];
     if (id) {
       const row = db.prepare('SELECT d.data,c.project_id FROM direct_deliveries d JOIN direct_campaigns c ON c.id=d.campaign_id WHERE d.id=?').get(id);
-      if (!row) fail(404, 'DELIVERY_NOT_FOUND', 'Delivery not found.');
-      const delivery = JSON.parse(row.data), campaign = find(row.project_id, delivery.campaignId), providerId = form.get('MessageSid'), status = form.get('MessageStatus');
-      if (campaign.channel !== 'sms' || !/^(SM|MM)[a-f0-9]{32}$/i.test(providerId || '') || (delivery.providerId && providerId !== delivery.providerId) || form.get('To') !== delivery.recipient || !statuses.includes(status)) fail(400, 'DELIVERY_MISMATCH', 'The callback does not match this delivery.');
+      if (!row) { if (smsInbox?.receiveStatus(form, id)) return { accepted: true }; fail(404, 'DELIVERY_NOT_FOUND', 'Delivery not found.'); }
+      const delivery = JSON.parse(row.data), campaign = find(row.project_id, delivery.campaignId), providerId = form.get('MessageSid'), status = form.get('MessageStatus') === 'canceled' ? 'cancelled' : form.get('MessageStatus');
+      if (campaign.channel !== 'sms' || !/^(SM|MM)[a-f0-9]{32}$/i.test(providerId || '') || (delivery.providerId && providerId !== delivery.providerId) || form.get('To') !== delivery.recipient || !statuses.includes(status) || form.get('From') && delivery.smsSender && form.get('From') !== delivery.smsSender || form.get('MessagingServiceSid') && delivery.smsMessagingServiceSid && form.get('MessagingServiceSid') !== delivery.smsMessagingServiceSid) fail(400, 'DELIVERY_MISMATCH', 'The callback does not match this delivery.');
+      if (/^\+[1-9]\d{6,14}$/.test(form.get('From') || '')) { delivery.smsSender = form.get('From'); delivery.smsAccountSid = form.get('AccountSid'); if (/^MG[a-f0-9]{32}$/i.test(form.get('MessagingServiceSid') || '')) delivery.smsMessagingServiceSid = form.get('MessagingServiceSid'); }
       delivery.providerId = providerId; delivery.status = nextStatus(delivery.status, status); if (form.get('ErrorCode')) delivery.errorCode = form.get('ErrorCode').slice(0, 20); putDelivery(delivery); finish(campaign);
-      if (form.get('ErrorCode') === '21610') contacts.suppressDestination(row.project_id, 'sms', delivery.recipient, 'Recipient opted out');
-    } else if (url.pathname === '/api/webhooks/twilio/inbound') {
+      recordSms(campaign, delivery);
+      if (form.get('ErrorCode') === '21610') contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
+    } else if (/^\/api\/webhooks\/twilio\/inbound(?:\/[\w-]+)?$/.test(url.pathname)) {
       if (form.get('To') !== env.TWILIO_FROM_NUMBER && !(env.TWILIO_MESSAGING_SERVICE_SID && form.get('MessagingServiceSid') === env.TWILIO_MESSAGING_SERVICE_SID)) fail(400, 'SENDER_MISMATCH', 'The callback is for another sender.');
+      if (smsInbox) return smsInbox.receiveVerified(form, { projectId: url.pathname.split('/')[5] || undefined });
       if (form.get('OptOutType') === 'STOP' || /^(STOP|STOPALL|UNSUBSCRIBE|CANCEL|END|QUIT|REVOKE|OPT OUT)$/i.test((form.get('Body') || '').trim())) {
-        // Retain the opt-out only; this product does not collect inbox conversations.
-        for (const project of db.prepare('SELECT id FROM projects').all()) contacts.suppressDestination(project.id, 'sms', form.get('From'), 'Recipient opted out');
+        contacts.suppressSmsGlobally(form.get('From'), 'Recipient opted out');
       }
     } else fail(404, 'WEBHOOK_NOT_FOUND', 'Webhook not found.');
     return { accepted: true };
   }
   function handleUnsubscribe(token, method) { const [projectId, email] = unsubscribe(token); if (method === 'POST' && projectFor(projectId)) contacts.suppressDestination(projectId, 'email', email, 'Unsubscribed'); return method === 'POST' ? '<h1>Preferences updated</h1><p>This address will receive no further email campaigns from this project.</p>' : '<h1>Email preferences</h1><form method="post"><button type="submit">Stop email from this project</button></form>'; }
-  return { handle, contacts, processPending, receiveTwilio, handleUnsubscribe, close() { closed = true; }, async idle() { while (active) await new Promise(resolve => setTimeout(resolve, 10)); } };
+  return { handle, contacts, processPending, receiveTwilio, handleUnsubscribe, attachSmsInbox(service) {
+    smsInbox = service;
+    for (const row of db.prepare('SELECT data FROM direct_campaigns').all()) { const campaign = JSON.parse(row.data); if (campaign.channel !== 'sms') continue; for (const delivery of deliveries(campaign.id)) { if (!delivery.smsAccountSid && campaign.credentialHash === fingerprint(env, 'sms') && !env.TWILIO_MESSAGING_SERVICE_SID) Object.assign(delivery, { smsAccountSid: env.TWILIO_ACCOUNT_SID, smsSender: env.TWILIO_FROM_NUMBER }); recordSms(campaign, delivery); } }
+  }, close() { closed = true; }, async idle() { while (active) await new Promise(resolve => setTimeout(resolve, 10)); } };
 }
+
+export { nextStatus as nextDeliveryStatus };

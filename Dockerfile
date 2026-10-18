@@ -4,6 +4,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY index.html tsconfig.json vite.config.mjs ./
 COPY src ./src
+COPY shared ./shared
 COPY public ./public
 RUN npm run build && npm prune --omit=dev
 
@@ -14,6 +15,7 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json ./
 COPY --chown=node:node server ./server
+COPY --chown=node:node shared ./shared
 RUN mkdir data && chown node:node data
 USER node
 EXPOSE 3018

@@ -103,3 +103,30 @@ test('the actual action lock rejects double clicks and stale operation results d
   let finish, sends = 0; const first = action('Replying', async () => { sends++; await new Promise(resolve => { finish = resolve; }); }); await action('Reply again', async () => { sends++; }); assert.equal(sends, 1);
   version.current = 2; finish(); await first; assert.deepEqual(busy, ['Replying']); assert.deepEqual(errors, ['']);
 });
+
+test('SMS replies bind the selected conversation, block opted-out/viewer sends and reuse uncertain operation keys', async () => {
+  const handler = section('async function sendSms(', '  return <div className="unified-inbox inbox-sms">'), calls = [], messages = [], notices = [], keys = { current: new Map() }, selected = { id: 'sms-thread', participantId: '+971501234567', sender: '+12025550123' };
+  const context = { readOnly: false, selected, blocked: false, status: { configured: true }, message: 'Your order is ready', setError() {}, path: '/projects/a/sms-inbox', smsAction: async (_, run) => run(1), keys, crypto, requester: { current: async (...args) => { calls.push(args); return { sent: true, conversation: selected, message: { id: 'outgoing', message: 'Your order is ready', direction: 'outgoing' } }; } }, version: { current: 1 }, setMessage: value => messages.push(value), setSelected() {}, setDetail() {}, setRows() {}, setNotice: value => notices.push(value), merge };
+  for (const changes of [{ readOnly: true }, { blocked: true }, { status: { configured: false } }, { message: '' }, { selected: null }]) await compile(handler, { ...context, ...changes })(event);
+  assert.equal(calls.length, 0);
+  const failure = Object.assign(new Error('Outcome uncertain'), { status: 409, code: 'OPERATION_UNCERTAIN' });
+  await assert.rejects(compile(handler, { ...context, requester: { current: async (...args) => { calls.push(args); throw failure; } } })(event), /uncertain/); assert.deepEqual(messages, []);
+  await compile(handler, context)(event); assert.equal(calls[0][3], calls[1][3]); assert.deepEqual(calls[1].slice(0, 3), ['/projects/a/sms-inbox/conversations/sms-thread/reply', 'POST', { message: 'Your order is ready' }]); assert.deepEqual(messages, ['']); assert.match(notices[0], /accepted by Twilio/); assert.equal(keys.current.size, 0);
+  await compile(handler, { ...context, version: { current: 2 } })(event); assert.deepEqual(messages, [''], 'An old project reply must not clear another project’s message.');
+});
+
+test('SMS polling reads local data only and applies fresh STOP state without discarding older loaded conversations', async () => {
+  const handler = section('const pollSms = async () =>', '    const timer = window.setInterval(pollSms').replace('const pollSms = ', '').trim().replace(/;$/, '');
+  const calls = [], states = [], current = [{ id: 'one', blocked: false }, { id: 'older', lastMessageAt: '2025-01-01' }], context = { checking: false, pending: { current: false }, revision: { current: 0 }, requester: { current: async (...args) => { calls.push(args); return args[0].endsWith('/messages') ? { conversation: { id: 'one', blocked: true }, messages: [] } : { conversations: [{ id: 'one', blocked: true, lastMessageAt: '2030-01-01' }], pagination: {} }; } }, path: '/projects/a/sms-inbox', selected: { id: 'one' }, closed: false, generation: 1, version: { current: 1 }, merge, setRows: update => states.push(update(current)), setPagination() {}, setSelected: value => states.push(value), setDetail() {} };
+  await compile(handler, context)(); assert.equal(states[0][0].blocked, true); assert.equal(states[0][1].id, 'older'); assert.equal(states[1].blocked, true); assert.ok(calls.every(args => args.length === 1 && args[0].startsWith('/projects/a/sms-inbox/')));
+});
+
+test('campaign WhatsApp navigation loads only its explicit scoped account and never guesses a recipient thread', async () => {
+  const marker = 'requester.current(path + \'/status\').then(', start = source.indexOf(marker, source.indexOf('function ZernioInbox(')) + marker.length;
+  const handler = source.slice(start, source.indexOf(').catch(failure', start));
+  const calls = [], rows = [], errors = [], searches = [], context = { generation: 1, version: { current: 1 }, setStatus() {}, setAccounts() {}, tab: 'messages', initialChannel: 'whatsapp', initialAccountId: 'campaign-account', initialSearch: '+971501234567', setPlatform() {}, setSearch: value => searches.push(value), setError: value => errors.push(value), setAccountId() {}, requester: { current: async url => { calls.push(url); return { conversations: [{ id: 'user-selected-later', participantId: '971501234567' }], pagination: {} }; } }, path, setRows: value => rows.push(value), setPagination() {}, setMeta() {}, setLoaded() {} };
+  const accounts = [{ id: 'other', platform: 'whatsapp', capabilities: { messages: true } }, { id: 'campaign-account', platform: 'whatsapp', capabilities: { messages: true } }];
+  await compile(handler, context)({ accounts }); assert.equal(new URL(calls[0], 'https://app.example').searchParams.get('accountId'), 'campaign-account'); assert.deepEqual(searches, ['+971501234567']); assert.equal(rows[0][0].id, 'user-selected-later');
+  await compile(handler, { ...context, initialAccountId: 'unavailable' })({ accounts }); assert.equal(calls.length, 1); assert.match(errors[0], /unavailable/);
+  const match = compile(section('function conversationMatches(', 'function SmsInbox(')); assert.equal(match({ participantId: '971501234567' }, '+971501234567'), true); assert.equal(match({ participantId: 'BSUID.opaque' }, '+971501234567'), false);
+});

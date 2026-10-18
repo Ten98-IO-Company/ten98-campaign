@@ -105,3 +105,18 @@ test('a locally cancelled WhatsApp broadcast can explicitly retry an unconfirmed
   const cancel = compile(section('async function campaignAction(', '  function editContact('), { current: campaign, window: { confirm: () => true }, action: async (_, run) => run(1), requester: { current: async (...args) => { calls.push(args); return { campaign: { ...campaign, providerStatus: 'cancelled', lastError: undefined } }; } }, path: '/projects/a/direct', version: { current: 1 }, acceptCampaign: value => accepted.push(value), setDetail() {}, setNotice() {} });
   await cancel('cancel'); assert.deepEqual(calls, [['/projects/a/direct/campaigns/campaign/cancel', 'POST', {}]]); assert.equal(retry(accepted[0]), false);
 });
+
+test('explicit message shortening preserves HTML/template content and ignores stale or edited drafts', async () => {
+  const handler = section('async function shortenText(', '  function openReplies('), draft = { ...blankDraft, text: 'See https://example.com', html: '<p>Keep original HTML</p>' }, updates = [], notices = [], calls = [];
+  const context = { onShortenText: async (...args) => { calls.push(args); return 'See https://go.example/s/code'; }, readOnly: false, editable: true, draft, editingId: 'direct-campaign', action: async (_, run) => run(1), version: { current: 1 }, latestDraft: { current: { draft, editingId: 'direct-campaign' } }, setNotice: value => notices.push(value), setDraft: update => updates.push(update(draft)) };
+  await compile(handler, context)(); assert.deepEqual(calls[0], ['See https://example.com', 'direct-campaign']); assert.equal(updates[0].text, 'See https://go.example/s/code'); assert.equal(updates[0].html, draft.html); assert.deepEqual(updates[0].templateComponents, draft.templateComponents);
+  await compile(handler, { ...context, latestDraft: { current: { draft: { ...draft, text: 'Newer text' }, editingId: 'direct-campaign' } } })(); assert.equal(updates.length, 1); assert.match(notices.at(-1), /message changed/);
+  await compile(handler, { ...context, version: { current: 2 } })(); assert.equal(updates.length, 1);
+  const before = calls.length; await compile(handler, { ...context, readOnly: true })(); await compile(handler, { ...context, draft: { ...draft, channel: 'whatsapp' } })(); await compile(handler, { ...context, editingId: '' })(); assert.equal(calls.length, before); assert.match(notices.at(-1), /Save this draft first/);
+});
+
+test('reply navigation carries the selected campaign account and recipient without choosing another channel', () => {
+  const calls = [], open = compile(section('function openReplies(', '  return <div className="direct-campaigns">'), { onOpenReplies: (...args) => calls.push(args) });
+  open({ channel: 'whatsapp', accountId: 'campaign-account' }, '+971501234567'); open({ channel: 'sms', accountId: 'unused' }, '+971501234567'); open({ channel: 'email' }, 'person@example.com');
+  assert.deepEqual(calls, [['whatsapp', 'campaign-account', '+971501234567'], ['sms', undefined, '+971501234567']]);
+});

@@ -52,16 +52,19 @@ export function createContacts({ db }) {
   db.exec(`CREATE TABLE IF NOT EXISTS direct_contacts(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,data TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS direct_contacts_project ON direct_contacts(project_id);
     CREATE TABLE IF NOT EXISTS direct_contact_messenger_identities(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,account_id TEXT NOT NULL,participant_id TEXT NOT NULL,contact_id TEXT NOT NULL REFERENCES direct_contacts(id) ON DELETE CASCADE,PRIMARY KEY(project_id,account_id,participant_id));
-    CREATE TABLE IF NOT EXISTS direct_contact_suppressions(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,channel TEXT NOT NULL,target_hash TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(project_id,channel,target_hash));`);
+    CREATE TABLE IF NOT EXISTS direct_contact_suppressions(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,channel TEXT NOT NULL,target_hash TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(project_id,channel,target_hash));
+    CREATE TABLE IF NOT EXISTS direct_sms_suppressions(target_hash TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at TEXT NOT NULL);`);
   const read = db.prepare('SELECT data FROM direct_contacts WHERE project_id=? ORDER BY rowid DESC'), find = db.prepare('SELECT data FROM direct_contacts WHERE project_id=? AND id=?');
   const hash = target => createHash('sha256').update(target).digest('hex');
   const ledger = db.prepare('SELECT reason,created_at AS at FROM direct_contact_suppressions WHERE project_id=? AND channel=? AND target_hash=?');
   const remember = db.prepare('INSERT INTO direct_contact_suppressions VALUES(?,?,?,?,?) ON CONFLICT(project_id,channel,target_hash) DO NOTHING');
-  const list = projectId => read.all(projectId).map(row => JSON.parse(row.data));
-  const get = (projectId, id) => { const row = find.get(projectId, id); return row ? JSON.parse(row.data) : null; };
+  const smsSuppression = target => target ? db.prepare('SELECT reason,created_at AS at FROM direct_sms_suppressions WHERE target_hash=?').get(hash(target)) : null;
+  const contactView = row => { const contact = JSON.parse(row.data), suppressed = smsSuppression(contact.phone); if (suppressed) { contact.suppression.sms ||= suppressed; contact.consents.sms = false; delete contact.consentEvidence?.sms; } return contact; };
+  const list = projectId => read.all(projectId).map(contactView);
+  const get = (projectId, id) => { const row = find.get(projectId, id); return row ? contactView(row) : null; };
   const messengerContact = db.prepare('SELECT c.data FROM direct_contact_messenger_identities i JOIN direct_contacts c ON c.id=i.contact_id AND c.project_id=i.project_id WHERE i.project_id=? AND i.account_id=? AND i.participant_id=?');
   function findMessenger(projectId, accountId, participantId) {
-    const row = messengerContact.get(projectId, messengerId(accountId, 'account ID'), messengerId(participantId, 'participant ID')); return row ? JSON.parse(row.data) : null;
+    const row = messengerContact.get(projectId, messengerId(accountId, 'account ID'), messengerId(participantId, 'participant ID')); return row ? contactView(row) : null;
   }
   function prepare(projectId, body, previous, messengerIdentity) {
     if (!object(body) || Object.keys(body).some(key => !['name', 'email', 'phone', 'company', 'tags', 'consents', 'consentSource'].includes(key))) fail(400, 'Use the supported contact fields.');
@@ -79,7 +82,7 @@ export function createContacts({ db }) {
     const now = new Date().toISOString();
     for (const channel of channels) {
       const destination = channel === 'email' ? result.email : result.phone, oldDestination = channel === 'email' ? previous?.email : previous?.phone;
-      if (destination) { const suppressed = ledger.get(projectId, channel, hash(destination)); if (suppressed) result.suppression[channel] = suppressed; }
+      if (destination) { const suppressed = ledger.get(projectId, channel, hash(destination)) || channel === 'sms' && smsSuppression(destination); if (suppressed) result.suppression[channel] = suppressed; }
       if (!destination || previous && destination !== oldDestination || result.suppression[channel]) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
       if (result.consents[channel]) {
         const newlyEnabled = previous?.consents?.[channel] !== true;
@@ -194,6 +197,12 @@ export function createContacts({ db }) {
       return { suppressed: matching.length };
     });
   }
+  function suppressSmsGlobally(target, reason) {
+    reason = suppressionReason('sms', reason); target = text(target, 'phone number', 16);
+    if (!/^\+[1-9]\d{6,14}$/.test(target)) fail(400, 'Provide a valid destination to suppress.');
+    db.prepare('INSERT INTO direct_sms_suppressions VALUES(?,?,?) ON CONFLICT(target_hash) DO NOTHING').run(hash(target), reason, new Date().toISOString());
+    return { suppressed: true };
+  }
   async function assessDNS(projectId, ids, { resolver } = {}) {
     if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some(id => typeof id !== 'string')) fail(400, 'Select between 1 and 100 contacts to check DNS.');
     const selected = [...new Set(ids)].map(id => { const record = get(projectId, id); if (!record) fail(404, 'A selected contact is not in this project.'); return record; });
@@ -234,5 +243,5 @@ export function createContacts({ db }) {
       current.hygiene = { ...current.hygiene, dnsStatus: outcomes.get(current.email.split('@')[1]) || 'unavailable', dnsCheckedAt: checkedAt }; current.updatedAt = checkedAt; persist(current); return [current];
     }), notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' }));
   }
-  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressDestination, remove(projectId, id) { return db.prepare('DELETE FROM direct_contacts WHERE project_id=? AND id=?').run(projectId, id).changes > 0; } };
+  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressDestination, suppressSmsGlobally, smsSuppression, remove(projectId, id) { return db.prepare('DELETE FROM direct_contacts WHERE project_id=? AND id=?').run(projectId, id).changes > 0; } };
 }

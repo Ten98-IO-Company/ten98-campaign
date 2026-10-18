@@ -8,7 +8,7 @@ const groups = {
   googleMaps: { browserApiKey: 'GOOGLE_MAPS_BROWSER_API_KEY', mapId: 'GOOGLE_MAPS_MAP_ID' },
   broadsign: { apiKey: 'BROADSIGN_API_KEY', environment: 'BROADSIGN_ENVIRONMENT', domainId: 'BROADSIGN_DOMAIN_ID' },
   twilio: { accountSid: 'TWILIO_ACCOUNT_SID', authToken: 'TWILIO_AUTH_TOKEN', fromNumber: 'TWILIO_FROM_NUMBER', messagingServiceSid: 'TWILIO_MESSAGING_SERVICE_SID' },
-  cloudflareEmail: { accountId: 'CLOUDFLARE_ACCOUNT_ID', apiKey: 'CLOUDFLARE_EMAIL_API_TOKEN', zoneId: 'CLOUDFLARE_ZONE_ID', fromAddress: 'CLOUDFLARE_EMAIL_FROM_ADDRESS', fromName: 'CLOUDFLARE_EMAIL_FROM_NAME' },
+  cloudflareEmail: { accountId: 'CLOUDFLARE_ACCOUNT_ID', apiKey: 'CLOUDFLARE_EMAIL_API_TOKEN', zoneId: 'CLOUDFLARE_ZONE_ID', fromAddress: 'CLOUDFLARE_EMAIL_FROM_ADDRESS', fromName: 'CLOUDFLARE_EMAIL_FROM_NAME', replyToAddress: 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS' },
 };
 const providers = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email' };
 const secretFields = new Set(['apiKey', 'authToken', 'webhookSecret', 'privateKey', 'browserApiKey']);
@@ -44,7 +44,7 @@ function validate(field, input) {
   if (['accountSid', 'messagingServiceSid'].includes(field) && !new RegExp(`^${field === 'accountSid' ? 'AC' : 'MG'}[a-fA-F0-9]{32}$`).test(value)) fail(400, 'INVALID_SETTING', 'Enter the complete Twilio account or Messaging Service SID.');
   if (['accountId', 'zoneId'].includes(field) && !/^[a-fA-F0-9]{32}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the 32-character Cloudflare account or zone ID.');
   if (field === 'fromNumber' && !/^\+[1-9]\d{6,14}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the Twilio sender number with + and country code.');
-  if (field === 'fromAddress' && (value.length > 254 || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value))) fail(400, 'INVALID_SETTING', 'Enter a sender email address on an enabled Cloudflare sending domain.');
+  if (['fromAddress', 'replyToAddress'].includes(field) && (value.length > 254 || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value))) fail(400, 'INVALID_SETTING', 'Enter a valid sender or reply email address.');
   if (field === 'fromName' && value.length > 200) fail(400, 'INVALID_SETTING', 'Keep the sender name to 200 characters.');
   return value;
 }

@@ -1,6 +1,6 @@
 # Direct campaigns
 
-Direct campaigns sends project-scoped transactional email, SMS, and approved WhatsApp templates. It includes contacts, CSV import, consent records, audience previews, scheduling, suppression, and delivery receipts. The separate [unified inbox](inbox.md) handles connected messages, comments and reviews and creates Messenger contacts without campaign consent. Voice calling is excluded. Incoming Twilio SMS callbacks retain opt-outs, not conversations.
+Direct campaigns sends project-scoped transactional email, SMS, and approved WhatsApp templates. It includes contacts, CSV import, consent records, audience previews, scheduling, suppression, and delivery receipts. The [unified inbox](inbox.md) handles connected messages, comments and reviews, durable Twilio SMS conversations, and Messenger contacts without inferred campaign consent. Voice calling and a receiving email inbox are excluded.
 
 ## Connect the three channels
 
@@ -8,11 +8,13 @@ An instance operator configures credentials in **Integrations**. Use your own pr
 
 | Channel | Configuration | Sending behavior |
 | --- | --- | --- |
-| Email | Cloudflare account ID, Email Sending API token, approved sender address, optional sender name | One recipient per send, with a subject, required plain text and optional HTML. This connection supports transactional email only. |
+| Email | Cloudflare account ID, Email Sending API token, approved sender address, optional sender name and reply-to address | One recipient per send, with a subject, required plain text and optional HTML. Transactional email only; replies go to the external receiving address. |
 | SMS | Twilio Account SID, Auth Token, and either an international sender number or Messaging Service SID | Personalized text with an appended STOP instruction. Encoding and segment totals are estimates; Twilio determines delivery and charges. |
 | WhatsApp | Zernio credentials, a project profile mapping, an active WhatsApp Business account, and an approved template/language | A scoped broadcast containing the explicitly selected phone numbers. The editor supports text variables, approved image/video/document headers using public HTTPS media URLs, and approved URL-button suffix values. |
 
 Cloudflare explicitly limits Email Service to transactional messages. Promotional newsletters and bulk marketing email cannot be sent through this connection, even when a contact has opted in. Review [Cloudflare's current policy](https://developers.cloudflare.com/email-service/reference/faq/) and [sender setup](https://developers.cloudflare.com/email-service/get-started/).
+
+Set **Reply-to address** in Integrations, or `CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS`, to the address your team already receives. The app sends it using Cloudflare's [`reply_to` field](https://developers.cloudflare.com/api/resources/email_sending/methods/send/). To forward replies through Cloudflare, configure an Email Routing address, verify its group/mailbox destination, and enable that route in Cloudflare's dashboard. See [routing rules and verified destinations](https://developers.cloudflare.com/email-service/configuration/email-routing-addresses/). Google Groups or other group mailboxes must also permit the intended external messages. The app does not create these routing rules, read group mail, or maintain an email inbox. A successful sending connection test does not verify the reply route; test it separately with your receiving system.
 
 WhatsApp templates, recipient tiers and fees depend on the connected account and Meta's rules. Loading a template does not establish that every recipient can receive it. Media must match the approved header format; Drive preview pages are not media files. Dynamic URL buttons accept the approved trailing variable while preserving the fixed public HTTPS origin. Flows, carousels and other advanced template components remain outside this editor. The [Zernio broadcast guide](https://docs.zernio.com/platforms/whatsapp/broadcasts) describes the provider workflow and per-recipient tracking.
 
@@ -20,13 +22,15 @@ WhatsApp templates, recipient tiers and fees depend on the connected account and
 
 Before sending, set `APP_URL` to the app's publicly reachable HTTPS origin and restart the service. Keep this origin consistent with your reverse proxy. Local preview addresses cannot provide usable recipient preference links or external delivery callbacks.
 
-For Twilio, configure the incoming-message webhook on your sender or Messaging Service as:
+For Twilio, copy the project-specific **Incoming-message webhook URL** from **Unified inbox → SMS replies** and configure it on your sender or Messaging Service with HTTP POST:
 
 ```text
-https://your-app.example/api/webhooks/twilio/inbound
+https://your-app.example/api/webhooks/twilio/inbound/PROJECT_ID
 ```
 
-The app supplies a delivery-specific status callback URL when submitting SMS messages. Twilio requests are validated against their signature, configured account, exact public URL and intended recipient. Preserve the callback path, query and form data through the proxy. Configure [Twilio opt-out handling](https://www.twilio.com/docs/messaging/tutorials/advanced-opt-out) for your sender; Advanced Opt-Out supplies the `OptOutType` field. [Status callbacks](https://www.twilio.com/docs/messaging/guides/outbound-message-status-in-status-callbacks) describe delivery updates, not proof that someone read an SMS.
+The app supplies a delivery-specific status callback URL when submitting SMS messages and inbox replies. Twilio requests are validated against their signature, configured account, exact public URL and intended recipient. Preserve the callback path, query and form data through the proxy. Configure [Twilio opt-out handling](https://www.twilio.com/docs/messaging/tutorials/advanced-opt-out) for your sender; Advanced Opt-Out supplies the `OptOutType` field. [Status callbacks](https://www.twilio.com/docs/messaging/guides/outbound-message-status-in-status-callbacks) describe delivery updates, not proof that someone read an SMS.
+
+The legacy `/api/webhooks/twilio/inbound` route also works when the account/sender/recipient and outbound ledger identify exactly one project. If the same phone pair belongs to multiple projects, the global route stores only a hashed, unattributed receipt; it does not copy the message body into either inbox. A project-specific signed callback narrows attribution but still requires a prior outbound message in that project. Unknown senders do not create contacts or acquire consent. See the [SMS inbox guide](inbox.md#twilio-sms-conversations).
 
 Email includes a signed preference link and unsubscribe headers. A GET opens a preference page; the explicit POST records suppression. Suppression is tied to the original destination so deleting or editing a contact cannot silently reactivate that address. Keep the application's session secret stable: replacing it invalidates existing signed links.
 
@@ -66,6 +70,8 @@ Null MX, nonexistent domains and conclusive missing mail routes are excluded fro
 
 Hard bounces, provider suppression, unsubscribe links, SMS opt-outs and manual suppression prevent further sends on the affected channel. Destination hashes retain suppression through contact deletion and reimport. Editing a contact or importing another opt-in cannot clear it. This release has no automatic resubscribe workflow; resolve provider blocks and obtain fresh evidence through an explicitly reviewed process before any future reactivation feature is used.
 
+Verified SMS STOP requests and Twilio's opt-out rejection retain a phone hash in an installation-wide suppression ledger. It protects current and future projects, campaign sends and individual SMS replies, even after contact deletion, reimport or sender configuration changes. Manual project suppressions remain project-scoped; older local records without verified opt-out provenance are not guessed to be global. The hash is a suppression key, not anonymized visitor analytics; treat it as private data. Receiving another message or START does not automatically reenable consent.
+
 ## Preview, schedule and monitor
 
 Create a draft, choose contacts or tags, and preview the eligible audience, exclusions and personalized copy. Supported email/SMS placeholders are `{{name}}`, `{{email}}`, `{{phone}}`, and `{{company}}`. WhatsApp uses the approved template's explicit text values. SMS estimates include personalization and the STOP footer; they are not a price quote.
@@ -75,6 +81,10 @@ A campaign accepts 1–500 eligible contacts. Review a fresh preview before conf
 Run one application process with SQLite. The local queue checks once per second and handles one email/SMS recipient at a time. WhatsApp hands the approved batch to Zernio; provider pacing governs its subsequent delivery. Consent, suppression, destination, author access, provider credentials and project mapping are checked before dispatch. Connection or access changes stop the campaign for review.
 
 Cancellation stops remaining local work and requests cancellation of an eligible provider broadcast. An already submitted message may still arrive. Accepted, queued, sent, delivered and read are distinct states. A completed local queue does not mean every recipient received a message. Refresh delivery details to read supported provider evidence; Cloudflare suppression refresh does not supply email opens or a complete asynchronous delivery history.
+
+**Open replies** on an SMS or WhatsApp campaign opens its inbox view. Per-recipient navigation supplies a phone-number search, not proof of an exact conversation match. WhatsApp uses the existing Zernio account/feed; some business-specific participant IDs differ from phone numbers, so select the recognized conversation before replying. Outside its free-text reply window, use an approved template through the campaign flow. Twilio replies use durable local history and the original sender, with text-only sending and separate signed delivery updates.
+
+Save an email/SMS draft, then choose **Use short links in message**, or open [Links & tracking](tracking.md), to prepare campaign URLs and downloadable QR codes. Shortening is explicit and affects text URLs, not media delivery URLs. URLs containing personalization placeholders remain unchanged. Review the changed message and audience again before sending. Website event totals and short-link visits are separate from provider delivery evidence.
 
 If a request loses its acknowledgement, review the provider before starting another campaign for those recipients. A restart marks in-flight sends and interrupted WhatsApp preparation as requiring attention; it does not automatically replay them. Check known provider IDs, the actual recipient list and provider charges. Preserve the private database and matching secret in backups. Real delivery acceptance requires your configured credentials and approved sender accounts; automated tests use disposable databases and mocked provider responses.
 

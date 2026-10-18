@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { stripTypeScriptTypes } from 'node:module';
 
 const composer = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8'), details = await readFile(new URL('../src/AdDetails.tsx', import.meta.url), 'utf8'), analytics = await readFile(new URL('../src/SocialAnalytics.tsx', import.meta.url), 'utf8');
 const javascript = value => value.replaceAll('event: React.FormEvent<HTMLFormElement>', 'event').replace(/ as Record<string, string>/g, '').replace(/: Record<string, (?:string\[\]|string|any)>/g, '').replaceAll('(err as Error)', 'err');
@@ -10,7 +11,7 @@ const form = { countries: 'ae, sa, AE', name: 'QA campaign', budgetAmount: '50',
 const submitSource = javascript(composer.slice(composer.indexOf('async function submit('), composer.indexOf('  return <form')));
 async function createAd(changes = {}, values = {}) {
   const calls = [], errors = [], saved = [];
-  const context = { busy: false, FormData: FormValues, setError: error => errors.push(error), connection: { platform: 'googleads' }, adAccount: { id: 'native-account' }, currency: 'AED', accountId: 'connection-a', adAccountId: 'native-account', platform: 'google', boosting: false, assets: false, format: 'search', goal: 'traffic', video: false, carousel: false, cards: 2, lines, setBusy: () => {}, requester: { current: async (path, payload) => calls.push({ path, payload }) }, onCreated: () => saved.push(true), ...changes };
+  const context = { busy: false, isCurrent: () => true, FormData: FormValues, setError: error => errors.push(error), connection: { platform: 'googleads' }, adAccount: { id: 'native-account' }, currency: 'AED', accountId: 'connection-a', adAccountId: 'native-account', platform: 'google', boosting: false, assets: false, format: 'search', goal: 'traffic', video: false, carousel: false, cards: 2, lines, setBusy: () => {}, requester: { current: async (path, payload) => calls.push({ path, payload }) }, onCreated: () => saved.push(true), ...changes };
   const submit = new Function(...Object.keys(context), `return (${submitSource});`)(...Object.values(context));
   await submit({ preventDefault() {}, currentTarget: { ...form, ...values } });
   assert.equal(errors.at(-1), '', errors.at(-1)); assert.deepEqual(saved, [true]);
@@ -42,9 +43,29 @@ test('Google calendar dates are preserved and partial posts can boost only their
   assert.deepEqual(eligible(posts, 'fb-a').map(post => post.id), ['partial', 'legacy']); assert.deepEqual(eligible(posts, 'ig-a').map(post => post.id), ['legacy']); assert.deepEqual(eligible(posts, 'tt-a').map(post => post.id), ['legacy']);
 });
 
+test('an ad creation finishing after its dialog closes or changes cannot close a newer draft dialog', async () => {
+  const compile = (code, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
+  const lifecycle = composer.match(/useEffect\((\(\) => \{ mounted.current = true; return \(\) => \{ mounted.current = false; \}; \}), \[\]\);/)[1];
+  const current = composer.match(/const isCurrent = (.+);/)[1];
+  for (const stale of ['unmounted', 'changed-identity', 'project-abort']) {
+    const mounted = { current: false }, identity = 'original-ad', currentIdentity = { current: identity }, busy = [], errors = [];
+    const unmount = compile(lifecycle, { mounted })(), isCurrent = compile(current, { mounted, identity, currentIdentity });
+    let finish, fail, modal = 'ad';
+    const context = { busy: false, isCurrent, FormData: FormValues, setError: error => errors.push(error), connection: { platform: 'googleads' }, adAccount: { id: 'native-account' }, currency: 'AED', accountId: 'connection-a', adAccountId: 'native-account', platform: 'google', boosting: false, assets: false, format: 'search', goal: 'traffic', video: false, carousel: false, cards: 2, lines, setBusy: value => busy.push(value), requester: { current: () => new Promise((resolve, reject) => { finish = resolve; fail = reject; }) }, onCreated: () => { modal = null; } };
+    const pending = compile(submitSource, context)({ preventDefault() {}, currentTarget: form });
+    if (stale === 'unmounted') unmount();
+    if (stale === 'changed-identity') currentIdentity.current = 'different-ad';
+    modal = 'unsaved-asset-draft';
+    if (stale === 'project-abort') fail(new DOMException('Project changed.', 'AbortError')); else finish({});
+    await pending;
+    assert.equal(modal, 'unsaved-asset-draft'); assert.deepEqual(errors, ['']);
+    assert.deepEqual(busy, stale === 'project-abort' ? [true, false] : [true]);
+  }
+});
+
 test('Display editing forwards replacement creative fields and unchanged or stale forms do not submit another write', async () => {
   const handler = javascript(details.slice(details.indexOf('async function edit('), details.indexOf('  async function editSet('))), calls = [], errors = [];
-  const base = { FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'display-ad', name: 'Existing ad' }, platform: 'google', channel: 'display', creative: {}, lines, copy: value => (value || []).join('\n'), setError: error => errors.push(error), act: async action => action(), requester: { current: async (path, payload) => calls.push({ path, payload }) }, readAd: async () => {} };
+  const base = { FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'display-ad', name: 'Existing ad' }, platform: 'google', channel: 'display', creative: {}, lines, copy: value => (value || []).join('\n'), setError: error => errors.push(error), act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), readAd: async () => {} };
   async function edit(values, extra = {}) { const context = { ...base, ...extra }; await new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context))({ preventDefault() {}, currentTarget: values }); }
   await edit({ longHeadline: 'New long headline', businessName: 'New brand', imageUrl: 'https://cdn.example.com/new.jpg', squareImageUrl: 'https://cdn.example.com/new-square.jpg' });
   assert.deepEqual(calls[0], { path: 'ads/edit', payload: { adId: 'display-ad', creative: { longHeadline: 'New long headline', businessName: 'New brand', imageUrl: 'https://cdn.example.com/new.jpg', squareImageUrl: 'https://cdn.example.com/new-square.jpg' } } });
@@ -54,13 +75,34 @@ test('Display editing forwards replacement creative fields and unchanged or stal
 });
 
 test('a failed readback after a confirmed ad write requires refresh without claiming the write failed', async () => {
-  const helper = details.slice(details.indexOf('async function readAd('), details.indexOf('  async function edit(')).replace('adId: string', 'adId').replace('(failure as Error)', 'failure');
+  const helper = stripTypeScriptTypes(details.slice(details.indexOf('async function readAd('), details.indexOf('  async function edit(')));
   const refreshStates = [], selections = [], errors = [], revisions = [];
-  const context = { setNeedsRefresh: value => refreshStates.push(value), setSelected: value => selections.push(value), setReadVersion: update => revisions.push(update(2)), setError: error => errors.push(error), requester: { current: async () => { throw new Error('Read timed out.'); } } };
+  const context = { isCurrent: () => true, setNeedsRefresh: value => refreshStates.push(value), setSelected: value => selections.push(value), setReadVersion: update => revisions.push(update(2)), setError: error => errors.push(error), requester: { current: async () => { throw new Error('Read timed out.'); } }, scopedRequest: (...args) => context.requester.current(...args) };
   const read = new Function(...Object.keys(context), `return (${helper});`)(...Object.values(context));
   await read('ad-a', true); assert.deepEqual(refreshStates, [true]); assert.equal(selections.length, 0); assert.match(errors[0], /provider confirmed the change/);
   context.requester.current = async () => ({ ad: { _id: 'ad-a' }, statusReadAt: null });
   await read('ad-a'); assert.equal(refreshStates.at(-1), false); assert.deepEqual(revisions, [3]); assert.equal(selections.length, 1);
+});
+
+test('closed or changed ad scopes never notify the parent or swallow an aborted post-write read', async () => {
+  const compile = (code, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
+  const requestSource = details.slice(details.indexOf('async function scopedRequest('), details.indexOf('  const live ='));
+  const actionSource = details.slice(details.indexOf('async function act('), details.indexOf('  async function readAd('));
+  const readSource = details.slice(details.indexOf('async function readAd('), details.indexOf('  async function edit('));
+  for (const stale of ['unmounted', 'changed-identity', 'project-abort']) {
+    let mounted = true, identity = 'campaign-a', reject;
+    const notices = [], changes = [], selections = [], errors = [], requests = [];
+    const isCurrent = () => mounted && identity === 'campaign-a';
+    const scopedRequest = compile(requestSource, { isCurrent, requester: { current: path => { requests.push(path); return new Promise((_, fail) => { reject = fail; }); } } });
+    const readAd = compile(readSource, { scopedRequest, isCurrent, setNeedsRefresh() {}, setSelected: value => selections.push(value), setReadVersion() {}, setError: value => errors.push(value) });
+    const act = compile(actionSource, { isCurrent, setBusy() {}, setError: value => errors.push(value), setNotice: value => notices.push(value), onChanged: () => changes.push(true) });
+    const work = act(() => readAd('ad-a', true), 'Changes saved');
+    if (stale === 'unmounted') mounted = false;
+    if (stale === 'changed-identity') identity = 'campaign-b';
+    reject(new DOMException('Project changed.', 'AbortError')); await work;
+    assert.deepEqual(changes, []); assert.deepEqual(selections, []); assert.deepEqual(notices, ['']); assert.deepEqual(errors, ['']);
+    if (stale !== 'project-abort') { await assert.rejects(scopedRequest('ads/ad-status', {}), { name: 'AbortError' }); assert.equal(requests.length, 1, 'A stale continuation must not send another provider request.'); }
+  }
 });
 
 test('analytics date validation and failed refresh preserve the last successful report', async () => {

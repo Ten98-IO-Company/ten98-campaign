@@ -3,28 +3,107 @@ import './inbox.css';
 
 type Row = Record<string, any>;
 type Tab = 'messages' | 'comments' | 'reviews';
-type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean };
+type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; initialChannel?: 'sms' | 'whatsapp'; initialAccountId?: string; initialSearch?: string };
 const tabs: Tab[] = ['messages', 'comments', 'reviews'];
 const title = (value = '') => ({ googlebusiness: 'Google Business Profile', twitter: 'X', metaads: 'Meta ads', sms: 'SMS', rcs: 'RCS', whatsapp: 'WhatsApp', imessage: 'iMessage' } as Record<string, string>)[value] || (value ? value.charAt(0).toUpperCase() + value.slice(1) : '');
 const accountLabel = (account: Row) => `${account.name || account.username || account.id} · ${account.platform === 'facebook' ? 'Facebook / Messenger' : title(account.platform)}`;
 const when = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : 'Time unavailable';
 const link = (value?: string) => { try { const url = new URL(value || ''); return url.protocol === 'https:' && !url.username && !url.password ? url.href : undefined; } catch { return undefined; } };
 const merge = (before: Row[], after: Row[]) => [...new Map([...before, ...after].map(row => [row.id, row])).values()];
+function conversationMatches(row: Row, search: string) {
+  const query = search.toLowerCase();
+  return !query || [row.participantName, row.participantId, row.lastMessage, row.content, row.text, row.reviewer?.name, row.locationName].some(value => String(value || '').toLowerCase().includes(query)) || /^\+?[1-9]\d{6,14}$/.test(search) && String(row.participantId || '').replace(/^\+/, '') === search.replace(/^\+/, '');
+}
+
+function SmsInbox({ projectId, request, readOnly = false, initialSearch }: Props) {
+  const path = `/projects/${encodeURIComponent(projectId)}/sms-inbox`, requester = useRef(request), version = useRef(0), pending = useRef(false), revision = useRef(0), keys = useRef(new Map<string, string>()); requester.current = request;
+  const [status, setStatus] = useState<Row | null>(null), [rows, setRows] = useState<Row[]>([]), [pagination, setPagination] = useState<Row | null>(null), [selected, setSelected] = useState<Row | null>(null), [detail, setDetail] = useState<Row | null>(null);
+  const [message, setMessage] = useState(''), [search, setSearch] = useState(initialSearch || ''), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  const visible = rows.filter(item => conversationMatches(item, search)), conversation = detail?.conversation || selected, blocked = !!conversation?.blocked;
+  useEffect(() => {
+    const generation = ++version.current; pending.current = false; keys.current.clear(); setStatus(null); setRows([]); setPagination(null); setSelected(null); setDetail(null); setMessage(''); setSearch(initialSearch || ''); setError(''); setNotice(''); setBusy('Loading SMS replies');
+    Promise.allSettled([requester.current(path + '/status'), requester.current(path + '/conversations')]).then(results => {
+      if (generation !== version.current) return;
+      if (results[0].status === 'fulfilled') setStatus(results[0].value); else setError(results[0].reason.message || 'SMS configuration could not be loaded.');
+      if (results[1].status === 'fulfilled') { setRows(results[1].value.conversations || []); setPagination(results[1].value.pagination || null); } else setError(results[1].reason.message || 'SMS conversations could not be loaded.');
+    }).finally(() => { if (generation === version.current) setBusy(''); });
+    return () => { version.current++; };
+  }, [projectId]);
+  async function smsAction(label: string, run: (generation: number) => Promise<void>) {
+    if (pending.current) return; const generation = version.current; pending.current = true; revision.current++; setBusy(label); setError(''); setNotice('');
+    try { await run(generation); } catch (failure) { if (generation === version.current) setError((failure as Error).message || 'This SMS action could not be completed.'); }
+    finally { if (generation === version.current) { pending.current = false; setBusy(''); } }
+  }
+  async function smsList(generation: number, cursor = '') {
+    const result = await requester.current(path + '/conversations' + (cursor ? '?' + new URLSearchParams({ cursor }) : '')); if (generation !== version.current) return;
+    setRows(previous => cursor ? merge(previous, result.conversations || []) : result.conversations || []); setPagination(result.pagination || null);
+  }
+  async function smsThread(item: Row, generation: number, cursor = '') {
+    const result = await requester.current(path + '/conversations/' + encodeURIComponent(item.id) + '/messages' + (cursor ? '?' + new URLSearchParams({ cursor }) : '')); if (generation !== version.current) return;
+    setSelected(result.conversation || item); setDetail((previous: Row | null) => cursor ? { ...result, messages: merge(previous?.messages || [], result.messages || []) } : result);
+  }
+  async function openSms(item: Row, cursor = '') {
+    if (pending.current) return;
+    if (!cursor && selected?.id !== item.id) version.current++;
+    await smsAction('Loading SMS conversation', async generation => { await smsThread(item, generation, cursor); if (generation === version.current && !cursor && selected?.id !== item.id) setMessage(''); });
+  }
+  useEffect(() => {
+    const generation = version.current; let closed = false, checking = false;
+    const pollSms = async () => {
+      if (checking || pending.current) return; checking = true; const started = revision.current;
+      try {
+        const [list, thread] = await Promise.all([requester.current(path + '/conversations'), selected ? requester.current(path + '/conversations/' + encodeURIComponent(selected.id) + '/messages') : Promise.resolve(null)]);
+        if (closed || generation !== version.current || started !== revision.current) return;
+        setRows(previous => merge(previous, list.conversations || []).sort((a, b) => (Date.parse(b.lastMessageAt) || 0) - (Date.parse(a.lastMessageAt) || 0))); setPagination(list.pagination || null);
+        if (thread) { setSelected(thread.conversation); setDetail((previous: Row | null) => ({ ...thread, messages: merge(previous?.messages || [], thread.messages || []) })); }
+      } catch { /* Manual refresh is available; polling reads local SMS records only. */ }
+      finally { checking = false; }
+    };
+    const timer = window.setInterval(pollSms, 5000); return () => { closed = true; window.clearInterval(timer); };
+  }, [projectId, selected?.id]);
+  async function sendSms(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (readOnly || !selected || blocked || !status?.configured || !message.trim()) return;
+    if (message.length > 1600) { setError('Keep the SMS reply within 1,600 characters.'); return; }
+    const body = { message }, suffix = '/conversations/' + encodeURIComponent(selected.id) + '/reply', signature = JSON.stringify([path, suffix, body]);
+    await smsAction('Sending SMS reply', async generation => {
+      if (!keys.current.has(signature)) keys.current.set(signature, crypto.randomUUID());
+      let result;
+      try { result = await requester.current(path + suffix, 'POST', body, keys.current.get(signature)); keys.current.delete(signature); }
+      catch (failure) { const failed = failure as Error & { status?: number; code?: string; operation?: Row }; if (failed.status && failed.status < 500 && failed.code !== 'OPERATION_UNCERTAIN' && !['pending', 'uncertain'].includes(failed.operation?.status)) keys.current.delete(signature); throw failure; }
+      if (generation !== version.current) return;
+      setMessage(''); setSelected(result.conversation || selected); if (result.message) setDetail((previous: Row | null) => ({ ...previous, conversation: result.conversation || selected, messages: merge(previous?.messages || [], [result.message]) }));
+      setRows(previous => { const updated = result.conversation || selected; return previous.some(item => item.id === updated.id) ? previous.map(item => item.id === updated.id ? updated : item) : [updated, ...previous]; });
+      setNotice('SMS reply accepted by Twilio. Delivery updates are shown separately.');
+    });
+  }
+  return <div className="unified-inbox inbox-sms"><section className="panel inbox-intro"><div><h2>SMS replies</h2><p>Receive and answer replies to SMS campaigns through the original Twilio sender.</p></div><button className="button" type="button" disabled={!!busy} onClick={() => smsAction('Refreshing SMS replies', async generation => { const connection = await requester.current(path + '/status'); if (generation !== version.current) return; setStatus(connection); await smsList(generation); if (selected) await smsThread(selected, generation); })}>Refresh SMS replies</button></section>
+    {error && <p className="alert error" role="alert">{error}</p>}{notice && <p className="inbox-notice" role="status">{notice}</p>}{busy && <p className="inbox-help" role="status">{busy}…</p>}
+    <section className="panel inbox-filters"><label className="field"><span>Search loaded SMS conversations</span><input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Phone number, contact name or message"/></label><p className="inbox-help">Configure the Twilio incoming-message webhook shown below. Replies do not grant marketing permission. STOP opt-outs block further replies.</p>{status?.callbackUrl && <label className="field"><span>Incoming-message webhook URL (HTTP POST)</span><input readOnly value={status.callbackUrl}/></label>}{status && !status.configured && <p className="inbox-provider-note">Configure Twilio in Integrations to send replies. Previously received messages remain available.</p>}</section>
+    <div className="inbox-messages-layout"><section className="panel inbox-conversations" aria-label="SMS conversations">{visible.map(item => <button className={'inbox-conversation ' + (selected?.id === item.id ? 'selected' : '')} type="button" key={item.id} disabled={!!busy} onClick={() => openSms(item)}><span className="inbox-avatar" aria-hidden="true">SMS</span><span><strong>{item.participantName || item.participantId}</strong><small>{item.lastMessage || 'Media message'}</small><time>{when(item.lastMessageAt)}</time>{item.blocked && <small>Opted out · replies blocked</small>}</span></button>)}{!visible.length && <div className="empty"><h3>{search ? 'No matching SMS replies' : 'No SMS replies yet'}</h3><p>{search ? 'Clear the search or load more conversations.' : 'Incoming messages appear here after Twilio delivers them to this app.'}</p></div>}</section><section className="panel inbox-thread">{selected ? <><div className="inbox-thread-heading"><h3>{conversation?.participantName || conversation?.participantId}</h3><p>{conversation?.participantId} · Twilio sender {conversation?.sender}</p></div>{blocked && <p className="inbox-provider-note" role="status">Replies are blocked: {conversation?.blockedReason || 'This recipient has opted out of SMS.'} A reply cannot override their preference.</p>}<div className="inbox-message-history" aria-label="SMS message history">{[...(detail?.messages || [])].sort((a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0)).map((item: Row) => <article className={'inbox-message ' + (item.direction === 'outgoing' ? 'outgoing' : 'incoming')} key={item.id}><strong>{item.direction === 'outgoing' ? 'Your SMS sender' : conversation?.participantName || conversation?.participantId}</strong><p>{item.message || 'Media message'}</p>{(item.attachments || []).map((attachment: Row, index: number) => <Attachment key={index} item={attachment}/>)}<small>{when(item.createdAt)}{item.deliveryStatus || item.status ? ` · ${item.deliveryStatus || item.status}` : ''}</small></article>)}</div>{detail?.pagination?.hasMore && detail.pagination.nextCursor && <button className="button" type="button" disabled={!!busy} onClick={() => openSms(selected, detail.pagination.nextCursor)}>Load older SMS messages</button>}{!readOnly && <form className="inbox-reply" onSubmit={sendSms}><fieldset disabled={!!busy || blocked || !status?.configured}><label className="field"><span>SMS reply</span><textarea required rows={3} maxLength={1600} value={message} onChange={event => setMessage(event.target.value)}/><small aria-live="polite">{message.length} / 1,600 characters</small></label><p className="inbox-help">The reply uses this conversation’s original sender. Twilio may charge for multiple SMS segments; encoding affects the segment count.</p><button className="button primary">Send SMS reply</button></fieldset></form>}</> : <div className="empty"><h3>Choose an SMS conversation</h3><p>Open the recipient’s thread before sending a reply.</p></div>}</section></div>{pagination?.hasMore && pagination.nextCursor && <p className="inbox-load-more"><button className="button" type="button" disabled={!!busy} onClick={() => smsAction('Loading more SMS replies', generation => smsList(generation, pagination.nextCursor))}>Load more SMS conversations</button></p>}
+  </div>;
+}
+
+export default function UnifiedInbox(props: Props) {
+  const [tab, setTab] = useState<Tab | 'sms'>(props.initialChannel === 'sms' ? 'sms' : 'messages');
+  return <><div className="tabs inbox-tabs">{[...tabs, 'sms' as const].map(item => <button key={item} type="button" className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item === 'sms' ? 'SMS replies' : title(item)}</button>)}</div>{tab === 'sms' ? <SmsInbox {...props} key={props.projectId + ':sms'}/> : <ZernioInbox {...props} tab={tab} key={props.projectId + ':' + tab}/>}</>;
+}
 function commentsWithDepth(rows: Row[], depth = 0): Row[] { return depth > 12 ? [] : rows.flatMap(row => [{ ...row, depth }, ...commentsWithDepth(Array.isArray(row.replies) ? row.replies : [], depth + 1)]); }
 function privateMessageLimit(capabilities: Row, platform: string, attachmentUrl: string) {
   const maximum = Number.isSafeInteger(capabilities.messageLimit) && capabilities.messageLimit > 0 ? capabilities.messageLimit : 10000;
   return attachmentUrl && platform === 'tiktok' ? 0 : attachmentUrl && ['telegram', 'whatsapp'].includes(platform) ? Math.min(maximum, 1024) : maximum;
 }
 function Attachment({ item }: { item: Row }) {
+  const [failed, setFailed] = useState(false);
   const url = link(item.url || item.downloadUrl || item.mediaUrl);
   if (!url) return <p className="inbox-help">{item.type || 'Attachment'}: no public preview is available.</p>;
-  return <div className="inbox-attachment">{['image', 'sticker'].includes(item.type) ? <img src={url} alt={item.name || item.filename || 'Message attachment'} loading="lazy" referrerPolicy="no-referrer"/> : item.type === 'video' ? <video src={url} controls preload="metadata"/> : item.type === 'audio' ? <audio src={url} controls preload="none"/> : null}<a href={url} target="_blank" rel="noreferrer">Open {item.name || item.filename || item.type || 'attachment'}</a></div>;
+  const providerLogin = new URL(url).hostname === 'api.twilio.com';
+  return <div className="inbox-attachment">{!failed && !providerLogin && (['image', 'sticker'].includes(item.type) ? <img src={url} alt={item.name || item.filename || 'Message attachment'} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)}/> : item.type === 'video' ? <video src={url} controls preload="metadata" onError={() => setFailed(true)}/> : item.type === 'audio' ? <audio src={url} controls preload="none" onError={() => setFailed(true)}/> : null)}<a href={url} target="_blank" rel="noreferrer">Open {item.name || item.filename || item.type || 'attachment'}</a>{providerLogin && <p className="inbox-help">This provider file may require Twilio account access.</p>}</div>;
 }
 
-export default function UnifiedInbox({ projectId, request, readOnly = false }: Props) {
+function ZernioInbox({ projectId, request, readOnly = false, initialChannel, initialAccountId, initialSearch, tab = 'messages' }: Props & { tab?: Tab }) {
   const path = `/projects/${encodeURIComponent(projectId)}/integrations/inbox`, requester = useRef(request), version = useRef(0), pending = useRef(false), keys = useRef(new Map<string, string>());
   requester.current = request;
-  const [tab, setTab] = useState<Tab>('messages'), [status, setStatus] = useState<Row | null>(null), [accounts, setAccounts] = useState<Row[]>([]), [accountId, setAccountId] = useState(''), [platform, setPlatform] = useState(''), [conversationStatus, setConversationStatus] = useState('active');
+  const [status, setStatus] = useState<Row | null>(null), [accounts, setAccounts] = useState<Row[]>([]), [accountId, setAccountId] = useState(''), [platform, setPlatform] = useState(''), [conversationStatus, setConversationStatus] = useState('active');
   const [rows, setRows] = useState<Row[]>([]), [pagination, setPagination] = useState<Row | null>(null), [meta, setMeta] = useState<Row | null>(null), [loaded, setLoaded] = useState(false), [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Row | null>(null), [detail, setDetail] = useState<Row | null>(null), [focusedComment, setFocusedComment] = useState(''), [replyTarget, setReplyTarget] = useState<Row | null>(null), [message, setMessage] = useState(''), [confirmReplace, setConfirmReplace] = useState(false);
   const [messageTag, setMessageTag] = useState(''), [attachmentUrl, setAttachmentUrl] = useState(''), [attachmentType, setAttachmentType] = useState('image'), [attachmentName, setAttachmentName] = useState('');
@@ -33,14 +112,24 @@ export default function UnifiedInbox({ projectId, request, readOnly = false }: P
   const canReply = tab === 'messages' ? capabilities.reply : tab === 'comments' ? capabilities.commentReply : capabilities.reviewReply;
   const messageLimit = privateMessageLimit(capabilities, account?.platform || '', attachmentUrl);
   const supported = accounts.filter(item => !!item.capabilities?.[tab] && (!platform || item.platform === platform));
-  const visibleRows = rows.filter(row => !search || [row.participantName, row.participantId, row.lastMessage, row.content, row.text, row.reviewer?.name, row.locationName].some(value => String(value || '').toLowerCase().includes(search.toLowerCase())));
+  const visibleRows = rows.filter(row => conversationMatches(row, search));
   const threadRows = detail?.parent && focusedComment ? [{ ...detail.parent, depth: 0 }, ...commentsWithDepth(detail.comments || [], 1)] : commentsWithDepth(detail?.comments || []);
 
   function resetSelection() { setSelected(null); setDetail(null); setFocusedComment(''); setReplyTarget(null); setMessage(''); setConfirmReplace(false); setMessageTag(''); setAttachmentUrl(''); setAttachmentName(''); setAttachmentType('image'); }
   function resetList() { version.current++; pending.current = false; setBusy(''); setRows([]); setPagination(null); setMeta(null); setLoaded(false); resetSelection(); setSearch(''); setError(''); setNotice(''); }
   useEffect(() => {
     const generation = ++version.current; pending.current = false; keys.current.clear(); setStatus(null); setAccounts([]); setAccountId(''); setPlatform(''); setRows([]); setPagination(null); setLoaded(false); setMeta(null); resetSelection(); setSearch(''); setError(''); setNotice(''); setBusy('Loading connections');
-    requester.current(path + '/status').then(result => { if (generation === version.current) { setStatus(result); setAccounts(result.accounts || []); } }).catch(failure => { if (generation === version.current) setError(failure.message); }).finally(() => { if (generation === version.current) setBusy(''); });
+    requester.current(path + '/status').then(async result => {
+      if (generation !== version.current) return; setStatus(result); setAccounts(result.accounts || []);
+      if (tab === 'messages' && initialChannel === 'whatsapp') {
+        setPlatform('whatsapp'); setSearch(initialSearch || '');
+        const account = (result.accounts || []).find((item: Row) => item.id === initialAccountId && item.platform === 'whatsapp' && item.capabilities?.messages);
+        if (!account) { if (initialAccountId) setError('This campaign’s WhatsApp account is unavailable. Choose a connected WhatsApp account before loading replies.'); return; }
+        setAccountId(account.id);
+        const list = await requester.current(path + '/conversations?' + new URLSearchParams({ accountId: account.id, status: 'active' }));
+        if (generation !== version.current) return; setRows(list.conversations || []); setPagination(list.pagination || null); setMeta(list.meta || null); setLoaded(true);
+      }
+    }).catch(failure => { if (generation === version.current) setError(failure.message); }).finally(() => { if (generation === version.current) setBusy(''); });
     return () => { version.current++; };
   }, [projectId]);
   useEffect(() => {
@@ -129,11 +218,11 @@ export default function UnifiedInbox({ projectId, request, readOnly = false }: P
   return <div className="unified-inbox">
     <section className="panel inbox-intro"><div><h2>Unified inbox</h2><p>Reply to private messages, manage public comments and respond to reviews from your connected accounts.</p></div><button className="button" type="button" disabled={!!busy} onClick={loadAccounts}>Refresh connections</button></section>
     {error && <p className="alert error" role="alert">{error}</p>}{notice && <p className="inbox-notice" role="status">{notice}</p>}{busy && <p className="inbox-help" role="status">{busy}…</p>}
-    <div className="tabs inbox-tabs">{tabs.map(item => <button type="button" key={item} disabled={!!busy} className={tab === item ? 'active' : ''} onClick={() => { resetList(); setTab(item); setAccountId(''); }}>{title(item)}</button>)}</div>
     {status && !connected && <p className="inbox-provider-note">Configure Zernio and map this project’s profile in Integrations settings to load its inbox.</p>}
     {status?.webhookConfigured === false && <p className="inbox-provider-note">Configure inbox webhooks in Integrations settings to receive activity updates. You can refresh provider lists manually now.</p>}
     <section className="panel inbox-filters"><div className="form-grid"><label className="field"><span>Platform</span><select value={platform} disabled={!!busy} onChange={event => { resetList(); setPlatform(event.target.value); setAccountId(''); }}><option value="">All connected platforms</option>{[...new Set(accounts.filter(item => item.capabilities?.[tab]).map(item => item.platform))].map(item => <option value={item} key={item}>{item === 'facebook' ? 'Facebook / Messenger' : title(item)}</option>)}</select></label><label className="field"><span>Connected account</span><select value={accountId} disabled={!!busy || !connected} onChange={event => { resetList(); setAccountId(event.target.value); }}><option value="">Choose an account</option>{supported.map(item => <option key={item.id} value={item.id}>{accountLabel(item)}</option>)}</select></label>{tab === 'messages' && <label className="field"><span>Conversation status</span><select value={conversationStatus} disabled={!!busy} onChange={event => { resetList(); setConversationStatus(event.target.value); }}><option value="active">Active</option><option value="archived">Archived</option></select></label>}</div><div className="button-wrap"><button className="button primary" type="button" disabled={!!busy || !accountId || !connected} onClick={() => loadList()}>Load {tab}</button><label className="field inbox-search"><span>Search loaded {tab === 'comments' ? 'posts' : tab}</span><input type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder={tab === 'messages' ? 'Name, identity or recent message' : 'Text, author or location'}/></label></div>{connected && accounts.length > 0 && !supported.length && <p className="inbox-help">No account in this filter supports {tab}. Choose another platform or connect a supported account.</p>}{tab === 'comments' && <p className="inbox-help">Choose a published post, then open its comments. Provider caching, permissions and moderation capabilities vary by platform.</p>}{tab === 'messages' && <p className="inbox-help">Provider reply windows and account permissions apply. Messages from encrypted X Chat are unavailable through the provider API.</p>}</section>
     {meta?.failedAccounts?.length > 0 && <section className="inbox-provider-note" role="status"><strong>Some account data could not be loaded.</strong>{meta?.failedAccounts?.map((item: Row, index: number) => <p key={item.accountId || index}>{item.accountUsername || item.accountId}: {item.error || item.message || 'Provider unavailable'}{item.retryAfter ? ` · Retry after ${item.retryAfter} seconds` : ''}</p>)}</section>}
+    {initialChannel === 'whatsapp' && initialSearch && tab === 'messages' && <p className="inbox-help">Select the conversation you recognise before replying. Some WhatsApp participants use a business-specific identity instead of their phone number. Clear the search to inspect other conversations.</p>}
     {loaded && !visibleRows.length && <section className="panel empty"><h3>{search ? 'No matching items on these pages' : `No ${tab === 'comments' ? 'commented posts' : tab} returned`}</h3><p>{pagination?.hasMore ? 'More results are available below.' : 'Refresh after new activity or choose another account.'}</p></section>}
     {tab === 'messages' ? <div className="inbox-messages-layout"><section className="panel inbox-conversations" aria-label="Conversations">{visibleRows.map(item => <button className={'inbox-conversation ' + (selected?.id === item.id ? 'selected' : '')} key={item.id} type="button" disabled={!!busy} onClick={() => openItem(item)}><span className="inbox-avatar" aria-hidden="true">{String(item.participantName || item.participantId || '?').slice(0, 2).toUpperCase()}</span><span><strong>{item.participantName || item.participantId || 'Participant'}</strong><small>{item.lastMessage || 'No text preview'}</small><time>{when(item.updatedTime)}</time></span>{item.unreadCount > 0 && <b className="inbox-unread">{item.unreadCount} unread</b>}</button>)}</section>
       <section className="panel inbox-thread">{selected ? <><div className="inbox-thread-heading"><div><h3>{selected.participantName || selected.participantId || 'Conversation'}</h3><p>{title(selected.platform || account?.platform)} · {selected.participantId} · {selected.status || 'active'}</p></div><div className="button-wrap"><button className="button" type="button" disabled={!!busy} onClick={() => openItem(selected)}>Refresh thread</button>{link(selected.url) && <a className="button" href={link(selected.url)} target="_blank" rel="noreferrer">Open in platform</a>}{!readOnly && capabilities.read && <button className="button" type="button" disabled={!!busy} onClick={() => conversationAction('read')}>Mark read</button>}{!readOnly && capabilities.archive && <button className="button" type="button" disabled={!!busy} onClick={() => conversationAction('status')}>{selected.status === 'archived' ? 'Reopen' : 'Archive'}</button>}</div></div>
