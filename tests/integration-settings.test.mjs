@@ -8,6 +8,23 @@ const secret = 'integration-settings-fixture-secret-at-least-32-characters';
 const provider = (manager, id) => manager.describe().providers.find(value => value.id === id);
 const rejects = (run, code) => assert.throws(run, error => error.code === code);
 
+test('native ad credentials stay encrypted, masked and independent from shared Drive/Calendar credentials', () => {
+  const db = new DatabaseSync(':memory:'), env = {};
+  try {
+    const manager = createIntegrationSettings({ db, env, secret });
+    const fields = { clientId: 'native-client-id', clientSecret: 'native-client-secret', refreshToken: 'native-refresh-token', developerToken: 'native-developer-token' };
+    manager.save('googleAdsNative', { ...fields, loginCustomerId: '123-456-7890' }); manager.save('microsoftAds', fields);
+    assert.equal(provider(manager, 'googleAdsNative').configured, true); assert.equal(provider(manager, 'microsoftAds').configured, true);
+    assert.equal(provider(manager, 'googleAdsNative').fields.loginCustomerId, '1234567890'); assert.equal(provider(manager, 'googleDrive').configured, false);
+    const publicSettings = JSON.stringify(manager.describe()), saved = db.prepare('SELECT ciphertext FROM integration_settings').all();
+    for (const key of ['clientSecret', 'refreshToken', 'developerToken']) { assert.equal(publicSettings.includes(fields[key]), false); assert.ok(saved.every(row => !Buffer.from(row.ciphertext).toString().includes(fields[key]))); }
+    const afterRestart = {}; createIntegrationSettings({ db, env: afterRestart, secret });
+    assert.equal(afterRestart.GOOGLE_ADS_REFRESH_TOKEN, fields.refreshToken); assert.equal(afterRestart.MICROSOFT_ADS_REFRESH_TOKEN, fields.refreshToken);
+    manager.save('microsoftAds', { clientSecret: null }); assert.equal(provider(manager, 'microsoftAds').configured, true, 'Microsoft public OAuth clients need no client secret.');
+    rejects(() => manager.save('googleAdsNative', { loginCustomerId: 'short' }), 'INVALID_SETTING');
+  } finally { db.close(); }
+});
+
 test('integration settings encrypt credentials, mask reads, persist overrides, share Google credentials and restore environment values', () => {
   const db = new DatabaseSync(':memory:');
   const original = { ZERNIO_API_KEY: 'ENV_ZERNIO_KEY', ZERNIO_WEBHOOK_SECRET: 'ENV_WEBHOOK_SECRET_LONG', OPENROUTER_API_KEY: 'ENV_OPENROUTER_KEY', OPENROUTER_MODEL: 'vendor/model', GOOGLE_SERVICE_ACCOUNT_EMAIL: 'env-service@example.test', GOOGLE_PRIVATE_KEY: 'ENV_PRIVATE_KEY' }, env = { ...original };

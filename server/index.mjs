@@ -15,6 +15,8 @@ import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.mjs';
 import { handleCalendar } from './calendar.mjs';
 import { handleAgent } from './agent.mjs';
 import { handleOoh } from './ooh.mjs';
+import { handleNativeGoogleAds } from './native-google-ads.mjs';
+import { handleMicrosoftAds } from './native-microsoft-ads.mjs';
 import { createDirectCampaigns } from './direct-campaigns.mjs';
 import { handleInbox } from './inbox.mjs';
 import { createSmsInbox } from './sms-inbox.mjs';
@@ -256,6 +258,13 @@ export function createApp(options = {}) {
           const assertIntegrationSettings = () => { if (auth.user(req)?.id !== user.id) throw new HttpError(403, 'Your sign-in session ended. Sign in again.'); const current = projectAccess(project.id, user.id); if (current.role !== role) throw new HttpError(403, 'Your workspace role changed. Refresh this project before continuing.'); if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.'); };
           const context = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT zernio_profile_id FROM projects WHERE id=?').get(project.id); if (current?.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT drive_folder_id FROM projects WHERE id=?').get(project.id); if (current?.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: (collection, fields) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); checkReferences(store, project.id, data); return data; } };
           context.assertPublishingApproval = post => assertPublishingApproval(context, post);
+          context.persistNativeRefreshToken = (provider, expected, next) => {
+            assertIntegrationSettings();
+            const name = { googleAdsNative: 'GOOGLE_ADS_REFRESH_TOKEN', microsoftAds: 'MICROSOFT_ADS_REFRESH_TOKEN' }[provider];
+            if (!name) throw new HttpError(409, 'The native ad authorization changed. Refresh before continuing.');
+            // Parallel refreshes retain the first saved token; administrative changes still invalidate the request above.
+            if (env[name] === expected) integrationSettings.save(provider, { refreshToken: next }, { tokenRotation: true });
+          };
           context.assertProviderPostEdit = () => assertProviderPostEdit(context);
           context.contacts = direct.contacts; context.webhooks = webhooks;
           if (projectRoute[2]?.startsWith('sms-inbox') && await smsInbox.handle(context)) return;
@@ -267,6 +276,8 @@ export function createApp(options = {}) {
           if (projectRoute[2]?.startsWith('calendar/') && await handleCalendar(context)) return;
           if (projectRoute[2]?.startsWith('agent/') && await handleAgent(context)) return;
           if (projectRoute[2]?.startsWith('ooh/') && await handleOoh(context)) return;
+          if (projectRoute[2]?.startsWith('native-google-ads/') && await handleNativeGoogleAds(context)) return;
+          if (projectRoute[2]?.startsWith('microsoft-ads/') && await handleMicrosoftAds(context)) return;
           if (projectRoute[2]?.startsWith('integrations/')) {
             if (await handleIntegration(context)) return;
           }
@@ -287,7 +298,7 @@ export function createApp(options = {}) {
             }
             if (id && ['PATCH', 'DELETE'].includes(req.method)) {
               const previous = store.get(project.id, collection, id); if (!previous) throw new HttpError(404, 'Record not found.');
-              if ((collection === 'placements' && previous.source === 'broadsign') || (collection === 'campaigns' && previous.externalId) || (collection === 'posts' && (previous.externalId || previous.status === 'published'))) bad('Provider-managed records must be changed through their connected provider controls.');
+              if ((collection === 'placements' && previous.source === 'broadsign') || (collection === 'campaigns' && (previous.externalId || previous.nativeProvider)) || (collection === 'posts' && (previous.externalId || previous.status === 'published'))) bad('Provider-managed records must be changed through their connected provider controls.');
               if (req.method === 'DELETE') { checkDependants(store, project.id, collection, id); store.remove(project.id, collection, id); store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
               rejectProviderFields(body, collection);
               if (collection === 'posts' && (body.status === 'published' || previous.status === 'published' || previous.externalId)) bad('Provider posts must be managed through their connected provider.');
@@ -331,7 +342,7 @@ function checkDependants(store, projectId, collection, id, realOnly = false) {
   if (field && collections.some(name => store.list(projectId, name).some(record => (record[field] === id || (collection === 'assets' && Object.values(record.platformOverrides || {}).some(variant => variant?.assetId === id))) && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
 }
 function rejectProviderFields(body, collection = '') {
-  if (['externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'modifiedTime', 'md5Checksum', 'approvalStatus', 'approvedBy', 'reviewedBy', 'providerDeletedAt', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key) && !(collection === 'assets' && key === 'deliveryUrl'))) bad('Provider identifiers and publication evidence are managed by integrations.');
+  if (['nativeProvider', 'nativeCustomerId', 'nativeCampaignResource', 'nativeResources', 'nativeAccountId', 'nativeCampaignId', 'nativeAdGroupId', 'nativeAdId', 'externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'modifiedTime', 'md5Checksum', 'approvalStatus', 'approvedBy', 'reviewedBy', 'providerDeletedAt', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key) && !(collection === 'assets' && key === 'deliveryUrl'))) bad('Provider identifiers and publication evidence are managed by integrations.');
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app = createApp();

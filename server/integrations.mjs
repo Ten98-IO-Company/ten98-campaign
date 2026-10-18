@@ -1,6 +1,7 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
 import { buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostVariants, resolveVariant, validatePostForPlatforms, wireMediaItems } from '../shared/social-posts.mjs';
 import { transaction } from './database.mjs';
+import { handleGoogleAds } from './google-ads.mjs';
 
 const ZERNIO = 'https://zernio.com/api/v1';
 const GOOGLE = 'https://www.googleapis.com';
@@ -51,7 +52,7 @@ async function providerJson(response) {
 }
 async function request(url, options = {}, provider = 'Zernio', assertMapping) {
   const target = new URL(url);
-  if (target.protocol !== 'https:' || !['zernio.com', 'www.googleapis.com', 'oauth2.googleapis.com', 'api.twilio.com', 'api.cloudflare.com'].includes(target.hostname)) fail(500, 'INVALID_PROVIDER', 'The provider endpoint is invalid.');
+  if (target.protocol !== 'https:' || !['zernio.com', 'www.googleapis.com', 'oauth2.googleapis.com', 'googleads.googleapis.com', 'login.microsoftonline.com', 'clientcenter.api.bingads.microsoft.com', 'campaign.api.bingads.microsoft.com', 'reporting.api.bingads.microsoft.com', 'api.twilio.com', 'api.cloudflare.com'].includes(target.hostname)) fail(500, 'INVALID_PROVIDER', 'The provider endpoint is invalid.');
   checkMapping(assertMapping);
   let response;
   try { response = await fetch(target, { ...options, redirect: 'error', signal: AbortSignal.timeout(['/api/v1/ads/create', '/api/v1/ads/boost'].includes(target.pathname) ? 180000 : 20000) }); }
@@ -140,7 +141,7 @@ function requireAccount(accounts, accountId) {
   if (!account) fail(403, 'ACCOUNT_OUTSIDE_PROJECT', 'This account is not connected to this project.');
   return account;
 }
-async function campaignTree(api, profileId, dates = {}) {
+export async function campaignTree(api, profileId, dates = {}) {
   const all = []; let last; let backfillPending = false;
   for (let page = 1; page <= 10; page++) {
     const result = await api('/ads/tree', { profileId, ...dates, page, limit: 100, source: 'all' });
@@ -153,7 +154,7 @@ async function campaignTree(api, profileId, dates = {}) {
   }
   fail(503, 'INCOMPLETE_PROVIDER_DATA', 'The campaign tree exceeds the current reporting limit.');
 }
-async function adAccounts(api, accountId) {
+export async function adAccounts(api, accountId) {
   const result = await api('/ads/accounts', { accountId, inScopeOnly: true });
   if (!Array.isArray(result.accounts)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return advertising accounts.');
   return result;
@@ -246,21 +247,23 @@ function googleAssetUpdate(value, type) {
 }
 function adBody(body, account, nativeAccount, boost = false) {
   const common = ['platform', 'accountId', 'adAccountId', 'name', 'goal', 'budgetAmount', 'budgetType', 'countries', 'status', 'currency', 'targeting', 'startDate', 'endDate'];
-  fields(body, [...common, ...(boost ? ['postId'] : ['headline', 'body', 'linkUrl', 'imageUrl', 'video', 'carouselCards', 'callToAction', 'campaignType', 'businessName', 'images', 'additionalHeadlines', 'additionalDescriptions', 'keywords', 'advantageAudience', 'boardId', 'organizationId', 'assetGroup', 'demandGen', 'promotedObject', 'leadGenFormId', 'bidStrategy', 'bidAmount', 'creativeFormat'])]);
+  fields(body, [...common, ...(boost ? ['postId'] : ['headline', 'body', 'linkUrl', 'imageUrl', 'video', 'carouselCards', 'callToAction', 'campaignType', 'businessName', 'images', 'additionalHeadlines', 'additionalDescriptions', 'keywords', 'advantageAudience', 'boardId', 'organizationId', 'assetGroup', 'demandGen', 'promotedObject', 'leadGenFormId', 'bidStrategy', 'bidAmount', 'creativeFormat', 'tracking'])]);
   const platform = body.platform, meta = ['facebook', 'instagram'].includes(platform), google = platform === 'google', advancedGoogle = google && ['pmax', 'demand_gen'].includes(body.campaignType);
   if (!CREATE_CONNECTIONS[platform]?.includes(account.platform)) fail(400, 'AD_CONNECTION_MISMATCH', 'Select a connected account for this advertising network.');
   const goals = ['traffic', 'awareness', ...(['facebook', 'instagram', 'google', 'pinterest', 'linkedin', 'tiktok', 'twitter'].includes(platform) ? ['engagement'] : []), ...(['facebook', 'instagram', 'linkedin', 'tiktok', 'reddit'].includes(platform) ? ['video_views'] : []), ...(['facebook', 'instagram', 'tiktok', 'openai', 'reddit'].includes(platform) ? ['conversions'] : []), ...(meta || platform === 'linkedin' ? ['lead_generation'] : [])];
   if (!advancedGoogle && !goals.includes(body.goal)) fail(400, 'UNSUPPORTED_AD_GOAL', 'Choose a supported goal for this network.');
-  if (body.budgetType && body.budgetType !== 'daily') fail(400, 'UNSUPPORTED_BUDGET', 'This editor supports daily budgets.');
+  const budgetType = body.budgetType || 'daily';
+  if (budgetType !== 'daily' && !(platform === 'openai' && budgetType === 'lifetime')) fail(400, 'UNSUPPORTED_BUDGET', 'Choose a supported budget type.');
   if (body.status !== undefined && body.status !== 'PAUSED') fail(400, 'INVALID_AD_STATUS', 'New ads must start paused. Review them before activation.');
   if (body.currency && body.currency !== nativeAccount.currency) fail(400, 'CURRENCY_MISMATCH', 'The budget currency must match the advertising account.');
-  const minimum = Math.max(platform === 'pinterest' ? 5 : platform === 'tiktok' ? 20 : platform === 'openai' ? 1 : 0, Number(nativeAccount.minimumDailyBudget) || 0);
-  const result = { accountId: account._id, adAccountId: nativeAccount.id, name: text(body.name, 'ad name', 255), ...(!advancedGoogle ? { goal: body.goal } : {}), budgetAmount: adAmount(body.budgetAmount, nativeAccount.currency, minimum), budgetType: 'daily', countries: countries(body.countries), status: 'PAUSED' };
+  const minimum = Math.max(platform === 'pinterest' ? 5 : platform === 'tiktok' ? 20 : platform === 'openai' ? 1 : 0, budgetType === 'daily' ? Number(nativeAccount.minimumDailyBudget) || 0 : 0);
+  const result = { accountId: account._id, adAccountId: nativeAccount.id, name: text(body.name, 'ad name', 255), ...(!advancedGoogle ? { goal: body.goal } : {}), budgetAmount: adAmount(body.budgetAmount, nativeAccount.currency, minimum), budgetType, countries: countries(body.countries), status: 'PAUSED' };
   if (body.targeting !== undefined) { result.targeting = adTargeting(body.targeting, platform, body.campaignType); if (result.targeting.countries) fail(400, 'INVALID_AUDIENCE', 'Set countries once using the target countries field.'); }
   for (const key of ['startDate', 'endDate']) if (body[key] !== undefined) { if (typeof body[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(body[key]) || Number.isNaN(Date.parse(body[key])) || new Date(body[key].slice(0, 10)).toISOString().slice(0, 10) !== body[key].slice(0, 10)) fail(400, 'INVALID_DATE', 'Use a valid date and time including its timezone.'); result[key] = google ? body[key] : new Date(body[key]).toISOString(); }
   if (google ? result.startDate && result.endDate && result.startDate.slice(0, 10) > result.endDate.slice(0, 10) : (result.endDate && Date.parse(result.endDate) <= Date.now()) || (result.startDate && result.endDate && Date.parse(result.startDate) >= Date.parse(result.endDate))) fail(400, 'INVALID_DATE', google ? 'The end day must be the same as or later than the start day, in the advertising account’s timezone.' : 'The end must be in the future and later than the start.');
+  if (budgetType === 'lifetime' && !result.endDate) fail(400, 'INVALID_DATE', 'Lifetime campaigns require a future end time.');
   if (boost) { result.targeting = { countries: result.countries, ...result.targeting }; delete result.countries; return result; }
-  const perNetwork = google ? ['campaignType', ...(advancedGoogle ? [body.campaignType === 'pmax' ? 'assetGroup' : 'demandGen'] : ['headline', 'body', 'linkUrl', ...(body.campaignType === 'search' ? ['additionalHeadlines', 'additionalDescriptions', 'keywords'] : ['businessName', 'images'])])] : ['headline', 'body', 'linkUrl', 'imageUrl', ...(meta ? ['video', 'carouselCards', 'callToAction', 'advantageAudience', 'promotedObject', 'leadGenFormId'] : platform === 'linkedin' ? ['video', 'callToAction', 'organizationId', 'leadGenFormId'] : platform === 'reddit' ? ['video', 'carouselCards', 'callToAction', 'promotedObject', 'creativeFormat'] : platform === 'pinterest' ? ['boardId'] : platform === 'openai' ? ['promotedObject', 'bidStrategy', 'bidAmount'] : platform === 'tiktok' ? ['promotedObject'] : [])];
+  const perNetwork = google ? ['campaignType', ...(advancedGoogle ? [body.campaignType === 'pmax' ? 'assetGroup' : 'demandGen'] : ['headline', 'body', 'linkUrl', ...(body.campaignType === 'search' ? ['additionalHeadlines', 'additionalDescriptions', 'keywords'] : ['businessName', 'images'])])] : ['headline', 'body', 'linkUrl', 'imageUrl', ...(meta ? ['video', 'carouselCards', 'callToAction', 'advantageAudience', 'promotedObject', 'leadGenFormId'] : platform === 'linkedin' ? ['video', 'callToAction', 'organizationId', 'leadGenFormId'] : platform === 'reddit' ? ['video', 'carouselCards', 'callToAction', 'promotedObject', 'creativeFormat'] : platform === 'pinterest' ? ['boardId'] : platform === 'openai' ? ['promotedObject', 'bidStrategy', 'bidAmount', 'tracking'] : platform === 'tiktok' ? ['promotedObject'] : [])];
   if (Object.keys(body).some(key => !common.includes(key) && !perNetwork.includes(key))) fail(400, 'UNSUPPORTED_AD_FIELD', 'Use the fields for this network and ad format.');
   if (google) {
     if (!['search', 'display', 'pmax', 'demand_gen'].includes(body.campaignType)) fail(400, 'UNSUPPORTED_AD_TYPE', 'Choose Search, Display, Performance Max, or Demand Gen.');
@@ -306,11 +309,18 @@ function adBody(body, account, nativeAccount, boost = false) {
   if (body.promotedObject !== undefined) { fields(body.promotedObject, platform === 'openai' ? ['customEventType'] : ['pixelId', 'customEventType'], 'conversion'); result.promotedObject = Object.fromEntries(Object.entries(body.promotedObject).map(([key, item]) => [key, text(item, 'conversion event or pixel ID')])); }
   if (body.goal === 'conversions' && platform !== 'openai' && (!result.promotedObject?.pixelId || ((meta || platform === 'reddit') && !result.promotedObject.customEventType))) fail(400, 'CONVERSION_CONFIGURATION_REQUIRED', 'Conversion campaigns need a pixel ID and conversion event.');
   if (platform === 'openai') {
+    if (result.promotedObject && body.goal !== 'conversions') fail(400, 'INVALID_AD_GOAL', 'Select the conversions goal to choose a conversion event.');
     if (body.bidStrategy !== undefined && !['LOWEST_COST_WITHOUT_CAP', 'LOWEST_COST_WITH_BID_CAP', 'COST_CAP'].includes(body.bidStrategy)) fail(400, 'INVALID_BIDDING', 'Choose automatic or capped bidding.');
     if (body.bidStrategy) result.bidStrategy = body.bidStrategy;
     const capped = ['LOWEST_COST_WITH_BID_CAP', 'COST_CAP'].includes(body.bidStrategy);
-    if (body.goal === 'awareness' && !capped) fail(400, 'INVALID_BIDDING', 'ChatGPT awareness ads require a fixed bid.');
+    if ((body.goal === 'awareness' || budgetType === 'lifetime') && !capped) fail(400, 'INVALID_BIDDING', 'ChatGPT awareness and lifetime campaigns require a fixed bid.');
     if (capped) result.bidAmount = adAmount(body.bidAmount, nativeAccount.currency); else if (body.bidAmount !== undefined) fail(400, 'INVALID_BIDDING', 'A bid amount requires capped bidding.');
+    if (body.tracking !== undefined) {
+      fields(body.tracking, ['urlTags'], 'tracking');
+      if (!Array.isArray(body.tracking.urlTags) || !body.tracking.urlTags.length || body.tracking.urlTags.length > 50) fail(400, 'INVALID_TRACKING', 'Use 1 to 50 tracking parameters.');
+      const keys = new Set();
+      result.tracking = { urlTags: body.tracking.urlTags.map(tag => { fields(tag, ['key', 'value'], 'tracking parameter'); const key = text(tag.key, 'tracking key', 100); if (!/^[A-Za-z0-9_.-]+$/.test(key) || keys.has(key)) fail(400, 'INVALID_TRACKING', 'Tracking keys must be distinct URL parameter names.'); keys.add(key); return { key, value: text(tag.value, 'tracking value', 2000) }; }) };
+    }
   }
   return result;
 }
@@ -408,7 +418,7 @@ export async function operation(context, action) {
   }
   if (db.prepare("SELECT id FROM integration_operations WHERE project_id = ? AND request_hash = ? AND status IN ('pending', 'uncertain', 'reviewed-applied')").get(project.id, hash)) fail(409, 'OPERATION_UNCERTAIN', 'This action has an unresolved or externally applied provider outcome. Review its receipt before trying again.');
   const id = randomUUID();
-  const known = new Set(['integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
+  const known = new Set(['native-google-ads', 'microsoft-ads', 'shopping', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
   const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
   db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString(), actionPath, operation.runId);
   active.add(id);
@@ -748,6 +758,17 @@ export async function handleIntegration(context) {
     if (!env.ZERNIO_API_KEY) fail(503, 'ZERNIO_NOT_CONFIGURED', 'Configure a Zernio API key to connect providers.');
     if (!project.zernioProfileId) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
     const profileId = String(project.zernioProfileId); const api = zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping?.(profileId));
+    if (req.method === 'POST' && path === 'connect/openai-ads') {
+      if (!['owner', 'admin'].includes(role)) fail(403, 'ADMIN_PERMISSION_REQUIRED', 'Only a workspace administrator can connect provider accounts.');
+      fields(body, ['apiKey'], 'connection'); const apiKey = identifier(body.apiKey, 'ChatGPT Ads Manager API key');
+      const outcome = await operation(context, async key => {
+        const result = await api('/connect/openai-ads/credentials', {}, { apiKey, profileId }, key);
+        const account = (await scopedAccounts(api, profileId)).find(item => item._id === result.accountId && item.platform === 'openaiads' && item.isActive !== false);
+        if (!account) throw new IntegrationError(502, 'CONNECTION_NOT_CONFIRMED', 'The connection could not be verified in this project. Refresh accounts before retrying.', true);
+        return { accountId: account._id, adAccountName: typeof result.adAccountName === 'string' ? result.adAccountName.slice(0, 200) : 'ChatGPT Ads' };
+      }); send(outcome.status, outcome.data); return true;
+    }
+    if (path.startsWith('ads/google/')) return await handleGoogleAds(context, api, profileId, path.slice('ads/google/'.length));
     if (req.method === 'GET' && path === 'connect') {
       if (!['owner', 'admin'].includes(role)) fail(403, 'ADMIN_PERMISSION_REQUIRED', 'Only a workspace administrator can connect provider accounts.');
       const platform = url.searchParams.get('platform'); const kind = url.searchParams.get('kind') || 'social';
@@ -1042,17 +1063,18 @@ export async function handleIntegration(context) {
         fields(body.budget, ['amount', 'type'], 'budget');
         if (!['facebook', 'instagram', 'google', 'openai', 'reddit'].includes(body.platform)) fail(422, 'AD_SET_BUDGET_REQUIRED', 'Use the ad set budget editor for this network.');
         if (['facebook', 'instagram'].includes(body.platform) && campaign.budgetLevel !== 'campaign') fail(422, 'AD_SET_BUDGET_REQUIRED', 'This campaign uses ad set budgets. Use its ad set budget editor.');
-        if (body.budget.type !== 'daily' || campaign.budget?.type === 'lifetime' || campaign.campaignBudget?.type === 'lifetime') fail(400, 'UNSUPPORTED_BUDGET', 'Keep lifetime budgets in the provider dashboard.');
-        payload.budget = { amount: adAmount(body.budget.amount, campaign.currency), type: 'daily' };
+        const lifetime = campaign.budget?.type === 'lifetime' || campaign.campaignBudget?.type === 'lifetime';
+        if (body.platform === 'openai' ? !['daily', 'lifetime'].includes(body.budget.type) || body.budget.type === 'lifetime' && !lifetime : body.budget.type !== 'daily' || lifetime) fail(400, 'UNSUPPORTED_BUDGET', body.platform === 'openai' ? 'A daily ChatGPT campaign cannot switch to lifetime. Create a new campaign for that budget type.' : 'Keep lifetime budgets in the provider dashboard.');
+        payload.budget = { amount: adAmount(body.budget.amount, campaign.currency, body.platform === 'openai' ? 1 : 0), type: body.budget.type };
       }
       if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a campaign name or daily budget to change.');
       const outcome = await operation(context, async key => {
         const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, payload, key, 'PUT');
-        if (!Number.isInteger(result.updated) || result.updated < 0 || (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== 'daily')) || (payload.name && result.name !== payload.name)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not acknowledge the campaign changes.', true);
+        if (!Number.isInteger(result.updated) || result.updated < 0 || (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== payload.budget.type)) || (payload.name && result.name !== payload.name)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not acknowledge the campaign changes.', true);
         return { result: redact(result) };
       }); send(outcome.status, outcome.data); return true;
     }
-    if (req.method === 'POST' && path === 'ads/create') {
+    if (req.method === 'POST' && ['ads/create', 'ads/validate'].includes(path)) {
       if (!CREATE_CONNECTIONS[body.platform]) fail(422, 'AD_CREATION_REQUIREMENTS', 'Choose a supported advertising network.');
       const accounts = await scopedAccounts(api, profileId);
       const account = requireAccount(accounts, identifier(body.accountId, 'account ID'));
@@ -1062,10 +1084,18 @@ export async function handleIntegration(context) {
       if (!nativeAccount) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This advertising account is not available through this project connection.');
       if (nativeAccount.selectable === false) fail(409, 'AD_ACCOUNT_UNAVAILABLE', 'This advertising account cannot currently create campaigns. Check it in the provider dashboard.');
       const payload = adBody(body, account, nativeAccount);
+      if (path === 'ads/validate') {
+        if (body.platform !== 'openai' && !(body.platform === 'google' && ['pmax', 'demand_gen'].includes(body.campaignType))) fail(422, 'VALIDATION_UNAVAILABLE', 'Provider validation here supports ChatGPT, Google Performance Max and Demand Gen.');
+        let result;
+        try { result = await api('/ads/create', {}, { ...payload, validateOnly: true }); }
+        catch (error) { if (error instanceof IntegrationError) error.uncertain = false; throw error; }
+        if (result.validateOnly !== true || !Array.isArray(result.results) || !result.results.length || result.results.some(item => !item || typeof item.node !== 'string' || item.status !== 'validated') || result.ad) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm a validation-only result.');
+        send(200, { validateOnly: true, results: result.results.map(item => ({ node: item.node, status: item.status })), message: typeof result.message === 'string' ? result.message.slice(0, 2000) : 'Validation passed. No campaign was created.' }); return true;
+      }
       const outcome = await operation(context, async key => {
         const result = await api('/ads/create', {}, payload, key);
         assertCreatedAd(result.ad, body.platform, account, nativeAccount, profileId);
-        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: payload.status === 'PAUSED' ? 'paused' : result.ad.status === 'active' ? 'active' : 'draft', budget: payload.budgetAmount, budgetType: 'daily', spent: 0, currency: nativeAccount.currency, platform: result.ad.platform, externalId: result.ad._id, platformCampaignId: result.ad.platformCampaignId, providerStatus: result.ad.status, zernioProfileId: profileId });
+        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: payload.status === 'PAUSED' ? 'paused' : result.ad.status === 'active' ? 'active' : 'draft', budget: payload.budgetAmount, budgetType: payload.budgetType, spent: 0, currency: nativeAccount.currency, platform: result.ad.platform, externalId: result.ad._id, platformCampaignId: result.ad.platformCampaignId, providerStatus: result.ad.status, zernioProfileId: profileId });
         await store.activity(project.id, `Created an advertising campaign through Zernio (${payload.status.toLowerCase()}).`);
         return { campaign, ad: redact(result.ad), provider: { id: result.ad._id, status: result.ad.status } };
       }); send(outcome.status, outcome.data); return true;

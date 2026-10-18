@@ -1,6 +1,32 @@
-# End-to-end verification — v0.7.5
+# End-to-end verification — v0.8.0
 
-## Full-app workflow audit
+## Paid advertising and inbox audit
+
+Verified on 18 October 2026 with isolated local applications, temporary databases, the production frontend and simulated providers. All **214 automated tests** pass, including existing social publishing, analytics, OOH, DAM, inbox and direct-campaign regressions. The production build, non-root offline Docker smoke check and production dependency audit pass; the audit reports no known production dependency vulnerabilities. Ponytail and Paperthin correctness, evidence, consistency and independent cold-read reviews were applied. No dependency was added.
+
+| Area | Browser and automated evidence |
+| --- | --- |
+| AI ad drafting | The browser requests a Google Search creative, opens Review in ad builder, retains headlines/descriptions/keywords/destination, explicitly selects the account and budget, and creates a paused campaign. Automated checks reject unsupported proposal fields and private media, keep proposals local, enforce permissions and discard stale results. |
+| ChatGPT ads | Browser validation succeeds without creation, followed by explicit paused creation. HTTP/UI checks cover connection scope, secret handling, supported daily/lifetime goals and bidding, conversion events, URL macros, dry-run validation and budget changes. |
+| Google paid search | Browser selects the connected account/campaign/ad group, adds an exact-match keyword and reads back the new row. HTTP/UI checks cover keyword state/deletion, negatives, search terms, Planner, targeting, bidding, scope and uncertain writes. |
+| Native Shopping | Browser validates without resources, creates a paused Shopping graph, enables its tracked campaign/group/ad, changes the budget from USD 25 to USD 30, pauses it and reloads the confirmed state. Automated checks cover atomic requests, country resolution, shared budgets, exact resource scope, readback, malformed reports, permission changes and duplicate prevention. |
+| Native Microsoft | Browser verifies customer/account mapping, creates a paused Search campaign with responsive ad/keywords/location, explicitly changes it to Active with USD 24 daily budget, requests a report, observes Pending then Success and receives its scoped ZIP export link. HTTP checks verify exact creative/targets, roles, report scope, optional readback fields, uncertain outcomes and concurrent token renewals. The browser does not download a fabricated external report file. |
+| Credentials and records | Actual HTTP tests rotate both native providers' refresh tokens, restart the app, retain encrypted values, reject stale administrative changes, and prevent manual creation/edit/deletion of native delivery evidence. Concurrent Microsoft refreshes no longer interrupt another creation. |
+| SMS attachments | Signed incoming media reaches a same-origin authenticated download route. HTTP checks cover owner/viewer access, foreign projects, missing attachments, protected Twilio authentication, allowed redirects, MIME/20 MB limits, failures and access revoked during download. |
+
+![AI Search proposal created paused](ai-ads-verification.png)
+
+![ChatGPT provider validation](chatgpt-ads-verification.png)
+
+![Shopping paused with its confirmed USD 30 budget](shopping-verification.png)
+
+![Microsoft campaign controls and completed report link](microsoft-ads-verification.png)
+
+The new checks are in [AI drafts](../tests/ai-ad-drafts.test.mjs), [OpenAI Ads](../tests/openai-ads.test.mjs), [Google tools](../tests/google-ads-tools.test.mjs), [native Google](../tests/native-google-ads.test.mjs), [native Microsoft](../tests/native-microsoft-ads.test.mjs), [credential HTTP routes](../tests/settings-http.test.mjs) and [SMS media](../tests/sms-media.test.mjs). Runnable release commands remain below.
+
+These are synthetic results, including all displayed spend, delivery and report states. No real publication, message, upload, activation, booking or media spending occurred. Live acceptance requires configured credentials, permissions and provider approvals. Standard Google Video creation is unsupported by its API; existing Video reporting and Zernio Demand Gen creation are supported. Copilot and Google AI search placement eligibility do not guarantee impressions. Organic Search Console stays in ten98 Discover. See [advertising setup and limits](advertising.md).
+
+## Previous full-app workflow audit — v0.7.5
 
 Verified on 18 October 2026 using actual HTTP handlers, temporary databases, mocked providers and the production frontend. This pass traced ads, social publishing, analytics, OOH, Drive DAM, inbox and direct campaigns, then reran the full regression suite. Ponytail simplicity review and [Paperthin](https://github.com/LilMGenius/paperthin) evidence, consistency and cold-read checks were applied. No dependency was added, and no real publishing, delivery, upload or media spending occurred.
 
