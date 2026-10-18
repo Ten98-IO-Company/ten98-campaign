@@ -6,6 +6,10 @@ const scope = 'https://www.googleapis.com/auth/calendar.events';
 const DAY = 86400000;
 const text = (value, max = 500) => { if (typeof value !== 'string' || !value.trim() || value.length > max) fail(400, 'Enter a valid calendar event title or description.'); return value.trim(); };
 function isoDate(value) { return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value; }
+function validEvent(event) {
+  const boundary = value => value && typeof value === 'object' && (value.date === undefined || isoDate(value.date)) && (value.dateTime === undefined || typeof value.dateTime === 'string' && isoDate(value.dateTime.slice(0, 10)) && Number.isFinite(Date.parse(value.dateTime))) && Boolean(value.date || value.dateTime);
+  return event && typeof event === 'object' && typeof event.id === 'string' && event.id.length > 0 && event.id.length <= 1024 && ['summary', 'description', 'htmlLink', 'status'].every(key => event[key] === undefined || typeof event[key] === 'string') && boundary(event.start) && boundary(event.end) && (event.extendedProperties?.private?.ten98ProjectId === undefined || typeof event.extendedProperties.private.ten98ProjectId === 'string');
+}
 function range(body) {
   if (body.allDay !== undefined && typeof body.allDay !== 'boolean') fail(400, 'All-day must be true or false.');
   if (body.allDay) {
@@ -66,7 +70,7 @@ export async function handleCalendar(context) {
       if (!currentMapping()) fail(409, 'The calendar mapping changed. Refresh this project.');
       const result = await providerRequest(base + suffix, { method, headers: { Authorization: `Bearer ${token}`, ...(payload ? { 'Content-Type': 'application/json' } : {}) }, ...(payload ? { body: JSON.stringify(payload) } : {}) }, 'Google Calendar');
       if (!currentMapping()) throw new IntegrationError(409, 'CALENDAR_MAPPING_CHANGED', 'The calendar mapping changed while the request was in progress. Review the provider outcome.', method !== 'GET');
-      if (payload && result?.id !== payload.id) throw new IntegrationError(502, 'CALENDAR_UNCERTAIN', 'Google did not confirm the expected calendar event. Review the provider outcome before retrying.', true);
+      if (payload && (result?.id !== payload.id || !validEvent(result))) throw new IntegrationError(502, 'CALENDAR_UNCERTAIN', 'Google did not confirm the expected calendar event. Review the provider outcome before retrying.', true);
       return result;
     };
     async function list(managedOnly = false) {
@@ -76,7 +80,7 @@ export async function handleCalendar(context) {
       for (let page = 0; page < 10; page++) {
         const query = new URLSearchParams({ maxResults: '250', singleEvents: 'true', ...(managedOnly ? { privateExtendedProperty: `ten98ProjectId=${project.id}` } : { orderBy: 'startTime', timeMin: from ? from + 'T00:00:00Z' : new Date(Date.now() - 30 * DAY).toISOString(), timeMax: to ? new Date(Date.parse(to) + DAY).toISOString() : new Date(Date.now() + 90 * DAY).toISOString() }), ...(pageToken ? { pageToken } : {}) });
         const data = await call('?' + query);
-        if (!Array.isArray(data.items)) fail(502, 'Google Calendar returned an unreadable event list.');
+        if (!Array.isArray(data.items) || data.items.length > 250 || data.items.some(event => !validEvent(event)) || data.nextPageToken !== undefined && (typeof data.nextPageToken !== 'string' || !data.nextPageToken)) fail(502, 'Google Calendar returned an unreadable event list.');
         events.push(...data.items);
         if (!data.nextPageToken) return events;
         if (data.nextPageToken === pageToken) break;

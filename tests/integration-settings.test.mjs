@@ -106,3 +106,15 @@ test('connection tests use fixed read-only provider contracts, never inference o
     assert.equal(calls.some(call => call.url.includes('chat/completions')), false);
   } finally { globalThis.fetch = originalFetch; db.close(); }
 });
+
+test('connection tests reject non-object provider responses as unreadable without leaking them', async () => {
+  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch;
+  const env = { OPENROUTER_API_KEY: 'TEST_OPENROUTER_KEY', OPENROUTER_MODEL: 'vendor/model', BROADSIGN_API_KEY: 'TEST_BROADSIGN_KEY', TWILIO_ACCOUNT_SID: 'AC' + 'a'.repeat(32), TWILIO_AUTH_TOKEN: 'TEST_TWILIO_TOKEN', TWILIO_FROM_NUMBER: '+12025550100', CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32), CLOUDFLARE_ZONE_ID: 'b'.repeat(32), CLOUDFLARE_EMAIL_API_TOKEN: 'TEST_EMAIL_KEY', CLOUDFLARE_EMAIL_FROM_ADDRESS: 'sender@example.test' };
+  const manager = createIntegrationSettings({ db, env, secret });
+  try {
+    for (const payload of [null, [], 'PRIVATE_PROVIDER_RESPONSE', 123]) {
+      globalThis.fetch = async () => Response.json(payload);
+      for (const name of ['openrouter', 'broadsign', 'twilio', 'cloudflareEmail']) await assert.rejects(manager.test(name), error => error.status === 502 && error.code === 'INVALID_PROVIDER_RESPONSE' && !error.message.includes('PRIVATE_PROVIDER_RESPONSE'));
+    }
+  } finally { globalThis.fetch = originalFetch; db.close(); }
+});

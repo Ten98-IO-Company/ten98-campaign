@@ -203,7 +203,8 @@ export function createContacts({ db }) {
     db.prepare('INSERT INTO direct_sms_suppressions VALUES(?,?,?) ON CONFLICT(target_hash) DO NOTHING').run(hash(target), reason, new Date().toISOString());
     return { suppressed: true };
   }
-  async function assessDNS(projectId, ids, { resolver } = {}) {
+  async function assessDNS(projectId, ids, { resolver, assertAccess } = {}) {
+    assertAccess?.();
     if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some(id => typeof id !== 'string')) fail(400, 'Select between 1 and 100 contacts to check DNS.');
     const selected = [...new Set(ids)].map(id => { const record = get(projectId, id); if (!record) fail(404, 'A selected contact is not in this project.'); return record; });
     const domains = [...new Set(selected.filter(row => row.email).map(row => row.email.split('@')[1]))], outcomes = new Map();
@@ -236,6 +237,7 @@ export function createContacts({ db }) {
         }
       })); } finally { clearTimeout(timer); native?.cancel(); }
     }
+    assertAccess?.();
     const checkedAt = new Date().toISOString();
     return transaction(db, () => ({ checked: outcomes.size, contacts: selected.flatMap(snapshot => {
       const current = get(projectId, snapshot.id); if (!current) return [];

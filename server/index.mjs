@@ -184,6 +184,9 @@ export function createApp(options = {}) {
             const calendarTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='calendar_connections'").get();
             const calendar = mapped && calendarTable ? db.prepare('SELECT calendar_id FROM calendar_connections WHERE project_id=?').get(mapped.id) : null;
             const result = await integrationSettings.test(provider, { driveFolderId: mapped?.driveFolderId, calendarId: calendar?.calendar_id });
+            const currentUser = auth.user(req);
+            if (currentUser?.id !== user.id) throw new HttpError(403, 'Your sign-in session ended. Sign in again.');
+            if (!currentUser.isOperator) throw new HttpError(403, 'Your instance operator access changed. Refresh before continuing.');
             if (mapped) {
               const current = projectAccess(mapped.id, user.id);
               const currentCalendar = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='calendar_connections'").get() ? db.prepare('SELECT calendar_id FROM calendar_connections WHERE project_id=?').get(mapped.id) : null;
@@ -250,7 +253,7 @@ export function createApp(options = {}) {
           }
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
           const requestRevision = integrationSettings.revision;
-          const assertIntegrationSettings = () => { const current = projectAccess(project.id, user.id); if (mutating && current.role !== role) throw new HttpError(403, 'Your workspace role changed. Refresh this project before continuing.'); if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.'); };
+          const assertIntegrationSettings = () => { if (auth.user(req)?.id !== user.id) throw new HttpError(403, 'Your sign-in session ended. Sign in again.'); const current = projectAccess(project.id, user.id); if (current.role !== role) throw new HttpError(403, 'Your workspace role changed. Refresh this project before continuing.'); if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.'); };
           const context = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT zernio_profile_id FROM projects WHERE id=?').get(project.id); if (current?.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: expected => { assertIntegrationSettings(); const current = db.prepare('SELECT drive_folder_id FROM projects WHERE id=?').get(project.id); if (current?.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: (collection, fields) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); checkReferences(store, project.id, data); return data; } };
           context.assertPublishingApproval = post => assertPublishingApproval(context, post);
           context.assertProviderPostEdit = () => assertProviderPostEdit(context);

@@ -58,7 +58,7 @@ async function readProvider(url, authorization, label) {
   try {
     const reader = response.body.getReader(), chunks = []; let size = 0;
     for (;;) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > 2 * 1024 * 1024) { await reader.cancel(); throw new Error(); } chunks.push(value); }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const data = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (!plain(data)) throw new Error(); return data;
   } catch { fail(502, 'INVALID_PROVIDER_RESPONSE', `${label} returned an unreadable response.`); }
 }
 

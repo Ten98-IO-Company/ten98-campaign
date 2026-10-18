@@ -88,6 +88,7 @@ export function createAuth(db, config) {
       if (!previous || !await verify(currentPassword, previous)) throw new HttpError(400, 'The current password is incorrect.');
       const next = await hashPassword(newPassword);
       transaction(db, () => {
+        if (findSession(sessionToken(req))?.id !== userId) throw new HttpError(403, 'Your sign-in session ended. Sign in again before changing your password.');
         if (db.prepare('SELECT password FROM users WHERE id=?').get(userId)?.password !== previous) throw new HttpError(409, 'Your password changed during this request. Sign in again.');
         db.prepare('UPDATE users SET password=? WHERE id=?').run(next, userId);
         db.prepare('DELETE FROM sessions WHERE user_id=?').run(userId);
