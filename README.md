@@ -25,6 +25,8 @@ For development, run `npm run dev` and open [http://127.0.0.1:5178](http://127.0
 
 ## Included workflows
 
+Full Zernio coverage is the expansion target. The [detailed feature breakdown](docs/zernio-feature-plan.md) separates implemented workflows from partial, missing and provider-restricted capabilities, with platform matrices and the pinned API inventory. It is an implementation backlog; the table below describes this release.
+
 | Area | Available behavior |
 | --- | --- |
 | Campaigns | Workspace/project organization, roles, dates, budgets, separate currency totals, local results, and CSV export. |
@@ -102,7 +104,7 @@ Social media and ad creatives need public HTTPS delivery URLs. Private Drive pre
 
 Create a shared caption and media set, choose destinations, then open each platform's tab to customise its copy. Each platform can use its own caption, a different approved DAM asset, a separate ordered set of public media URLs, or no media. Leaving an override off inherits the shared value; an explicitly empty caption or media set remains empty. Connected-account selections are preserved when drafts are reopened. Multiple accounts on the same platform share that platform's customisation.
 
-The composer supports Instagram, Facebook, LinkedIn, TikTok, X, YouTube, Pinterest, Threads, Bluesky, Reddit, Google Business Profile, Telegram, Discord, Slack, and Snapchat, subject to Zernio/account access. Snapchat requires Zernio's closed-beta access. WhatsApp is not a publishing destination.
+The composer supports Instagram, Facebook, LinkedIn, TikTok, X, YouTube, Pinterest, Threads, Bluesky, Reddit, Google Business Profile, Telegram, Discord and Slack, subject to Zernio/account access. Snapchat configuration exists in the model, but [Zernio currently rejects all new Snapchat connections](https://docs.zernio.com/platforms/snapchat); it is unavailable for normal onboarding. WhatsApp uses the dedicated direct-campaign and inbox workflows.
 
 Publishing options follow the selected platform: examples include Instagram Stories, Reel covers, collaborators and disclosures; Facebook Stories/Reels and carousel cards; TikTok privacy, interactions, commercial disclosure and posting consent; YouTube title, visibility and audience settings; Pinterest board, title and destination; X/Threads threads, X reply settings and polls; LinkedIn documents, audience and polls; and Reddit community/title settings. Advanced structured options are validated against the supported Zernio contract. TikTok creator information supplies current privacy choices, interaction permissions, posting availability and video-duration limits.
 
