@@ -2,13 +2,14 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { transaction } from './database.mjs';
 import { createContacts } from './contacts.mjs';
 import { HttpError } from './auth.mjs';
+import { validPostInstant as iso } from '../shared/social-posts.mjs';
+import { paidAdEvents, minimizeAdEvent, initializeAdEvents, recordAdEvent } from './zernio-ad-events.mjs';
 
 export const WEBHOOK_MAX_BYTES = 1024 * 1024;
 const postEvents = new Set(['post.scheduled', 'post.published', 'post.failed', 'post.partial', 'post.cancelled', 'post.recycled', 'post.platform.published', 'post.platform.failed', 'post.platform.deleted', 'post.tiktok.url_resolved']);
 const messageEvents = new Set(['message.received', 'message.sent', 'message.edited', 'message.deleted', 'message.delivered', 'message.read', 'message.failed']);
 const inboxEvents = new Set([...messageEvents, 'conversation.started', 'conversation.control_changed', 'reaction.received', 'referral.received', 'comment.received', 'review.new', 'review.updated']);
 const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f]/.test(value);
-const iso = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
 const display = (value, maximum = 500) => typeof value === 'string' ? value.slice(0, maximum) : '';
 const header = (headers, name) => typeof headers?.get === 'function' ? headers.get(name) : Object.entries(headers || {}).find(([key]) => key.toLowerCase() === name)?.[1];
 const response = (status, code) => ({ status, body: status < 300 ? { accepted: true } : { error: { code, message: 'The webhook could not be accepted.' } } });
@@ -23,9 +24,18 @@ export function createWebhookService({ db, store, contacts = createContacts({ db
     last_error TEXT,next_attempt INTEGER NOT NULL DEFAULT 0,received_at TEXT NOT NULL,processed_at TEXT);
     CREATE INDEX IF NOT EXISTS webhook_pending ON webhook_events(status,next_attempt);
     CREATE TABLE IF NOT EXISTS webhook_inbox_updates(sequence INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,event_id TEXT UNIQUE NOT NULL,event TEXT NOT NULL,data TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS webhook_inbox_scope ON webhook_inbox_updates(project_id,profile_id,account_id,sequence);`);
+    CREATE INDEX IF NOT EXISTS webhook_inbox_scope ON webhook_inbox_updates(project_id,profile_id,account_id,sequence);
+    CREATE TABLE IF NOT EXISTS webhook_project_bindings(event_id TEXT NOT NULL,profile_id TEXT NOT NULL,project_id TEXT NOT NULL,PRIMARY KEY(event_id,profile_id));`);
+  initializeAdEvents(db);
   const eventById = db.prepare('SELECT * FROM webhook_events WHERE id=?');
   const projectByProfile = db.prepare('SELECT id,zernio_profile_id FROM projects WHERE zernio_profile_id=?');
+  const binding = db.prepare('SELECT project_id FROM webhook_project_bindings WHERE event_id=? AND profile_id=?');
+  const bind = db.prepare('INSERT INTO webhook_project_bindings VALUES(?,?,?) ON CONFLICT(event_id,profile_id) DO NOTHING');
+  const profileIds = payload => postEvents.has(payload.event) ? [...new Set((Array.isArray(payload.profiles) ? payload.profiles : []).map(profile => profile?.id))] : [payload.account?.profileId || payload.profiles?.[0]?.id];
+  function bindKnown(payload) { for (const profileId of profileIds(payload)) { if (!validId(profileId)) continue; const projects = projectByProfile.all(profileId); if (projects.length === 1) bind.run(payload.id, profileId, projects[0].id); } }
+  function assertBindings(payload) {
+    for (const profileId of profileIds(payload)) { const project = projectFor(profileId), saved = binding.get(payload.id, profileId); if (saved && saved.project_id !== project.id) blocked('PROFILE_MAPPING_CHANGED'); bind.run(payload.id, profileId, project.id); }
+  }
 
   function inboxPayload(payload) {
     const account = payload.account, conversation = payload.conversation, message = payload.message;
@@ -63,14 +73,16 @@ export function createWebhookService({ db, store, contacts = createContacts({ db
     if (postEvents.has(payload.event) && payload.test !== true && !validId(payload.post?.id)) return response(400, 'INVALID_POST_EVENT');
     let minimized;
     if (inboxEvents.has(payload.event) && payload.test !== true) { try { minimized = inboxPayload(payload); } catch { return response(400, 'INVALID_INBOX_EVENT'); } }
+    if (paidAdEvents.has(payload.event) && payload.test !== true) { try { minimized = minimizeAdEvent(payload); } catch { return response(400, 'INVALID_AD_EVENT'); } }
     const hash = createHash('sha256').update(bytes).digest('hex');
     try {
       return transaction(db, () => {
         const existing = eventById.get(payload.id);
         if (existing) return existing.body_hash === hash ? response(200) : response(409, 'EVENT_ID_CONFLICT');
-        const ignored = payload.test === true || !postEvents.has(payload.event) && !inboxEvents.has(payload.event);
+        const ignored = payload.test === true || !postEvents.has(payload.event) && !inboxEvents.has(payload.event) && !paidAdEvents.has(payload.event);
         const now = new Date().toISOString();
         db.prepare('INSERT INTO webhook_events(id,event,payload,body_hash,status,received_at,processed_at) VALUES(?,?,?,?,?,?,?)').run(payload.id, payload.event, JSON.stringify(ignored ? { id: payload.id, event: payload.event, timestamp: payload.timestamp } : minimized || payload), hash, ignored ? 'ignored' : 'pending', now, ignored ? now : null);
+        if (!ignored) bindKnown(minimized || payload);
         return response(202);
       });
     } catch { return response(503, 'WEBHOOK_STORAGE_UNAVAILABLE'); }
@@ -120,21 +132,28 @@ export function createWebhookService({ db, store, contacts = createContacts({ db
     let processed = 0, pending = 0;
     for (const { id } of rows) {
       try {
+        const queued = eventById.get(id);
+        // Legacy/unmapped deliveries cannot prove their original receipt scope; bind the
+        // first known mapping before effect work so a failed effect cannot erase that proof.
+        if (queued?.status === 'pending') bindKnown(JSON.parse(queued.payload));
         transaction(db, () => {
           const event = eventById.get(id);
           if (!event || event.status !== 'pending' || event.next_attempt > now) return;
           const payload = JSON.parse(event.payload);
-          if (!postEvents.has(payload.event) && !inboxEvents.has(payload.event)) {
+          if (!postEvents.has(payload.event) && !inboxEvents.has(payload.event) && !paidAdEvents.has(payload.event)) {
             db.prepare("UPDATE webhook_events SET status='ignored',last_error=NULL,processed_at=? WHERE id=?").run(new Date().toISOString(), id);
             return;
           }
           let savedPayload = event.payload;
+          // New deliveries with a known mapping retain that receipt-time project across retries.
+          assertBindings(payload);
           if (inboxEvents.has(payload.event)) {
             let minimized;
             try { minimized = inboxPayload(payload); } catch { db.prepare("UPDATE webhook_events SET status='ignored',payload=?,last_error='INVALID_INBOX_EVENT',processed_at=? WHERE id=?").run(JSON.stringify({ id: payload.id, event: payload.event, timestamp: payload.timestamp }), new Date().toISOString(), id); return; }
             updateInbox(minimized);
             savedPayload = JSON.stringify(minimized);
-          } else updatePost(payload);
+          } else if (paidAdEvents.has(payload.event)) { const minimized = minimizeAdEvent(payload, true); recordAdEvent(db, minimized, projectFor(minimized.account.profileId).id); savedPayload = JSON.stringify(minimized); }
+          else updatePost(payload);
           db.prepare("UPDATE webhook_events SET status='processed',payload=?,attempts=attempts+1,last_error=NULL,processed_at=? WHERE id=?").run(savedPayload, new Date().toISOString(), id);
           processed++;
         });

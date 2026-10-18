@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import GoogleConversions from './GoogleConversions';
 
 type Props = { request: (path: string, body?: any) => Promise<any>; canWrite: boolean };
 const lines = (value = '') => value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
@@ -29,6 +30,7 @@ export default function GoogleAdsTools({ request, canWrite }: Props) {
       <label className="field"><span>Google advertising account</span><select value={adAccountId} disabled={!accountId || loading} onChange={event => setAdAccountId(event.target.value)}><option value="">Choose an account</option>{native.map(row => <option key={row.id} value={row.id}>{row.name || row.id} {row.currency && `· ${row.currency}`}</option>)}</select></label>
       <label className="field"><span>Google campaign · optional for research</span><select value={campaignId} disabled={!adAccountId || loading} onChange={event => setCampaignId(event.target.value)}><option value="">Account-wide research</option>{campaigns.map(row => <option key={row.platformCampaignId} value={row.platformCampaignId}>{row.campaignName || row.platformCampaignId} · {row.advertisingChannelType || 'Google'}</option>)}</select></label></div>
     {selected && <GoogleSelection key={[accountId, adAccountId, campaignId].join(':')} request={request} accountId={accountId} adAccountId={adAccountId} campaign={campaign} currency={selected.currency} canWrite={canWrite && selected.selectable !== false}/>}
+    {selected && <GoogleConversions key={['conversions', accountId, adAccountId, campaignId].join(':')} request={request} accountId={accountId} adAccountId={adAccountId} campaign={campaign} currency={selected.currency} canWrite={canWrite && selected.selectable !== false}/>}
   </section>;
 }
 

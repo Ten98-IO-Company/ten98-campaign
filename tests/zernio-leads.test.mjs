@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { createApp } from '../server/index.mjs';
+import { transformWithOxc } from 'vite';
 
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-leads-')), originalFetch = globalThis.fetch, origin = 'https://leads.example.test', calls = [];
@@ -20,7 +21,8 @@ async function fixture() {
     const method = options.method || 'GET', body = options.body ? JSON.parse(options.body) : undefined; calls.push({ url, method, body, key: options.headers['Idempotency-Key'] });
     if (state.hook) { const response = await state.hook(url, options, body); if (response !== undefined) return response; }
     if (url.pathname.endsWith('/accounts') && !url.pathname.endsWith('/ads/accounts')) return Response.json({ accounts: [...accounts, { _id: 'foreign-account', platform: 'metaads', profileId: 'foreign-profile', isActive: true }] });
-    if (url.pathname.endsWith('/ads/accounts')) { assert.equal(url.searchParams.get('inScopeOnly'), 'true'); return Response.json({ accounts: [{ id: 'advertiser-1', name: 'Verified advertiser', selectable: true }, { id: 'disabled-advertiser', name: 'Unavailable advertiser', selectable: false }] }); }
+    if (url.pathname.endsWith('/ads/accounts')) { assert.equal(url.searchParams.get('inScopeOnly'), 'true'); return Response.json({ accounts: [{ id: 'advertiser-1', name: 'Verified advertiser', currency: 'AED', selectable: true }, { id: 'disabled-advertiser', name: 'Unavailable advertiser', currency: 'AED', selectable: false }] }); }
+    if (url.pathname.endsWith('/ads/create')) return Response.json({ ad: { _id: 'created-ad-' + calls.length, platformCampaignId: 'created-campaign-' + calls.length, platform: body.accountId.startsWith('linkedin') ? 'linkedin' : 'facebook', status: 'paused', accountId: body.accountId, profileId: 'lead-profile', adAccountId: body.adAccountId } });
     if (url.pathname.endsWith('/ads/lead-forms') && method === 'POST') {
       const linkedin = body.accountId.startsWith('linkedin'), form = { id: 'created-' + (++state.sequence), name: body.name, ...(linkedin ? { state: body.platformSpecificData.state } : { status: 'ACTIVE' }), ...body.platformSpecificData, questions: body.platformSpecificData.questions, privacy_policy_url: body.privacyPolicyUrl };
       state.forms[linkedin ? 'linkedinads' : 'metaads'].push(form); return Response.json({ status: 'success', form: { id: form.id, name: form.name } });
@@ -204,4 +206,91 @@ test('test-lead confirmation belongs to the reviewed form version rather than a 
   const submit = selected => new Function('canManage', 'linkedin', 'selected', 'confirmTest', 'testAnswers', 'action', 'write', 'current', 'target', 'adAccountId', 'setTestLeads', 'setConfirmTest', 'setNotice', 'merge', `return (${code});`)(true, false, selected, confirmed, { email: 'synthetic@example.test' }, run => run(), async (...args) => { writes.push(args); return { testLead: { id: 'test' } }; }, () => true, '/forms', 'advertiser-1', () => {}, () => {}, () => {}, () => []);
   await submit(after)({ preventDefault() {} }); assert.equal(writes.length, 0, 'A newly selected form cannot inherit the prior form’s review.');
   await submit(before)({ preventDefault() {} }); assert.equal(writes.length, 1); assert.equal(writes[0][1].expectedFormVersion, before.version);
+});
+
+const adSource = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8');
+const compile = (source, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source)});`)(...Object.values(context));
+const readableLeadForm = compile(adSource.match(/const readableLeadForm = (.+);/)[1], {});
+const adSubmitSource = adSource.slice(adSource.indexOf('async function submit('), adSource.indexOf('  return <form'));
+async function submitLeadAd(form, request, extra = {}) {
+  const errors = [], saved = [], view = {}, context = { busy: false, budgetType: 'daily', bidding: 'automatic', setValidation() {}, isCurrent: () => true, FormData: class { constructor(value) { return Object.entries(value); } }, setError: value => errors.push(value), connection: { platform: 'metaads' }, adAccount: { id: 'advertiser-1' }, currency: 'AED', accountId: 'metaads-account', adAccountId: 'advertiser-1', platform: 'facebook', boosting: false, assets: false, format: 'image', goal: 'lead_generation', video: false, carousel: false, cards: 2, lines() {}, setBusy() {}, requester: { current: request }, onCreated: () => saved.push(true), leadForm: form, leadSelection: { current: view }, leadView: view, leadReview: form.version, usableLeadForm: row => row.status === 'ACTIVE', currentLeadView: () => true, ...extra };
+  await compile(adSubmitSource, context)({ preventDefault() {}, currentTarget: { countries: 'AE', name: 'Reviewed native lead campaign', budgetAmount: '50', headline: 'Ask about our service', body: 'Submit your inquiry.', imageUrl: 'https://cdn.example.test/ad.jpg', callToAction: 'SIGN_UP' } });
+  return { errors, saved };
+}
+async function integrationRequester(f) {
+  const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), source = main.slice(main.indexOf('async function integrate('), main.indexOf('  useEffect(() => { if (!notice)'));
+  const pendingKeys = { current: new Map() }, requests = [];
+  const request = compile(source, { state: { projectId: 'project' }, activeProject: { current: 'project' }, pendingKeys, crypto, endpoint: path => f.project + '/' + path, api: async (path, method, body, key) => { requests.push({ path, method, body, key }); const result = await f.request(path, method, body, key); if (result.status >= 400) throw Object.assign(new Error(result.data.error?.message || 'Request failed.'), { status: result.status, code: result.data.error?.code, operation: result.data.operation }); return result.data; } });
+  return { request, pendingKeys, requests };
+}
+
+test('a form chosen in the ad composer is re-read before scoped paused ad creation and app review metadata never reaches the provider', async () => {
+  const f = await fixture();
+  try {
+    for (const platform of ['metaads', 'linkedinads']) {
+      const list = await f.request(f.formPath(platform) + f.query), chosen = list.data.forms[0], preview = await f.request(f.formPath(platform) + '/' + chosen.id + f.query), form = preview.data.form, bridge = await integrationRequester(f), before = f.calls.length;
+      const outcome = await submitLeadAd(form, bridge.request, platform === 'linkedinads' ? { platform: 'linkedin', accountId: 'linkedinads-account', connection: { platform: 'linkedinads' }, usableLeadForm: row => row.status === 'PUBLISHED' } : {});
+      assert.deepEqual(outcome.saved, [true], JSON.stringify(outcome.errors));
+      const dispatched = f.calls.slice(before), write = dispatched.find(row => row.url.pathname.endsWith('/ads/create'));
+      assert.ok(write); assert.equal(write.body.leadGenFormId, chosen.id); assert.equal(write.body.leadFormReview, undefined); assert.equal(write.body.status, 'PAUSED'); assert.equal(write.body.accountId, platform + '-account'); assert.equal(write.body.adAccountId, 'advertiser-1');
+      const readback = dispatched.findIndex(row => row.url.pathname.endsWith('/ads/lead-forms/' + chosen.id)); assert.ok(readback >= 0 && readback < dispatched.indexOf(write), 'The reviewed form must be read back before dispatch.');
+      assert.deepEqual(bridge.requests[0].body.leadFormReview, { id: form.id, name: form.name, version: form.version });
+      const replay = await f.request(bridge.requests[0].path, 'POST', bridge.requests[0].body, bridge.requests[0].key); assert.equal(replay.status, 200); assert.equal(f.calls.filter(row => row.url.pathname.endsWith('/ads/create')).length, platform === 'metaads' ? 1 : 2);
+    }
+  } finally { await f.close(); }
+});
+
+test('ad creation rejects unseen, stale, inactive, foreign and unavailable lead forms before any advertising write', async () => {
+  const f = await fixture();
+  try {
+    const form = (await f.request(f.selected('metaads') + f.query)).data.form, bridge = await integrationRequester(f);
+    await submitLeadAd(form, bridge.request, { leadReview: false }); assert.equal(bridge.requests.length, 0);
+    await submitLeadAd(form, bridge.request, { leadSelection: { current: {} } }); assert.equal(bridge.requests.length, 0);
+    const body = { platform: 'facebook', accountId: 'metaads-account', adAccountId: 'advertiser-1', name: 'Guarded lead ad', goal: 'lead_generation', budgetAmount: 50, budgetType: 'daily', countries: ['AE'], status: 'PAUSED', currency: 'AED', headline: 'Inquiry', body: 'Tell us more.', imageUrl: 'https://cdn.example.test/ad.jpg', callToAction: 'SIGN_UP', leadGenFormId: form.id, leadFormReview: { id: form.id, name: form.name, version: form.version } };
+    const route = f.project + '/integrations/ads/create';
+    for (const invalid of [{ ...body, leadFormReview: undefined }, { ...body, leadFormReview: { ...body.leadFormReview, id: 'unseen' } }, { ...body, leadFormReview: { ...body.leadFormReview, name: 'Unseen name' } }, { ...body, accountId: 'foreign-account' }, { ...body, adAccountId: 'foreign-advertiser' }, { ...body, leadGenFormId: 'foreign-form', leadFormReview: { ...body.leadFormReview, id: 'foreign-form' } }]) assert.ok((await f.request(route, 'POST', invalid)).status >= 400);
+    f.state.forms.metaads[0].questions.push({ type: 'CUSTOM', key: 'unseen', label: 'Unreviewed question' }); assert.equal((await f.request(route, 'POST', body)).status, 409);
+    f.state.forms.metaads[0].status = 'ARCHIVED'; assert.equal((await f.request(route, 'POST', body)).status, 409);
+    f.state.forms.metaads[0].status = 'ACTIVE'; f.state.forms.metaads[0].questions.pop();
+    f.state.hook = (url, options) => url.pathname.endsWith('/ads/lead-forms') && options.method === 'GET' ? new Response('{}', { status: 503 }) : undefined;
+    const unavailable = await f.request(route, 'POST', body); assert.equal(unavailable.status, 502); assert.equal(unavailable.data.operation.status, 'failed');
+    assert.equal(f.writes().length, 0, 'No guarded rejection may dispatch an advertising mutation.');
+  } finally { await f.close(); }
+});
+
+test('an uncertain ad create retains the exact reviewed form and request key when the user retries', async () => {
+  const f = await fixture();
+  try {
+    const form = (await f.request(f.selected('metaads') + f.query)).data.form, bridge = await integrationRequester(f);
+    f.state.hook = url => { if (url.pathname.endsWith('/ads/create')) throw new Error('Synthetic connection loss after the provider received creation.'); };
+    const first = await submitLeadAd(form, bridge.request), retry = await submitLeadAd(form, bridge.request);
+    assert.deepEqual(first.saved, []); assert.deepEqual(retry.saved, []); assert.equal(bridge.requests.length, 2); assert.equal(bridge.requests[0].key, bridge.requests[1].key); assert.deepEqual(bridge.requests[0].body, bridge.requests[1].body); assert.equal(bridge.pendingKeys.current.size, 1);
+    assert.equal(f.writes().length, 1, 'An uncertain receipt prevents a duplicate native ad.');
+  } finally { await f.close(); }
+});
+
+test('lead picker responses cannot cross account scopes, overwrite newer previews or survive unmount, and manual fallback is limited to provider outages', async () => {
+  const loadSource = adSource.slice(adSource.indexOf('async function loadLeadForms('), adSource.indexOf('  async function previewLeadForm(')), previewSource = adSource.slice(adSource.indexOf('async function previewLeadForm('), adSource.indexOf('  async function loadPixels('));
+  const form = { id: 'form-a', name: 'Reviewed form', version: 'a'.repeat(64), status: 'ACTIVE', privacyPolicyUrl: 'https://example.test/privacy', questions: [] };
+  for (const stale of ['scope', 'newer', 'unmounted', 'current']) {
+    let finish; const view = {}, state = { current: view }, mounted = { current: true }, accepted = [], leadRead = { current: 0 };
+    const context = { needsLeadForm: true, accountId: 'account /a', adAccountId: 'advertiser /a', currentLeadView: () => mounted.current && state.current === view, leadView: view, leadSelection: { current: null }, leadRead, readableLeadForm, requester: { current: () => new Promise(resolve => { finish = resolve; }) }, setLeadBusy() {}, setLeadError() {}, setLeadForm: value => { if (value) accepted.push(value); }, setLeadReview() {}, setManualLead() {} };
+    const pending = compile(previewSource, context)(form.id);
+    if (stale === 'scope') state.current = {}; if (stale === 'newer') leadRead.current++; if (stale === 'unmounted') mounted.current = false;
+    finish({ form }); await pending; assert.equal(accepted.length, stale === 'current' ? 1 : 0);
+    assert.equal(context.leadSelection.current, stale === 'current' ? view : null);
+  }
+  for (const [code, status, expected] of [['PROVIDER_UNAVAILABLE', 502, true], ['PROVIDER_REJECTED', 502, true], ['PROVIDER_RATE_LIMIT', 429, true], ['INVALID_PROVIDER_RESPONSE', 502, false], ['FORM_OUTSIDE_ACCOUNT', 403, false], ['LEADS_UNAVAILABLE', 422, false]]) {
+    let manual = false; const context = { needsLeadForm: true, accountId: 'account', adAccountId: 'advertiser', currentLeadView: () => true, leadRead: { current: 0 }, leadSelection: { current: null }, setLeadBusy() {}, setLeadError() {}, setLeadUnavailable: value => { manual = value; }, setLeadForm() {}, setLeadReview() {}, readableLeadForm, requester: { current: async () => { throw Object.assign(new Error(code), { code, status }); } } };
+    await compile(loadSource, context)(); assert.equal(manual, expected, code);
+  }
+  const start = adSource.indexOf('<section className="helper-note" aria-label="Lead form selection"'), end = adSource.indexOf('</section>}', start), { code } = await transformWithOxc(`const render = () => (${adSource.slice(start, end + 10)});`, 'LeadFormPicker.tsx', { jsx: { runtime: 'classic' } });
+  const React = { createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter(Boolean) }) }, view = {}, previewed = []; let reviewed = false;
+  const context = { React, platform: 'facebook', leadSelection: { current: view }, leadView: view, leadForm: form, leadForms: [form, { ...form, id: 'archived', status: 'ARCHIVED' }], leadBusy: false, adAccountId: 'advertiser', previewLeadForm: (...args) => previewed.push(args), setLeadForm() {}, setLeadReview: value => { reviewed = value; }, usableLeadForm: row => row.status === 'ACTIVE', loadLeadForms() {}, leadPage: null, leadLoaded: true, leadError: '', leadUnavailable: false, manualLeadId: '', setManualLeadId() {}, leadReview: false, manualLead: false };
+  const render = () => new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))(), all = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(all)] : [];
+  const nodes = all(render()); assert.equal(nodes.find(node => node.type === 'option' && node.props.value === 'archived').props.disabled, true); assert.equal(nodes.find(node => node.type === 'input' && node.props.readOnly).props.value, form.privacyPolicyUrl);
+  nodes.find(node => node.type === 'select').props.onChange({ target: { value: form.id } }); assert.deepEqual(previewed, [[form.id]]);
+  nodes.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange({ target: { checked: true } }); assert.equal(reviewed, form.version);
+  assert.equal(nodes.some(node => node.type === 'button' && node.children.includes('Preview and verify this ID')), false);
+  context.leadUnavailable = true; assert.equal(all(render()).some(node => node.type === 'button' && node.children.includes('Preview and verify this ID')), true); assert.doesNotMatch(adSource, /window\.confirm/);
 });

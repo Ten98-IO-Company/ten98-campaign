@@ -2,11 +2,11 @@
 
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.8.6 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.8.7 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
 
-The Zernio expansion adds credential/bot/store connections, provider publishing queues and recurring posts, account reports, inbox message controls, Meta/LinkedIn lead forms and WhatsApp template management. Existing account health, profile/groups, pixels, inbox search and destination selectors remain available. Snapchat is blocked by provider approval; existing drafts remain available. Full Zernio parity and remaining manual browser/live-account acceptance are tracked in [verification and remaining scope](docs/verification.md).
+The Zernio expansion includes separate account captions/media/options/times, fixed recipient selection from account groups, provider queues and recurring posts, publishing destination management, account reports, inbox controls, verified Meta/LinkedIn lead selection, Google conversion settings, provider contacts/custom fields and paid-ad notifications. Account health, profile settings, pixels, credential/bot/store connections and WhatsApp template management remain available. Snapchat is blocked by provider approval; existing drafts remain available. Full Zernio parity and remaining manual browser/live-account acceptance are tracked in [verification and remaining scope](docs/verification.md).
 
 ## Run locally
 
@@ -32,11 +32,11 @@ Full Zernio coverage is the expansion target. The [detailed feature breakdown](d
 | Area | Available behavior |
 | --- | --- |
 | Campaigns | Workspace/project organization, roles, dates, budgets, separate currency totals, local results, and CSV export. |
-| Social | Per-platform captions, media and options; previews and restriction checks; content approvals; explicit publish/schedule submission; status reconciliation, rescheduling, cancellation, eligible retries, and supported published-copy changes. Zernio executes submitted schedules. |
+| Social | Per-platform and per-account captions, media, options and fixed times; explicit group recipients; previews and restriction checks; content approvals; explicit publish/schedule submission; status reconciliation, rescheduling, cancellation, eligible retries, and supported published-copy changes. Zernio executes submitted schedules. |
 | Direct campaigns | Cloudflare transactional email, Twilio SMS, and Zernio approved WhatsApp templates; consent-aware contacts; CSV import preview and deduplication; disposable/role/typo flags, DNS mail-route checks, suppression, signed unsubscribe/opt-out handling, scheduling and delivery receipts. |
 | Unified inbox | Scoped Zernio messages, comments and reviews; automatic Messenger contacts without inferred campaign consent; durable Twilio SMS history and explicit replies through the original sender. |
 | Links & tracking | Project/campaign short links, optional branded domain, SVG QR downloads, ordinary/QR-tagged visit totals, and cookie-free website pageview/event aggregates. |
-| Advertising | Campaign/ad-group/ad reporting; supported status, budget, targeting, and creative changes; paused ad creation and eligible post boosting. |
+| Advertising | Verified Meta/LinkedIn lead forms, Google conversion actions/goals, scoped paid-ad update history; campaign/ad-group/ad reporting; supported status, budget, targeting, and creative changes; paused ad creation and eligible post boosting. |
 | OOH | Local provider/booking ledger, verified Broadsign inventory, proposals, availability, explicit booking/cancellation, delivery totals, and mapped locations. |
 | DAM | Asset links, public delivery URLs, tags, approvals, Google Drive metadata sync, and Shared Drive uploads. Originals remain in Drive. |
 | Planning | Local publishing calendar and optional Google Calendar events and campaign-plan publishing. |

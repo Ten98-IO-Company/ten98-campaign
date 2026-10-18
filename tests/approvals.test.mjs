@@ -55,7 +55,8 @@ test('content approval policy binds current posts and creative to audited review
     assert.doesNotThrow(() => assertPublishingApproval(context(), current()));
     assert.equal((await review(firstReviewId)).status, 409, 'A completed review cannot silently change its decision.');
     const originalPost = current();
-    for (const changed of [{ content: 'Changed copy' }, { platforms: ['instagram'] }, { accounts: ['another-brand-account'] }, { mediaItems: [{ type: 'image', url: 'https://cdn.example.test/new.jpg' }] }, { campaignId: 'changed-campaign' }, { scheduledAt: '2027-01-21T10:00:00Z' }]) {
+    store.update(project.id, 'posts', post.id, { accountOverrides: {} }); assert.doesNotThrow(() => assertPublishingApproval(context(), current()), 'Empty account customizations keep legacy approval fingerprints unchanged.');
+    for (const changed of [{ content: 'Changed copy' }, { platforms: ['instagram'] }, { accounts: ['another-brand-account'] }, { mediaItems: [{ type: 'image', url: 'https://cdn.example.test/new.jpg' }] }, { campaignId: 'changed-campaign' }, { scheduledAt: '2027-01-21T10:00:00Z' }, { accountOverrides: { 'brand-account-a': { platform: 'facebook', content: 'Account caption', options: {}, mediaItems: [] } } }, { accountOverrides: { 'brand-account-a': { platform: 'facebook', scheduledAt: '2027-01-22T10:00:00Z' } } }]) {
       store.update(project.id, 'posts', post.id, changed); assertRejected(current(), 'PUBLISHING_APPROVAL_STALE'); assert.equal((await item()).status, 'stale'); store.update(project.id, 'posts', post.id, originalPost);
     }
     store.update(project.id, 'posts', post.id, { assetId: asset.id }); assertRejected(current(), 'PUBLISHING_APPROVAL_STALE');
@@ -70,6 +71,12 @@ test('content approval policy binds current posts and creative to audited review
     const pendingAssetReview = (await requestReview()).data.item.review.id;
     assert.equal((await review(pendingAssetReview)).status, 409); assert.equal((await review(pendingAssetReview, 'rejected')).status, 200);
     store.update(project.id, 'assets', asset.id, originalAsset);
+    store.update(project.id, 'posts', post.id, { assetId: '', accountOverrides: { 'brand-account-a': { platform: 'facebook', content: '', assetId: asset.id, options: {}, scheduledAt: '2027-01-22T10:00:00Z' } } });
+    const accountRequest = await requestReview(), accountCopy = accountRequest.data.item.post.accountOverrides['brand-account-a'];
+    assert.equal(accountCopy.content, ''); assert.equal(accountCopy.mediaItems[0].url, originalAsset.deliveryUrl); assert.deepEqual(accountCopy.options, {}); assert.equal(accountCopy.scheduledAt, '2027-01-22T10:00:00Z');
+    assert.equal((await review(accountRequest.data.item.review.id)).status, 200);
+    store.update(project.id, 'assets', asset.id, { deliveryUrl: 'https://cdn.example.test/changed-account-asset.jpg' }); assertRejected(current(), 'PUBLISHING_APPROVAL_STALE'); store.update(project.id, 'assets', asset.id, originalAsset);
+    store.update(project.id, 'posts', post.id, { assetId: asset.id, accountOverrides: {} });
     const reRequested = (await requestReview()).data.item.review.id; assert.notEqual(reRequested, pendingAssetReview);
     assert.equal((await review(pendingAssetReview)).status, 409, 'An old rendered review ID cannot approve a newer request.');
     assert.equal((await review(reRequested)).status, 200);

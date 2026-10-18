@@ -21,7 +21,7 @@ import { createDirectCampaigns } from './direct-campaigns.mjs';
 import { handleInbox } from './inbox.mjs';
 import { createSmsInbox } from './sms-inbox.mjs';
 import { createLinks } from './links.mjs';
-import { normalizePostVariants, normalizeMediaItems } from '../shared/social-posts.mjs';
+import { normalizePostVariants, normalizeAccountVariants, normalizeMediaItems } from '../shared/social-posts.mjs';
 import { validateQueueIntent } from './zernio-queues.mjs';
 
 const roles = ['owner', 'admin', 'editor', 'viewer'];
@@ -59,11 +59,15 @@ function validateRecord(collection, raw) {
     if (data.scheduledFor && !data.scheduledAt) data.scheduledAt = data.scheduledFor;
     date(data.scheduledAt, 'Scheduled time');
     if (data.status === 'scheduled' && (!data.scheduledAt || Date.parse(data.scheduledAt) <= Date.now())) bad('Scheduled posts need a future scheduled time.');
-    if (data.accounts !== undefined) data.accounts = strings(data.accounts, 'Accounts', 20);
+    if (data.accounts !== undefined) data.accounts = strings(data.accounts, 'Accounts', 50);
     validateQueueIntent(data);
     try {
       if (data.mediaItems !== undefined && data.mediaItems !== null) data.mediaItems = normalizeMediaItems(data.mediaItems);
       if (data.platformOverrides !== undefined) data.platformOverrides = normalizePostVariants(data);
+      if (data.accountOverrides !== undefined) {
+        data.accountOverrides = normalizeAccountVariants(data);
+        for (const [id, variant] of Object.entries(data.accountOverrides)) if (!data.accounts?.includes(id) || !data.platforms.includes(variant.platform)) bad('Each account customization must belong to a selected account and platform.');
+      }
     } catch (error) { bad(error.message); }
   } else if (collection === 'placements') {
     data.name = text(data.name, 'Placement name'); data.type = choice(data.type ?? 'billboard', ['billboard', 'digital', 'transit', 'street'], 'Placement type');
@@ -336,12 +340,12 @@ function projectInput(data) {
 }
 function checkReferences(store, projectId, data) {
   for (const [key, collection] of [['campaignId', 'campaigns'], ['assetId', 'assets'], ['providerId', 'providers']]) if (data[key] && !store.get(projectId, collection, data[key])) bad(`${key} does not belong to this project.`);
-  for (const variant of Object.values(data.platformOverrides || {})) if (variant?.assetId && !store.get(projectId, 'assets', variant.assetId)) bad('A platform creative asset does not belong to this project.');
+  for (const variant of [...Object.values(data.platformOverrides || {}), ...Object.values(data.accountOverrides || {})]) if (variant?.assetId && !store.get(projectId, 'assets', variant.assetId)) bad('A customized creative asset does not belong to this project.');
 }
 function checkDependants(store, projectId, collection, id, realOnly = false) {
   const field = { campaigns: 'campaignId', assets: 'assetId', providers: 'providerId' }[collection];
   // ponytail: scan local project records for references; use indexed relationships if project size makes deletion checks slow.
-  if (field && collections.some(name => store.list(projectId, name).some(record => (record[field] === id || (collection === 'assets' && Object.values(record.platformOverrides || {}).some(variant => variant?.assetId === id))) && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
+  if (field && collections.some(name => store.list(projectId, name).some(record => (record[field] === id || (collection === 'assets' && [...Object.values(record.platformOverrides || {}), ...Object.values(record.accountOverrides || {})].some(variant => variant?.assetId === id))) && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
 }
 function rejectProviderFields(body, collection = '') {
   if (['nativeProvider', 'nativeCustomerId', 'nativeCampaignResource', 'nativeResources', 'nativeAccountId', 'nativeCampaignId', 'nativeAdGroupId', 'nativeAdId', 'externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'modifiedTime', 'md5Checksum', 'approvalStatus', 'approvedBy', 'reviewedBy', 'providerDeletedAt', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key) && !(collection === 'assets' && key === 'deliveryUrl'))) bad('Provider identifiers and publication evidence are managed by integrations.');

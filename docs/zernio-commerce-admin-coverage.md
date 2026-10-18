@@ -1,6 +1,6 @@
 # Zernio coverage: stores, administration and additional channels
 
-Snapshot: 18 October 2026, compared with the v0.8.6 expansion and Zernio OpenAPI 1.292.0. This is an implementation backlog, not a claim that the missing features work. The [main breakdown](zernio-feature-plan.md) defines status and acceptance rules; the [operation inventory](zernio-api-inventory.csv) lists the API surface without treating every operation as a separate user feature.
+Snapshot: 18 October 2026, compared with the v0.8.7 expansion and Zernio OpenAPI 1.292.0. This is an implementation backlog, not a claim that the missing features work. The [main breakdown](zernio-feature-plan.md) defines status and acceptance rules; the [operation inventory](zernio-api-inventory.csv) lists the API surface without treating every operation as a separate user feature.
 
 ## Stores and articles
 

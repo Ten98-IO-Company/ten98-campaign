@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
-import { PLATFORM_RULES, normalizePostVariants, publicMediaUrl, resolveVariant } from '../shared/social-posts.mjs';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { transformWithOxc } from 'vite';
+import * as social from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, normalizePostVariants, normalizeAccountVariants, publicMediaUrl, resolveVariant } from '../shared/social-posts.mjs';
 
 const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');
 
@@ -12,7 +16,7 @@ test('late browser and provider media inspections cannot restore removed media o
   const providerSource = source.slice(source.indexOf('async function inspectWithProvider('), source.indexOf('  return <div className="post-media-editor">'));
   const browserSource = source.slice(source.indexOf('async function inspect(index:'), source.indexOf('  async function inspectWithProvider('));
   const lifecycle = source.match(/useEffect\((\(\) => \{ active.current = true; return \(\) => \{ active.current = false; \}; \}), \[\]\);/)[1];
-  assert.match(source, /<MediaEditor key=\{selected\} items=\{override.mediaItems/, 'Platform tabs must mount separate editors even when the same source URL is used.');
+  assert.match(source, /<MediaEditor key=\{editKey\} items=\{override.mediaItems/, 'Platform and account tabs must mount separate media editors even when the source URL matches.');
   for (const kind of ['provider', 'browser']) {
     const active = { current: false }, current = { current: [{ type: 'image', url: 'https://cdn.example.com/shared.jpg', altText: 'Instagram creative' }] }, writes = [];
     const unmount = compile(lifecycle, { active })();
@@ -34,7 +38,7 @@ test('late browser and provider media inspections cannot restore removed media o
 });
 const expression = source.match(/const values = useMemo\(\(\) => \((.+)\), \[content,/)[1];
 function draft(changes = {}) {
-  const state = { content: 'Shared caption', platforms: ['facebook', 'instagram'], post: undefined, selectedAccounts: [], accountsTouched: false, accounts: [], baseMode: 'asset', assetId: 'shared-creative', campaignId: '', scheduledAt: '', queueId: '', queueVersion: '', baseMedia: [], overrides: { instagram: { content: '', mediaItems: [], options: { contentType: 'story' } } }, ...changes };
+  const state = { content: 'Shared caption', platforms: ['facebook', 'instagram'], post: undefined, selectedAccounts: [], accountsTouched: false, accounts: [], baseMode: 'asset', assetId: 'shared-creative', campaignId: '', scheduledAt: '', queueId: '', queueVersion: '', baseMedia: [], accountOverrides: {}, overrides: { instagram: { content: '', mediaItems: [], options: { contentType: 'story' } } }, ...changes };
   return new Function(...Object.keys(state), 'PLATFORM_RULES', `return (${expression});`)(...Object.values(state), PLATFORM_RULES);
 }
 
@@ -66,11 +70,55 @@ test('composer saves a reviewed queue as local intent and explicitly clears it w
   assert.equal(Object.hasOwn(draft(), 'queueId'), false, 'Ordinary drafts retain their existing shape.');
 });
 
+test('account editor stores changes only for that account and submitting drops unselected account variants', () => {
+  const handler = source.slice(source.indexOf('function changeOverride('), source.indexOf('  function togglePlatform('));
+  let copies = { first: { platform: 'facebook', content: 'First', options: { firstComment: 'Keep' } }, second: { platform: 'facebook', content: 'Second' } }, platforms = { facebook: { content: 'Default' } }, inputs = { 'facebook:first:firstComment': 'Stale account option', 'facebook:second:firstComment': 'Second option' }, errors = { 'facebook:first:firstComment': 'Old error' };
+  const context = { own: Object.hasOwn, selected: 'facebook', editingAccountId: 'first', editKey: 'facebook:first', setAccountOverrides: update => { copies = update(copies); }, setOverrides: update => { platforms = update(platforms); }, setOptionInputs: update => { inputs = update(inputs); }, setOptionErrors: update => { errors = update(errors); } };
+  const change = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(handler)});`)(...Object.values(context));
+  change({ content: '', mediaItems: [], options: {} });
+  assert.deepEqual(copies.first, { platform: 'facebook', content: '', mediaItems: [], options: {} }); assert.equal(copies.second.content, 'Second'); assert.equal(platforms.facebook.content, 'Default');
+  assert.deepEqual(inputs, { 'facebook:second:firstComment': 'Second option' }); assert.deepEqual(errors, {});
+  change({}, ['content', 'mediaItems', 'options']); assert.deepEqual(copies.first, { platform: 'facebook' }, 'Turning off separate fields restores inheritance.');
+  const saved = draft({ platforms: ['facebook'], selectedAccounts: ['second'], accountOverrides: { ...copies, foreign: { platform: 'facebook', content: 'Not selected' } } });
+  assert.deepEqual(saved.accountOverrides, { second: copies.second }); assert.equal(Object.hasOwn(draft(), 'accountOverrides'), false, 'Legacy drafts retain their stored shape.');
+});
+
+test('actual account composer rendering shows distinct caption, media, options and time controls without changing platform defaults', async () => {
+  const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview'), 'PostComposer.tsx', { jsx: { runtime: 'classic' } });
+  const accounts = [{ id: 'first', platform: 'facebook', displayName: 'Brand One' }, { id: 'second', platform: 'facebook', displayName: 'Brand Two' }];
+  const post = { id: 'post', content: 'Shared caption', platforms: ['facebook'], accounts: ['first', 'second'], scheduledAt: '2070-01-01T09:00:00Z', mediaItems: [], platformOverrides: { facebook: { content: 'Platform caption', options: { firstComment: 'Platform comment' } } }, accountOverrides: { second: { platform: 'facebook', content: 'Second brand caption', mediaItems: [{ type: 'image', url: 'https://cdn.example.test/second.jpg' }], options: {}, scheduledAt: '2070-01-02T09:00:00Z' } } };
+  let stateIndex = 0;
+  const hooks = { useState: initial => { const index = stateIndex++; return [index === 13 ? 'second' : typeof initial === 'function' ? initial() : initial, () => {}]; }, useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute() };
+  const context = { React, ...hooks, ...social };
+  const Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
+  const html = renderToStaticMarkup(Composer({ post, accounts, assets: [], campaigns: [], canWrite: true, onSubmit: async () => {} }));
+  assert.match(html, /Customise destination/); assert.match(html, /Brand Two · second/); assert.match(html, /Second brand caption/); assert.match(html, /second\.jpg/); assert.match(html, /Separate account publishing options/); assert.match(html, /Separate account time/); assert.match(html, /2070-01-02/); assert.equal(post.platformOverrides.facebook.content, 'Platform caption');
+});
+
+test('group recipient selection copies reviewed IDs, blocks unavailable members and ignores a response after its scope closes', async () => {
+  const picker = source.slice(source.indexOf('function AccountGroupPicker('), source.indexOf('function previewUrl(')), compile = (code, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
+  const members = [{ _id: 'first', platform: 'facebook', displayName: 'First page' }, { _id: 'second', platform: 'facebook', displayName: 'Second page' }], copied = [], notices = [], group = { _id: 'group', name: 'Launch pages', accountIds: ['first', 'second'] }, data = { groups: [group], accounts: members };
+  const choose = picker.slice(picker.indexOf('function choose()'), picker.indexOf('  return <section'));
+  const context = { disabled: false, busy: false, canChoose: true, members, data, group, onChoose: (...args) => copied.push(args), setNotice: value => notices.push(value) };
+  compile(choose, context)(); members[0].displayName = 'Changed group directory'; group.accountIds.push('later-account');
+  assert.deepEqual(copied[0][0].map(row => row._id), ['first', 'second']); assert.equal(copied[0][0][0].displayName, 'First page'); assert.match(notices[0], /Later group changes will not change/);
+  compile(choose, { ...context, canChoose: false })(); assert.equal(copied.length, 1, 'A group with any unavailable member cannot be partly applied.');
+  let finish; const accepted = [], active = { current: true }, generation = { current: 0 }, pending = { current: false };
+  const refresh = compile(picker.slice(picker.indexOf('async function refresh()'), picker.indexOf('  const group =')), { disabled: false, pending, generation, active, setBusy() {}, setError() {}, load: () => new Promise(resolve => { finish = resolve; }), setData: value => accepted.push(value), setSelectedId() {}, setNotice() {} });
+  const loading = refresh(); active.current = false; generation.current++; finish(data); await loading; assert.deepEqual(accepted, []); assert.equal(pending.current, false);
+  const { code } = await transformWithOxc(picker, 'AccountGroupPicker.tsx', { jsx: { runtime: 'classic' } });
+  let index = 0; const badData = { groups: [{ _id: 'blocked', name: 'Mixed channels', accountIds: ['inactive', 'ads', 'missing'] }], accounts: [{ _id: 'inactive', platform: 'facebook', displayName: 'Disconnected page', isActive: false }, { _id: 'ads', platform: 'google', displayName: 'Ads connection' }] };
+  const ui = { React, PLATFORM_RULES, accountId: row => row._id || row.id, accountLabel: row => row.displayName || row._id || row.id, useState: initial => [[badData, 'blocked', false, '', ''][index++] ?? initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
+  const Picker = new Function(...Object.keys(ui), code + ';return AccountGroupPicker;')(...Object.values(ui)), html = renderToStaticMarkup(Picker({ load: async () => badData, onChoose() {}, disabled: false }));
+  assert.match(html, /Reconnection required/); assert.match(html, /Social publishing unavailable/); assert.match(html, /Unavailable in this project/); assert.match(html, /no members will be silently skipped/); assert.match(html, /disabled="">Replace destinations with these accounts/);
+});
+
 test('an empty custom-media editor and an empty asset selector retain their selected editing mode', () => {
   const mode = source.match(/const mediaMode = (.+);/)[1];
-  const evaluate = (override, platformMediaModes = {}) => new Function('own', 'override', 'platformMediaModes', 'selected', `return (${mode});`)((item, key) => Object.hasOwn(item, key), override, platformMediaModes, 'instagram');
-  assert.equal(evaluate({ mediaItems: [] }, { instagram: 'custom' }), 'custom');
-  assert.equal(evaluate({ assetId: '' }, { instagram: 'asset' }), 'asset');
+  const evaluate = (override, platformMediaModes = {}, editKey = 'instagram:') => new Function('own', 'override', 'platformMediaModes', 'editKey', `return (${mode});`)((item, key) => Object.hasOwn(item, key), override, platformMediaModes, editKey);
+  assert.equal(evaluate({ mediaItems: [] }, { 'instagram:': 'custom' }), 'custom');
+  assert.equal(evaluate({ assetId: '' }, { 'instagram:': 'asset' }), 'asset');
+  assert.equal(evaluate({ mediaItems: [] }, { 'instagram:account-a': 'custom' }, 'instagram:account-b'), 'none', 'Account editor modes cannot leak into a different account.');
   assert.equal(evaluate({ mediaItems: [] }), 'none');
   assert.equal(evaluate({}), 'shared');
 });
@@ -79,7 +127,7 @@ test('composer saves incomplete platform drafts but blocks malformed options and
   const handler = source.slice(source.indexOf('async function submit('), source.indexOf('  async function checkWithProvider(')).replace('event: React.FormEvent<HTMLFormElement>', 'event').replace('(failure as Error)', 'failure');
   function submit(values, changes = {}) {
     const errors = [], calls = [], saving = [], focused = [];
-    const context = { disabled: false, setError: error => errors.push(error), platforms: values.platforms, optionErrors: {}, normalizePostVariants, values, setSaving: value => saving.push(value), onSubmit: async value => calls.push(value), headingRef: { current: { focus: () => focused.push(true) } }, ...changes };
+    const context = { disabled: false, setError: error => errors.push(error), platforms: values.platforms, optionErrors: {}, normalizePostVariants, normalizeAccountVariants, values, setSaving: value => saving.push(value), onSubmit: async value => calls.push(value), headingRef: { current: { focus: () => focused.push(true) } }, ...changes };
     const action = new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context));
     return { action, errors, calls, saving, focused };
   }

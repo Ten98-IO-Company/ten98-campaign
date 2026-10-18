@@ -1,10 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PLATFORM_RULES, normalizeMediaItems, normalizePostVariants, normalizePlatformOptions, resolveVariant, buildPlatformEntry, validatePostForPlatforms, countCaption, captionLimitForVariant } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, normalizeMediaItems, normalizePostVariants, normalizeAccountVariants, assertAccountSchedules, normalizePlatformOptions, resolveVariant, buildPlatformEntry, validatePostForPlatforms, countCaption, captionLimitForVariant } from '../shared/social-posts.mjs';
 
 const image = (extra = {}) => ({ type: 'image', url: 'https://cdn.example.com/creative.jpg', width: 1080, height: 1080, size: 100000, mimeType: 'image/jpeg', ...extra });
 const video = (extra = {}) => ({ type: 'video', url: 'https://cdn.example.com/video.mp4', width: 1080, height: 1920, duration: 30, size: 1000000, mimeType: 'video/mp4', ...extra });
 const valid = (post, platforms) => validatePostForPlatforms(post, platforms).valid;
+
+test('same-platform accounts independently inherit or replace caption, media, options and zoned times', () => {
+  const assets = [{ id: 'account-asset', kind: 'image', deliveryUrl: 'https://cdn.example.test/account.jpg' }];
+  const post = { content: 'Shared', mediaItems: [image()], scheduledAt: '2070-01-01T09:00:00Z', platformOverrides: { facebook: { content: 'Facebook default', mediaItems: [video()], options: { firstComment: 'Default comment' } } }, accountOverrides: {
+    first: { platform: 'facebook', content: '', assetId: 'account-asset', options: {}, scheduledAt: '2070-01-02T11:00:00+04:00' },
+    second: { platform: 'facebook', content: 'Second account', mediaItems: [], scheduledAt: '' },
+  } };
+  assert.deepEqual(normalizeAccountVariants(post), post.accountOverrides);
+  assert.deepEqual(buildPlatformEntry(post, 'facebook', 'first', assets), { platform: 'facebook', accountId: 'first', customContent: '', customMedia: [{ type: 'image', url: 'https://cdn.example.test/account.jpg' }], platformSpecificData: {}, scheduledFor: '2070-01-02T11:00:00+04:00' });
+  assert.deepEqual(buildPlatformEntry(post, 'facebook', 'second', assets), { platform: 'facebook', accountId: 'second', customContent: 'Second account', customMedia: [], platformSpecificData: { firstComment: 'Default comment' } });
+  assert.equal(resolveVariant(post, 'facebook', assets).content, 'Facebook default', 'Account changes do not mutate platform defaults.');
+  assert.equal(resolveVariant(post, 'facebook', assets, 'first').mediaItems[0].type, 'image', 'An account asset replaces inherited platform media.');
+  assert.equal(validatePostForPlatforms(post, ['facebook'], { assets, accountId: 'first' }).valid, true);
+  assert.doesNotThrow(() => assertAccountSchedules(post));
+  for (const changed of [{ queueId: 'queue' }, { scheduledAt: '' }, { scheduledAt: '2020-01-01T09:00:00Z' }]) assert.throws(() => assertAccountSchedules({ ...post, ...changed }), /future fixed post schedule/);
+  assert.throws(() => assertAccountSchedules(post, { publishNow: true }), /Publish now/);
+  assert.throws(() => assertAccountSchedules({ ...post, accountOverrides: { first: { platform: 'facebook', scheduledAt: '2020-01-01T09:00:00Z' } } }), /must be in the future/);
+});
+
+test('account trust boundary rejects foreign platform shapes and invalid dates without weakening account restriction checks', () => {
+  for (const scheduledAt of ['2070-01-01T10:00', 'January 1 2070', '2070-02-31T10:00:00Z']) assert.throws(() => normalizeAccountVariants({ accountOverrides: { first: { platform: 'facebook', scheduledAt } } }), /valid date and time/);
+  for (const variant of [{ content: 'Missing platform' }, { platform: 'facebook', caption: 'Unknown' }, { platform: 'facebook', options: { unsupported: true } }]) assert.throws(() => normalizeAccountVariants({ accountOverrides: { first: variant } }));
+  assert.throws(() => normalizeAccountVariants({ accountOverrides: JSON.parse('{"__proto__":{"platform":"facebook"}}') }), /account ID/);
+  assert.throws(() => buildPlatformEntry({ accountOverrides: { first: { platform: 'twitter', content: 'Mismatch' } } }, 'facebook', 'first'), /does not match/);
+  const post = { content: 'A'.repeat(501), accountOverrides: { first: { platform: 'threads', content: 'Valid first copy' }, second: { platform: 'threads', content: 'A'.repeat(501) } } };
+  assert.equal(validatePostForPlatforms(post, ['threads'], { accountId: 'first' }).valid, true);
+  assert.equal(validatePostForPlatforms(post, ['threads'], { accountId: 'second' }).valid, false);
+});
 
 test('Snapchat remains readable as a draft but cannot pass publishing checks while provider access is unavailable', () => {
   const post = { content: 'Saved Snapchat draft', mediaItems: [image()], platformOverrides: { snapchat: { options: { contentType: 'story' } } } };

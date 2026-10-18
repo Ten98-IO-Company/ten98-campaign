@@ -43,7 +43,7 @@ test('changing subreddit removes stale flair while preserving separate captions,
 });
 
 test('the actual YouTube selector leaves an empty playlist empty and requires explicitly choosing the saved default', async () => {
-  const start = source.indexOf('  return <section className="post-tiktok-permissions"'), end = source.indexOf('\n  </section>;', start) + '\n  </section>'.length;
+  const start = source.indexOf('  return <section className="post-tiktok-permissions"', source.indexOf('function PublishingDestinations(')), end = source.indexOf('\n  </section>;', start) + '\n  </section>'.length;
   const { code } = await transformWithOxc(`const render = () => (${source.slice(start + '  return '.length, end)});`, 'PublishingDestinations.tsx', { jsx: { runtime: 'classic' } });
   function render(loaded, options = {}) {
     const context = { React, platform: 'youtube', PLATFORM_RULES: { youtube: { label: 'YouTube' } }, sourceAccount: 'yt-account', accounts: [{ id: 'yt-account', name: 'Our channel' }], busy: '', accountId: row => row.id, accountLabel: row => row.name, setSourceId() {}, load() {}, resource: 'youtube-playlists', options, change() {}, loaded, details: {}, error: '', subreddit: '' };

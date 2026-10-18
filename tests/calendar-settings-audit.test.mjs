@@ -64,48 +64,49 @@ test('Calendar mapping callbacks preserve newer month drafts and use the confirm
     const active = { current: true }, scope = { current: 'october' }, changes = [], calls = []; let finish;
     const request = async path => { calls.push(path); if (calls.length > 1) throw new Error('A following status read is offline.'); return new Promise(resolve => { finish = resolve; }); };
     const write = new Function('path', 'keys', 'request', 'active', 'scope', 'view', `return (${writeHandler});`)('/calendar', { current: new Map() }, request, active, scope, 'october');
-    const dependencies = { FormData: class { get() { return 'shared@example.test'; } }, action: run => run(), request, path: '/calendar', active, scope, view: 'october', write, status: { configured: true, mapped: false }, setStatus: value => changes.push(value), updateEvents() {}, setLoaded() {}, setEditing: value => changes.push(value), setDraft: value => changes.push(value), blank: { summary: 'A new draft' }, setNotice() {} };
+    const dependencies = { FormData: class { get() { return 'shared@example.test'; } }, action: run => run(), request, path: '/calendar', active, scope, view: 'october', write, status: { configured: true, mapped: false }, setStatus: value => changes.push(value), updateEvents() {}, setLoaded() {}, setEditing: value => changes.push(value), setReview: value => changes.push({ review: value }), setDeleting: value => changes.push({ deleting: value }), setDraft: value => changes.push(value), blank: { summary: 'A new draft' }, setNotice() {} };
     const mapCalendar = new Function(...Object.keys(dependencies), `return (${handler});`)(...Object.values(dependencies));
     const pending = mapCalendar({ preventDefault() {}, currentTarget: {} });
     if (stale === 'unmounted') active.current = false; else if (stale !== 'current') scope.current = 'november';
     finish({ calendarId: 'shared@example.test', mapped: true });
     await pending.catch(error => { if (error.name !== 'AbortError') throw error; });
-    assert.equal(changes.length, stale === 'current' ? 3 : 0, 'A mapping response must not reset a newer month’s event draft.');
+    assert.equal(changes.length, stale === 'current' ? 5 : 0, 'A mapping response must not reset a newer month’s event draft or review.');
     assert.equal(calls.length, 1); if (stale === 'current') assert.deepEqual(changes[0], { configured: true, mapped: true, calendarId: 'shared@example.test' });
   }
 });
 
 test('Calendar sync uses current server plan identity, retains uncertain keys and ignores closed views', async () => {
   const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
-  const writeHandler = stripTypeScriptTypes(source.slice(source.indexOf('async function write('), source.indexOf('  async function load('))), syncHandler = stripTypeScriptTypes(source.slice(source.indexOf('async function syncPlan('), source.indexOf('  function edit(')));
+  const writeHandler = stripTypeScriptTypes(source.slice(source.indexOf('async function write('), source.indexOf('  async function load('))), reviewHandler = stripTypeScriptTypes(source.slice(source.indexOf('async function reviewPlan('), source.indexOf('  async function syncPlan('))), syncHandler = stripTypeScriptTypes(source.slice(source.indexOf('async function syncPlan('), source.indexOf('  async function removeEvent(')));
   function setup(request, active = { current: true }, scope = { current: 'view' }) {
     const keys = { current: new Map() }, notices = [], loads = [], context = { request, path: '/calendar', active, scope, view: 'view', keys };
     const write = new Function(...Object.keys(context), `return (${writeHandler});`)(...Object.values(context));
-    const dependencies = { ...context, write, action: run => run(), setNotice: value => notices.push(value), load: async () => { loads.push(true); } };
-    return { keys, notices, loads, sync: new Function(...Object.keys(dependencies), `return (${syncHandler});`)(...Object.values(dependencies)) };
+    let review = null;
+    const dependencies = { ...context, write, action: run => run(), projectId: 'project', status: { calendarId: 'shared@example.test' }, canWrite: true, setReview: value => { review = value; }, setNotice: value => notices.push(value), load: async () => { loads.push(true); } };
+    return { keys, notices, loads, preview: new Function(...Object.keys(dependencies), `return (${reviewHandler});`)(...Object.values(dependencies)), sync: () => { const current = { ...dependencies, review }; return new Function(...Object.keys(current), `return (${syncHandler});`)(...Object.values(current))(); } };
   }
   let fingerprint = 'a'.repeat(64), uncertain = true; const writes = [];
   const ui = setup(async (path, method, body, key) => {
-    if (path.endsWith('/plan')) return { fingerprint };
+    if (path.endsWith('/plan')) return { fingerprint, projectId: 'project', calendarId: 'shared@example.test', upserts: [], deletions: [] };
     assert.equal(method, 'POST'); writes.push({ body, key });
     if (uncertain) throw Object.assign(new Error('Needs provider review'), { status: 409, code: 'OPERATION_UNCERTAIN' });
     return { created: 0, updated: 1 };
   });
-  await assert.rejects(ui.sync(), /Needs provider review/); await assert.rejects(ui.sync(), /Needs provider review/);
+  await ui.preview(); assert.equal(writes.length, 0, 'Reviewing a plan must not publish it.'); await assert.rejects(ui.sync(), /Needs provider review/); await assert.rejects(ui.sync(), /Needs provider review/);
   assert.equal(writes[0].key, writes[1].key); assert.equal(ui.keys.current.size, 1);
-  fingerprint = 'b'.repeat(64); uncertain = false; await ui.sync();
+  fingerprint = 'b'.repeat(64); uncertain = false; await ui.preview(); await ui.sync();
   assert.notEqual(writes[2].key, writes[0].key); assert.deepEqual(writes[2].body, { planFingerprint: fingerprint }); assert.equal(ui.notices.length, 1); assert.equal(ui.loads.length, 1);
   for (const plan of [{}, { fingerprint: null }, { fingerprint: 7 }, { fingerprint: 'a'.repeat(63) }, { fingerprint: 'z'.repeat(64) }]) {
     const malformedWrites = [], malformed = setup(async path => { if (path.endsWith('/plan')) return plan; malformedWrites.push(path); return { created: 0, updated: 0 }; });
-    await assert.rejects(malformed.sync(), /plan identity could not be read/);
+    await assert.rejects(malformed.preview(), /plan preview could not be read/); await malformed.sync();
     assert.deepEqual(malformedWrites, []); assert.equal(malformed.keys.current.size, 0); assert.deepEqual(malformed.notices, []); assert.deepEqual(malformed.loads, []);
   }
   for (const during of ['plan', 'write']) {
     const active = { current: true }, closedWrites = [], closed = setup(async (path) => {
-      if (path.endsWith('/plan')) { if (during === 'plan') active.current = false; return { fingerprint }; }
+      if (path.endsWith('/plan')) { if (during === 'plan') active.current = false; return { fingerprint, projectId: 'project', calendarId: 'shared@example.test', upserts: [], deletions: [] }; }
       closedWrites.push(path); active.current = false; return { created: 1, updated: 0 };
     }, active);
-    await closed.sync().catch(error => { assert.equal(error.name, 'AbortError'); });
+    await closed.preview(); await closed.sync().catch(error => { assert.equal(error.name, 'AbortError'); });
     assert.equal(closedWrites.length, during === 'plan' ? 0 : 1); assert.equal(closed.notices.length, 0); assert.equal(closed.loads.length, 0);
   }
 });
