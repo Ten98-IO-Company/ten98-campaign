@@ -66,6 +66,10 @@ function validTargeting(result) {
   if (result.excludedLocations !== undefined && (!Array.isArray(result.excludedLocations) || result.excludedLocations.length !== negativeIds.size || !result.excludedLocations.every(row => geo(row) && row.negative !== false && negativeIds.has(row.geoTargetId)) || new Set(result.excludedLocations.map(row => row.geoTargetId)).size !== negativeIds.size)) return false;
   return result.languages.every(row => object(row) && typeof row.code === 'string' && label(row.name)) && result.devices.every(row => object(row) && ['MOBILE', 'DESKTOP', 'TABLET', 'CONNECTED_TV', 'OTHER', 'UNKNOWN'].includes(row.device) && typeof row.included === 'boolean' && count(row.bidModifier)) && (result.locationTargetingType === undefined || ['presence', 'presence_or_interest'].includes(result.locationTargetingType));
 }
+function validBidding(result, campaignId) {
+  const spec = result?.bidSpec, portfolio = result?.portfolio;
+  return object(result) && String(result.campaignId) === campaignId && typeof result.biddingStrategyType === 'string' && label(result.biddingStrategyType) && label(result.cachedAt) && (result.stale == null || typeof result.stale === 'boolean') && (spec == null || object(spec) && label(spec.bidStrategy) && label(spec.portfolioBidStrategyId) && count(spec.bidAmount) && count(spec.roasAverageFloor)) && (portfolio == null || object(portfolio) && label(portfolio.id) && label(portfolio.name));
+}
 
 export async function handleGoogleAds(context, api, profileId, action) {
   const { req, url, body, send } = context, write = req.method === 'POST', values = write ? body : Object.fromEntries(url.searchParams);
@@ -124,7 +128,7 @@ export async function handleGoogleAds(context, api, profileId, action) {
     const endpoint = `/ads/campaigns/${encodeURIComponent(campaignId)}/${action === 'negatives' ? 'negative-keywords' : action}`;
     if (!write) {
       const result = await api(endpoint, { accountId, adAccountId, platform: 'google' });
-      if (action === 'negatives' && (!Array.isArray(result.keywords) || result.keywords.length > 1000 || result.keywords.some(row => !object(row) || typeof row.text !== 'string' || !['exact', 'phrase', 'broad'].includes(row.matchType))) || action === 'targeting' && !validTargeting(result) || action === 'bidding' && (String(result.campaignId) !== campaignId || typeof result.biddingStrategyType !== 'string')) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable campaign settings.');
+      if (action === 'negatives' && (!Array.isArray(result.keywords) || result.keywords.length > 1000 || result.keywords.some(row => !object(row) || typeof row.text !== 'string' || !['exact', 'phrase', 'broad'].includes(row.matchType))) || action === 'targeting' && !validTargeting(result) || action === 'bidding' && !validBidding(result, campaignId)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable campaign settings.');
       send(200, redact(result)); return true;
     }
     if (body.confirmChange !== true) fail(400, 'GOOGLE_CONFIRMATION_REQUIRED', 'Confirm this campaign-wide change.');
@@ -140,7 +144,7 @@ export async function handleGoogleAds(context, api, profileId, action) {
       if (parameter) { if (typeof body[parameter] !== 'number' || !Number.isFinite(body[parameter]) || body[parameter] <= 0 || body[parameter] > 10000000) fail(400, 'INVALID_BIDDING', 'Enter a positive bidding target.'); payload[parameter] = body[parameter]; }
     }
     const outcome = await operation(context, async key => {
-      if (action === 'bidding') { const current = await api(endpoint, { accountId, adAccountId, platform: 'google' }); if (String(current.campaignId) !== campaignId || typeof current.biddingStrategyType !== 'string') fail(502, 'INVALID_PROVIDER_RESPONSE', 'Current campaign bidding could not be verified.'); if (current.stale === true) fail(409, 'STALE_GOOGLE_BIDDING', 'Google could not refresh the current bidding. Load it again before making a change.'); if (current.portfolio || current.bidSpec?.portfolioBidStrategyId) fail(409, 'SHARED_BIDDING', 'Detach the shared portfolio strategy in Google Ads before changing this campaign’s bidding.'); }
+      if (action === 'bidding') { const current = await api(endpoint, { accountId, adAccountId, platform: 'google' }); if (!validBidding(current, campaignId)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Current campaign bidding could not be verified.'); if (current.stale === true) fail(409, 'STALE_GOOGLE_BIDDING', 'Google could not refresh the current bidding. Load it again before making a change.'); if (current.portfolio || current.bidSpec?.portfolioBidStrategyId) fail(409, 'SHARED_BIDDING', 'Detach the shared portfolio strategy in Google Ads before changing this campaign’s bidding.'); }
       const result = await api(action === 'bidding' ? `/ads/campaigns/${encodeURIComponent(campaignId)}` : endpoint, {}, payload, key, 'PUT');
       if (action === 'negatives') confirmed(result.stale !== true && Array.isArray(result.keywords) && sameKeywords(result.keywords, payload.keywords), 'Google did not confirm the complete campaign negative keyword set.');
       if (action === 'targeting') {
@@ -161,7 +165,7 @@ export async function handleGoogleAds(context, api, profileId, action) {
       if (action === 'bidding') {
         confirmed(result.bidStrategy === payload.bidStrategy && ['bidAmount', 'roasAverageFloor'].every(field => payload[field] === undefined || result[field] === payload[field]), 'Google did not acknowledge the requested bidding strategy.');
         let current; try { current = await api(endpoint, { accountId, adAccountId, platform: 'google' }); } catch (error) { error.uncertain = true; throw error; }
-        confirmed(String(current.campaignId) === campaignId && current.stale !== true && current.bidSpec?.bidStrategy === payload.bidStrategy && ['bidAmount', 'roasAverageFloor'].every(field => payload[field] === undefined || current.bidSpec?.[field] === payload[field]), 'The updated campaign bidding could not be read back.');
+        confirmed(validBidding(current, campaignId) && current.stale !== true && current.bidSpec?.bidStrategy === payload.bidStrategy && ['bidAmount', 'roasAverageFloor'].every(field => payload[field] === undefined || current.bidSpec?.[field] === payload[field]), 'The updated campaign bidding could not be read back.');
         return { result: redact(current) };
       }
       return { result: redact(result) };

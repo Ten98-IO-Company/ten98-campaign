@@ -75,6 +75,41 @@ test('Calendar mapping callbacks preserve newer month drafts and use the confirm
   }
 });
 
+test('Calendar sync uses current server plan identity, retains uncertain keys and ignores closed views', async () => {
+  const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
+  const writeHandler = stripTypeScriptTypes(source.slice(source.indexOf('async function write('), source.indexOf('  async function load('))), syncHandler = stripTypeScriptTypes(source.slice(source.indexOf('async function syncPlan('), source.indexOf('  function edit(')));
+  function setup(request, active = { current: true }, scope = { current: 'view' }) {
+    const keys = { current: new Map() }, notices = [], loads = [], context = { request, path: '/calendar', active, scope, view: 'view', keys };
+    const write = new Function(...Object.keys(context), `return (${writeHandler});`)(...Object.values(context));
+    const dependencies = { ...context, write, action: run => run(), setNotice: value => notices.push(value), load: async () => { loads.push(true); } };
+    return { keys, notices, loads, sync: new Function(...Object.keys(dependencies), `return (${syncHandler});`)(...Object.values(dependencies)) };
+  }
+  let fingerprint = 'a'.repeat(64), uncertain = true; const writes = [];
+  const ui = setup(async (path, method, body, key) => {
+    if (path.endsWith('/plan')) return { fingerprint };
+    assert.equal(method, 'POST'); writes.push({ body, key });
+    if (uncertain) throw Object.assign(new Error('Needs provider review'), { status: 409, code: 'OPERATION_UNCERTAIN' });
+    return { created: 0, updated: 1 };
+  });
+  await assert.rejects(ui.sync(), /Needs provider review/); await assert.rejects(ui.sync(), /Needs provider review/);
+  assert.equal(writes[0].key, writes[1].key); assert.equal(ui.keys.current.size, 1);
+  fingerprint = 'b'.repeat(64); uncertain = false; await ui.sync();
+  assert.notEqual(writes[2].key, writes[0].key); assert.deepEqual(writes[2].body, { planFingerprint: fingerprint }); assert.equal(ui.notices.length, 1); assert.equal(ui.loads.length, 1);
+  for (const plan of [{}, { fingerprint: null }, { fingerprint: 7 }, { fingerprint: 'a'.repeat(63) }, { fingerprint: 'z'.repeat(64) }]) {
+    const malformedWrites = [], malformed = setup(async path => { if (path.endsWith('/plan')) return plan; malformedWrites.push(path); return { created: 0, updated: 0 }; });
+    await assert.rejects(malformed.sync(), /plan identity could not be read/);
+    assert.deepEqual(malformedWrites, []); assert.equal(malformed.keys.current.size, 0); assert.deepEqual(malformed.notices, []); assert.deepEqual(malformed.loads, []);
+  }
+  for (const during of ['plan', 'write']) {
+    const active = { current: true }, closedWrites = [], closed = setup(async (path) => {
+      if (path.endsWith('/plan')) { if (during === 'plan') active.current = false; return { fingerprint }; }
+      closedWrites.push(path); active.current = false; return { created: 1, updated: 0 };
+    }, active);
+    await closed.sync().catch(error => { assert.equal(error.name, 'AbortError'); });
+    assert.equal(closedWrites.length, during === 'plan' ? 0 : 1); assert.equal(closed.notices.length, 0); assert.equal(closed.loads.length, 0);
+  }
+});
+
 test('Drive and Calendar credential forms edit one shared draft without discarding either card’s input', async () => {
   const source = await readFile(new URL('../src/IntegrationSettings.tsx', import.meta.url), 'utf8');
   const changeSource = stripTypeScriptTypes(source.slice(source.indexOf('function change('), source.indexOf('  function dirty(')));

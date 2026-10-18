@@ -1,6 +1,24 @@
-# End-to-end verification — v0.8.3
+# End-to-end verification — v0.8.4
 
 ## Current full-app audit
+
+Verified on 18 October 2026 using isolated local databases, the production frontend build served locally and simulated providers. All **255 automated checks** pass (`npm test`), with no failures or skipped checks. The production build (`npm run build`), container build and offline non-root container smoke check pass; `npm audit --omit=dev` reports zero vulnerabilities. No dependency or schema change was added. Ponytail simplicity review and [Paperthin](https://github.com/LilMGenius/paperthin) evidence and consistency checks were applied, with separate agents reviewing changes and a fresh-context review of this release summary.
+
+The [full coverage map](audit-coverage.md) records the reviewed function and UI action families, runnable evidence, current versus historical browser observations and acceptance limits. This release fixes:
+
+- Google bidding reads and mutation checks reject malformed strategy, target, portfolio and freshness data. Search and Shopping money displays preserve currency precision, including 0.001 KWD.
+- Surrounding whitespace cannot bypass an unresolved model request. Malformed Microsoft token metadata is rejected before account reads. Unreadable or non-object app responses retain action keys so an accepted write can be recovered without a duplicate submission.
+- Calendar sync identifies the exact current plan, updates existing events after edits, and stops stale or unconfirmed batches until reviewed. Connected-account display fields are validated before reaching the UI.
+- A delayed CSV file cannot replace newer file or pasted content. Selecting a replacement clears the old import immediately. Dashboard spend includes daily-budget campaigns while allocation keeps daily limits separate; missing metrics remain unknown.
+- Ad media guidance follows the selected format. Closed mobile navigation is hidden from keyboard focus and its menu button exposes the expanded state.
+
+The fresh browser pass verifies Shopping validation and paused creation with KWD precision, Microsoft recovery after an accepted but unreadable response, reviewed Search ad drafting, ad-dialog focus, dashboard budget periods, contact deduplication without implied consent, and Calendar updates after local plan edits. The Microsoft retry produced one provider creation; the Calendar update retained one managed event.
+
+![Shopping preserves sub-unit amounts and distinct budget periods](shopping-currency-verification.png)
+
+All accounts, amounts and provider receipts are synthetic. No real publication, message, upload, activation, booking or spend occurred. Live credentials and provider permissions/approvals are still required for live acceptance. The file-picker race and mobile navigation change have focused regression/review evidence, rather than a manual file-picker or resized-viewport walkthrough. Other workflows retain their historical browser evidence in the coverage map. Standard native Google Video creation remains unsupported; existing Video reporting and supported Zernio Demand Gen video creation remain available. Organic search performance stays in ten98 Discover.
+
+## Previous full-app audit — v0.8.3
 
 Verified on 18 October 2026 using isolated databases, the production frontend and simulated providers. All **244 automated checks** pass. The production build and offline non-root container smoke check pass; `npm audit --omit=dev` reports zero vulnerabilities. No dependency or schema change was added. Ponytail simplicity review and [Paperthin](https://github.com/LilMGenius/paperthin) evidence and consistency checks were applied, with separate agents reviewing changes and a fresh-context review of this release summary.
 

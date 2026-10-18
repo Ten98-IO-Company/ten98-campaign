@@ -7,6 +7,29 @@ import { stripTypeScriptTypes } from 'node:module';
 
 const source = () => readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
 
+test('the shared API client rejects unreadable receipts without treating a potentially accepted write as a known failure', async () => {
+  const appSource = source(), start = appSource.indexOf('async function api('), end = appSource.indexOf('\nconst money =', start);
+  assert.ok(start > 0 && end > start);
+  const client = response => runInNewContext(stripTypeScriptTypes(appSource.slice(start, end)) + '; api', { fetch: async () => response });
+  for (const status of [200, 502]) await assert.rejects(client(new Response('<html>upstream error</html>', { status }))('/test', 'POST', { value: 1 }, 'action-key'), error => error.message === 'The server returned an unreadable response.' && error.status === undefined);
+  for (const invalid of [null, [], 'saved', 1, true]) await assert.rejects(client(Response.json(invalid))('/test', 'POST', {}, 'action-key'), error => error.message === 'The server returned an unreadable response.' && error.status === undefined);
+  await assert.rejects(client(Response.json({ error: { code: 'OPERATION_UNCERTAIN', message: 'Check the provider.' }, operation: { id: 'receipt' } }, { status: 409 }))('/test'), error => error.status === 409 && error.code === 'OPERATION_UNCERTAIN' && error.operation.id === 'receipt');
+  assert.equal((await client(Response.json({ saved: true }))('/test')).saved, true);
+});
+
+test('dashboard counts daily-campaign spend without adding daily budgets to total allocations or inventing missing metrics', () => {
+  const appSource = source(), start = appSource.search(/  const (?:currencyCampaigns|currentCurrency) =/), end = appSource.indexOf('  const activeCampaigns =', start);
+  assert.ok(start > 0 && end > start);
+  const calculate = runInNewContext(`(state, currency) => { const numeric = value => typeof value === 'number' && Number.isFinite(value), money = value => String(value); ${appSource.slice(start, end)} return { spent, budget, impressions, chartCount: currentCurrency.length, caption: typeof spendCaption === 'undefined' ? '' : spendCaption }; }`);
+  const manual = { currency: 'USD', budget: 100, spent: 10, impressions: 100 }, daily = { currency: 'USD', budgetType: 'daily', budget: 25, spent: 31.5, impressions: 1450 }, foreign = { currency: 'EUR', budget: 300, spent: 5, impressions: 50 };
+  const totals = calculate({ campaigns: [manual, daily, foreign] }, 'USD');
+  assert.equal(totals.spent, 41.5, 'Spend includes daily-budget advertising campaigns.'); assert.equal(totals.budget, 100, 'A daily spend limit cannot be added to a campaign-total allocation.'); assert.equal(totals.chartCount, 1); assert.equal(totals.impressions, 1600);
+  assert.match(totals.caption, /daily budgets separate/); assert.doesNotMatch(totals.caption, /%/);
+  assert.equal(calculate({ campaigns: [manual, { ...daily, spent: undefined, impressions: undefined }] }, 'USD').spent, undefined);
+  assert.equal(calculate({ campaigns: [manual, { ...daily, impressions: null }] }, 'USD').impressions, undefined);
+  assert.equal(calculate({ campaigns: [] }, 'USD').spent, 0);
+});
+
 test('campaign money and counts preserve fractional amounts and distinguish absent values from zero', () => {
   const appSource = source(), names = ['numeric', 'money', 'compact', 'budgetProgress'];
   const declarations = names.map(name => appSource.match(new RegExp(`^const ${name} = .+;$`, 'm'))?.[0]);

@@ -14,7 +14,7 @@ async function fixture() {
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
     const body = url.hostname === 'login.microsoftonline.com' ? Object.fromEntries(new URLSearchParams(options.body)) : JSON.parse(options.body); calls.push({ url, ...options, body }); assert.equal(options.redirect, 'error');
-    if (url.hostname === 'login.microsoftonline.com') { assert.equal(url.pathname, '/common/oauth2/v2.0/token'); assert.equal(body.grant_type, 'refresh_token'); assert.equal(body.scope, 'https://ads.microsoft.com/msads.manage offline_access'); assert.equal(body.client_secret, env.MICROSOFT_ADS_CLIENT_SECRET); return Response.json({ access_token: 'PRIVATE_ACCESS_TOKEN', token_type: 'Bearer', scope: 'https://ads.microsoft.com/msads.manage', ...(state.rotateTokens ? { refresh_token: 'ROTATED_' + randomUUID() } : {}) }); }
+    if (url.hostname === 'login.microsoftonline.com') { assert.equal(url.pathname, '/common/oauth2/v2.0/token'); assert.equal(body.grant_type, 'refresh_token'); assert.equal(body.scope, 'https://ads.microsoft.com/msads.manage offline_access'); assert.equal(body.client_secret, env.MICROSOFT_ADS_CLIENT_SECRET); return Response.json({ access_token: 'PRIVATE_ACCESS_TOKEN', token_type: Object.hasOwn(state, 'tokenType') ? state.tokenType : 'Bearer', scope: 'https://ads.microsoft.com/msads.manage', ...(state.rotateTokens ? { refresh_token: 'ROTATED_' + randomUUID() } : {}) }); }
     assert.equal(options.headers.Authorization, 'Bearer PRIVATE_ACCESS_TOKEN'); assert.equal(options.headers.DeveloperToken, env.MICROSOFT_ADS_DEVELOPER_TOKEN);
     if (state.hook) await state.hook(url, body);
     if (url.hostname === 'clientcenter.api.bingads.microsoft.com') { assert.equal(url.pathname, '/CustomerManagement/v13/Account/Query'); return Response.json({ Account: { Id: body.AccountId, ParentCustomerId: state.mode === 'foreign-account' ? '999' : '10', Name: 'Synthetic Microsoft account', CurrencyCode: 'USD', TimeZone: 'PacificTimeUSCanadaTijuana' } }); }
@@ -78,6 +78,13 @@ test('native Microsoft search creates a paused campaign with exact targeting, re
 test('native Microsoft validation, roles, partial creation, readback and lost acknowledgements stop unintended writes or duplicate campaigns', async () => {
   const f = await fixture();
   try {
+    for (const tokenType of [42, {}, [], null]) {
+      f.state.tokenType = tokenType; const before = f.calls.length;
+      const rejected = await f.request(f.prefix + '/connection', 'POST', { customerId: '10', accountId: '100', confirmed: true });
+      assert.equal(rejected.status, 502); assert.equal(rejected.data.error.code, 'INVALID_MICROSOFT_TOKEN');
+      assert.equal(f.calls.length, before + 1, 'A malformed token must stop before any account or campaign request.');
+    }
+    delete f.state.tokenType;
     await f.map();
     for (const patch of [{ confirmed: false }, { dailyBudget: -1 }, { dailyBudget: 1.001 }, { finalUrl: 'http://localhost/private' }, { headlines: ['Only one'] }, { descriptions: ['Same', 'Same'] }, { keywords: [] }, { locationIds: [] }, { matchType: 'Unsupported' }, { arbitraryPayload: {} }, { headlines: ['Dynamic {keyword}', 'Second headline', 'Third headline'] }]) {
       const result = await f.request(f.prefix + '/campaigns', 'POST', { ...input, ...patch }, randomUUID()); assert.ok([400, 422].includes(result.status), JSON.stringify(result.data));
