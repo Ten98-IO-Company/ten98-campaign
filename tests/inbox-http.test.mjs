@@ -9,7 +9,7 @@ import { createApp } from '../server/index.mjs';
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-inbox-')), originalFetch = globalThis.fetch, calls = [], env = { ZERNIO_API_KEY: 'inbox-fixture-key', ZERNIO_WEBHOOK_SECRET: 'inbox-fixture-signing-secret' };
   const app = createApp({ dataDir, env, appUrl: 'https://campaign.example.test', directScheduler: false });
-  const accounts = [['fb', 'facebook'], ['ig', 'instagram'], ['yt', 'youtube'], ['gb', 'googlebusiness'], ['bs', 'bluesky'], ['ads', 'metaads'], ['tt', 'tiktok'], ['sl', 'slack'], ['rc', 'rcs'], ['sm', 'sms'], ['wa', 'whatsapp']].map(([_id, platform]) => ({ _id, platform, profileId: 'inbox-profile', username: `${platform}-account`, isActive: true }));
+  const accounts = [['fb', 'facebook'], ['ig', 'instagram'], ['yt', 'youtube'], ['gb', 'googlebusiness'], ['bs', 'bluesky'], ['ads', 'metaads'], ['tt', 'tiktok'], ['sl', 'slack'], ['rc', 'rcs'], ['sm', 'sms'], ['wa', 'whatsapp'], ['xx', 'twitter'], ['rd', 'reddit']].map(([_id, platform]) => ({ _id, platform, profileId: 'inbox-profile', username: `${platform}-account`, isActive: true }));
   const review = { id: 'review-1', accountId: 'gb', platform: 'googlebusiness', rating: 5, reviewer: { name: 'Alex' }, text: 'Good service', hasReply: false, reply: null }, comments = [{ id: 'comment-1', platform: 'facebook', message: 'Question', from: { id: 'participant-a', name: 'Alex', isOwner: false }, canReply: true, canHide: true, canLike: true, canDelete: true, isHidden: false, isLiked: false }];
   let base, cookie, projectId, hook, lastIncoming = Date.now(), sourceForeign = false, malformedHistory = false;
   const json = data => Response.json(data), paging = { hasMore: false, nextCursor: null };
@@ -60,6 +60,76 @@ async function fixture() {
   await request(`/api/projects/${projectId}`, 'PATCH', { zernioProfileId: 'inbox-profile' }); const path = `/api/projects/${projectId}/integrations/inbox`;
   return { app, projectId, path, calls, comments, review, accounts, request, writes: () => calls.filter(call => call.options.method !== 'GET' && !call.url.pathname.includes('/tools/validate/')), setHook(value) { hook = value; }, setForeign(value) { sourceForeign = value; }, setMalformedHistory(value) { malformedHistory = value; }, setIncoming(value) { lastIncoming = value; }, async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
 }
+
+test('full-history search forwards the scoped query and opaque pages, validates snippets and reports skipped accounts', async () => {
+  const f = await fixture(); let mode = 'normal';
+  f.setHook(url => {
+    if (!url.pathname.endsWith('/inbox/conversations/search')) return;
+    const accountId = url.searchParams.get('accountId'), account = f.accounts.find(row => row._id === accountId);
+    assert.equal(url.searchParams.get('profileId'), 'inbox-profile'); assert.equal(url.searchParams.get('query'), 'old invoice');
+    if (accountId === 'bs') return Response.json({ data: [], pagination: { hasMore: false, nextCursor: null }, meta: { accountsQueried: 0, accountsSkipped: [{ accountId, platform: 'bluesky' }] } });
+    const paged = url.searchParams.has('cursor'); if (paged) assert.equal(url.searchParams.get('cursor'), 'opaque +/cursor');
+    return Response.json({ data: [{ conversation: { id: paged ? 'older-thread' : 'thread-1', accountId: mode === 'foreign' ? 'foreign' : accountId, platform: account.platform, participantName: 'Older conversation', participantUsername: 'older', status: 'archived', lastMessage: 'A different recent preview' }, matchCount: 1, matches: [{ id: 'old-message', text: mode === 'bad-text' ? {} : 'Your old invoice', direction: mode === 'bad-direction' ? 'outgoing' : 'incoming', timestamp: '2023-01-01T00:00:00Z', apiKey: 'do-not-return' }] }], pagination: { hasMore: !paged, nextCursor: paged ? null : 'opaque +/cursor' }, meta: mode === 'bad-meta' ? { accountsSkipped: [{ accountId: 'foreign', platform: 'facebook' }] } : { accountsQueried: 1 } });
+  });
+  try {
+    const route = f.path + '/conversations/search?', params = new URLSearchParams({ accountId: 'fb', query: 'old invoice', direction: 'incoming', limit: '20' });
+    const first = await f.request(route + params); assert.equal(first.status, 200, JSON.stringify(first.data)); assert.equal(first.data.conversations[0].matches[0].text, 'Your old invoice'); assert.equal(first.data.conversations[0].matches[0].apiKey, undefined); assert.equal(first.data.conversations[0].status, 'archived');
+    params.set('cursor', first.data.pagination.nextCursor); const next = await f.request(route + params); assert.equal(next.data.conversations[0].id, 'older-thread'); assert.equal(next.data.pagination.hasMore, false);
+    const skipped = await f.request(route + new URLSearchParams({ accountId: 'bs', query: 'old invoice' })); assert.equal(skipped.data.meta.accountsSkipped[0].accountId, 'bs'); assert.deepEqual(skipped.data.conversations, []);
+    for (mode of ['foreign', 'bad-text', 'bad-direction', 'bad-meta']) assert.equal((await f.request(route + params)).status, 502, mode);
+    const before = f.calls.length; for (const bad of ['accountId=fb&query=x', 'accountId=fb&query=old+invoice&limit=51', 'accountId=fb&query=old+invoice&direction=both']) assert.equal((await f.request(route + bad)).status, 400);
+    assert.equal(f.calls.length, before + 3, 'Invalid search filters make only the scoped account read, never a search call.'); assert.equal(f.writes().length, 0); assert.equal(f.app.direct.contacts.list(f.projectId).length, 0, 'Search snippets are not proof of a new inbound Messenger contact.');
+    assert.equal((await f.request(route + 'accountId=foreign&query=old+invoice')).status, 403);
+  } finally { await f.close(); }
+});
+
+test('new text conversations check platform recipients, keep X eligibility enabled and reuse accepted or uncertain receipts', async () => {
+  const f = await fixture(), route = f.path + '/conversations/start'; let malformed = false;
+  f.setHook((url, options) => {
+    if (url.pathname.endsWith('/inbox/conversations') && options.method === 'POST') return Response.json({ success: true, data: { messageId: 'opening-1', conversationId: 'thread-1', participantName: malformed ? {} : 'Alex', apiKey: 'private' } });
+    if (url.pathname.endsWith('/slack-members')) return Response.json({ members: [{ id: 'U01ABCDEF', name: 'Alex', username: 'alex' }] });
+  });
+  try {
+    for (const body of [{ accountId: 'xx', participantUsername: '@alex', message: 'Hello Alex' }, { accountId: 'fb', participantUsername: 'alex', message: 'Hello', confirmSend: true }, { accountId: 'xx', participantId: 1234, message: 'Hello', confirmSend: true }, { accountId: 'xx', participantUsername: 'alex', message: 'Hello', confirmSend: true, skipDmCheck: true }]) assert.ok([400, 422].includes((await f.request(route, 'POST', body)).status));
+    assert.equal(f.writes().length, 0);
+    const body = { accountId: 'xx', participantUsername: '@alex', message: 'Hello Alex', confirmSend: true }, key = randomUUID();
+    const accepted = await f.request(route, 'POST', body, key); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.equal(accepted.data.sent, true); assert.equal(accepted.data.apiKey, undefined); assert.deepEqual(f.writes().at(-1).body, { accountId: 'xx', participantUsername: 'alex', message: 'Hello Alex' });
+    const count = f.writes().length; assert.equal((await f.request(route, 'POST', body, key)).status, 200); assert.equal(f.writes().length, count);
+    const history = await f.request(f.path + '/conversations/' + accepted.data.conversationId + '/messages?accountId=xx'); assert.equal(history.status, 200);
+    for (const [accountId, participantUsername] of [['bs', 'alex.bsky.social'], ['rd', 'u/alex']]) assert.equal((await f.request(route, 'POST', { ...body, accountId, participantUsername })).status, 200);
+    const recipients = await f.request(f.path + '/conversations/recipients?accountId=sl'); assert.equal(recipients.data.recipients[0].id, 'U01ABCDEF');
+    const beforeSlack = f.writes().length; assert.equal((await f.request(route, 'POST', { accountId: 'sl', participantId: 'UFOREIGN', message: 'Hello', confirmSend: true })).status, 422); assert.equal(f.writes().length, beforeSlack);
+    assert.equal((await f.request(route, 'POST', { accountId: 'sl', participantId: 'U01ABCDEF', message: 'Hello coworker', confirmSend: true })).status, 200);
+    f.setHook((url, options) => url.pathname.endsWith('/inbox/conversations') && options.method === 'POST' ? Response.json({ success: true, data: { messageId: 'wrong-recipient', conversationId: 'thread-1', participantId: '9999' } }) : undefined);
+    const wrongRecipient = await f.request(route, 'POST', { accountId: 'xx', participantId: '1234', message: 'Exact recipient must match', confirmSend: true }); assert.equal(wrongRecipient.data.operation.status, 'uncertain');
+    f.setHook((url, options) => url.pathname.endsWith('/inbox/conversations') && options.method === 'POST' ? Response.json({ success: true, data: { messageId: 'opening-1', conversationId: 'thread-1', participantName: {} } }) : undefined);
+    malformed = true; const uncertainBody = { ...body, message: 'A unique ambiguous send' }, uncertainKey = randomUUID(), beforeUncertain = f.writes().length;
+    assert.equal((await f.request(route, 'POST', uncertainBody, uncertainKey)).data.operation.status, 'uncertain');
+    assert.equal((await f.request(route, 'POST', uncertainBody, uncertainKey)).status, 409); assert.equal((await f.request(route, 'POST', uncertainBody)).status, 409); assert.equal(f.writes().length, beforeUncertain + 1);
+    f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const beforeViewer = f.calls.length; assert.equal((await f.request(route, 'POST', body)).status, 403); assert.equal(f.calls.length, beforeViewer);
+  } finally { await f.close(); }
+});
+
+test('new WhatsApp and Zernio SMS conversations require current local permission and exact approved template values', async () => {
+  const f = await fixture(), route = f.path + '/conversations/start', contacts = f.app.direct.contacts;
+  const ready = contacts.save(f.projectId, { name: 'Permitted', phone: '+12025550101', consents: { whatsapp: true, sms: true }, consentSource: 'Synthetic opt-in record' });
+  const notPermitted = contacts.save(f.projectId, { name: 'No permission', phone: '+12025550102' }); let revoke = false;
+  const template = { id: 'approved-template', name: 'appointment_update', language: 'en', status: 'APPROVED', category: 'UTILITY', components: [{ type: 'HEADER', text: 'Appointment {{1}}', format: 'TEXT' }, { type: 'BODY', text: 'Your appointment is {{1}}' }, { type: 'BUTTONS', buttons: [{ type: 'URL', text: 'Details', url: 'https://example.com/{{1}}' }] }] };
+  f.setHook((url, options) => {
+    if (url.pathname.endsWith('/whatsapp/templates')) { if (revoke) contacts.suppress(f.projectId, ready.id, 'whatsapp', 'Recipient opted out during lookup'); return Response.json({ success: true, templates: [template] }); }
+    if (url.pathname.endsWith('/inbox/conversations') && options.method === 'POST') return Response.json({ success: true, data: { messageId: 'opening-1', conversationId: 'thread-1' } });
+  });
+  try {
+    const recipients = await f.request(f.path + '/conversations/recipients?accountId=wa'); assert.deepEqual(recipients.data.recipients.map(row => row.id), [ready.id]);
+    const body = { accountId: 'wa', contactId: ready.id, templateName: 'appointment_update', templateLanguage: 'en', templateComponents: [{ type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: 'appointment-1' }] }, { type: 'body', parameters: [{ type: 'text', text: 'Friday' }] }, { type: 'header', parameters: [{ type: 'text', text: 'A1' }] }], confirmSend: true };
+    for (const changed of [{ contactId: notPermitted.id }, { contactId: randomUUID() }, { participantId: '+12025550101' }, { message: 'Free-form opening' }, { templateLanguage: 'fr' }, { templateComponents: [] }]) assert.ok([400, 409].includes((await f.request(route, 'POST', { ...body, ...changed })).status));
+    assert.equal(f.writes().length, 0);
+    const accepted = await f.request(route, 'POST', body); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.deepEqual(f.writes().at(-1).body, { accountId: 'wa', participantId: '12025550101', templateName: 'appointment_update', templateLanguage: 'en', templateParams: ['A1', 'Friday', 'appointment-1'] });
+    assert.equal((await f.request(route, 'POST', { accountId: 'sm', contactId: ready.id, message: 'Your appointment is confirmed', confirmSend: true })).status, 200);
+    contacts.suppressSmsGlobally(ready.phone, 'STOP'); const beforeStop = f.writes().length; assert.equal((await f.request(route, 'POST', { accountId: 'sm', contactId: ready.id, message: 'Blocked after STOP', confirmSend: true })).status, 409); assert.equal(f.writes().length, beforeStop);
+    revoke = true; const beforeRevoke = f.writes().length; assert.equal((await f.request(route, 'POST', { ...body, templateComponents: body.templateComponents.map(row => row.type === 'body' ? { ...row, parameters: [{ type: 'text', text: 'Saturday' }] } : row) })).status, 409); assert.equal(f.writes().length, beforeRevoke);
+  } finally { await f.close(); }
+});
 
 test('inbox reads are scoped, side-effect-free and create identity-only contacts from verified incoming Messenger history', async () => {
   const f = await fixture();

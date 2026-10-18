@@ -7,13 +7,24 @@ const composer = await readFile(new URL('../src/AdComposer.tsx', import.meta.url
 const javascript = value => value.replaceAll('event: React.FormEvent<HTMLFormElement>', 'event').replace(/ as Record<string, string>/g, '').replace(/: Record<string, (?:string\[\]|string|any)>/g, '').replaceAll('(err as Error)', 'err').replaceAll(' as SubmitEvent | undefined', '');
 class FormValues { constructor(values) { return Object.entries(values); } }
 const lines = value => (value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
-const form = { countries: 'ae, sa, AE', name: 'QA campaign', budgetAmount: '50', headline: 'Main headline', body: 'Ad description', linkUrl: 'https://brand.example.com/launch', additionalHeadlines: 'Second headline\nThird headline', additionalDescriptions: 'Second description', keywords: 'launch campaign', businessName: 'QA brand', landscape: 'https://cdn.example.com/landscape.jpg', square: 'https://cdn.example.com/square.jpg', logo: 'https://cdn.example.com/logo.jpg', headlines: 'First headline\nSecond headline\nThird headline', descriptions: 'First description\nSecond description', longHeadline: 'A longer launch headline', longHeadlines: 'A longer video headline', youtubeVideoIds: 'abcdefghijk', videoUrl: 'https://cdn.example.com/video.mp4', thumbnailUrl: 'https://cdn.example.com/thumb.jpg', imageUrl: 'https://cdn.example.com/image.jpg', callToAction: 'LEARN_MORE', organizationId: '123456', boardId: 'board-a', bidAmount: '2', cardHeadline0: 'First card', cardHeadline1: 'Second card', cardImage0: 'https://cdn.example.com/card-one.jpg', cardImage1: 'https://cdn.example.com/card-two.jpg' };
+const form = { countries: 'ae, sa, AE', name: 'QA campaign', budgetAmount: '50', headline: 'Main headline', body: 'Ad description', linkUrl: 'https://brand.example.com/launch', additionalHeadlines: 'Second headline\nThird headline', additionalDescriptions: 'Second description', keywords: 'launch campaign', businessName: 'QA brand', landscape: 'https://cdn.example.com/landscape.jpg', square: 'https://cdn.example.com/square.jpg', logo: 'https://cdn.example.com/logo.jpg', headlines: 'First headline\nSecond headline\nThird headline', descriptions: 'First description\nSecond description', longHeadline: 'A longer launch headline', longHeadlines: 'A longer video headline', youtubeVideoIds: 'abcdefghijk', videoUrl: 'https://cdn.example.com/video.mp4', thumbnailUrl: 'https://cdn.example.com/thumb.jpg', imageUrl: 'https://cdn.example.com/image.jpg', callToAction: 'LEARN_MORE', organizationId: '123456', boardId: 'board-a', bidAmount: '2', pixelId: 'reddit-pixel', customEventType: 'PURCHASE', postId: 'published-reddit-post', cardHeadline0: 'First card', cardHeadline1: 'Second card', cardImage0: 'https://cdn.example.com/card-one.jpg', cardImage1: 'https://cdn.example.com/card-two.jpg' };
+test('Reddit pixel lookup cannot replace a newer advertising account or closed composer', async () => {
+  const source = stripTypeScriptTypes(composer.slice(composer.indexOf('async function loadPixels('), composer.indexOf('  async function submit(')));
+  let finish; const mounted = { current: true }; const accepted = [], calls = [], pixelRead = { current: 0 };
+  const context = { accountId: 'reddit /a', adAccountId: 'native /a', platform: 'reddit', pixelBusy: false, pixelRead, pixelScope: 'account-a', currentPixelScope: { current: 'account-a' }, mounted, setPixelBusy() {}, setPixelError() {}, setPixels: value => accepted.push(value), setPixelsLoaded() {}, requester: { current: path => { calls.push(path); return new Promise(resolve => { finish = resolve; }); } } };
+  const load = new Function(...Object.keys(context), `return (${source});`)(...Object.values(context));
+  const first = load(); pixelRead.current++; finish({ tags: [{ id: 'old-account' }] }); await first; assert.deepEqual(accepted, []);
+  const second = load(); mounted.current = false; finish({ tags: [{ id: 'closed-view' }] }); await second; assert.deepEqual(accepted, []);
+  mounted.current = true; const third = load(); finish({ tags: [{ id: 'scoped-pixel' }] }); await third; assert.deepEqual(accepted, [[{ id: 'scoped-pixel' }]]);
+  assert.equal(calls[0], 'measurement/reddit%20%2Fa/tags?adAccountId=native%20%2Fa');
+});
 const submitSource = javascript(composer.slice(composer.indexOf('async function submit('), composer.indexOf('  return <form')));
-async function createAd(changes = {}, values = {}) {
+async function createAd(changes = {}, values = {}, expectedError = '') {
   const calls = [], errors = [], saved = [];
   const context = { busy: false, budgetType: 'daily', bidding: 'automatic', setValidation() {}, isCurrent: () => true, FormData: FormValues, setError: error => errors.push(error), connection: { platform: 'googleads' }, adAccount: { id: 'native-account' }, currency: 'AED', accountId: 'connection-a', adAccountId: 'native-account', platform: 'google', boosting: false, assets: false, format: 'search', goal: 'traffic', video: false, carousel: false, cards: 2, lines, setBusy: () => {}, requester: { current: async (path, payload) => calls.push({ path, payload }) }, onCreated: () => saved.push(true), ...changes };
   const submit = new Function(...Object.keys(context), `return (${submitSource});`)(...Object.values(context));
   await submit({ preventDefault() {}, currentTarget: { ...form, ...values } });
+  if (expectedError) { assert.equal(errors.at(-1), expectedError); assert.deepEqual(saved, []); assert.deepEqual(calls, []); return; }
   assert.equal(errors.at(-1), '', errors.at(-1)); assert.deepEqual(saved, [true]);
   return calls[0];
 }
@@ -38,9 +49,25 @@ test('Google calendar dates are preserved and partial posts can boost only their
   const google = await createAd({}, { startDate: '2030-01-01', endDate: '2030-01-01' }); assert.equal(google.payload.startDate, '2030-01-01T00:00:00Z'); assert.equal(google.payload.endDate, google.payload.startDate);
   const meta = await createAd({ platform: 'facebook', format: 'image' }, { startDate: '2030-01-01T08:00' }); assert.equal(meta.payload.startDate, new Date('2030-01-01T08:00').toISOString());
   const expression = composer.match(/const publishedPosts = (.+);/)[1].replace('copy: any', 'copy');
-  const eligible = new Function('posts', 'accountId', `return (${expression});`);
+  const eligible = new Function('posts', 'accountId', 'platform', `return (${expression});`);
   const posts = [{ id: 'partial', status: 'partial', externalId: 'remote-a', providerResults: [{ accountId: { _id: 'fb-a' }, platform: 'facebook', status: 'published' }, { accountId: 'ig-a', platform: 'instagram', status: 'failed' }] }, { id: 'legacy', status: 'published', externalId: 'remote-b' }, { id: 'draft', status: 'published', externalId: 'remote-c', providerResults: [{ accountId: 'tt-a', platform: 'tiktok', status: 'published', platformSpecificData: { isDraft: true } }] }];
   assert.deepEqual(eligible(posts, 'fb-a').map(post => post.id), ['partial', 'legacy']); assert.deepEqual(eligible(posts, 'ig-a').map(post => post.id), ['legacy']); assert.deepEqual(eligible(posts, 'tt-a').map(post => post.id), ['legacy']);
+  assert.deepEqual(eligible([...posts, { id: 'reddit', status: 'published', externalId: 'remote-reddit', providerResults: [{ accountId: 'organic-reddit', platform: 'reddit', status: 'published' }] }], 'reddit-ads', 'reddit').map(post => post.id), ['legacy', 'reddit']);
+});
+
+test('Reddit create and boost submissions carry a pixel for every goal and website leads never send retired form IDs', async () => {
+  for (const boosting of [false, true]) for (const goal of ['traffic', 'awareness', 'video_views', 'conversions', 'lead_generation']) {
+    const result = await createAd({ platform: 'reddit', format: 'video', video: true, boosting, goal, budgetType: 'lifetime' }, { endDate: '2070-01-04T12:00', leadGenFormId: '' });
+    assert.equal(result.path, boosting ? 'ads/boost' : 'ads/create'); assert.equal(result.payload.status, 'PAUSED'); assert.equal(result.payload.budgetType, 'lifetime'); assert.equal(result.payload.promotedObject.pixelId, 'reddit-pixel'); assert.equal(result.payload.leadGenFormId, undefined);
+    if (goal === 'lead_generation') assert.equal(result.payload.promotedObject.customEventType, 'LEAD');
+    if (goal === 'conversions') assert.equal(result.payload.promotedObject.customEventType, 'PURCHASE');
+    if (boosting) { assert.equal(result.payload.postId, 'published-reddit-post'); assert.equal(result.payload.linkUrl, form.linkUrl); assert.equal(result.payload.video, undefined); }
+    await createAd({ platform: 'reddit', format: 'video', video: true, boosting, goal }, { pixelId: ' ' }, 'Every Reddit ad group needs a pixel from this advertising account.');
+  }
+  const goals = new Function('platform', 'video', 'boosting', 'format', `return (${composer.match(/const goals = (.+);/)[1]});`);
+  assert.deepEqual(goals('reddit', true, false, 'video'), ['traffic', 'awareness', 'video_views', 'conversions', 'lead_generation']);
+  assert.deepEqual(goals('reddit', false, true, 'image'), ['traffic', 'awareness', 'video_views', 'conversions', 'lead_generation']);
+  assert.deepEqual(goals('reddit', false, false, 'text'), ['traffic', 'awareness', 'conversions']);
 });
 
 test('an ad creation finishing after its dialog closes or changes cannot close a newer draft dialog', async () => {

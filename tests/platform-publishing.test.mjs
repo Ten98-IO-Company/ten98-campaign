@@ -75,6 +75,16 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
       const reviewed = await post(`${project}/approvals/posts/${record.id}/review`, { reviewId: requested.data.item.review.id, decision: 'approved', note: 'Checked all platform captions, creatives and options.' }); assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data)); return reviewed.data.item;
     }
     let result = await post(integrations + '/validate', draftFields); assert.equal(result.status, 200); assert.equal(result.data.valid, true); assert.equal(writes.length, 0);
+    const snapchatAccount = { _id: 'snapchat-fixture', platform: 'snapchat', profileId, isActive: true }; accounts.push(snapchatAccount);
+    const snapchatFields = { content: 'Historic Snapchat draft', platforms: ['snapchat'], accounts: [snapchatAccount._id], mediaItems: [image], platformOverrides: { snapchat: { options: { contentType: 'story' } } } };
+    const snapchatDraft = await draft(snapchatFields), beforeSnapchatChecks = calls.filter(call => call.method !== 'GET').length;
+    for (const fields of [snapchatFields, { ...snapchatFields, status: 'scheduled', scheduledAt: '2070-02-01T10:00:00Z' }]) {
+      const check = await post(integrations + '/validate', fields); assert.equal(check.status, 422); assert.match(check.data.error.message, /Snapchat.*unavailable|Snapchat.*not available/i);
+    }
+    const snapchatPublish = await publish(snapchatDraft); assert.equal(snapchatPublish.status, 422);
+    assert.equal(calls.filter(call => call.method !== 'GET').length, beforeSnapchatChecks, 'Unavailable Snapchat does not reach validation or publication upstream.');
+    assert.equal((await request('/api/state?projectId=' + projectId)).data.posts.find(record => record.id === snapchatDraft.id).content, snapchatFields.content, 'Historic draft stays readable.');
+    accounts.pop();
     for (const invalid of [{ content: {} }, { platforms: 'facebook' }, { mediaItems: 'invalid' }, { scheduledAt: '2070-02-30T10:00:00Z' }]) assert.equal((await post(integrations + '/validate', { ...draftFields, ...invalid })).status, 400);
     assert.equal((await post(integrations + '/validate', draftFields, { cookie: viewerCookie })).status, 403);
     assert.equal((await post(integrations + '/validate', { ...draftFields, accounts: ['foreign-account'] })).status, 403);

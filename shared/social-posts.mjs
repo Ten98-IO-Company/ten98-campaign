@@ -8,7 +8,7 @@ const fail = message => { throw new TypeError(message); };
 const MB = 1024 * 1024;
 
 const definitions = {
-  instagram: ['Instagram', 2200, ['image', 'video'], 20, 1],
+  instagram: ['Instagram', 2200, ['image', 'video'], 10, 1],
   facebook: ['Facebook', 63206, ['image', 'video', 'gif'], 10],
   linkedin: ['LinkedIn', 3000, ['image', 'video', 'gif', 'document'], 20],
   tiktok: ['TikTok', 2200, ['image', 'video'], 35, 1],
@@ -29,8 +29,8 @@ const optionLabels = { contentType: 'Post format', shareToFeed: 'Share Reel to p
 const label = key => optionLabels[key] || key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, char => char.toUpperCase());
 export const PLATFORM_RULES = Object.fromEntries(Object.entries(definitions).map(([key, [name, captionLimit, mediaTypes, maxMedia, minMedia = 0]]) => [key, {
   label: name, captionLimit, mediaTypes, maxMedia, minMedia,
-  supported: key !== 'whatsapp',
-  ...(key === 'snapchat' ? { notice: 'Snapchat publishing requires access to Zernio’s closed beta.' } : {}),
+  supported: !['whatsapp', 'snapchat'].includes(key),
+  ...(key === 'snapchat' ? { notice: 'Snapchat publishing is unavailable. Zernio cannot connect Snapchat accounts while its app approval is pending.' } : {}),
   ...(key === 'whatsapp' ? { notice: 'WhatsApp is unavailable through Zernio’s social post endpoint. Remove this destination before publishing.' } : {}),
   options: Object.entries(OPTION_SCHEMAS[key]?.properties || {}).map(([name, schema]) => ({
     key: name, label: label(name), type: schema.enum ? 'select' : schema.type === 'boolean' ? 'boolean' : ['integer', 'number'].includes(schema.type) ? 'number' : schema.type === 'array' && schema.items?.type === 'string' ? 'string-list' : ['array', 'object'].includes(schema.type) || schema.oneOf ? 'json' : name === 'firstComment' || name === 'description' ? 'textarea' : 'text',
@@ -304,7 +304,7 @@ function checkMedia(platform, item, options, index, add, warn, requireMetadata) 
     if (image && ['instagram', 'bluesky'].includes(platform)) warn(`${field}.size`, `The image exceeds ${sizeLimits[platform]} MB; Zernio may compress it, changing quality.`);
     else add(`${field}.size`, `File exceeds ${PLATFORM_RULES[platform].label}'s ${sizeLimits[platform]} MB limit.`);
   }
-  const durationLimits = { tiktok: [3, 600], facebook: options.contentType === 'reel' ? [3, 90] : options.contentType === 'story' ? [1, 120] : [1, 14400], instagram: options.contentType === 'story' ? [0, 60] : [0, 3600], threads: [0, 300], bluesky: [0, 60], linkedin: [3, 1800], pinterest: [4, 900], youtube: [0, 43200], snapchat: [0, 60] };
+  const durationLimits = { tiktok: [3, 600], facebook: options.contentType === 'reel' ? [3, 60] : options.contentType === 'story' ? [1, 120] : [1, 14400], instagram: options.contentType === 'story' ? [0, 60] : [0, 3600], threads: [0, 300], bluesky: [0, 60], linkedin: [3, 1800], pinterest: [4, 900], youtube: [0, 43200], snapchat: [0, 60] };
   if (video && item.duration && durationLimits[platform] && (item.duration < durationLimits[platform][0] || item.duration > durationLimits[platform][1])) add(`${field}.duration`, `Video duration must be ${durationLimits[platform][0]}–${durationLimits[platform][1]} seconds for this format.`);
   if (video && platform === 'linkedin' && item.duration > 600 && !options.organizationUrn) warn(`${field}.duration`, 'LinkedIn personal profiles allow 10-minute videos; videos up to 30 minutes require an organization page.');
   if (video && platform === 'youtube' && item.duration > 900) warn(`${field}.duration`, 'YouTube videos longer than 15 minutes require a verified channel.');

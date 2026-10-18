@@ -1,8 +1,8 @@
 # Full Zernio feature support: scope and delivery breakdown
 
-Prepared 18 October 2026. Application baseline: **v0.8.4**. Provider baseline: **Zernio OpenAPI 1.292.0**.
+Updated 18 October 2026. Application baseline: **v0.8.5**. Provider baseline: **Zernio OpenAPI 1.292.0**.
 
-Full Zernio support is the target. **The app does not provide it yet.** Existing publishing, ads, inbox and direct-campaign workflows cover useful subsets; the missing workflows below are implementation work, not completed features. The latest audit fixes are released separately in [PR #11](https://github.com/Ten98-IO-Company/ten98-campaign/pull/11).
+Full Zernio support is the target. **The app does not provide it yet.** Version 0.8.5 implements the first connection, publishing, measurement and inbox subsets below. Missing workflows remain implementation work; completing a subset does not complete its API family.
 
 ## Scope and evidence
 
@@ -20,28 +20,40 @@ Snapshot SHA-256: `324a4675b576bbd15f7f1f7c60397d5832b76e49fd976479028b22cd572d7
 | Unavailable/gated | Zernio or the platform restricts it; show the reason and required approval rather than a false success. |
 | Excluded | An earlier explicit user decision still applies. |
 
-Each domain report below contains current code anchors, capability rows, primary references and acceptance work. Reports are a source-reviewed snapshot, not new live-provider certification.
+Each domain report below contains current code anchors, capability rows, primary references and acceptance work. The v0.8.5 acceptance run passed 299 automated checks, the production build and a production dependency audit with no vulnerabilities. Browser walkthroughs use isolated synthetic upstream providers; they do not establish live eligibility, delivery, installation or spend. Exact evidence and browser boundaries are recorded in [verification](verification.md).
+
+## Implemented in v0.8.5
+
+| Area | Completed subset | Remaining boundary |
+| --- | --- | --- |
+| Reddit advertising | Explicit pixel on every creation/boost goal; five goals, website lead conversion, lifetime budgets with end dates, and promotion of a verified project-owned Reddit post. Browser acceptance covers paused lifetime creation and a paused website-lead boost. | Full targeting, hierarchy/edit lifecycle and conversion ingestion remain partial or missing. Website leads are not a Reddit native lead-form builder. |
+| Snapchat and publishing limits | New Snapchat connections and publication/scheduling are blocked before provider dispatch; historical draft content remains readable/editable. Shared checks now enforce Instagram's 10-item carousel and Facebook Reel's 60-second upper bound. | Snapchat remains unavailable pending provider approval. These changes do not establish all media/codec limits or live account acceptance. |
+| Connection administration | Scoped health and detailed token/permission/sync status, WhatsApp link health, supported reconnection, display/username overrides, paid X background toggles and confirmed disconnect. | Credential/bot onboarding, remaining secondary selection and platform-specific administration are still partial. |
+| Profile and groups | Read/edit the mapped profile's name, description, color and timezone; list/create/edit/delete groups containing only this project's accounts. | Profile provisioning/mapping/global operations, cross-profile groups, account moves and selecting posting recipients by group are not implemented. |
+| Measurement | Meta, Google, LinkedIn, TikTok, Pinterest, X and OpenAI have tag list/detail/code/event reads and creation; Meta adds rename/diagnostics. Reddit has account-scoped pixel discovery. Browser acceptance covers Meta creation/rename/events/diagnostics and use of a discovered Reddit pixel. | No Whop connection, store installation, event-definition CRUD, tag sharing/users, conversion ingestion or full attribution suite. Displayed code does not install a pixel. |
+| Inbox | Provider-backed message-history search with pagination and partial-account feedback; opening sends with validated synthetic receipts for X, Bluesky, Reddit, Slack, WhatsApp approved templates and consent-checked Zernio SMS. | Browser acceptance covers archived search pagination and X/WhatsApp/SMS openings; Bluesky/Reddit/Slack openings have handler-fixture coverage only. Rich actions, handover, automation and specialist reporting remain incomplete. |
+| Publishing destinations | Scoped Pinterest board, YouTube playlist and Reddit subreddit/rules/flair reads and composer selectors. Browser acceptance covers Pinterest selection through publication and YouTube/Reddit selection saved in drafts. | Board/playlist creation, account-default management and other destination selectors remain pending. Loading choices never changes a provider default. |
 
 ## Product modules
 
 | Module | Current state | Required completion |
 | --- | --- | --- |
-| Connections and account administration | Partial | Profile management, complete OAuth/credential/selection flows, reconnect/disconnect, account health, settings and groups. Preserve project isolation when accounts move. [Social breakdown](zernio-social-coverage.md) |
+| Connections and account administration | Partial | Health, supported reconnect/disconnect, overrides/X toggles, mapped profile edits and safe group CRUD are present. Complete provisioning, OAuth/credential/secondary selection, remaining settings and deliberate cross-project operations. [Social breakdown](zernio-social-coverage.md) |
 | Social publishing | Partial | Complete all supported platform formats/options, lookups and selectors, external-post discovery/import, bulk operations, provider queues, native edits and supported deletion. Existing separate captions/media, previews, scheduling and approvals remain the foundation. [Social breakdown](zernio-social-coverage.md) |
 | Paid ad creation and management | Partial | Extend the eight managed networks beyond the current formats; support full campaign/ad-set/ad hierarchy, duplication, attachments/assets and permitted edits. [Ads breakdown](zernio-ads-coverage.md) |
 | Creative library and research | Partial/missing | Reusable creative library, image/video lifecycle, rendered previews, partnership permissions and public ad-library research. Existing media URLs are a subset. [Ads breakdown](zernio-ads-coverage.md) |
 | Audiences and targeting | Partial | Customer uploads, supported engagement/website/lookalike/company audiences, saved presets, exclusions, reach/forecast/bid tools and platform-specific selectors. [Ads breakdown](zernio-ads-coverage.md) |
-| Pixels, conversions and attribution | Mostly missing | Supported tracking tags/events, installation, diagnostics, matching quality, conversion adjustments and consent-aware server events. Existing UTM/short-link tracking is separate. [Ads breakdown](zernio-ads-coverage.md) |
+| Pixels, conversions and attribution | Partial | Tag discovery/detail/code/events/create and Meta rename/diagnostics are present for the named networks. Complete event management, installation, sharing, matching quality, conversion adjustments and consent-aware server events. Existing UTM/short-link tracking is separate. [Ads breakdown](zernio-ads-coverage.md) |
 | Leads and catalogs | Missing | Instant forms, leads/webhooks, catalog/product/feed/set management, store sync and campaign use. Lead capture must create/update a contact without inventing outreach consent. [Ads](zernio-ads-coverage.md), [stores](zernio-commerce-admin-coverage.md) |
 | Paid/social analytics | Partial | Account/post/platform specialist reports, demographics, retention, timing, comparisons, breakdowns, asynchronous exports, missing/stale data and provider account operations. [Social](zernio-social-coverage.md), [ads](zernio-ads-coverage.md) |
-| Unified inbox | Partial | Complete search, starting conversations, rich messages, supported message edits/deletion/reactions, attachments and control handover. [Messaging breakdown](zernio-messaging-coverage.md) |
+| Unified inbox | Partial | History search and opening conversations are present for the named platforms. Complete rich messages, supported message edits/deletion/reactions, attachment retrieval and control handover. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Comments, mentions and reviews | Partial | Supported engagement/moderation actions, private replies, mentions, additional filters and platform-specific actions. [Messaging breakdown](zernio-messaging-coverage.md) |
 | WhatsApp suite | Partial | Advanced templates and lifecycle, Flows, interactive/commerce messages, catalogs, business settings, quality/tier health, sandbox, groups and conversion analytics. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Contacts and direct campaigns | Partial | Link local identities to Zernio contacts/channels, custom fields/segments and all supported platform broadcasts. Keep local consent, suppression and Twilio delivery paths. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Automations | Missing | Sequences, branching workflows, comment-to-DM funnels, run history, versioning, handover and stop conditions. Use Zernio execution; do not create a second automation engine. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Community and business profiles | Partial | Discord administration, Telegram/Slack account tools, Google Business location/media/services/menus/attributes/actions/verification and supported social discovery/engagement. [Social](zernio-social-coverage.md), [messaging](zernio-messaging-coverage.md) |
 | Blogs and commerce | Missing | Shopify/WordPress onboarding, articles and native scheduling; supported products, variants, stock, collections, discounts, market pricing, custom content and store attribution. [Store breakdown](zernio-commerce-admin-coverage.md) |
-| RCS, iMessage and Zernio SMS | Partial basic inbox adapters | Sender/agent lifecycle, rich campaign formats, opt-in audience, compliance states, channel fallback and receipts. Add Zernio SMS alongside Twilio; do not silently migrate existing campaigns. [Additional channels](zernio-commerce-admin-coverage.md) |
+| RCS, iMessage and Zernio SMS | Partial basic inbox adapters | Zernio SMS opening messages now use consent-checked local contacts; Twilio campaigns remain separate. Complete sender/agent lifecycle, rich campaign formats, provider audiences/subscriptions, compliance states, channel fallback and receipts. [Additional channels](zernio-commerce-admin-coverage.md) |
 | Webhooks and operations | Partial | Endpoint setup/testing/logs/redelivery, every relevant event family, diagnostics, provider usage/billing and public API change tracking. [Messaging](zernio-messaging-coverage.md), [administration](zernio-commerce-admin-coverage.md) |
 | Provider support and optional business agent | Missing | Explicit paid support runs and provider-native Meta Business Agent setup/knowledge/tools/evaluation where eligible. Keep these separate from OpenRouter creative drafting. [Administration](zernio-commerce-admin-coverage.md), [messaging](zernio-messaging-coverage.md) |
 
@@ -55,11 +67,11 @@ RCS and iMessage are messaging products, not extra destinations in a public soci
 
 ## Delivery sequence
 
-This is the proposed implementation order. No stage below is marked complete by this document. Expand existing components and shared validation/operation helpers; add a module only when the workflow needs a distinct screen.
+This is the continuing implementation order. No stage is complete: v0.8.5 advances bounded parts of stages 1, 3, 4, 5 and 8. Expand existing components and shared validation/operation helpers; add a module only when the workflow needs a distinct screen.
 
 | Stage | Deliverable | Dependencies and completion check |
 | --- | --- | --- |
-| 1. Current-contract fixes and connection foundation | Reconcile discovered Reddit pixel/boost gaps, Snapchat availability and platform-limit drift; complete scoped connect/reconnect/health, selectors and capability states. | First resolve conflicting docs against the pinned operation schema. Tests must reject unsupported combinations and wrong-project accounts before a provider write. |
+| 1. Current-contract fixes and connection foundation | Reddit pixel/boost, Snapchat guards, Instagram/Facebook bounds, scoped health/admin and selected destination reads are implemented. Complete remaining connect/credential/secondary-selection flows and destination/default management. | Keep current-contract regressions; reject unsupported combinations and wrong-project accounts before a provider write. |
 | 2. Complete paid campaign controls | Network-specific objectives/formats, campaign trees, assets/extensions, creative library, duplication and supported bulk operations. | Stage 1. Validate, create paused, reload exact remote IDs/state and preserve partial/uncertain outcomes. Prioritize Google Search/Shopping, Microsoft and ChatGPT regression coverage. |
 | 3. Measurement and acquisition | Audiences, pixels/events, server conversions, leads, catalogs and rich ad reports. | Campaign identity plus scoped permissions. Verify installation/event IDs, deduplication, consent, asynchronous report states and lead/contact attribution. Local QR counts must remain distinct. |
 | 4. Complete publishing and analytics | Remaining platform-specific content/actions, queues, bulk import, native-post discovery, media workflows and specialist analytics. | Connection capabilities; reuse approval and per-platform snapshot checks. Schedule, edit, cancel, publish/fail/retry and webhook reconciliation must have end-to-end evidence. |
@@ -68,9 +80,7 @@ This is the proposed implementation order. No stage below is marked complete by 
 | 7. Stores and additional channels | Blogs/commerce, catalog sync, Zernio SMS, RCS and iMessage sender/campaign lifecycle. | Provider capabilities, reviewed grants, approved senders and cost visibility. Test fallback and carrier/store failures with synthetic fixtures; live acceptance uses designated test accounts. |
 | 8. Administration and release closure | Complete provider logs/usage/support, webhook administration, change tracking and cross-module acceptance. | All relevant event families and role boundaries. Every included operation must map to a workflow and a test or an explicit unavailable/excluded reason. |
 
-Stage 1 contains newly identified compatibility gaps, not fixes included in v0.8.4. The detailed reports record the evidence and uncertainty for each one.
-
-The next planned implementation increment is deliberately smaller than Stage 1: reconcile the Reddit pixel requirement for existing create paths and Snapchat's advertised availability, with focused request-shape/capability regressions and a browser walkthrough. Do not add unrelated formats or rewrite OAuth in that increment. Resolve the Instagram/Facebook limit disagreements against current provider validation before changing either shared rule. The remaining connection work follows as separate increments.
+The first compatibility and foundation increment is implemented in v0.8.5; it was not included in v0.8.4. The detailed reports distinguish these tested changes from the remaining stages. Next work must close the named missing workflows rather than count routes as complete: campaign hierarchy/advanced formats, conversion and lead resources, queues/media/bulk publishing, richer engagement/WhatsApp, contacts/automation, stores/additional channels and provider operations remain substantial work.
 
 ## UI structure
 

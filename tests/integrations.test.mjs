@@ -269,6 +269,17 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     };
     result = await invoke('connect?platform=instagram&redirect_url=https://evil.example', { role: 'admin', config: { ZERNIO_API_KEY: 'sk_PRIVATE', appUrl: 'https://campaign.example.com' } });
     assert.equal(result.data.authUrl, 'https://www.instagram.com/oauth/authorize?state=server-state');
+    for (const [platform, connection] of [['google', 'googleads'], ['reddit', 'redditads']]) {
+      provider = async url => { assert.equal(url.pathname, `/api/v1/connect/${connection}/ads`); assert.equal(url.searchParams.get('profileId'), 'profile-a'); return { authUrl: 'https://provider.example.test/authorize' }; };
+      result = await invoke(`connect?platform=${platform}&kind=ads`, { role: 'admin' }); assert.equal(result.status, 200); assert.equal(result.data.authUrl, 'https://provider.example.test/authorize');
+    }
+    const beforeSnapchatConnect = calls.length;
+    result = await invoke('connect?platform=snapchat', { role: 'admin' }); assert.equal(result.status, 422); assert.equal(result.data.error.code, 'PLATFORM_UNAVAILABLE'); assert.equal(calls.length, beforeSnapchatConnect);
+    for (const returned of [{ _id: 'connected-google', profileId: 'profile-a', platform: 'googleads', isActive: true }, { _id: 'connected-google', profileId: 'profile-b', platform: 'googleads' }, { _id: 'connected-google', profileId: 'profile-a', platform: 'reddit' }]) {
+      provider = async url => url.pathname.endsWith('/accounts') ? { accounts: [returned] } : { alreadyConnected: true, accountId: returned._id };
+      result = await invoke('connect?platform=google&kind=ads', { role: 'admin' });
+      assert.equal(result.status, returned.profileId === 'profile-a' && returned.platform === 'googleads' ? 200 : 502);
+    }
     provider = async url => {
       assert.equal(url.pathname, '/api/v1/analytics/dashboard');
       assert.equal(url.searchParams.get('profileId'), 'profile-a');
@@ -365,7 +376,7 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     return response;
   }
   const base = { platform: 'facebook', accountId: 'metaads', adAccountId: 'native-account', name: 'Autumn launch', goal: 'traffic', budgetAmount: 20, budgetType: 'daily', headline: 'Explore new arrivals', body: 'Find your next favorite.', linkUrl: 'https://example.com/collection', imageUrl: 'https://cdn.example.com/image.jpg', callToAction: 'LEARN_MORE', countries: ['AE'], currency: 'AED' };
-  const clean = (platform, accountId) => { const value = { ...base, platform, accountId }; delete value.callToAction; delete value.imageUrl; return value; };
+  const clean = (platform, accountId) => { const value = { ...base, platform, accountId, ...(platform === 'reddit' ? { promotedObject: { pixelId: 'reddit-pixel' } } : {}) }; delete value.callToAction; delete value.imageUrl; return value; };
   try {
     const metaVideo = { ...base, video: { url: 'https://cdn.example.com/video.mp4' } }; delete metaVideo.imageUrl;
     assert.equal((await invoke('ads/create', metaVideo)).status, 200);

@@ -6,6 +6,17 @@ const image = (extra = {}) => ({ type: 'image', url: 'https://cdn.example.com/cr
 const video = (extra = {}) => ({ type: 'video', url: 'https://cdn.example.com/video.mp4', width: 1080, height: 1920, duration: 30, size: 1000000, mimeType: 'video/mp4', ...extra });
 const valid = (post, platforms) => validatePostForPlatforms(post, platforms).valid;
 
+test('Snapchat remains readable as a draft but cannot pass publishing checks while provider access is unavailable', () => {
+  const post = { content: 'Saved Snapchat draft', mediaItems: [image()], platformOverrides: { snapchat: { options: { contentType: 'story' } } } };
+  assert.equal(PLATFORM_RULES.snapchat.supported, false);
+  assert.match(PLATFORM_RULES.snapchat.notice, /not available|unavailable/i);
+  assert.doesNotThrow(() => normalizePostVariants(post));
+  assert.equal(resolveVariant(post, 'snapchat').content, post.content);
+  const checks = validatePostForPlatforms(post, ['snapchat']);
+  assert.equal(checks.valid, false);
+  assert.ok(checks.errors.some(error => error.platform === 'snapchat' && error.field === 'platform' && /not available|unavailable/i.test(error.message)));
+});
+
 test('post variants preserve inheritance, explicit empty values, DAM changes and exact provider wire fields', () => {
   const assets = [{ id: 'base', kind: 'image', deliveryUrl: 'https://cdn.example.com/base.jpg', size: '0' }, { id: 'reel', kind: 'video', deliveryUrl: 'https://cdn.example.com/reel.mp4', size: '123', duration: 30 }];
   const post = { content: 'Shared caption', assetId: 'base', mediaItems: null, platformOverrides: { twitter: { content: '', mediaItems: [] }, instagram: { content: 'Reel caption', assetId: 'reel', options: { shareToFeed: false } } } };

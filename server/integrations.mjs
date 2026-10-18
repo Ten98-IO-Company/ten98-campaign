@@ -1,7 +1,11 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
-import { buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostVariants, resolveVariant, validatePostForPlatforms, wireMediaItems } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostVariants, resolveVariant, validatePostForPlatforms, wireMediaItems } from '../shared/social-posts.mjs';
 import { transaction } from './database.mjs';
 import { handleGoogleAds } from './google-ads.mjs';
+import { handleZernioAccounts } from './zernio-accounts.mjs';
+import { handleZernioMeasurement } from './zernio-measurement.mjs';
+import { handleZernioAdmin } from './zernio-admin.mjs';
+import { handleZernioPublishing } from './zernio-publishing.mjs';
 
 const ZERNIO = 'https://zernio.com/api/v1';
 const GOOGLE = 'https://www.googleapis.com';
@@ -249,13 +253,13 @@ function googleAssetUpdate(value, type) {
 }
 function adBody(body, account, nativeAccount, boost = false) {
   const common = ['platform', 'accountId', 'adAccountId', 'name', 'goal', 'budgetAmount', 'budgetType', 'countries', 'status', 'currency', 'targeting', 'startDate', 'endDate'];
-  fields(body, [...common, ...(boost ? ['postId'] : ['headline', 'body', 'linkUrl', 'imageUrl', 'video', 'carouselCards', 'callToAction', 'campaignType', 'businessName', 'images', 'additionalHeadlines', 'additionalDescriptions', 'keywords', 'advantageAudience', 'boardId', 'organizationId', 'assetGroup', 'demandGen', 'promotedObject', 'leadGenFormId', 'bidStrategy', 'bidAmount', 'creativeFormat', 'tracking'])]);
+  fields(body, [...common, ...(boost ? ['postId', ...(body.platform === 'reddit' ? ['promotedObject', 'linkUrl'] : [])] : ['headline', 'body', 'linkUrl', 'imageUrl', 'video', 'carouselCards', 'callToAction', 'campaignType', 'businessName', 'images', 'additionalHeadlines', 'additionalDescriptions', 'keywords', 'advantageAudience', 'boardId', 'organizationId', 'assetGroup', 'demandGen', 'promotedObject', 'leadGenFormId', 'bidStrategy', 'bidAmount', 'creativeFormat', 'tracking'])]);
   const platform = body.platform, meta = ['facebook', 'instagram'].includes(platform), google = platform === 'google', advancedGoogle = google && ['pmax', 'demand_gen'].includes(body.campaignType);
   if (!CREATE_CONNECTIONS[platform]?.includes(account.platform)) fail(400, 'AD_CONNECTION_MISMATCH', 'Select a connected account for this advertising network.');
-  const goals = ['traffic', 'awareness', ...(['facebook', 'instagram', 'google', 'pinterest', 'linkedin', 'tiktok', 'twitter'].includes(platform) ? ['engagement'] : []), ...(['facebook', 'instagram', 'linkedin', 'tiktok', 'reddit'].includes(platform) ? ['video_views'] : []), ...(['facebook', 'instagram', 'tiktok', 'openai', 'reddit'].includes(platform) ? ['conversions'] : []), ...(meta || platform === 'linkedin' ? ['lead_generation'] : [])];
+  const goals = ['traffic', 'awareness', ...(['facebook', 'instagram', 'google', 'pinterest', 'linkedin', 'tiktok', 'twitter'].includes(platform) ? ['engagement'] : []), ...(['facebook', 'instagram', 'linkedin', 'tiktok', 'reddit'].includes(platform) ? ['video_views'] : []), ...(['facebook', 'instagram', 'tiktok', 'openai', 'reddit'].includes(platform) ? ['conversions'] : []), ...(meta || ['linkedin', 'reddit'].includes(platform) ? ['lead_generation'] : [])];
   if (!advancedGoogle && !goals.includes(body.goal)) fail(400, 'UNSUPPORTED_AD_GOAL', 'Choose a supported goal for this network.');
   const budgetType = body.budgetType || 'daily';
-  if (budgetType !== 'daily' && !(platform === 'openai' && budgetType === 'lifetime')) fail(400, 'UNSUPPORTED_BUDGET', 'Choose a supported budget type.');
+  if (budgetType !== 'daily' && !(['openai', 'reddit'].includes(platform) && budgetType === 'lifetime')) fail(400, 'UNSUPPORTED_BUDGET', 'Choose a supported budget type.');
   if (body.status !== undefined && body.status !== 'PAUSED') fail(400, 'INVALID_AD_STATUS', 'New ads must start paused. Review them before activation.');
   if (body.currency && body.currency !== nativeAccount.currency) fail(400, 'CURRENCY_MISMATCH', 'The budget currency must match the advertising account.');
   const minimum = Math.max(platform === 'pinterest' ? 5 : platform === 'tiktok' ? 20 : platform === 'openai' ? 1 : 0, budgetType === 'daily' ? Number(nativeAccount.minimumDailyBudget) || 0 : 0);
@@ -264,7 +268,19 @@ function adBody(body, account, nativeAccount, boost = false) {
   for (const key of ['startDate', 'endDate']) if (body[key] !== undefined) { if (typeof body[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(body[key]) || Number.isNaN(Date.parse(body[key])) || new Date(body[key].slice(0, 10)).toISOString().slice(0, 10) !== body[key].slice(0, 10)) fail(400, 'INVALID_DATE', 'Use a valid date and time including its timezone.'); result[key] = google ? body[key] : new Date(body[key]).toISOString(); }
   if (google ? result.startDate && result.endDate && result.startDate.slice(0, 10) > result.endDate.slice(0, 10) : (result.endDate && Date.parse(result.endDate) <= Date.now()) || (result.startDate && result.endDate && Date.parse(result.startDate) >= Date.parse(result.endDate))) fail(400, 'INVALID_DATE', google ? 'The end day must be the same as or later than the start day, in the advertising account’s timezone.' : 'The end must be in the future and later than the start.');
   if (budgetType === 'lifetime' && !result.endDate) fail(400, 'INVALID_DATE', 'Lifetime campaigns require a future end time.');
-  if (boost) { result.targeting = { countries: result.countries, ...result.targeting }; delete result.countries; return result; }
+  if (platform === 'reddit') {
+    if (!body.promotedObject?.pixelId) fail(400, 'REDDIT_PIXEL_REQUIRED', 'Every Reddit ad group needs a pixel. Enter a pixel from this advertising account.');
+    fields(body.promotedObject, ['pixelId', 'customEventType'], 'Reddit pixel');
+    result.promotedObject = { pixelId: identifier(body.promotedObject.pixelId, 'Reddit pixel ID') };
+    if (body.promotedObject.customEventType !== undefined) {
+      const event = text(body.promotedObject.customEventType, 'Reddit conversion event').toUpperCase();
+      if (!['PURCHASE', 'LEAD', 'COMPLETE_REGISTRATION', 'SIGN_UP', 'ADD_TO_CART', 'PAGE_VISIT', 'VIEW_CONTENT', 'CONTENT_VIEW'].includes(event) || body.goal !== 'conversions' && !(body.goal === 'lead_generation' && event === 'LEAD')) fail(400, 'INVALID_CONVERSION_EVENT', 'Choose a supported Reddit event for this campaign goal.');
+      result.promotedObject.customEventType = event;
+    }
+    if (body.goal === 'conversions' && !result.promotedObject.customEventType) fail(400, 'CONVERSION_CONFIGURATION_REQUIRED', 'Reddit conversion campaigns need a conversion event that this pixel has already received.');
+    if (body.goal === 'lead_generation') result.promotedObject.customEventType = 'LEAD';
+  }
+  if (boost) { if (platform === 'reddit' && (body.linkUrl !== undefined || body.goal === 'lead_generation')) result.linkUrl = mediaUrl(body.linkUrl); result.targeting = { countries: result.countries, ...result.targeting }; delete result.countries; return result; }
   const perNetwork = google ? ['campaignType', ...(advancedGoogle ? [body.campaignType === 'pmax' ? 'assetGroup' : 'demandGen'] : ['headline', 'body', 'linkUrl', ...(body.campaignType === 'search' ? ['additionalHeadlines', 'additionalDescriptions', 'keywords'] : ['businessName', 'images'])])] : ['headline', 'body', 'linkUrl', 'imageUrl', ...(meta ? ['video', 'carouselCards', 'callToAction', 'advantageAudience', 'promotedObject', 'leadGenFormId'] : platform === 'linkedin' ? ['video', 'callToAction', 'organizationId', 'leadGenFormId'] : platform === 'reddit' ? ['video', 'carouselCards', 'callToAction', 'promotedObject', 'creativeFormat'] : platform === 'pinterest' ? ['boardId'] : platform === 'openai' ? ['promotedObject', 'bidStrategy', 'bidAmount', 'tracking'] : platform === 'tiktok' ? ['promotedObject'] : [])];
   if (Object.keys(body).some(key => !common.includes(key) && !perNetwork.includes(key))) fail(400, 'UNSUPPORTED_AD_FIELD', 'Use the fields for this network and ad format.');
   if (google) {
@@ -274,12 +290,12 @@ function adBody(body, account, nativeAccount, boost = false) {
   }
   const headlineLimit = google ? 30 : ({ pinterest: 100, linkedin: 400, twitter: 70, openai: 50, reddit: 300 }[platform] || 255);
   if (platform !== 'tiktok') result.headline = text(body.headline, 'headline', headlineLimit);
-  result.body = text(body.body, 'ad text', google ? 90 : ({ pinterest: 500, twitter: 280, openai: 100, linkedin: 3000, tiktok: 100 }[platform] || 10000));
+  if (platform !== 'reddit' || body.creativeFormat === 'text' || body.body !== undefined && body.body !== '') result.body = text(body.body, 'ad text', google ? 90 : ({ pinterest: 500, twitter: 280, openai: 100, linkedin: 3000, tiktok: 100 }[platform] || 10000));
   if (platform === 'openai' && result.headline.length < 3) fail(400, 'INVALID_AD_COPY', 'ChatGPT ad titles need at least 3 characters.');
   const redditText = platform === 'reddit' && body.creativeFormat === 'text';
   if (body.creativeFormat !== undefined && !redditText) fail(400, 'UNSUPPORTED_AD_TYPE', 'Choose an available creative format.');
-  if (redditText) { if (body.linkUrl !== undefined || body.callToAction !== undefined) fail(400, 'UNSUPPORTED_AD_FIELD', 'Reddit text ads cannot link to a website or carry a button.'); }
-  else if (body.goal !== 'lead_generation') result.linkUrl = mediaUrl(body.linkUrl);
+  if (redditText) { if (body.linkUrl !== undefined || body.callToAction !== undefined || body.goal === 'lead_generation') fail(400, 'UNSUPPORTED_AD_FIELD', 'Reddit text ads cannot link to a website or carry a button. Choose an image, video or carousel for website leads.'); }
+  else if (body.goal !== 'lead_generation' || platform === 'reddit') result.linkUrl = mediaUrl(body.linkUrl);
   else { result.leadGenFormId = identifier(body.leadGenFormId, 'lead form ID'); if (body.linkUrl !== undefined) result.linkUrl = mediaUrl(body.linkUrl); }
   if (google) {
     if (body.campaignType === 'search') {
@@ -305,10 +321,10 @@ function adBody(body, account, nativeAccount, boost = false) {
     result.callToAction = body.callToAction; result.currency = nativeAccount.currency;
     if (body.advantageAudience !== undefined && ![0, 1].includes(body.advantageAudience)) fail(400, 'INVALID_AUDIENCE', 'The Advantage audience setting must be 0 or 1.');
     result.advantageAudience = body.advantageAudience ?? 0;
-  } else if (['linkedin', 'reddit'].includes(platform) && body.callToAction !== undefined) { const ctas = platform === 'linkedin' ? ['LEARN_MORE', 'SIGN_UP', 'DOWNLOAD', 'SUBSCRIBE', 'REGISTER', 'JOIN', 'ATTEND', 'REQUEST_DEMO', 'VIEW_QUOTE', 'APPLY', 'SEE_MORE', 'SHOP_NOW', 'BUY_NOW'] : ['LEARN_MORE', 'SHOP_NOW', 'SIGN_UP', 'CONTACT_US', 'DOWNLOAD', 'GET_QUOTE', 'SUBSCRIBE', 'APPLY_NOW', 'BOOK_NOW']; if (!ctas.includes(body.callToAction)) fail(400, 'INVALID_CALL_TO_ACTION', 'Choose an available call-to-action button.'); result.callToAction = body.callToAction; }
+  } else if (['linkedin', 'reddit'].includes(platform) && body.callToAction !== undefined) { const ctas = platform === 'linkedin' ? ['LEARN_MORE', 'SIGN_UP', 'DOWNLOAD', 'SUBSCRIBE', 'REGISTER', 'JOIN', 'ATTEND', 'REQUEST_DEMO', 'VIEW_QUOTE', 'APPLY', 'SEE_MORE', 'SHOP_NOW', 'BUY_NOW'] : ['LEARN_MORE', 'SHOP_NOW', 'SIGN_UP', 'CONTACT_US', 'DOWNLOAD', 'GET_QUOTE', 'SUBSCRIBE', 'APPLY_NOW', 'BOOK_NOW', 'BUY_TICKETS', 'DONATE_NOW', 'GET_DIRECTIONS', 'GET_SHOWTIMES', 'LISTEN_NOW', 'ORDER_NOW', 'SEE_MENU', 'INSTALL_MOBILE_APP']; if (!ctas.includes(body.callToAction)) fail(400, 'INVALID_CALL_TO_ACTION', 'Choose an available call-to-action button.'); result.callToAction = body.callToAction; }
   if (platform === 'linkedin' && body.organizationId !== undefined) { if (!/^(urn:li:organization:)?\d+$/.test(body.organizationId)) fail(400, 'INVALID_ORGANIZATION', 'Enter a numeric LinkedIn Company Page ID.'); result.organizationId = body.organizationId; }
   if (platform === 'pinterest' && body.boardId !== undefined) result.boardId = identifier(body.boardId, 'Pinterest board ID');
-  if (body.promotedObject !== undefined) { fields(body.promotedObject, platform === 'openai' ? ['customEventType'] : ['pixelId', 'customEventType'], 'conversion'); result.promotedObject = Object.fromEntries(Object.entries(body.promotedObject).map(([key, item]) => [key, text(item, 'conversion event or pixel ID')])); }
+  if (body.promotedObject !== undefined && platform !== 'reddit') { fields(body.promotedObject, platform === 'openai' ? ['customEventType'] : ['pixelId', 'customEventType'], 'conversion'); result.promotedObject = Object.fromEntries(Object.entries(body.promotedObject).map(([key, item]) => [key, text(item, 'conversion event or pixel ID')])); }
   if (body.goal === 'conversions' && platform !== 'openai' && (!result.promotedObject?.pixelId || ((meta || platform === 'reddit') && !result.promotedObject.customEventType))) fail(400, 'CONVERSION_CONFIGURATION_REQUIRED', 'Conversion campaigns need a pixel ID and conversion event.');
   if (platform === 'openai') {
     if (result.promotedObject && body.goal !== 'conversions') fail(400, 'INVALID_AD_GOAL', 'Select the conversions goal to choose a conversion event.');
@@ -428,7 +444,7 @@ export async function operation(context, action, resourceKey) {
   const resource = resourceKey ? canonical([project.id, resourceKey]) : null;
   if (resource && active.has(resource)) fail(409, 'PROVIDER_RESOURCE_BUSY', 'Another change to this campaign is in progress. Wait for it to finish, refresh, then try again.');
   const id = randomUUID();
-  const known = new Set(['native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
+  const known = new Set(['accounts', 'health', 'reconnect', 'disconnect', 'measurement', 'tags', 'diagnostics', 'ad-accounts', 'admin', 'profile', 'groups','native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
   const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
   db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString(), actionPath, operation.runId);
   active.add(id); if (resource) active.add(resource);
@@ -532,6 +548,8 @@ function publishBody(post, accounts, assets = [], { validate = true } = {}) {
   if (!selected.length || selected.some(account => account.isActive === false)) fail(400, 'ACCOUNT_UNAVAILABLE', 'A selected publishing account needs connection or reconnection.');
   if (Array.isArray(platforms) && platforms.length && selected.some(account => !platforms.includes(account.platform))) fail(400, 'ACCOUNT_PLATFORM_MISMATCH', 'Every selected account must belong to one of the post’s selected platforms.');
   if (selected.some(account => !SOCIAL_CONNECT.has(account.platform) && !['bluesky', 'telegram', 'snapchat'].includes(account.platform))) fail(400, 'INVALID_PUBLISHING_ACCOUNT', 'Choose a social publishing account, rather than an advertising connection.');
+  const unavailable = selected.find(account => !PLATFORM_RULES[account.platform]?.supported);
+  if (unavailable) fail(422, 'POST_RESTRICTIONS', PLATFORM_RULES[unavailable.platform]?.notice || 'This platform is unavailable for social posting.');
   const result = { content, platforms: selected.map(account => buildPlatformEntry(post, account.platform, account._id, assets)) };
   if (post.mediaItems !== undefined || post.assetId) result.mediaItems = wireMediaItems(commonMedia(post, assets));
   const scheduledAt = post.scheduledAt || post.scheduledFor;
@@ -771,6 +789,10 @@ export async function handleIntegration(context) {
     if (!env.ZERNIO_API_KEY) fail(503, 'ZERNIO_NOT_CONFIGURED', 'Configure a Zernio API key to connect providers.');
     if (!project.zernioProfileId) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
     const profileId = String(project.zernioProfileId); const api = zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping?.(profileId));
+    if (path.startsWith('measurement/') && await handleZernioMeasurement(context, api, profileId, path.slice('measurement/'.length))) return true;
+    if (path.startsWith('admin/') && await handleZernioAdmin(context, api, profileId, path.slice('admin/'.length))) return true;
+    if (path.startsWith('publishing/') && await handleZernioPublishing(context, api, profileId, path.slice('publishing/'.length))) return true;
+    if (path.startsWith('accounts/')) { if (await handleZernioAccounts(context, api, profileId, path.slice('accounts/'.length))) return true; }
     if (req.method === 'POST' && path === 'connect/openai-ads') {
       if (!['owner', 'admin'].includes(role)) fail(403, 'ADMIN_PERMISSION_REQUIRED', 'Only a workspace administrator can connect provider accounts.');
       fields(body, ['apiKey'], 'connection'); const apiKey = identifier(body.apiKey, 'ChatGPT Ads Manager API key');
@@ -786,6 +808,7 @@ export async function handleIntegration(context) {
       if (!['owner', 'admin'].includes(role)) fail(403, 'ADMIN_PERMISSION_REQUIRED', 'Only a workspace administrator can connect provider accounts.');
       const platform = url.searchParams.get('platform'); const kind = url.searchParams.get('kind') || 'social';
       if (!['social', 'ads'].includes(kind)) fail(400, 'INVALID_CONNECTION_KIND', 'Choose a social or advertising connection.');
+      if (platform === 'snapchat') fail(422, 'PLATFORM_UNAVAILABLE', PLATFORM_RULES.snapchat.notice);
       if (!(kind === 'ads' ? ADS_CONNECT : SOCIAL_CONNECT).has(platform)) fail(422, 'CONNECTION_REQUIRES_ZERNIO', 'This network uses a credential flow or is unavailable. Connect it in the Zernio dashboard, then refresh accounts.');
       let accountId = url.searchParams.get('accountId');
       if (kind === 'ads' && platform === 'twitter') {
@@ -797,8 +820,14 @@ export async function handleIntegration(context) {
       const origin = new URL(context.config?.appUrl || env.APP_URL || 'http://127.0.0.1:3000');
       if (origin.username || origin.password || (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)))) fail(503, 'INVALID_CALLBACK', 'Configure a valid app origin before connecting providers.');
       const callback = new URL('/', origin); callback.search = new URLSearchParams({ view: 'integrations', project: project.id }).toString();
-      const result = await api(`/connect/${platform}${kind === 'ads' ? '/ads' : ''}`, { profileId, redirect_url: callback.href, ...(accountId ? { accountId } : {}) });
-      if (result.alreadyConnected) { send(200, { alreadyConnected: true, accountId: result.accountId }); return true; }
+      const connectionPlatform = kind === 'ads' ? ({ google: 'googleads', reddit: 'redditads' }[platform] || platform) : platform;
+      const result = await api(`/connect/${connectionPlatform}${kind === 'ads' ? '/ads' : ''}`, { profileId, redirect_url: callback.href, ...(accountId ? { accountId } : {}) });
+      if (result.alreadyConnected === true) {
+        const expectedPlatform = kind === 'ads' ? CREATE_CONNECTIONS[platform]?.[0] : platform;
+        const account = (await scopedAccounts(api, profileId)).find(item => item._id === result.accountId && item.platform === expectedPlatform && item.isActive !== false);
+        if (!account) fail(502, 'CONNECTION_NOT_CONFIRMED', 'The connected account could not be verified in this project. Refresh accounts before retrying.');
+        send(200, { alreadyConnected: true, accountId: account._id }); return true;
+      }
       let authUrl;
       try { authUrl = new URL(result.authUrl); } catch { fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return a connection URL.'); }
       if (authUrl.protocol !== 'https:' || authUrl.username || authUrl.password) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned an invalid connection URL.');
@@ -1117,22 +1146,22 @@ export async function handleIntegration(context) {
       }); send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && path === 'ads/boost') {
-      const account = requireAccount(await scopedAccounts(api, profileId), identifier(body.accountId, 'account ID'));
-      if (!['facebook', 'instagram', 'twitter', 'linkedin', 'tiktok', 'pinterest'].includes(account.platform) || account.isActive === false) fail(400, 'BOOST_POSTING_ACCOUNT_REQUIRED', 'Choose an active social publishing connection to boost its published post.');
-      if (!['traffic', 'awareness', 'engagement', 'video_views'].includes(body.goal)) fail(400, 'UNSUPPORTED_AD_GOAL', 'Choose traffic, awareness, engagement, or video views for this boost.');
+      const accounts = await scopedAccounts(api, profileId), account = requireAccount(accounts, identifier(body.accountId, 'account ID')), reddit = account.platform === 'redditads';
+      if (!['facebook', 'instagram', 'twitter', 'linkedin', 'tiktok', 'pinterest', 'redditads'].includes(account.platform) || account.isActive === false) fail(400, 'BOOST_POSTING_ACCOUNT_REQUIRED', 'Choose an active publishing connection, or Reddit Ads connection, to boost a published project post.');
+      if (!(reddit ? ['traffic', 'awareness', 'video_views', 'conversions', 'lead_generation'] : ['traffic', 'awareness', 'engagement', 'video_views']).includes(body.goal)) fail(400, 'UNSUPPORTED_AD_GOAL', 'Choose a supported goal for this boost.');
       const native = (await adAccounts(api, account._id)).accounts.find(item => item.id === identifier(body.adAccountId, 'advertising account ID'));
       if (!native) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This advertising account is not connected to this project.');
       if (native.selectable === false) fail(409, 'AD_ACCOUNT_UNAVAILABLE', 'This advertising account is unavailable.');
       const payload = adBody(body, account, native, true), post = await store.get(project.id, 'posts', identifier(body.postId, 'post ID'));
       if (!post || sample(post) || !post.externalId || post.zernioProfileId !== profileId || !['published', 'partial'].includes(post.status)) fail(400, 'BOOST_PUBLISHED_POST_REQUIRED', 'Choose a published copy of a post from this project.');
       const remote = await api(`/posts/${encodeURIComponent(post.externalId)}`);
-      const copy = Array.isArray(remote.post?.platforms) && remote.post.platforms.find(item => String(item.accountId?._id || item.accountId) === account._id && item.platform === account.platform && item.status === 'published');
+      const copy = Array.isArray(remote.post?.platforms) && remote.post.platforms.find(item => (reddit ? item.platform === 'reddit' && accounts.some(connection => connection.platform === 'reddit' && connection._id === String(item.accountId?._id || item.accountId) && connection.isActive !== false) : String(item.accountId?._id || item.accountId) === account._id && item.platform === account.platform) && item.status === 'published');
       if (remote.post?._id !== post.externalId || !['published', 'partial'].includes(remote.post.status) || !copy || copy.platformSpecificData?.isDraft || copy.platformSpecificData?.draft || copy.platformSpecificData?.tiktokSettings?.draft) fail(403, 'POST_OUTSIDE_ACCOUNT', 'This copy was not publicly published by the selected connection.');
       payload.postId = post.externalId;
       const outcome = await operation(context, async key => {
         const result = await api('/ads/boost', {}, payload, key);
         assertCreatedAd(result.ad, body.platform, account, native, profileId);
-        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: 'paused', budget: payload.budgetAmount, budgetType: 'daily', spent: 0, currency: native.currency, platform: result.ad.platform, externalId: result.ad._id, platformCampaignId: result.ad.platformCampaignId, providerStatus: result.ad.status, zernioProfileId: profileId });
+        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: 'paused', budget: payload.budgetAmount, budgetType: payload.budgetType, spent: 0, currency: native.currency, platform: result.ad.platform, externalId: result.ad._id, platformCampaignId: result.ad.platformCampaignId, providerStatus: result.ad.status, zernioProfileId: profileId });
         await store.activity(project.id, 'Created a paused paid boost for a published social post.'); return { campaign, ad: redact(result.ad) };
       }); send(outcome.status, outcome.data); return true;
     }

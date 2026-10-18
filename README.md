@@ -2,9 +2,11 @@
 
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.8.4 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.8.5 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
+
+The Zernio foundation update adds account health/reconnection, scoped profile and group settings, tracking tags/pixels, inbox history search and new conversations, and publishing destination selectors. Snapchat is currently blocked by provider approval; existing drafts remain available. See [verification and remaining scope](docs/verification.md).
 
 ## Run locally
 
