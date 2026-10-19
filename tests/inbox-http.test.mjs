@@ -101,6 +101,123 @@ async function actionFixture(platform = 'telegram') {
   return { ...f, state, account, thread, write };
 }
 
+async function privateReplyFixture(accountId = 'fb') {
+  const f = await fixture(), state = { before: null, response: null, onSend: null };
+  f.comments[0].createdTime = new Date(Date.now() - 60000).toISOString();
+  f.setHook(async (url, options) => {
+    const intercepted = await state.before?.(url, options); if (intercepted !== undefined) return intercepted;
+    if (!url.pathname.endsWith('/private-reply')) return;
+    await state.onSend?.(url, options);
+    return state.response ? state.response(url, options) : Response.json({ status: 'success', messageId: 'private-message-1', commentId: decodeURIComponent(url.pathname.split('/').at(-2)), platform: f.accounts.find(row => row._id === JSON.parse(options.body).accountId)?.platform });
+  });
+  const thread = () => f.request(`${f.path}/comments/thread?` + new URLSearchParams({ accountId, postId: accountId === 'ads' ? 'ad-1:instagram' : 'post-1' }));
+  const draft = async (extra = {}) => { const result = await thread(); assert.equal(result.status, 200, JSON.stringify(result.data)); const row = result.data.comments[0]; return { accountId, postId: accountId === 'ads' ? 'ad-1:instagram' : 'post-1', commentId: row.id, expectedCommentVersion: row.privateReplyVersion, message: 'Thanks for your question. How can we help?', confirmSend: true, ...extra }; };
+  const send = (body, key = randomUUID()) => f.request(f.path + '/comments/private-reply', 'POST', body, key);
+  return { ...f, state, thread, draft, send };
+}
+
+test('private comment replies require an explicit reviewed Meta comment, bridge ads correctly and persist one send per comment', async () => {
+  for (const accountId of ['fb', 'ig', 'ads']) {
+    const f = await privateReplyFixture(accountId);
+    try {
+      const status = await f.request(f.path + '/status'); assert.equal(status.data.accounts.find(row => row.id === accountId).capabilities.commentPrivateReply, true);
+      const initial = await f.thread(); assert.equal(initial.data.comments[0].privateReplyEligible, true); assert.equal(f.writes().length, 0, 'Reading and opening the composer never sends.');
+      const body = await f.draft(), key = randomUUID(), accepted = await f.send(body, key);
+      assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.equal(accepted.data.operation.status, 'complete'); assert.equal(accepted.data.sent, true); assert.equal(accepted.data.accountId, accountId); assert.equal(accepted.data.commentId, body.commentId); assert.equal(accepted.data.postId, body.postId);
+      const sent = f.writes().at(-1); assert.equal(sent.url.pathname, `/api/v1/inbox/comments/${accountId === 'ads' ? 'ad-media-1' : 'post-1'}/comment-1/private-reply`); assert.equal(sent.options.headers['Idempotency-Key'], key); assert.deepEqual(sent.body, { accountId: accountId === 'ads' ? 'ig' : accountId, message: body.message });
+      assert.equal((await f.send(body, key)).status, 200); const blocked = await f.send({ ...body, message: 'A different message and action key must still not resend.' }); assert.equal(blocked.data.error.code, 'PRIVATE_REPLY_RECORDED'); assert.equal(f.writes().length, 1);
+      const refreshed = await f.thread(); assert.equal(refreshed.data.comments[0].privateReplyEligible, false); assert.equal(refreshed.data.comments[0].privateReplyStatus, 'sent');
+      assert.equal(f.app.db.prepare('SELECT status FROM inbox_private_replies').get().status, 'sent'); assert.equal(f.app.db.prepare('SELECT COUNT(*) AS count FROM direct_contacts').get().count, 0, 'A comment or outbound reply must not manufacture marketing permission.');
+    } finally { await f.close(); }
+  }
+});
+
+test('private reply eligibility rejects stale reviews, unsupported platforms, unknown authors and expired or future comment times before sending', async () => {
+  const f = await privateReplyFixture();
+  try {
+    const body = await f.draft(), original = structuredClone(f.comments[0]);
+    for (const patch of [{ createdTime: new Date(Date.now() - 7 * 86400000).toISOString() }, { createdTime: new Date(Date.now() + 86400000).toISOString() }, { createdTime: undefined }, { from: { ...original.from, isOwner: true } }, { from: { ...original.from, isOwner: undefined } }, { from: { isOwner: false } }, { canReply: false }]) {
+      Object.assign(f.comments[0], original, patch); assert.equal((await f.thread()).data.comments[0].privateReplyEligible, false);
+      assert.equal((await f.send(body)).data.error.code, 'PRIVATE_REPLY_INELIGIBLE');
+    }
+    Object.assign(f.comments[0], original, { message: 'This comment was edited after review.' }); assert.equal((await f.send(body)).data.error.code, 'PRIVATE_REPLY_REVIEW_REQUIRED');
+    Object.assign(f.comments[0], original); assert.equal((await f.send({ ...body, confirmSend: false })).data.error.code, 'PRIVATE_REPLY_REVIEW_REQUIRED');
+    assert.equal((await f.send({ ...body, postId: 'other-post' })).data.error.code, 'INBOX_ITEM_OUTSIDE_PROJECT');
+    assert.equal((await f.send({ ...body, commentId: 'other-comment' })).data.error.code, 'COMMENT_OUTSIDE_POST');
+    assert.equal((await f.send({ ...body, accountId: 'yt' })).data.error.code, 'INBOX_FEATURE_UNSUPPORTED');
+    assert.equal((await f.send({ ...body, accountId: 'foreign' })).status, 403);
+    f.setForeign(true); assert.equal((await f.send(body)).data.error.code, 'INVALID_PROVIDER_SCOPE'); f.setForeign(false);
+    assert.equal(f.writes().length, 0);
+    f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const before = f.calls.length; assert.equal((await f.send(body)).status, 403); assert.equal(f.calls.length, before);
+  } finally { await f.close(); }
+});
+
+test('private replies validate Meta buttons and quick replies and keep invalid payloads definitely failed and retryable', async () => {
+  const f = await privateReplyFixture();
+  try {
+    const body = await f.draft(), invalid = [
+      { buttons: [] }, { buttons: Array.from({ length: 4 }, () => ({ type: 'url', title: 'Link', url: 'https://example.com' })) },
+      { buttons: [{ type: 'url', title: 'An excessively long label', url: 'https://example.com' }] }, { buttons: [{ type: 'url', title: 'Link', url: 'http://127.0.0.1/private' }] },
+      { buttons: [{ type: 'postback', title: 'Reply', payload: '' }] }, { buttons: [{ type: 'phone', title: 'Call', phone: '555' }] }, { buttons: [{ type: 'url', title: 'Link', url: 'https://example.com', payload: 'unexpected' }] },
+      { quickReplies: Array.from({ length: 14 }, () => ({ title: 'Yes', payload: 'YES' })) }, { quickReplies: [{ title: 'Yes', payload: 'YES', imageUrl: 'https://192.168.1.1/icon' }] },
+      { buttons: [{ type: 'url', title: 'Link', url: 'https://example.com' }], quickReplies: [{ title: 'Yes', payload: 'YES' }] }, { template: {} }, { message: 'a'.repeat(2001) },
+    ];
+    for (const extra of invalid) { const rejected = await f.send({ ...body, ...extra }); assert.ok([400, 422].includes(rejected.status), JSON.stringify(rejected.data)); assert.equal(rejected.data.operation.status, 'failed'); }
+    assert.equal(f.writes().length, 0);
+    const buttons = [{ type: 'url', title: 'More information', url: 'https://example.com/details' }, { type: 'postback', title: 'Talk to us', payload: 'ASK_SUPPORT' }, { type: 'phone', title: 'Phone us', phone: '+15551234567' }];
+    assert.equal((await f.send({ ...body, buttons })).status, 200); assert.deepEqual(f.writes().at(-1).body.buttons, buttons);
+    f.comments[0].id = 'comment-2'; const quickReplies = Array.from({ length: 13 }, (_, index) => ({ title: `Option ${index + 1}`, payload: `OPTION_${index + 1}`, ...(index === 0 ? { imageUrl: 'https://example.com/icon.png' } : {}) }));
+    assert.equal((await f.send(await f.draft({ quickReplies }))).status, 200); assert.deepEqual(f.writes().at(-1).body.quickReplies, quickReplies);
+    f.comments[0].id = 'comment-3'; const igThread = await f.request(f.path + '/comments/thread?accountId=ig&postId=post-1'), ig = { ...body, commentId: 'comment-3', expectedCommentVersion: igThread.data.comments[0].privateReplyVersion, accountId: 'ig', buttons: [{ type: 'phone', title: 'Call', phone: '+15551234567' }] }; assert.equal((await f.send(ig)).data.error.code, 'INVALID_PRIVATE_REPLY'); assert.equal(f.writes().length, 2);
+  } finally { await f.close(); }
+});
+
+test('private reply consumed and unknown outcomes survive new keys and operator review cannot reopen spent comments', async () => {
+  for (const mode of ['consumed', 'unknown', 'malformed400', 'lost', 'bad-receipt']) {
+    const f = await privateReplyFixture('ig');
+    try {
+      const body = await f.draft(), key = randomUUID();
+      f.state.response = () => mode === 'consumed' ? Response.json({ error: 'Do not expose provider body or apiKey', apiKey: 'never-return-this', details: { privateReplyConsumed: true } }, { status: 400 }) : mode === 'unknown' ? Response.json({ details: { privateReplyOutcome: 'unknown' } }, { status: 502 }) : mode === 'malformed400' ? new Response('unreadable', { status: 400 }) : mode === 'lost' ? (() => { throw new Error('Lost acknowledgement'); })() : Response.json({ status: 'success', messageId: 'sent-1', commentId: 'different-comment', platform: 'instagram' });
+      const result = await f.send(body, key); assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.operation.status, mode === 'consumed' ? 'failed' : 'uncertain'); assert.equal(JSON.stringify(result.data).includes('never-return-this'), false);
+      assert.equal((await f.send(body, key)).status, 409); assert.equal((await f.send({ ...body, message: 'Do not repeat an unknown or consumed private reply.' })).status, 409); assert.equal(f.writes().length, 1);
+      const state = (await f.thread()).data.comments[0]; assert.equal(state.privateReplyEligible, false); assert.equal(state.privateReplyStatus, mode === 'consumed' ? 'consumed' : 'uncertain');
+      const review = await f.request(`/api/projects/${f.projectId}/operations/${result.data.operation.id}/review`, 'POST', { resolution: 'not_applied', confirmChecked: true, note: 'Checked the synthetic fixture conversation and provider receipt.' }); assert.equal(review.status, mode === 'consumed' ? 409 : 200, JSON.stringify(review.data));
+      f.state.response = null;
+      const fresh = await f.send({ ...body, message: 'Explicit new send after verified non-application.' }); assert.equal(fresh.status, mode === 'consumed' ? 409 : 200, JSON.stringify(fresh.data)); assert.equal(f.writes().length, mode === 'consumed' ? 1 : 2);
+    } finally { await f.close(); }
+  }
+});
+
+test('known nonconsumed private reply rejection releases the fence and concurrent changed payloads cannot dispatch twice', async () => {
+  const f = await privateReplyFixture(); let release;
+  try {
+    const body = await f.draft(); f.state.response = () => Response.json({ error: 'Invalid input', code: 'invalid_field_value' }, { status: 400 });
+    const failed = await f.send(body); assert.equal(failed.status, 400); assert.equal(failed.data.operation.status, 'failed'); assert.equal(f.app.db.prepare('SELECT COUNT(*) AS count FROM inbox_private_replies').get().count, 0); assert.equal((await f.thread()).data.comments[0].privateReplyEligible, true);
+    f.state.response = null; const held = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { f.state.onSend = async () => { resolve(); await held; }; });
+    const first = f.send(body); await started;
+    const competing = await f.send({ ...body, message: 'A concurrent different reply to the same comment.' }); assert.equal(competing.data.error.code, 'PRIVATE_REPLY_RECORDED');
+    release(); assert.equal((await first).status, 200); assert.equal(f.writes().length, 2, 'One known rejected request and one accepted send; the competing request never dispatches.');
+  } finally { release?.(); await f.close(); }
+});
+
+test('private reply rechecks account activity, exact platform, project mapping and current role after thread lookup', async () => {
+  for (const mode of ['inactive', 'platform', 'mapping', 'viewer']) {
+    const f = await privateReplyFixture('ads'); let reads = 0;
+    try {
+      const body = await f.draft();
+      f.state.before = (url, options) => {
+        if (url.pathname.endsWith('/accounts') && options.method === 'GET' && ++reads === 2) {
+          if (mode === 'inactive') f.accounts.find(row => row._id === 'ig').isActive = false;
+          if (mode === 'platform') f.accounts.find(row => row._id === 'ig').platform = 'facebook';
+          if (mode === 'mapping') f.app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile'").run();
+          if (mode === 'viewer') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+        }
+      };
+      const denied = await f.send(body); assert.ok([400, 403, 409, 422].includes(denied.status), JSON.stringify(denied.data)); assert.equal(f.writes().length, 0);
+    } finally { await f.close(); }
+  }
+});
+
 test('X and Instagram attachment replies use DM limits, inspect exact URLs and replay accepted sends without duplicates', async () => {
   const f = await fixture(), route = f.path + '/conversations/thread-1/reply'; let metadata;
   f.setHook(url => url.pathname.endsWith('/tools/validate/media') ? Response.json(metadata) : undefined);

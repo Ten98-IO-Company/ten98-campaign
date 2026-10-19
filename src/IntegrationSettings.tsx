@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { loadGoogleMaps } from './OohMap';
+import ZernioWebhooks from './ZernioWebhooks';
 
 type Project = { id: string; zernioProfileId?: string; driveFolderId?: string };
 type Props = { project: Project; isOperator: boolean; canManageProject: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void> };
@@ -128,6 +129,7 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
         {provider.id === 'googleMaps' && <div ref={mapContainer} className="integration-map-preview" role="region" aria-label="Google Maps connection preview" style={{ display: ['browser_loading', 'browser_loaded', 'failed'].includes(results.googleMaps?.status) ? 'block' : 'none' }}/>}
       </section>;
     })}</div>
+    {canMap && <ZernioWebhooks key={project.id} projectId={project.id} request={request}/>}
     <section className="panel integration-project-mappings"><div className="panel-heading"><div><h2>This project’s connections</h2><p>Each Zernio profile and shared calendar can belong to one project. Save connection changes before testing.</p></div><span className="subtle-tag">Project connections</span></div><div className="integration-mapping-grid">
       <form onSubmit={saveMapping}><fieldset disabled={!canMap || Boolean(busy)}><label className="field"><span>Zernio profile ID</span><input value={mapping.zernioProfileId} maxLength={200} onChange={event => setMapping({ ...mapping, zernioProfileId: event.target.value })} placeholder="Brand profile in Zernio"/></label><label className="field"><span>Google Drive folder ID</span><input value={mapping.driveFolderId} maxLength={200} onChange={event => setMapping({ ...mapping, driveFolderId: event.target.value })} placeholder="Shared creative folder ID"/></label><p className="field-help">Use the folder ID from its Google Drive URL. Leaving a field empty disconnects that mapping.</p>{canMap && <button className="button" type="submit">Save profile and folder</button>}</fieldset></form>
       <form onSubmit={saveCalendar}><fieldset disabled={!canMap || Boolean(busy) || !calendarLoaded}><label className="field"><span>Google Calendar ID</span><input value={mapping.calendarId} maxLength={500} onChange={event => setMapping({ ...mapping, calendarId: event.target.value })} placeholder="calendar-id@group.calendar.google.com"/></label><p className="field-help">Use a dedicated shared calendar with event editing access for the service account. Leaving this empty disconnects the calendar.</p>{canMap && <button className="button" type="submit">Save calendar mapping</button>}</fieldset></form>
