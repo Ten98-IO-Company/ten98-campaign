@@ -1,6 +1,30 @@
-# ten98 Campaign v0.8.9 — verification
+# ten98 Campaign v0.8.10 — verification
 
 ## Current expansion and acceptance limits
+
+Verified on 19 October 2026: **499 automated checks pass**, without failures, skips or cancellations. Type checking, the production frontend/container build and an offline non-root container smoke check pass. No dependency was added. The smoke harness needs writable temporary storage; the initial read-only `/tmp` attempt was corrected before the successful run.
+
+| Workflow | Verification and boundary |
+| --- | --- |
+| Navigation | All 16 main pages were opened in the browser. Page/primary-section URLs, refresh, Back/Forward, project history and inaccessible-project fallback were exercised. Actual-handler regressions cover membership-first requests and superseded project failures, including an independently reproduced stale-Back race. A page walkthrough does not verify every action inside that page. |
+| Unsaved editors | Browser checks cover Close, Escape, Cancel and Back retaining a post draft, followed by a successful local draft save. Ad-detail refresh retains unfinished Search creative; confirmed save preserves pins and both URLs and clears its dirty state. Actual-handler regressions cover ad selection and sibling campaign/ad-set drafts before refresh. |
+| Ad layout and copy | The ad dialog has usable width, padded content and a keyboard-scrollable results region. Browser screenshots confirm the table/action fit at the observed desktop viewport. Mobile dimensions were not established by the attempted browser override, so mobile acceptance is not claimed. Navigation uses Draft content; Integrations uses App administrator and deployment settings. |
+| Microsoft recovery | Synthetic HTTP checks cover accepted updates followed by rejected, faulted or revoked-access readback. Those receipts remain uncertain and block both original-key and fresh-key duplicate writes; preflight rejection remains retryable. An independent UI-handler check confirms no false success or discarded uncertain key. |
+| Hosting | The app was deployed on **04-lon-01**, at [campaign.ten98.io](https://campaign.ten98.io/), with persistent storage and a non-root runtime. The approved database/secret migration validated all 48 table fingerprints and the matching secret before public exposure. One former local short-link setting was explicitly changed to the hosted origin in the prepared snapshot; unrelated tables were unchanged. HTTPS, sign-in, existing administrator setup, security headers and anonymous state rejection were checked. Private data, secrets and migration payloads are excluded from this repository. |
+
+![Inline review protects an unfinished post](ui-draft-protection-verification.png)
+
+![Ad details retain their table and controls inside the dialog](ad-details-layout-verification.png)
+
+Runnable anchors are [navigation/editor handlers](../tests/navigation-editor-ui.test.mjs), [ad detail handlers](../tests/ads-ui.test.mjs), [native Microsoft HTTP workflows](../tests/native-microsoft-ads.test.mjs), and the retained neighboring project/onboarding/lead-form regressions. Independent correctness review reproduced and verified the two draft/navigation defects and the Microsoft uncertainty boundary. Ponytail's whole-tree inventory/import scan found only small unused bindings/imports; its findings were applied without new dependencies. Full-file reads covered the entry/integration settings, both native ad handlers/UIs and the touched editors, alongside smaller modules listed in the audit notes. **This is not a claim that every code line or every app flow has been audited.**
+
+Uncertain Microsoft changes require [operator recovery](advertising.md#credentials-recovery-and-acceptance): an app administrator who manages the workspace checks the provider dashboard, then records Applied or Not applied in Settings → Provider receipts & recovery. Only Not applied allows a new manual attempt; review never replays a request.
+
+UI behavior was compared with [Buffer scheduling](https://support.buffer.com/articles/scheduling-posts-4Qdld7giAZ), [Hootsuite publishing](https://help.hootsuite.com/s/article/create-publish), [Hootsuite inbox](https://help.hootsuite.com/s/article/custom-inbox), [Mixpost releases](https://mixpost.app/releases/pro), and the public [Zernio ads dashboard](https://github.com/zernio-dev/ads-dashboard). Authenticated Zernio dashboard screens were not inspected. Paperthin's read, evidence, consistency and independent-review checks distinguish simulated provider acceptance from live delivery.
+
+Provider credentials will be added by the operator. Real publication, message delivery, uploads, bookings, inference, platform eligibility and spend have not been established. The [full Zernio plan](zernio-feature-plan.md) remains incomplete; hosted availability and this cleanup release do not establish full parity.
+
+## Previous expansion — v0.8.9
 
 Verified on 19 October 2026: **488 automated checks pass**, with no failures, skips or cancellations. Type checking, the production frontend/container builds and offline non-root container startup pass. The production dependency audit reports **zero vulnerabilities**. No dependency was added.
 

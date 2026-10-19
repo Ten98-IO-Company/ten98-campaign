@@ -18,7 +18,6 @@ const telephone = value => typeof value === 'string' && /^\+?[1-9]\d{6,14}$/.tes
 const channelVersion = channel => digest(channel);
 const localVersion = contact => digest(Object.fromEntries(['id', 'name', 'email', 'phone', 'company', 'tags', 'consents', 'suppression', 'consentEvidence', 'identities'].map(key => [key, contact[key] ?? null])));
 const metadata = ['name', 'email', 'company', 'avatarUrl', 'tags', 'notes'];
-const editable = [...metadata, 'isSubscribed', 'isBlocked', 'customFields'];
 function strings(value, maximum = 100) {
   return Array.isArray(value) && value.length <= maximum && value.every(item => text(item, 200)) && new Set(value).size === value.length;
 }

@@ -1,12 +1,12 @@
 # Full Zernio feature support: scope and delivery breakdown
 
-Updated 19 October 2026. Application baseline: **v0.8.9**. Provider baseline: **Zernio OpenAPI 1.292.0**.
+Updated 19 October 2026. Application baseline: **v0.8.10**. Provider baseline: **Zernio OpenAPI 1.292.0**.
 
-Full Zernio support is the target. **The app does not provide it yet.** Releases through v0.8.9 implement the connection, publishing, measurement and inbox subsets below. Missing workflows remain implementation work; completing a subset does not complete its API family.
+Full Zernio support is the target. **The app does not provide it yet.** Releases through v0.8.10 implement the connection, publishing, measurement and inbox subsets below. Missing workflows remain implementation work; completing a subset does not complete its API family.
 
 ## Current expansion
 
-This ten98 Campaign implementation-status update includes the v0.8.9 attachment replies and Search creative protections. The listed subsets are implemented; their exact verification boundaries are linked below. Their wider API families remain incomplete.
+The v0.8.10 release adds URL-backed navigation, unsaved editor protection, cleaner ad details and Microsoft update recovery. Hosting and the 499-check acceptance boundary are recorded in [verification](verification.md). The listed Zernio subsets remain partial within their wider API families.
 
 | Area | Added workflow | Remaining boundary |
 | --- | --- | --- |

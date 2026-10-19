@@ -10,17 +10,17 @@ import { hashPassword } from '../server/auth.mjs';
 
 test('failed no-project refresh and workspace readback remain visible through the actual app handlers', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), context = {
-    state: { projectId: null }, loadVersion: { current: 0 }, activeProject: { current: '' }, pendingWork: { current: 0 },
+    state: { projectId: null, projects: [] }, navigationRef: { current: {} }, writeNavigation() {}, loadVersion: { current: 0 }, activeProject: { current: '' }, pendingWork: { current: 0 },
     setLoading() {}, setState() {}, setBusy() {}, setNotice() {}, errors: [], FormData: class { get() { return 'My campaign team'; } },
   };
   let failRead = false, creates = 0;
   context.api = async (path) => {
     if (path === '/workspaces') { creates++; return { projectId: 'created-project' }; }
     if (failRead) throw new Error('Workspace connection lost. Refresh access to try again.');
-    return { projectId: null };
+    return { projectId: null, projects: [] };
   };
   context.setError = value => context.errors.push(value);
-  for (const [name, end] of [['reload', '  async function run('], ['run', '  async function integrate('], ['createWorkspace', '  function exportReport(']]) {
+  for (const [name, end] of [['reload', '  function leaveEditor('], ['run', '  async function integrate('], ['createWorkspace', '  function exportReport(']]) {
     const start = source.indexOf(`async function ${name}(`), handler = source.slice(start, source.indexOf(end, start));
     context[name] = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(handler)});`)(...Object.values(context));
   }

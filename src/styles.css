@@ -22,3 +22,27 @@
 
 .shopping-controls{margin-top:20px!important}.shopping-controls>h3{margin-bottom:14px}.shopping-controls>.field{max-width:480px}.shopping-actions{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}.shopping-actions>.button{justify-self:start;grid-column:1/-1}.shopping-actions>details{padding:0;border:0}.shopping-actions>form{padding-top:0}.shopping-actions .field{margin-top:10px}@media(max-width:760px){.shopping-actions{grid-template-columns:1fr}}
 .integration-config{margin-top:16px}.integration-config>summary,.integration-help>summary,.agent-usage>summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--purple);padding:6px 0}.integration-help{margin-bottom:16px}.integration-help .integration-settings-help{margin:8px 0}.agent-usage{margin-top:16px}.agent-usage .agent-receipt{margin-top:8px}
+
+.modal:has(> .ad-details){width:min(960px,calc(100% - 32px))}
+.ad-details{padding:24px 28px;min-width:0;overflow-wrap:anywhere}
+.ad-details>.panel-heading{padding:0 0 20px;align-items:flex-start}
+.ad-details>.panel-heading>div{min-width:0}
+.ad-details>.panel-heading .field-help{margin:5px 0 0}
+.ad-details .table-scroll{margin-bottom:20px}
+.ad-details .table-scroll:focus-visible{outline:3px solid #a497ec;outline-offset:3px}
+.ad-details table{min-width:640px}
+.ad-details th,.ad-details td{padding:12px;vertical-align:top}
+.ad-details th{white-space:normal}
+.ad-details td:first-child{min-width:130px;max-width:240px;white-space:normal}
+.ad-details details{border-top:1px solid var(--border);padding:16px 0}
+.ad-details summary{cursor:pointer;font-size:13px;font-weight:600}
+.ad-details details[open]>summary{margin-bottom:16px}
+.modal .ad-details form{padding:0}
+.ad-details .field-help{margin:8px 0 16px}
+.ad-details .modal-actions{flex-wrap:wrap;margin-bottom:20px}
+.ad-details-selected{border-top:1px solid var(--border);padding-top:20px}
+.ad-details-selected>h3{margin-bottom:8px}
+.ad-details-discard{border:1px solid #efdec4;border-radius:7px;background:#faf3e8;padding:16px;margin-bottom:20px;font-size:13px;line-height:1.6}
+.ad-details-discard .button-wrap{margin-top:12px}
+.ad-details ul{padding-left:20px;font-size:12px;line-height:1.7;margin-bottom:20px}
+@media(max-width:760px){.ad-details{padding:20px}.ad-details .button{white-space:normal}.ad-details>.panel-heading{flex-wrap:wrap}}

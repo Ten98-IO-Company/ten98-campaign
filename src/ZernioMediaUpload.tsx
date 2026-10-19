@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 type Format = { contentType: string; extensions: string[]; kind: 'image' | 'video' | 'document' };
 type Options = { maxSize: number; formats: Format[]; asset?: { id: string; name?: string; url?: string }; assetVersion?: string; attempts?: Attempt[] };

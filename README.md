@@ -2,11 +2,13 @@
 
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.8.9 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter powers an optional campaign assistant. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.8.10 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter prepares optional content drafts. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
 
 The Zernio expansion includes hosted delivery uploads with recovery, scoped inbox attachment retrieval, explicit typing and reviewed stored-conversation removal. Separate account captions/media/options/times, fixed group recipients, queues, recurring posts, destination management, reports, lead forms, Google conversion settings, contacts/custom fields and paid-ad notifications remain available. Snapchat is blocked by provider approval; existing drafts remain available. Full Zernio parity and remaining manual browser/live-account acceptance are tracked in [verification and remaining scope](docs/verification.md).
+
+Pages, primary sections and project selection have shareable URLs and browser history. Unsaved editor dialogs use an inline discard review; ad-detail refreshes also protect unfinished creative and sibling campaign/ad-set forms. Accepted Microsoft updates with unavailable readback stay uncertain and cannot be automatically repeated.
 
 ## Run locally
 
@@ -41,7 +43,7 @@ Full Zernio coverage is the expansion target. The [detailed feature breakdown](d
 | DAM | Asset links, temporary Zernio delivery uploads with progress/recovery/cancellation, tags, approvals, Google Drive metadata sync, and Shared Drive uploads. Replacing delivery media preserves Drive originals and resets approval. |
 | Planning | Local publishing calendar and optional Google Calendar events and campaign-plan publishing. |
 | Analytics | Campaign totals and Zernio social dashboards, daily metrics, and top posts; missing live values remain unknown. |
-| Assistant | OpenRouter tool calls over the current project's campaigns, posts, placements and assets, usage reporting, and draft suggestions saved only after review. |
+| Draft content | OpenRouter tool calls over the current project's campaigns, posts, placements and assets, usage reporting, and draft suggestions saved only after review. |
 | Team and account | Workspace invitations, roles, local/OIDC sign-in, account details, local password changes, and session revocation. |
 | Integrations | Encrypted saved configuration, explicit read-only connection tests, project mappings, and audited handling of uncertain provider outcomes. |
 
@@ -49,7 +51,7 @@ Full Zernio coverage is the expansion target. The [detailed feature breakdown](d
 
 The **Integrations** page configures Zernio, OpenRouter, Google Shopping, Microsoft Advertising, Google Drive, Google Calendar, Google Maps, Broadsign, Cloudflare transactional email, and Twilio SMS. Expand a provider’s **Connection settings** to configure or test it; **Setup instructions** contains the detailed requirements. Only an **instance operator** can read or change installation-wide credentials and run connection tests. Operators also need workspace owner/admin access to change a project's Zernio profile, Drive folder, or shared calendar mapping. Workspace ownership alone does not grant installation credentials access.
 
-Saved fields override their server environment values. A blank secret field keeps its current credential; **Clear this credential** explicitly disables that field, including environment fallback. **Use server environment** removes that provider's saved overrides. Drive and Calendar share one service account, so saving, clearing, or resetting its credentials affects both. Credentials are not returned in settings responses; the Google Maps key is separately available to authorized project members because Google's browser service requires it.
+Saved fields override their server environment values. A blank secret field keeps its current credential; **Clear this credential** explicitly disables that field, including environment fallback. **Use deployment settings** removes that provider's saved overrides. Drive and Calendar share one service account, so saving, clearing, or resetting its credentials affects both. The Integrations UI calls the installation operator **App administrator**; workspace ownership alone does not grant this access. Credentials are not returned in settings responses; the Google Maps key is separately available to authorized project members because Google's browser service requires it.
 
 Settings are encrypted in SQLite using AES-256-GCM and a key derived from the instance session secret. Back up the database **with the matching `SESSION_SECRET` or generated `data/session-secret`**. Replacing that secret without preserving its match makes saved integration settings unreadable. Protect the complete data directory, including backups.
 

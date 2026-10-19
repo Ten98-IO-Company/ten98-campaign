@@ -92,7 +92,7 @@ test('an ad creation finishing after its dialog closes or changes cannot close a
 
 test('Display editing forwards replacement creative fields and unchanged or stale forms do not submit another write', async () => {
   const handler = javascript(details.slice(details.indexOf('async function edit('), details.indexOf('  async function editSet('))), calls = [], errors = [];
-  const base = { FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'display-ad', name: 'Existing ad' }, platform: 'google', channel: 'display', creative: {}, lines, copy: value => (value || []).join('\n'), setError: error => errors.push(error), act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), readAd: async () => {} };
+  const base = { FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'display-ad', name: 'Existing ad' }, platform: 'google', channel: 'display', creative: {}, lines, copy: value => (value || []).join('\n'), setError: error => errors.push(error), act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), confirmForm() {}, readAd: async () => {} };
   async function edit(values, extra = {}) { const context = { ...base, ...extra }; await new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context))({ preventDefault() {}, currentTarget: values }); }
   await edit({ longHeadline: 'New long headline', businessName: 'New brand', imageUrl: 'https://cdn.example.com/new.jpg', squareImageUrl: 'https://cdn.example.com/new-square.jpg' });
   assert.deepEqual(calls[0], { path: 'ads/edit', payload: { adId: 'display-ad', creative: { longHeadline: 'New long headline', businessName: 'New brand', imageUrl: 'https://cdn.example.com/new.jpg', squareImageUrl: 'https://cdn.example.com/new-square.jpg' } } });
@@ -108,7 +108,7 @@ test('RSA editing submits the reviewed full URL list and blocks missing, expired
   assert.deepEqual(pins({ headlines: null, descriptions: [{ text: 'Unverified pin', pinnedField: {} }, null] }), []);
   const handler = javascript(details.slice(details.indexOf('async function edit('), details.indexOf('  async function editSet('))), calls = [], errors = [];
   const creative = { headlines: [{ text: 'Pinned first', pinnedField: 'HEADLINE_1' }, { text: 'Second' }, { text: 'Third' }], descriptions: [{ text: 'First description' }, { text: 'Second description' }], finalUrls: ['https://brand.example/one', 'https://brand.example/two'] };
-  const base = { FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'search-ad' }, selected: { creativeReview: { version: 'a'.repeat(64), expiresAt: new Date(Date.now() + 60000).toISOString() } }, platform: 'google', channel: 'search', creative, lines, copy: value => (value || []).map(row => typeof row === 'string' ? row : row.text).join('\n'), setError: error => errors.push(error), act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), readAd: async () => {} };
+  const base = { FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'search-ad' }, selected: { creativeReview: { version: 'a'.repeat(64), expiresAt: new Date(Date.now() + 60000).toISOString() } }, platform: 'google', channel: 'search', creative, lines, copy: value => (value || []).map(row => typeof row === 'string' ? row : row.text).join('\n'), setError: error => errors.push(error), act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), confirmForm() {}, readAd: async () => {} };
   async function edit(values, extra = {}) { const context = { ...base, ...extra }; await new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context))({ preventDefault() {}, currentTarget: values }); }
   await edit({ finalUrls: 'https://brand.example/new\nhttps://brand.example/two' });
   assert.deepEqual(calls[0], { path: 'ads/edit', payload: { adId: 'search-ad', finalUrls: ['https://brand.example/new', 'https://brand.example/two'], expectedCreativeVersion: 'a'.repeat(64) } });
@@ -123,7 +123,7 @@ test('RSA editing submits the reviewed full URL list and blocks missing, expired
 test('a failed readback after a confirmed ad write requires refresh without claiming the write failed', async () => {
   const helper = stripTypeScriptTypes(details.slice(details.indexOf('async function readAd('), details.indexOf('  async function edit(')));
   const refreshStates = [], selections = [], errors = [], revisions = [];
-  const context = { isCurrent: () => true, setNeedsRefresh: value => refreshStates.push(value), setSelected: value => selections.push(value), setReadVersion: update => revisions.push(update(2)), setError: error => errors.push(error), requester: { current: async () => { throw new Error('Read timed out.'); } }, scopedRequest: (...args) => context.requester.current(...args) };
+  const context = { isCurrent: () => true, setNeedsRefresh: value => refreshStates.push(value), setSelected: value => selections.push(value), setReadVersion: update => revisions.push(update(2)), setDraftDirty() {}, setError: error => errors.push(error), requester: { current: async () => { throw new Error('Read timed out.'); } }, scopedRequest: (...args) => context.requester.current(...args) };
   const read = new Function(...Object.keys(context), `return (${helper});`)(...Object.values(context));
   await read('ad-a', true); assert.deepEqual(refreshStates, [true]); assert.equal(selections.length, 0); assert.match(errors[0], /provider confirmed the change/);
   context.requester.current = async () => ({ ad: { _id: 'ad-a' }, statusReadAt: null });
@@ -148,6 +148,94 @@ test('closed or changed ad scopes never notify the parent or swallow an aborted 
     reject(new DOMException('Project changed.', 'AbortError')); await work;
     assert.deepEqual(changes, []); assert.deepEqual(selections, []); assert.deepEqual(notices, ['']); assert.deepEqual(errors, ['']);
     if (stale !== 'project-abort') { await assert.rejects(scopedRequest('ads/ad-status', {}), { name: 'AbortError' }); assert.equal(requests.length, 1, 'A stale continuation must not send another provider request.'); }
+  }
+});
+
+test('ad refresh and selection wait for explicit discard, while uncertain saves retain the draft and other forms keep their own dirty state', async () => {
+  const compile = (code, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
+  const source = (start, end) => details.slice(details.indexOf(start), details.indexOf(end));
+  class Input { constructor(value, defaultValue) { this.value = value; this.defaultValue = defaultValue; } }
+  class Textarea extends Input {}
+  const input = new Textarea('Unsaved headline', 'Original headline'), events = [], errors = [];
+  let dirty = true, pending = null, calls = 0, resets = 0;
+  const form = { elements: [input], reset() { resets++; input.value = input.defaultValue; }, dispatchEvent(event) { events.push(event); } };
+  const context = {
+    isCurrent: () => true, draftDirty: true, editorForm: { current: form }, actionTrigger: { current: null },
+    document: { activeElement: { id: 'refresh-button' } }, HTMLInputElement: Input, HTMLTextAreaElement: Textarea,
+    setDraftDirty: value => { dirty = value; }, setPendingAction: value => { pending = value; },
+    setBusy() {}, setError: value => errors.push(value), setNotice() {},
+  };
+  context.confirmForm = compile(source('function confirmForm(', '  function discardDraft('), context);
+  context.hasDraft = compile(source('function hasDraft(', '  function trackDraft('), context);
+  context.act = compile(source('async function act(', '  async function readAd('), context);
+  const track = compile(source('function trackDraft(', '  return <section'), context);
+  track({ currentTarget: form }); assert.equal(dirty, true);
+  input.value = input.defaultValue; track({ currentTarget: form }); assert.equal(dirty, false, 'Reverting an edit needs no discard confirmation.');
+  assert.equal(events.at(-1).detail.outcome, 'restored'); events.length = 0;
+  input.value = 'Unsaved headline'; track({ currentTarget: form });
+  await context.act(async () => { calls++; }, '', true);
+  assert.equal(calls, 0); assert.equal(pending.message, ''); assert.equal(input.value, 'Unsaved headline');
+  assert.equal(context.actionTrigger.current.id, 'refresh-button');
+  const discard = compile(source('function discardDraft(', '  function hasDraft('), { ...context, pendingAction: pending });
+  discard(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1); assert.equal(resets, 1); assert.equal(dirty, false); assert.equal(pending, null);
+  assert.equal(events[0].type, 'campaign:editor-saved'); assert.equal(events[0].bubbles, true);
+  assert.equal(events[0].detail.form, form); assert.equal(events[0].detail.outcome, 'discarded');
+
+  dirty = true;
+  const otherForm = { dispatchEvent: event => events.push(event) };
+  context.confirmForm(otherForm); assert.equal(dirty, true, 'A campaign/ad-set save must not clear an unsaved creative.');
+  assert.equal(events.at(-1).detail.form, otherForm);
+  const editContext = {
+    ...context, FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'display-ad' }, platform: 'google', channel: 'display',
+    creative: {}, lines, copy: () => '', readAd: async () => {},
+    scopedRequest: async () => { throw new Error('Provider outcome unknown.'); },
+  };
+  await compile(source('async function edit(', '  async function editSet('), editContext)({ preventDefault() {}, currentTarget: { longHeadline: 'New headline' } });
+  assert.equal(dirty, true); assert.equal(errors.at(-1), 'Provider outcome unknown.');
+  const savedForm = { longHeadline: 'New headline', dispatchEvent: event => events.push(event) };
+  context.editorForm.current = savedForm;
+  await compile(source('async function edit(', '  async function editSet('), { ...editContext, scopedRequest: async () => ({ success: true }) })({ preventDefault() {}, currentTarget: savedForm });
+  assert.equal(dirty, false); assert.equal(events.at(-1).detail.form, savedForm); assert.equal(events.at(-1).detail.outcome, 'saved');
+});
+
+test('saving a campaign or ad set reviews sibling drafts before its full refresh and submits only the chosen form', async () => {
+  const compile = (code, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
+  const source = (start, end) => details.slice(details.indexOf(start), details.indexOf(end));
+  const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  class Input { constructor(value, defaultValue) { this.type = 'text'; this.value = value; this.defaultValue = defaultValue; } }
+  for (const saving of ['ad-set', 'campaign']) {
+    const dirtyScopes = { current: new Map() }, events = [], requests = [];
+    let pending = null, retry = 0, parentDirty = true;
+    const editorSaved = compile(main.slice(main.indexOf('function editorSaved('), main.indexOf('  async function shortenPostLinks(')), { dirtyScopes, setDraftDirty: value => { parentDirty = value; } });
+    function makeForm(value, original) {
+      const input = new Input(value, original);
+      return { get name() { return input.value; }, amount: '', elements: [input], reset() { input.value = input.defaultValue; }, dispatchEvent(event) { events.push(event); editorSaved(event.detail.form); } };
+    }
+    const submitted = makeForm('Chosen save', 'Original name'), sibling = makeForm('Unsaved sibling set', 'Original sibling set');
+    dirtyScopes.current.set(submitted, 1); dirtyScopes.current.set(sibling, 1);
+    const context = {
+      isCurrent: () => true, draftDirty: false, editorForm: { current: null }, detailsSection: { current: { querySelectorAll: () => [submitted, sibling] } },
+      actionTrigger: { current: null }, document: { activeElement: { focus() {} } }, HTMLInputElement: Input,
+      HTMLTextAreaElement: class {}, HTMLSelectElement: class {}, setPendingAction: value => { pending = value; },
+      setDraftDirty() {}, setBusy() {}, setError() {}, setNotice() {}, campaignId: 'campaign-a', platform: 'facebook', data: { campaign: { name: 'Original name' } },
+      FormData: FormValues, scopedRequest: async (path, payload) => { requests.push({ path, payload }); }, setRetry: update => { retry = update(retry); },
+    };
+    context.hasDraft = compile(source('function hasDraft(', '  function trackDraft('), context);
+    context.confirmForm = compile(source('function confirmForm(', '  function discardDraft('), context);
+    context.act = compile(source('async function act(', '  async function readAd('), context);
+    const handler = compile(saving === 'ad-set' ? source('async function editSet(', '  async function editCampaign(') : source('async function editCampaign(', '  function confirmForm('), context);
+    await handler({ preventDefault() {}, currentTarget: submitted }, { platformAdSetId: 'set-a', adSetName: 'Original name' });
+    assert.deepEqual(requests, []); assert.equal(retry, 0, 'The refresh cannot unmount sibling forms while review is pending.');
+    assert.deepEqual(pending.forms, [sibling]); assert.equal(submitted.name, 'Chosen save'); assert.equal(sibling.name, 'Unsaved sibling set');
+    assert.equal(parentDirty, true); assert.equal(dirtyScopes.current.size, 2);
+    compile(source('function discardDraft(', '  function hasDraft('), { ...context, pendingAction: pending })();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sibling.name, 'Original sibling set'); assert.equal(submitted.name, 'Chosen save', 'Discarding siblings must keep the submitted form values.');
+    assert.equal(requests.length, 1); assert.equal(requests[0].path, saving === 'ad-set' ? 'ads/adset' : 'ads/campaign');
+    assert.equal(requests[0].payload.name, 'Chosen save'); assert.equal(requests[0].payload.adSetId, saving === 'ad-set' ? 'set-a' : undefined);
+    assert.equal(retry, 1); assert.equal(dirtyScopes.current.size, 0); assert.equal(parentDirty, false);
+    assert.deepEqual(events.map(event => [event.detail.form, event.detail.outcome]), [[sibling, 'discarded'], [submitted, 'saved']]);
   }
 });
 
