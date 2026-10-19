@@ -12,6 +12,61 @@ function compile(code, context = {}) { return new Function(...Object.keys(contex
 const event = { preventDefault() {} }, path = '/projects/project-a/integrations/inbox';
 const merge = (before, after) => [...new Map([...before, ...after].map(row => [row.id, row])).values()];
 
+test('private comment replies keep the exact operation key until the scoped platform receipt is confirmed', async () => {
+  const keys = { current: new Map() }, calls = [], body = { accountId: 'fb', postId: 'post', commentId: 'comment', message: 'Reply privately', expectedCommentVersion: 'version', confirmSend: true };
+  const good = { operation: { status: 'complete' }, sent: true, accountId: 'fb', postId: 'post', commentId: 'comment', platform: 'facebook', messageId: 'message-1' }; let result = good;
+  const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, privateReplyTarget: { platform: 'facebook' }, requester: { current: async (...args) => { calls.push(args); return result; } } });
+  for (const invalid of [{ ...good, operation: { status: 'uncertain' } }, { ...good, sent: false }, { ...good, accountId: 'other' }, { ...good, postId: 'other' }, { ...good, commentId: 'other' }, { ...good, platform: 'instagram' }, { ...good, messageId: '' }]) {
+    result = invalid; await assert.rejects(write('comments/private-reply', body), /retained/); assert.equal(keys.current.size, 1);
+  }
+  result = good; await write('comments/private-reply', body); assert.equal(keys.current.size, 0); assert.ok(calls.every(row => row[3] === calls[0][3]));
+});
+
+test('private comment composer submits only its exact reviewed recipient, comment, message and interactive options', async () => {
+  const component = section('function PrivateCommentReply(', 'function ZernioInbox('), handler = component.slice(component.indexOf('async function submit('), component.indexOf('  return <form'));
+  const target = { id: 'comment', accountId: 'ig', postId: 'post', privateReplyVersion: 'reviewed-version' }, elements = [{ type: 'url', title: 'View details', url: 'https://example.com/details' }], sent = [], context = { target, busy: false, eligible: true, confirmed: 'review', review: 'review', message: 'Thanks for your question.', limit: 1000, mode: 'buttons', elements, onSend: async body => sent.push(body) };
+  for (const changes of [{ busy: true }, { eligible: false }, { confirmed: 'earlier-review' }, { message: ' ' }, { message: 'x'.repeat(1001) }, { elements: [] }]) await compile(handler, { ...context, ...changes })(event);
+  assert.deepEqual(sent, []);
+  await compile(handler, context)(event); assert.deepEqual(sent[0], { accountId: 'ig', postId: 'post', commentId: 'comment', expectedCommentVersion: 'reviewed-version', message: context.message, confirmSend: true, buttons: elements });
+  await compile(handler, { ...context, mode: 'text', elements: [] })(event); assert.equal(Object.hasOwn(sent[1], 'buttons'), false); assert.equal(Object.hasOwn(sent[1], 'quickReplies'), false);
+  const { code } = await transformWithOxc(component, 'PrivateCommentReply.tsx', { jsx: { runtime: 'classic' } });
+  let values = ['Preview message', 'buttons', elements, ''];
+  const render = new Function('React', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, () => [values.shift(), () => {}], value => value);
+  const html = renderToStaticMarkup(render({ target: { ...target, platform: 'instagram', from: { name: 'Alex' }, message: 'Public question' }, current: { privateReplyEligible: true, privateReplyVersion: target.privateReplyVersion }, busy: false, onSend() {}, onCancel() {} }));
+  assert.match(html, /Private message preview/); assert.match(html, /Preview message/); assert.match(html, /View details/); assert.match(html, /https:\/\/example.com\/details/); assert.match(html, /does not grant marketing permission/); assert.match(html, /Send private reply<\/button>/); assert.doesNotMatch(html, /Call a phone number/); assert.equal(sent.length, 2, 'Rendering a preview must never send.');
+  assert.match(component, /JSON\.stringify\(\[target\.accountId, target\.postId, target\.id, target\.privateReplyVersion, message, mode, elements\]\)/, 'Review must be invalidated by a changed recipient, comment, caption, mode or button.');
+});
+
+test('private reply handler retains unsuccessful drafts and ignores a stale account, post, comment or generation', async () => {
+  const target = { id: 'comment', accountId: 'ig', postId: 'post', privateReplyVersion: 'version' }, body = { accountId: 'ig', postId: 'post', commentId: 'comment', expectedCommentVersion: 'version', message: 'Thanks', confirmSend: true }, writes = [], cleared = [], notices = [], version = { current: 1 };
+  const context = { readOnly: false, privateReplyTarget: target, selected: { id: 'post' }, accountId: 'ig', version, action: async (_, run) => run(1), write: async (...args) => { writes.push(args); }, setPrivateReplyTarget: value => cleared.push(value), setDetail() {}, setNotice: value => notices.push(value), refreshAfterWrite: async () => {} };
+  const send = (changes = {}, draft = body) => compile(section('async function sendPrivateCommentReply(', '  async function loadReplyTemplates('), { ...context, ...changes })(draft);
+  for (const changes of [{ readOnly: true }, { privateReplyTarget: null }, { selected: null }, { accountId: 'fb' }, { selected: { id: 'another-post' } }, { privateReplyTarget: { ...target, id: 'other-comment' } }, { privateReplyTarget: { ...target, privateReplyVersion: 'changed-version' } }]) await send(changes);
+  await send({}, { ...body, confirmSend: false }); assert.equal(writes.length, 0);
+  await assert.rejects(send({ write: async () => { throw new Error('Outcome unknown'); } }), /unknown/); assert.deepEqual(cleared, []);
+  await send(); assert.deepEqual(writes[0], ['comments/private-reply', body]); assert.deepEqual(cleared, [null]); assert.match(notices[0], /Marketing permission has not changed/);
+  version.current = 2; await send(); assert.deepEqual(cleared, [null]);
+});
+
+test('consumed and unknown private reply failures immediately disable the composer and comment action while retaining the draft', async () => {
+  const comment = { id: 'comment', privateReplyEligible: true, privateReplyVersion: 'version' }, target = { ...comment, accountId: 'ig', postId: 'post', platform: 'instagram' }, body = { accountId: 'ig', postId: 'post', commentId: 'comment', expectedCommentVersion: 'version', message: 'Keep this private reply draft.', confirmSend: true }, cleared = [], version = { current: 1 };
+  const component = section('function PrivateCommentReply(', 'function ZernioInbox('), { code } = await transformWithOxc(component, 'PrivateCommentReply.tsx', { jsx: { runtime: 'classic' } });
+  for (const failure of [Object.assign(new Error('Do not retry.'), { status: 409, code: 'PRIVATE_REPLY_CONSUMED', operation: { status: 'failed' } }), Object.assign(new Error('Unknown outcome.'), { status: 409, code: 'OPERATION_UNCERTAIN', operation: { status: 'uncertain' } }), new Error('The reply receipt could not be read.')]) {
+    let detail = { comments: [{ id: 'parent', replies: [comment] }], parent: comment };
+    const send = compile(section('async function sendPrivateCommentReply(', '  async function loadReplyTemplates('), { readOnly: false, privateReplyTarget: target, selected: { id: 'post' }, accountId: 'ig', version, action: async (_, run) => run(1), write: async () => { throw failure; }, setDetail: update => { detail = update(detail); }, setPrivateReplyTarget: value => cleared.push(value), setNotice() {}, refreshAfterWrite: async () => {} });
+    await assert.rejects(send(body), error => error === failure); const current = detail.comments[0].replies[0];
+    assert.equal(current.privateReplyEligible, false); assert.equal(detail.parent.privateReplyEligible, false); assert.equal(current.privateReplyStatus, failure.code === 'PRIVATE_REPLY_CONSUMED' ? 'consumed' : 'uncertain'); assert.deepEqual(cleared, []);
+    const review = JSON.stringify([target.accountId, target.postId, target.id, target.privateReplyVersion, body.message, 'text', []]); let states = [body.message, 'text', [], review];
+    const render = new Function('React', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, () => [states.shift(), () => {}], value => value);
+    const html = renderToStaticMarkup(render({ target, current, busy: false, onSend() {}, onCancel() {} })); assert.match(html, /Keep this private reply draft/); assert.match(html, /disabled="">Send private reply/); assert.match(html, /already has a private reply recorded/);
+  }
+  for (const failure of [Object.assign(new Error('Known input rejection.'), { status: 400, code: 'PROVIDER_REJECTED', operation: { status: 'failed' } }), Object.assign(new Error('Known preflight failure.'), { status: 502, operation: { status: 'failed' } })]) {
+    let updates = 0;
+    const send = compile(section('async function sendPrivateCommentReply(', '  async function loadReplyTemplates('), { readOnly: false, privateReplyTarget: target, selected: { id: 'post' }, accountId: 'ig', version, action: async (_, run) => run(1), write: async () => { throw failure; }, setDetail: () => { updates++; } });
+    await assert.rejects(send(body)); assert.equal(updates, 0, 'Definitely failed requests remain retryable after correcting input or connection.');
+  }
+});
+
 test('stored-copy deletion preserves review on failure, rejects changed messages and clears only the confirmed target', async () => {
   const selected = { id: 'thread/opaque', deleteVersion: 'latest-message-v1' }, target = { ...selected, accountId: 'account-a' }, calls = [], cleared = [], rows = [], notices = [], version = { current: 1 };
   const context = { readOnly: false, selected, deleteTarget: target, confirmStoredDelete: true, accountId: 'account-a', action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { deletedMessages: 3 }; }, version, resetSelection: () => cleared.push(true), setRows: update => rows.push(update([selected, { id: 'other' }])), setNotice: value => notices.push(value) };
@@ -319,7 +374,7 @@ test('private reply limits follow account capabilities and attachment caption re
 
 test('thread refresh preserves an unfinished reply and post-write read failures never claim the confirmed write failed', async () => {
   const cleared = [], selected = { id: 'thread' }, errors = [];
-  const context = { selected, focusedComment: '', tab: 'messages', version: { current: 1 }, action: async (_, run) => run(1), fetchThread: async () => {}, resetTemplate() {}, setReplyTarget() {}, setMessage: value => cleared.push(value), setConfirmReplace() {}, setMessageTag() {}, setAttachmentUrl() {}, setAttachmentName() {}, setAttachmentPreview() {}, setMessageActionTarget() {}, setControlAction() {}, setTargetAppId() {}, setControlNote() {}, setConfirmControl() {}, setConfirmAccept() {} };
+  const context = { selected, focusedComment: '', tab: 'messages', version: { current: 1 }, action: async (_, run) => run(1), fetchThread: async () => {}, resetTemplate() {}, setReplyTarget() {}, setPrivateReplyTarget() {}, setMessage: value => cleared.push(value), setConfirmReplace() {}, setMessageTag() {}, setAttachmentUrl() {}, setAttachmentName() {}, setAttachmentPreview() {}, setMessageActionTarget() {}, setControlAction() {}, setTargetAppId() {}, setControlNote() {}, setConfirmControl() {}, setConfirmAccept() {} };
   const open = compile(section('async function openItem(', '  async function refreshAfterWrite('), context);
   await open(selected); assert.deepEqual(cleared, []); await open({ id: 'different-thread' }); assert.deepEqual(cleared, ['']);
   const refresh = compile(section('async function refreshAfterWrite(', '  function prepareReply('), { tab: 'messages', selected, focusedComment: '', version: { current: 1 }, fetchThread: async () => { throw new Error('Provider read failed'); }, setError: value => errors.push(value) });

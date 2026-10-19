@@ -8,6 +8,7 @@ import { handleZernioAdEvents } from './zernio-ad-events.mjs';
 import { handleZernioAccounts } from './zernio-accounts.mjs';
 import { handleZernioMeasurement } from './zernio-measurement.mjs';
 import { handleZernioAdmin } from './zernio-admin.mjs';
+import { handleWebhookSettings } from './zernio-webhook-settings.mjs';
 import { handleZernioPublishing } from './zernio-publishing.mjs';
 import { handleZernioConnections } from './zernio-connections.mjs';
 import { handleZernioInsights } from './zernio-insights.mjs';
@@ -73,9 +74,17 @@ async function request(url, options = {}, provider = 'Zernio', assertMapping) {
   catch { throw new IntegrationError(502, 'PROVIDER_UNAVAILABLE', `${provider} did not confirm the request.`, options.method && options.method !== 'GET'); }
   if (!response.ok) {
     const status = response.status === 429 ? 429 : response.status >= 500 ? 502 : 400;
-    let providerCode;
+    let providerCode; const privateReply = {};
+    if (target.hostname === 'zernio.com' && /^\/api\/v1\/inbox\/comments\/[^/]+\/[^/]+\/private-reply$/.test(target.pathname)) {
+      try {
+        const result = await providerJson(response), details = result?.details;
+        if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error();
+        if (typeof details?.privateReplyConsumed === 'boolean') privateReply.privateReplyConsumed = details.privateReplyConsumed;
+        if (details?.privateReplyOutcome === 'unknown') privateReply.privateReplyOutcome = 'unknown';
+      } catch { privateReply.privateReplyOutcome = 'unknown'; }
+    }
     if (target.hostname === 'api.twilio.com') { try { const result = await providerJson(response); if (Number.isSafeInteger(result?.code) && result.code >= 10000 && result.code <= 99999) providerCode = result.code; } catch { /* Preserve the sanitized rejection when the error body is unreadable. */ } }
-    throw Object.assign(new IntegrationError(status, response.status === 429 ? 'PROVIDER_RATE_LIMIT' : 'PROVIDER_REJECTED', `${provider} ${response.status === 429 ? 'rate limit reached. Try again later.' : 'could not complete this request. Check the connection and request details.'}`, (response.status >= 500 || [408, 409].includes(response.status)) && options.method && options.method !== 'GET'), { providerStatus: response.status, ...(providerCode === undefined ? {} : { providerCode }) });
+    throw Object.assign(new IntegrationError(status, response.status === 429 ? 'PROVIDER_RATE_LIMIT' : 'PROVIDER_REJECTED', `${provider} ${response.status === 429 ? 'rate limit reached. Try again later.' : 'could not complete this request. Check the connection and request details.'}`, (response.status >= 500 || [408, 409].includes(response.status)) && options.method && options.method !== 'GET'), { providerStatus: response.status, ...privateReply, ...(providerCode === undefined ? {} : { providerCode }) });
   }
   if (response.status === 204) { checkMapping(assertMapping, options.method && options.method !== 'GET'); return {}; }
   let result;
@@ -410,13 +419,14 @@ function rsaCreativeReview(result, ad, profileId, now = Date.now()) {
   const version = createHash('sha256').update(canonical({ profileId, adId: ad._id, platformAdId: scopeId(remote.platformAdId), accountId: scopeId(remote.accountId), adAccountId: scopeId(remote.platformAdAccountId), campaignId: scopeId(remote.platformCampaignId), adSetId: scopeId(remote.platformAdSetId), creative: normalized })).digest('hex');
   return { version, observedAt: new Date(now).toISOString(), expiresAt: new Date(Math.min(now, cached) + rsaReviewAge).toISOString(), creative: normalized };
 }
-function reviewedRsaPayload(payload, review, expectedVersion) {
+function reviewedRsaPayload(payload, review, expectedVersion, body) {
   if (!review || Date.parse(review.expiresAt) <= Date.now()) fail(409, 'GOOGLE_CREATIVE_NOT_CURRENT', 'Current Google Search text could not be verified. Refresh ad details before changing its creative.');
   if (expectedVersion !== review.version) fail(409, 'GOOGLE_CREATIVE_REVIEW_CHANGED', 'This Google Search creative changed since your review. Refresh ad details and review the current text and pinned positions.');
   const result = { ...payload };
   for (const key of ['headlines', 'descriptions']) if (payload[key]) {
+    if (body[key].every(reportObject)) continue;
     const previous = review.creative[key];
-    if (previous.some(row => row.pinnedField && !payload[key].some(item => item.text === row.text))) fail(409, 'GOOGLE_PINNED_TEXT_CHANGED', 'Keep the existing pinned text in this list. Replace or remove pinned text in Google Ads, then refresh here.');
+    if (previous.some(row => row.pinnedField && !payload[key].some(item => item.text === row.text))) fail(409, 'GOOGLE_PINNED_TEXT_CHANGED', 'Keep existing pinned text when sending text-only lists. Use the text and position controls to replace or remove pinned entries.');
     result[key] = payload[key].map(row => { const pinnedField = previous.find(item => item.text === row.text)?.pinnedField; return { ...row, ...(pinnedField ? { pinnedField } : {}) }; });
   }
   return result;
@@ -442,7 +452,15 @@ function editableAd(body, ad) {
     }
     if (body.headlines !== undefined || body.descriptions !== undefined || body.finalUrls !== undefined || body.creative !== undefined) {
       if (!['search', 'display'].includes(channel)) fail(400, 'UNSUPPORTED_AD_FIELD', 'Use the asset group fields for Performance Max or Demand Gen.');
-      for (const key of ['headlines', 'descriptions']) if (body[key] !== undefined) payload[key] = textList(body[key], key, channel === 'search' ? key === 'headlines' ? 3 : 2 : 1, channel === 'search' ? key === 'headlines' ? 15 : 4 : 5, key === 'headlines' ? 30 : 90).map(value => ({ text: value }));
+      for (const key of ['headlines', 'descriptions']) if (body[key] !== undefined) {
+        const structured = channel === 'search' && Array.isArray(body[key]) && body[key].some(row => typeof row === 'object');
+        const entries = structured ? body[key].map(row => { fields(row, ['text', 'pinnedField'], key); return row.text; }) : body[key];
+        payload[key] = textList(entries, key, channel === 'search' ? key === 'headlines' ? 3 : 2 : 1, channel === 'search' ? key === 'headlines' ? 15 : 4 : 5, key === 'headlines' ? 30 : 90).map((value, index) => {
+          const pin = structured ? body[key][index].pinnedField : undefined;
+          if (pin !== undefined && !(key === 'headlines' ? ['HEADLINE_1', 'HEADLINE_2', 'HEADLINE_3'] : ['DESCRIPTION_1', 'DESCRIPTION_2']).includes(pin)) fail(400, 'INVALID_AD_PIN', 'Choose an available pinned position for this text.');
+          return { text: value, ...(pin ? { pinnedField: pin } : {}) };
+        });
+      }
       if (body.finalUrls !== undefined) payload.finalUrls = textList(body.finalUrls, 'destination websites', 1, 10, 4000).map(mediaUrl);
       if (body.creative !== undefined) { if (channel !== 'display') fail(400, 'UNSUPPORTED_AD_FIELD', 'Search edits use headlines, descriptions, and destination websites.'); fields(body.creative, ['longHeadline', 'businessName', 'imageUrl', 'squareImageUrl'], 'Display creative'); payload.creative = {}; for (const [key, value] of Object.entries(body.creative)) payload.creative[key] = key.endsWith('Url') ? mediaUrl(value) : text(value, key, key === 'businessName' ? 25 : 90); }
     }
@@ -484,7 +502,7 @@ export async function operation(context, action, resourceKey) {
   const resource = resourceKey ? canonical([project.id, resourceKey]) : null;
   if (resource && active.has(resource)) fail(409, 'PROVIDER_RESOURCE_BUSY', 'Another change to this campaign is in progress. Wait for it to finish, refresh, then try again.');
   const id = randomUUID();
-  const known = new Set(['google-conversions', 'actions', 'goals', 'custom-goals', 'remove', 'contacts', 'fields', 'bulk', 'subscription', 'link', 'unlink', 'set', 'clear', 'recycling', 'posts', 'apply', 'stop', 'review', 'leads', 'forms', 'import', 'archive', 'test-leads', 'whatsapp-templates', 'templates', 'library', 'connections', 'credentials', 'code', 'react', 'unreact', 'thread-control', 'accept','queues', 'preview', 'accounts', 'health', 'reconnect', 'disconnect', 'measurement', 'tags', 'diagnostics', 'ad-accounts', 'admin', 'profile', 'groups','native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
+  const known = new Set(['google-conversions', 'actions', 'goals', 'custom-goals', 'remove', 'contacts', 'fields', 'bulk', 'subscription', 'link', 'unlink', 'set', 'clear', 'recycling', 'posts', 'apply', 'stop', 'review', 'leads', 'forms', 'import', 'archive', 'test-leads', 'whatsapp-templates', 'templates', 'library', 'connections', 'credentials', 'code', 'react', 'unreact', 'thread-control', 'accept','queues', 'preview', 'accounts', 'health', 'reconnect', 'disconnect', 'measurement', 'tags', 'diagnostics', 'ad-accounts', 'admin', 'profile', 'groups','native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'private-reply', 'webhook-settings', 'redeliver', 'test', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
   const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
   db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString(), actionPath, operation.runId);
   active.add(id); if (resource) active.add(resource);
@@ -882,6 +900,7 @@ export async function handleIntegration(context) {
     if ((path === 'whatsapp-templates' || path.startsWith('whatsapp-templates/')) && await handleZernioWhatsAppTemplates(context, api, profileId, path.slice('whatsapp-templates'.length).replace(/^\//, ''))) return true;
     if ((path === 'recycling' || path.startsWith('recycling/')) && await handleZernioRecycling(context, api, profileId, path.slice('recycling'.length).replace(/^\//, ''))) return true;
     if (path.startsWith('measurement/') && await handleZernioMeasurement(context, api, profileId, path.slice('measurement/'.length))) return true;
+    if ((path === 'webhook-settings' || path.startsWith('webhook-settings/')) && await handleWebhookSettings(context, api, profileId, path.slice('webhook-settings'.length).replace(/^\//, ''))) return true;
     if (path.startsWith('admin/') && await handleZernioAdmin(context, api, profileId, path.slice('admin/'.length))) return true;
     if (path.startsWith('publishing/') && await handleZernioPublishing(context, api, profileId, path.slice('publishing/'.length))) return true;
     if ((path === 'queues' || path.startsWith('queues/')) && await handleZernioQueues(context, api, profileId, path.slice('queues'.length).replace(/^\//, ''))) return true;
@@ -1196,7 +1215,7 @@ export async function handleIntegration(context) {
           const current = await scopedAd(api, profileId, ad._id);
           editableAd(body, current);
           reviewed = rsaCreativeReview(await api(`/ads/${encodeURIComponent(ad._id)}`, { live: true }), current, profileId);
-          outgoing = reviewedRsaPayload(payload, reviewed, body.expectedCreativeVersion);
+          outgoing = reviewedRsaPayload(payload, reviewed, body.expectedCreativeVersion, body);
           checkMapping(() => context.assertProjectMapping?.(profileId));
         }
         const result = await api(`/ads/${encodeURIComponent(ad._id)}${path === 'ads/ad-status' ? '/status' : ''}`, {}, outgoing, key, 'PUT');

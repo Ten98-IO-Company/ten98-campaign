@@ -9,6 +9,7 @@ export const WEBHOOK_MAX_BYTES = 1024 * 1024;
 const postEvents = new Set(['post.scheduled', 'post.published', 'post.failed', 'post.partial', 'post.cancelled', 'post.recycled', 'post.platform.published', 'post.platform.failed', 'post.platform.deleted', 'post.tiktok.url_resolved']);
 const messageEvents = new Set(['message.received', 'message.sent', 'message.edited', 'message.deleted', 'message.delivered', 'message.read', 'message.failed']);
 const inboxEvents = new Set([...messageEvents, 'conversation.started', 'conversation.control_changed', 'reaction.received', 'referral.received', 'comment.received', 'review.new', 'review.updated']);
+export const supportedWebhookEvents = [...new Set([...postEvents, ...inboxEvents, ...paidAdEvents])];
 const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f]/.test(value);
 const display = (value, maximum = 500) => typeof value === 'string' ? value.slice(0, maximum) : '';
 const header = (headers, name) => typeof headers?.get === 'function' ? headers.get(name) : Object.entries(headers || {}).find(([key]) => key.toLowerCase() === name)?.[1];

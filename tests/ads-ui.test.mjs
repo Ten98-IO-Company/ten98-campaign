@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 
 const composer = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8'), details = await readFile(new URL('../src/AdDetails.tsx', import.meta.url), 'utf8'), analytics = await readFile(new URL('../src/SocialAnalytics.tsx', import.meta.url), 'utf8');
-const javascript = value => value.replaceAll('event: React.FormEvent<HTMLFormElement>', 'event').replace(/ as Record<string, string>/g, '').replace(/: Record<string, (?:string\[\]|string|any)>/g, '').replaceAll('(err as Error)', 'err').replaceAll(' as SubmitEvent | undefined', '');
+const javascript = value => stripTypeScriptTypes(value);
 class FormValues { constructor(values) { return Object.entries(values); } }
 const lines = value => (value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
 const form = { countries: 'ae, sa, AE', name: 'QA campaign', budgetAmount: '50', headline: 'Main headline', body: 'Ad description', linkUrl: 'https://brand.example.com/launch', additionalHeadlines: 'Second headline\nThird headline', additionalDescriptions: 'Second description', keywords: 'launch campaign', businessName: 'QA brand', landscape: 'https://cdn.example.com/landscape.jpg', square: 'https://cdn.example.com/square.jpg', logo: 'https://cdn.example.com/logo.jpg', headlines: 'First headline\nSecond headline\nThird headline', descriptions: 'First description\nSecond description', longHeadline: 'A longer launch headline', longHeadlines: 'A longer video headline', youtubeVideoIds: 'abcdefghijk', videoUrl: 'https://cdn.example.com/video.mp4', thumbnailUrl: 'https://cdn.example.com/thumb.jpg', imageUrl: 'https://cdn.example.com/image.jpg', callToAction: 'LEARN_MORE', organizationId: '123456', boardId: 'board-a', bidAmount: '2', pixelId: 'reddit-pixel', customEventType: 'PURCHASE', postId: 'published-reddit-post', cardHeadline0: 'First card', cardHeadline1: 'Second card', cardImage0: 'https://cdn.example.com/card-one.jpg', cardImage1: 'https://cdn.example.com/card-two.jpg' };
@@ -103,21 +103,27 @@ test('Display editing forwards replacement creative fields and unchanged or stal
 
 test('RSA editing submits the reviewed full URL list and blocks missing, expired or unreadable creative reviews', async () => {
   const renderCopy = new Function(`return ${stripTypeScriptTypes('(' + details.match(/const copy = (.+);/)[1] + ')')};`)();
-  const pins = new Function('creative', `return ${stripTypeScriptTypes('(' + details.match(/const pinnedText = (.+);/)[1] + ')')};`);
   assert.equal(renderCopy({ unexpected: 'stored data' }), ''); assert.equal(renderCopy([null, { text: {} }, 'https://brand.example/two']), '\n\nhttps://brand.example/two');
-  assert.deepEqual(pins({ headlines: null, descriptions: [{ text: 'Unverified pin', pinnedField: {} }, null] }), []);
+  const rsaValues = new Function(`return ${stripTypeScriptTypes('(' + details.match(/const rsaValues = (.+);/)[1] + ')')};`)();
   const handler = javascript(details.slice(details.indexOf('async function edit('), details.indexOf('  async function editSet('))), calls = [], errors = [];
   const creative = { headlines: [{ text: 'Pinned first', pinnedField: 'HEADLINE_1' }, { text: 'Second' }, { text: 'Third' }], descriptions: [{ text: 'First description' }, { text: 'Second description' }], finalUrls: ['https://brand.example/one', 'https://brand.example/two'] };
-  const base = { FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'search-ad' }, selected: { creativeReview: { version: 'a'.repeat(64), expiresAt: new Date(Date.now() + 60000).toISOString() } }, platform: 'google', channel: 'search', creative, lines, copy: value => (value || []).map(row => typeof row === 'string' ? row : row.text).join('\n'), setError: error => errors.push(error), act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), confirmForm() {}, readAd: async () => {} };
+  const base = { FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'search-ad' }, selected: { creativeReview: { version: 'a'.repeat(64), expiresAt: new Date(Date.now() + 60000).toISOString() } }, platform: 'google', channel: 'search', creative, rsaValues, lines, copy: value => (value || []).map(row => typeof row === 'string' ? row : row.text).join('\n'), setError: error => errors.push(error), act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), confirmForm() {}, readAd: async () => {} };
   async function edit(values, extra = {}) { const context = { ...base, ...extra }; await new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context))({ preventDefault() {}, currentTarget: values }); }
   await edit({ finalUrls: 'https://brand.example/new\nhttps://brand.example/two' });
   assert.deepEqual(calls[0], { path: 'ads/edit', payload: { adId: 'search-ad', finalUrls: ['https://brand.example/new', 'https://brand.example/two'], expectedCreativeVersion: 'a'.repeat(64) } });
   for (const selected of [null, { creativeReview: null }, { creativeReview: { version: 'a'.repeat(64), expiresAt: new Date(Date.now() - 1000).toISOString() } }, { creativeReview: { version: 'a'.repeat(64), expiresAt: 'unreadable' } }]) {
-    await edit({ headlines: 'Pinned first\nChanged second\nThird' }, { selected });
+    await edit({ rsa_headlines_0: 'Pinned first', rsa_headlines_pin_0: 'HEADLINE_1', rsa_headlines_1: 'Changed second', rsa_headlines_2: 'Third' }, { selected });
     assert.match(errors.at(-1), /Refresh ad details/); assert.equal(calls.length, 1);
   }
   await edit({ countries: 'AE' }, { selected: null });
   assert.deepEqual(calls.at(-1).payload, { adId: 'search-ad', targeting: { countries: ['AE'] } }, 'Unrelated audience settings do not require RSA creative enrichment.');
+  const edits = { rsa_headlines_0: 'Changed pinned text', rsa_headlines_pin_0: 'HEADLINE_3', rsa_headlines_1: 'Second', rsa_headlines_2: 'Third', rsa_descriptions_0: 'First description', rsa_descriptions_pin_0: 'DESCRIPTION_2', rsa_descriptions_1: 'Second description' };
+  await edit(edits);
+  assert.deepEqual(calls.at(-1).payload, { adId: 'search-ad', headlines: [{ text: 'Changed pinned text', pinnedField: 'HEADLINE_3' }, { text: 'Second' }, { text: 'Third' }], descriptions: [{ text: 'First description', pinnedField: 'DESCRIPTION_2' }, { text: 'Second description' }], expectedCreativeVersion: 'a'.repeat(64) });
+  await edit({ ...edits, rsa_headlines_pin_0: '' }); assert.equal(calls.at(-1).payload.headlines[0].pinnedField, undefined, 'Choosing Unpinned explicitly removes its fixed position.');
+  const beforeInvalid = calls.length;
+  for (const invalid of [{ ...edits, rsa_headlines_0: '' }, { ...edits, rsa_headlines_0: 'Second' }, { ...edits, rsa_headlines_0: 'x'.repeat(31) }]) { await edit(invalid); assert.match(errors.at(-1), /Keep 3–15 distinct headlines/); assert.equal(calls.length, beforeInvalid); }
+  await edit({ ...edits, rsa_headlines_0: '', rsa_headlines_3: 'Replacement after removal' }); assert.deepEqual(calls.at(-1).payload.headlines, [{ text: 'Second' }, { text: 'Third' }, { text: 'Replacement after removal' }]);
 });
 
 test('a failed readback after a confirmed ad write requires refresh without claiming the write failed', async () => {

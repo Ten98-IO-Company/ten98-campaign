@@ -26,7 +26,8 @@ async function fixture(run) {
     }
     if (url.pathname === '/api/v1/ads/rsa-ad' && method === 'PUT') {
       state.writes.push(payload);
-      if (state.apply) for (const key of ['headlines', 'descriptions', 'finalUrls']) if (payload[key] !== undefined) state.creative[key] = payload[key];
+      if (state.apply) for (const key of ['headlines', 'descriptions', 'finalUrls']) if (payload[key] !== undefined) state.creative[key] = structuredClone(payload[key]);
+      state.afterWrite?.();
       return Response.json({ ad: { ...ad } });
     }
     if (url.pathname === '/api/v1/ads/rsa-ad/status' && method === 'PUT') { state.writes.push(payload); return Response.json({ configuredStatus: payload.status.toUpperCase() }); }
@@ -76,6 +77,48 @@ test('RSA full-list edits preserve pins and all retained URLs, confirm readback 
   assert.deepEqual(state.creative.descriptions, initial.descriptions, 'An omitted description list keeps its text and pins.');
   assert.deepEqual(await invoke('ads/edit', body, 'rsa-success-receipt'), result); assert.equal(state.writes.length, 1);
   assert.equal(state.calls.filter(call => call.path === '/api/v1/ads/rsa-ad' && call.method === 'GET').length, 3, 'Review, pre-dispatch check and confirmed post-write readback all use the actual detail endpoint.');
+}));
+
+test('RSA structured lists can replace pinned text, move pins, unpin and remove entries after a current review', () => fixture(async ({ state, initial, review, invoke }) => {
+  const headlines = [{ text: 'Replacement pinned headline', pinnedField: 'HEADLINE_3' }, { text: 'Second headline', pinnedField: 'HEADLINE_1' }, { text: 'Third headline' }, { text: 'Fourth headline' }];
+  let body = { adId: 'rsa-ad', expectedCreativeVersion: (await review()).version, headlines, descriptions: [{ text: 'Pinned description' }, { text: 'Second description', pinnedField: 'DESCRIPTION_2' }] };
+  let result = await invoke('ads/edit', body, 'rsa-structured-update');
+  assert.equal(result.status, 200, JSON.stringify(result));
+  assert.deepEqual(state.writes[0], { headlines, descriptions: body.descriptions });
+  assert.deepEqual(state.creative.finalUrls, initial.finalUrls, 'Every omitted destination remains unchanged.');
+  assert.deepEqual(await invoke('ads/edit', body, 'rsa-structured-update'), result); assert.equal(state.writes.length, 1);
+  body = { adId: 'rsa-ad', expectedCreativeVersion: (await review()).version, headlines: headlines.slice(1).map(({ text }) => ({ text })) };
+  result = await invoke('ads/edit', body);
+  assert.equal(result.status, 200, JSON.stringify(result)); assert.deepEqual(state.creative.headlines, [{ text: 'Second headline' }, { text: 'Third headline' }, { text: 'Fourth headline' }]);
+  assert.deepEqual(state.creative.descriptions, [{ text: 'Pinned description' }, { text: 'Second description', pinnedField: 'DESCRIPTION_2' }]);
+}));
+
+test('RSA structured edits validate exact text, positions and complete lists before dispatch', () => fixture(async ({ state, initial, review, invoke }) => {
+  const base = { adId: 'rsa-ad', expectedCreativeVersion: (await review()).version };
+  for (const headlines of [
+    [{ text: 'One' }, { text: 'Two' }],
+    [{ text: 'Same' }, { text: 'Same' }, { text: 'Third' }],
+    [{ text: 'x'.repeat(31) }, { text: 'Two' }, { text: 'Three' }],
+    [{ text: 'One', pinnedField: 'DESCRIPTION_1' }, { text: 'Two' }, { text: 'Three' }],
+    [{ text: 'One', pinnedField: '' }, { text: 'Two' }, { text: 'Three' }],
+    [{ text: 'One', pinnedField: null }, { text: 'Two' }, { text: 'Three' }],
+    [{ text: 'One', unknown: true }, { text: 'Two' }, { text: 'Three' }],
+    [{ text: 'One' }, 'Two', { text: 'Three' }],
+  ]) assert.equal((await invoke('ads/edit', { ...base, headlines })).status, 400, JSON.stringify(headlines));
+  assert.equal((await invoke('ads/edit', { ...base, descriptions: [{ text: 'Description one', pinnedField: 'HEADLINE_1' }, { text: 'Description two' }] })).status, 400);
+  assert.equal(state.writes.length, 0); assert.deepEqual(state.creative, initial);
+  state.creative.headlines[0].pinnedField = 'HEADLINE_2';
+  assert.equal((await invoke('ads/edit', { ...base, headlines: initial.headlines })).data.error.code, 'GOOGLE_CREATIVE_REVIEW_CHANGED');
+  assert.equal(state.writes.length, 0, 'Pin-only provider changes invalidate the reviewed version.');
+}));
+
+test('RSA pin mismatches after an accepted write retain an uncertain receipt and block duplicate writes', () => fixture(async ({ state, review, invoke }) => {
+  const body = { adId: 'rsa-ad', expectedCreativeVersion: (await review()).version, headlines: [{ text: 'Pinned headline' }, { text: 'Second headline' }, { text: 'Third headline', pinnedField: 'HEADLINE_2' }] };
+  state.afterWrite = () => { state.creative.headlines[0].pinnedField = 'HEADLINE_1'; };
+  const result = await invoke('ads/edit', body, 'rsa-pin-readback');
+  assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(state.writes.length, 1);
+  assert.equal((await invoke('ads/edit', body, 'rsa-pin-readback')).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(state.writes.length, 1);
+  assert.equal((await invoke('ads/edit', body, 'rsa-pin-new-request')).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(state.writes.length, 1, 'A new key cannot blindly repeat the same unresolved request.');
 }));
 
 test('RSA edits reject missing or changed reviews, pinned removals, stale reads, and role or mapping races before mutation', () => fixture(async ({ state, review, invoke }) => {
