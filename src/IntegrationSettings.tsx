@@ -18,7 +18,7 @@ const definitions: Record<string, { initial: string; description: string; help: 
   twilio: { initial: 'SMS', description: 'SMS campaigns, incoming replies and delivery reports.', help: 'Use one approved sender for this app. A Messaging Service takes priority over the sender number. Testing reads account access and sends no SMS. Use a public HTTPS app address for delivery reports.', fields: [{ name: 'accountSid', label: 'Account SID', placeholder: 'AC…' }, { name: 'authToken', label: 'Auth token', secret: true }, { name: 'fromNumber', label: 'Sender number', placeholder: '+15551234567' }, { name: 'messagingServiceSid', label: 'Messaging Service SID (optional)', placeholder: 'MG…' }] },
   cloudflareEmail: { initial: 'CF', description: 'Transactional email such as receipts, reminders, and service updates.', help: 'Cloudflare does not support marketing email. Enable Email Sending for the sender domain. The API token needs sending access; the read-only test also needs permission to read sending domains in this zone. No test email is sent.', fields: [{ name: 'accountId', label: 'Cloudflare account ID' }, { name: 'apiKey', label: 'Email Sending API token', secret: true }, { name: 'zoneId', label: 'Cloudflare zone ID (for connection test)' }, { name: 'fromAddress', label: 'Sender email address', type: 'email', placeholder: 'receipts@example.com' }, { name: 'fromName', label: 'Sender name (optional)' }, { name: 'replyToAddress', label: 'Reply-to email address (optional)', type: 'email', help: 'Route this address in Cloudflare to your Google Group or receiving inbox. Replies are handled there.' }] },
 };
-const sourceLabel = (source: string) => ({ saved: 'Saved in this app', environment: 'Server environment', mixed: 'Saved + environment', unconfigured: 'Not configured', disabled: 'Disabled in this app' }[source] || source);
+const sourceLabel = (source: string) => ({ saved: 'Saved in this app', environment: 'Deployment settings', mixed: 'App + deployment settings', unconfigured: 'Not configured', disabled: 'Disabled in this app' }[source] || source);
 
 export default function IntegrationSettings({ project, isOperator, canManageProject, request, onChanged }: Props) {
   const [providers, setProviders] = useState<Provider[]>([]), [drafts, setDrafts] = useState<Record<string, Record<string, string | null>>>({}), [results, setResults] = useState<Record<string, Result>>({});
@@ -57,13 +57,13 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
     });
   }
   async function reset(provider: Provider) {
-    if (!window.confirm(`Remove the saved ${provider.label} settings and use the server environment?${provider.id === 'googleDrive' || provider.id === 'googleCalendar' ? ' This changes both Google Drive and Calendar.' : ''}`)) return;
+    if (!window.confirm(`Remove the saved ${provider.label} settings and use the deployment settings?${provider.id === 'googleDrive' || provider.id === 'googleCalendar' ? ' This changes both Google Drive and Calendar.' : ''}`)) return;
     await action(provider.id, async () => {
       await request(`/settings/integrations/${provider.id}`, 'DELETE'); await refresh();
       if (!active.current) return;
       setDrafts(items => ({ ...items, [provider.id]: {}, ...(provider.id === 'googleDrive' || provider.id === 'googleCalendar' ? { googleDrive: {}, googleCalendar: {} } : {}) })); setResults({});
       if (provider.id === 'googleMaps') { mapsTested.current = false; cancelMapProbe.current?.(); setMapsReload(true); }
-      setNotice(`${provider.label} now uses its server environment settings.`); await onChanged?.();
+      setNotice(`${provider.label} now uses its deployment settings.`); await onChanged?.();
     });
   }
   async function test(provider: Provider) {
@@ -102,9 +102,9 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
   }
   function reloadMaps() { const url = new URL(window.location.href); url.searchParams.set('view', 'integrations'); url.searchParams.set('project', project.id); window.location.assign(url.href); }
   return <div className="integration-settings">
-    <section className="panel integration-settings-intro"><div><h2>Credentials and project connections</h2><p>Credentials apply across this installation. Project mappings choose the brand profile, creative folder, and calendar used here.</p></div><span className="subtle-tag">{isOperator ? 'Instance operator' : 'Project access'}</span></section>
+    <section className="panel integration-settings-intro"><div><h2>Credentials and project connections</h2><p>Credentials apply to every workspace. Project connections select the brand profile, creative folder and calendar.</p></div><span className="subtle-tag">{isOperator ? 'App administrator' : 'Project access'}</span></section>
     {error && <p className="alert error" role="alert">{error}</p>}{notice && <p className="integration-notice" role="status">{notice}</p>}
-    {!isOperator && <p className="alert">An instance operator can configure credentials and test provider connections. Your project mappings are shown below.</p>}
+    {!isOperator && <p className="alert">An app administrator can configure credentials and test provider connections. This project’s connections are shown below.</p>}
     {isOperator && !loaded && !error && <p role="status">Loading integration settings…</p>}
     <div className="integration-settings-grid">{providers.map(provider => {
       const definition = definitions[provider.id]; if (!definition) return null;
@@ -120,7 +120,7 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
           })}
           <details className="integration-help"><summary>Setup instructions</summary><p className="integration-settings-help">{definition.help}</p></details>
           {provider.id === 'zernio' && <p className="integration-webhook">Webhook URL <code>{window.location.origin}/api/webhooks/zernio</code></p>}
-          <div className="button-wrap"><button className="button primary" disabled={!changed}>Save settings</button><button type="button" className="button" disabled={!provider.configured || changed || (provider.id === 'googleMaps' && mapsReload)} onClick={() => test(provider)}>{busy === provider.id ? 'Working…' : 'Test connection'}</button><button type="button" className="text-link" onClick={() => reset(provider)}>Use server environment</button></div>
+          <div className="button-wrap"><button className="button primary" disabled={!changed}>Save settings</button><button type="button" className="button" disabled={!provider.configured || changed || (provider.id === 'googleMaps' && mapsReload)} onClick={() => test(provider)}>{busy === provider.id ? 'Working…' : 'Test connection'}</button><button type="button" className="text-link" onClick={() => reset(provider)}>Use deployment settings</button></div>
           {changed && <p className="field-help">Save these changes before testing.</p>}
         </fieldset></form></details>
         {provider.id === 'googleMaps' && mapsReload && <div className="integration-test-result"><p>Reload the app to apply the browser map settings before testing.</p><button className="button" type="button" onClick={reloadMaps}>Reload app</button></div>}
@@ -128,9 +128,9 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
         {provider.id === 'googleMaps' && <div ref={mapContainer} className="integration-map-preview" role="region" aria-label="Google Maps connection preview" style={{ display: ['browser_loading', 'browser_loaded', 'failed'].includes(results.googleMaps?.status) ? 'block' : 'none' }}/>}
       </section>;
     })}</div>
-    <section className="panel integration-project-mappings"><div className="panel-heading"><div><h2>This project’s connections</h2><p>Each Zernio profile and shared calendar can belong to one project. Connection tests use saved mappings; save mapping edits first.</p></div><span className="subtle-tag">Project mappings</span></div><div className="integration-mapping-grid">
+    <section className="panel integration-project-mappings"><div className="panel-heading"><div><h2>This project’s connections</h2><p>Each Zernio profile and shared calendar can belong to one project. Save connection changes before testing.</p></div><span className="subtle-tag">Project connections</span></div><div className="integration-mapping-grid">
       <form onSubmit={saveMapping}><fieldset disabled={!canMap || Boolean(busy)}><label className="field"><span>Zernio profile ID</span><input value={mapping.zernioProfileId} maxLength={200} onChange={event => setMapping({ ...mapping, zernioProfileId: event.target.value })} placeholder="Brand profile in Zernio"/></label><label className="field"><span>Google Drive folder ID</span><input value={mapping.driveFolderId} maxLength={200} onChange={event => setMapping({ ...mapping, driveFolderId: event.target.value })} placeholder="Shared creative folder ID"/></label><p className="field-help">Use the folder ID from its Google Drive URL. Leaving a field empty disconnects that mapping.</p>{canMap && <button className="button" type="submit">Save profile and folder</button>}</fieldset></form>
       <form onSubmit={saveCalendar}><fieldset disabled={!canMap || Boolean(busy) || !calendarLoaded}><label className="field"><span>Google Calendar ID</span><input value={mapping.calendarId} maxLength={500} onChange={event => setMapping({ ...mapping, calendarId: event.target.value })} placeholder="calendar-id@group.calendar.google.com"/></label><p className="field-help">Use a dedicated shared calendar with event editing access for the service account. Leaving this empty disconnects the calendar.</p>{canMap && <button className="button" type="submit">Save calendar mapping</button>}</fieldset></form>
-    </div>{!canMap && <p className="integration-mapping-permission">An instance operator with workspace administration access can change project mappings.</p>}</section>
+    </div>{!canMap && <p className="integration-mapping-permission">An app administrator who also manages this workspace can change project connections.</p>}</section>
   </div>;
 }

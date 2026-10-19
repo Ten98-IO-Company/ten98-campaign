@@ -8,8 +8,8 @@ import { transformWithOxc } from 'vite';
 test('campaign rows open the matching native advertising view and manual records retain their editor', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), start = source.indexOf('function openCampaign('), end = source.indexOf('  const campaignTable', start);
   assert.ok(start > 0 && end > start);
-  const calls = [], open = new Function('setPage', 'setAdsView', 'setModal', `return (${stripTypeScriptTypes(source.slice(start, end))});`)(value => calls.push(['page', value]), value => calls.push(['view', value]), value => calls.push(['modal', value]));
-  for (const [provider, view] of [['googleAdsNative', 'shopping'], ['microsoft', 'microsoft']]) { calls.length = 0; open({ nativeProvider: provider, id: 'native' }); assert.deepEqual(calls, [['page', 'Ads manager'], ['view', view]]); }
+  const calls = [], open = new Function('setPage', 'setAdsView', 'setModal', `return (${stripTypeScriptTypes(source.slice(start, end))});`)((...value) => calls.push(['page', ...value]), value => calls.push(['view', value]), value => calls.push(['modal', value]));
+  for (const [provider, view] of [['googleAdsNative', 'shopping'], ['microsoft', 'microsoft']]) { calls.length = 0; open({ nativeProvider: provider, id: 'native' }); assert.deepEqual(calls, [['page', 'Ads manager', view]]); }
   calls.length = 0; const manual = { id: 'manual' }; open(manual); assert.deepEqual(calls, [['modal', { type: 'campaign', item: manual }]]);
 });
 

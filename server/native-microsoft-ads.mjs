@@ -106,7 +106,9 @@ export async function handleMicrosoftAds(context) {
     if (!['Active', 'Paused'].includes(current.status) || body.dailyBudget !== undefined && (current.sharedBudget !== false || !['DailyBudgetStandard', 'DailyBudgetAccelerated'].includes(current.budgetType))) fail(422, 'MICROSOFT_CAMPAIGN_UNSUPPORTED', 'Manage terminal campaigns, shared or unconfirmed budgets and unsupported budget types in Microsoft Advertising.');
     const patch = { Id: campaignId, ...(body.status ? { Status: body.status } : {}), ...(body.dailyBudget !== undefined ? { DailyBudget: amount(body.dailyBudget) } : {}) }, result = await operation(context, async () => {
       noErrors(await api(campaignApi, '/Campaigns', { AccountId: mapping.accountId, Campaigns: [patch] }, 'PUT'));
-      const confirmed = (await campaigns(api, mapping)).find(row => row.id === campaignId); if (!confirmed || patch.Status && confirmed.status !== patch.Status || patch.DailyBudget !== undefined && confirmed.dailyBudget !== patch.DailyBudget) fail(502, 'MICROSOFT_READBACK_REQUIRED', 'Microsoft did not confirm the requested campaign change. Check the provider before repeating it.', true);
+      let confirmed;
+      try { confirmed = (await campaigns(api, mapping)).find(row => row.id === campaignId); if (!confirmed || patch.Status && confirmed.status !== patch.Status || patch.DailyBudget !== undefined && confirmed.dailyBudget !== patch.DailyBudget) throw new Error('Campaign update mismatch.'); }
+      catch { fail(502, 'MICROSOFT_READBACK_REQUIRED', 'Microsoft did not confirm the requested campaign change. Check the provider before repeating it.', true); }
       for (const local of store.list(project.id, 'campaigns').filter(row => row.nativeProvider === 'microsoft' && row.nativeAccountId === mapping.accountId && row.nativeCampaignId === campaignId)) store.update(project.id, 'campaigns', local.id, { status: confirmed.status.toLowerCase(), ...(patch.DailyBudget !== undefined ? { budget: confirmed.dailyBudget } : {}), providerStatus: confirmed.status });
       return { campaign: confirmed };
     }, ['ads', 'microsoft', campaignId]); send(result.status, result.data); return true;

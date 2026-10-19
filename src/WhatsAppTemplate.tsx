@@ -1,5 +1,3 @@
-import React from 'react';
-
 export function templateRestriction(template: any) {
   for (const component of template.components || []) {
     const type = String(component.type || '').toUpperCase();

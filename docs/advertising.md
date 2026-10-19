@@ -45,7 +45,7 @@ Eligible Search ads can reach Copilot inventory. Placement and approval are cont
 
 ## AI drafting and AI placements
 
-In **Assistant**, ask the configured OpenRouter model for an ad creative draft. **Review in ad builder** transfers supported copy, keywords and public media references into the existing composer. Select the account and budget yourself before submitting. Suggestions never create or activate provider campaigns automatically; model inference is remote through OpenRouter. Expand **Usage and cost** on a draft to see the recorded requests, tokens and reported charge.
+In **Draft content**, ask the configured OpenRouter model for an ad creative draft. **Review in ad builder** transfers supported copy, keywords and public media references into the existing composer. Select the account and budget yourself before submitting. Suggestions never create or activate provider campaigns automatically; model inference is remote through OpenRouter. Expand **Usage and cost** on a draft to see the recorded requests, tokens and reported charge.
 
 Google Search, Shopping and Performance Max campaigns can be eligible for Google's AI search experiences under Google's market, targeting and auction rules. The app provides these paid campaign types; it does not promise an AI-only placement or separate AI Overviews reporting. [Google AI Overviews eligibility](https://support.google.com/google-ads/answer/16297775), [AI Mode advertising](https://business.google.com/us/accelerate/announcements/ads-in-ai-mode/).
 
@@ -58,5 +58,7 @@ Native secrets are encrypted in the private database. Automatic refresh-token re
 Every native mapping and action checks project access. Mutations use the shared operation ledger; uncertain writes remain blocked. An instance operator who also administers the workspace checks the provider dashboard, opens **Settings → Provider receipts & recovery**, and records **Applied** or **Not applied** with a note. Only Not applied allows a new manual attempt; the interface generates its new action key automatically. Review does not replay the request or update the campaign automatically. Manual campaign records cannot overwrite or delete provider-managed delivery evidence. Ordinary validation failures can be corrected and retried.
 
 Changes to one advertising campaign are serialized through its provider readback. A concurrent change stops before writing; completed receipts can still be replayed safely. Confirmed Zernio status and campaign budget changes update matching local campaign records. Acknowledgements without status readback do not invent a confirmed delivery state.
+
+Ad details use an inline discard review before refreshing unfinished creative or replacing sibling campaign/ad-set forms. Saving one form never silently discards another form's edits. A Microsoft update that was accepted before readback failed remains uncertain, including when the readback is rejected or access changes; repeating the same change stays blocked until reconciliation.
 
 Automated and browser checks use isolated synthetic accounts and simulated provider responses. Live account acceptance still requires your credentials, developer-token approval, eligible products/creative, permissions and provider readbacks. The tests do not establish real placement or spending results.

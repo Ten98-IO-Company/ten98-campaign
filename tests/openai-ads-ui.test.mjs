@@ -30,8 +30,8 @@ test('ChatGPT credential form clears the entered key on confirmed connection and
 });
 
 test('ChatGPT campaign budget form submits the chosen lifetime type instead of silently converting it to daily', async () => {
-  const source = details.slice(details.indexOf('async function editCampaign('), details.indexOf('  return <section>')), calls = [];
-  const context = { FormData: FormValues, campaignId: 'campaign', platform: 'openai', data: { campaign: {} }, act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), setRetry() {} };
+  const source = details.slice(details.indexOf('async function editCampaign('), details.indexOf('  function confirmForm(')), calls = [];
+  const context = { FormData: FormValues, campaignId: 'campaign', platform: 'openai', data: { campaign: {} }, act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), confirmForm() {}, setRetry() {} };
   await compile(source, context)({ preventDefault() {}, currentTarget: { amount: '150', budgetType: 'lifetime' } });
   assert.deepEqual(calls[0].payload.budget, { amount: 150, type: 'lifetime' });
 });

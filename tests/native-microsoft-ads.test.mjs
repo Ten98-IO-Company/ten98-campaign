@@ -25,8 +25,15 @@ async function fixture() {
     }
     assert.equal(url.hostname, 'campaign.api.bingads.microsoft.com');
     const path = url.pathname.slice('/CampaignManagement/v13'.length), nextId = () => String(++counter);
-    if (path === '/Campaigns/QueryByAccountId') { assert.equal(body.AccountId, '100'); return Response.json({ Campaigns: state.campaigns }); }
-    if (path === '/Campaigns' && options.method === 'PUT') { if (state.mode !== 'ignore-status-update') Object.assign(state.campaigns.find(row => row.Id === body.Campaigns[0].Id), body.Campaigns[0]); return Response.json({ PartialErrors: [] }); }
+    if (path === '/Campaigns/QueryByAccountId') {
+      assert.equal(body.AccountId, '100');
+      const failure = state.nextUpdateReadbackFailure; delete state.nextUpdateReadbackFailure;
+      if (state.mode === 'preflight-read-failure' || failure === 'http') return Response.json({}, { status: 400 });
+      if (failure === 'fault') return Response.json({ OperationErrors: [{ Code: 'SyntheticReadFailure' }] });
+      if (failure === 'revoked') app.db.prepare("UPDATE memberships SET role='viewer' WHERE user_id=?").run(state.revokeUserId);
+      return Response.json({ Campaigns: state.campaigns });
+    }
+    if (path === '/Campaigns' && options.method === 'PUT') { if (state.mode !== 'ignore-status-update') Object.assign(state.campaigns.find(row => row.Id === body.Campaigns[0].Id), body.Campaigns[0]); if (state.updateReadbackFailure) state.nextUpdateReadbackFailure = state.updateReadbackFailure; return Response.json({ PartialErrors: [] }); }
     // Microsoft's REST SDK defaults to MaxClicks, while accepting both that and the legacy SOAP name on reads:
     // https://github.com/BingAds/BingAds-Python-SDK/blob/main/openapi_client/models/campaign/bidding_scheme.py
     if (path === '/Campaigns') { assert.equal(body.Campaigns[0].Status, 'Paused'); assert.equal(body.Campaigns[0].CampaignType, 'Search'); assert.deepEqual(body.Campaigns[0].BiddingScheme, { Type: 'MaxClicks', MaxCpc: { Amount: 2 } }); const row = { Id: nextId(), BudgetId: '0', ...body.Campaigns[0] }; state.campaigns.push(row); return Response.json({ CampaignIds: [row.Id], PartialErrors: [] }); }
@@ -173,4 +180,27 @@ test('Microsoft status-only controls work with shared and unknown budgets withou
     const unconfirmed = await f.request(route, 'POST', body, key); assert.equal(unconfirmed.status, 409); assert.equal(unconfirmed.data.operation.status, 'uncertain'); assert.equal(f.app.store.get(f.projectId, 'campaigns', created.data.campaign.id).status, 'active');
     before = writes().length; for (const retry of [key, randomUUID()]) assert.equal((await f.request(route, 'POST', body, retry)).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(writes().length, before);
   } finally { await f.close(); }
+});
+
+test('accepted Microsoft changes stay uncertain after rejected or revoked readback, while preflight reads remain retryable', async () => {
+  for (const failure of ['http', 'fault', 'revoked']) {
+    const f = await fixture();
+    try {
+      await f.map(); const created = await f.request(f.prefix + '/campaigns', 'POST', input, randomUUID()); assert.equal(created.status, 200);
+      const route = f.prefix + '/campaigns/' + created.data.providerCampaign.id, writes = () => f.calls.filter(row => row.method === 'PUT').length;
+      f.state.mode = 'preflight-read-failure';
+      const preflight = await f.request(route, 'POST', { status: 'Paused', confirmed: true }, randomUUID());
+      assert.equal(preflight.status, 400); assert.equal(preflight.data.operation, undefined); assert.equal(writes(), 0);
+      f.state.mode = ''; assert.equal((await f.request(route, 'POST', { status: 'Paused', confirmed: true }, randomUUID())).status, 200);
+      const before = writes(), body = { status: 'Active', confirmed: true }, key = randomUUID();
+      f.state.updateReadbackFailure = failure; f.state.revokeUserId = f.userId;
+      const result = await f.request(route, 'POST', body, key);
+      assert.equal(f.state.campaigns[0].Status, 'Active', 'The provider already applied this update.');
+      assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.operation.status, 'uncertain');
+      assert.equal(f.app.store.get(f.projectId, 'campaigns', created.data.campaign.id).status, 'paused', 'Unconfirmed readback cannot advance the local receipt.');
+      f.app.db.prepare("UPDATE memberships SET role='owner' WHERE user_id=?").run(f.userId); f.state.updateReadbackFailure = '';
+      for (const retryKey of [key, randomUUID()]) assert.equal((await f.request(route, 'POST', body, retryKey)).data.error.code, 'OPERATION_UNCERTAIN');
+      assert.equal(writes(), before + 1, 'Neither retry may repeat the accepted provider update.');
+    } finally { await f.close(); }
+  }
 });
