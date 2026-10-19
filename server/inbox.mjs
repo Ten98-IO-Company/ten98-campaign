@@ -22,6 +22,13 @@ const REVIEWS = new Set(['facebook', 'googlebusiness']);
 const WRITERS = new Set(['owner', 'admin', 'editor']);
 const START = new Set(['twitter', 'bluesky', 'reddit', 'slack', 'whatsapp', 'sms']);
 const EDIT_MESSAGE = new Set(['telegram', 'imessage']), DELETE_MESSAGE = new Set(['telegram', 'twitter', 'bluesky', 'reddit', 'imessage']), REACT_MESSAGE = new Set(['telegram', 'whatsapp', 'facebook', 'instagram', 'slack', 'imessage']);
+const TYPING = new Set(['facebook', 'instagram', 'telegram', 'whatsapp', 'imessage']);
+const downloadTypes = new Map([
+  ['image/jpeg', ['image', 'jpg', 5]], ['image/png', ['image', 'png', 5]], ['image/webp', ['image', 'webp', 5]],
+  ['video/mp4', ['video', 'mp4', 16]], ['video/3gpp', ['video', '3gp', 16]],
+  ['audio/aac', ['audio', 'aac', 16]], ['audio/mp4', ['audio', 'm4a', 16]], ['audio/mpeg', ['audio', 'mp3', 16]], ['audio/amr', ['audio', 'amr', 16]], ['audio/ogg', ['audio', 'ogg', 16]],
+  ...[...DOCUMENT_MIMES].map((mime, index) => [mime, ['file', ['pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'][index], 100]]),
+]);
 const conversationFields = ['id', 'platform', 'accountId', 'accountUsername', 'participantId', 'participantName', 'participantUsername', 'participantPicture', 'participantVerifiedType', 'businessScopedUserId', 'whatsappUsername', 'lastMessage', 'lastMessageAt', 'updatedTime', 'status', 'unreadCount', 'threadControl', 'folder', 'url', 'instagramProfile', 'metadata'];
 const messageFields = ['id', 'conversationId', 'accountId', 'platform', 'message', 'senderId', 'senderName', 'direction', 'createdAt', 'attachments', 'subject', 'storyReply', 'isStoryMention', 'noRenderableContent', 'isEdited', 'editedAt', 'editCount', 'editHistory', 'isDeleted', 'deletedAt', 'deliveryStatus', 'reactions', 'sentVia'];
 const postFields = ['id', 'platform', 'accountId', 'accountUsername', 'content', 'picture', 'permalink', 'createdTime', 'commentCount', 'likeCount', 'cid', 'subreddit', 'isAd', 'adId', 'placement'];
@@ -44,7 +51,7 @@ function validateReview(row) {
 }
 
 export function inboxCapabilities(platform) {
-  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : platform === 'sms' ? ['image', 'video'] : platform === 'instagram' ? ['image', 'video', 'audio'] : ['image', 'video', 'audio', 'file'], archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
+  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), typing: TYPING.has(platform), deleteStoredConversation: DM.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : platform === 'sms' ? ['image', 'video'] : platform === 'instagram' ? ['image', 'video', 'audio'] : ['image', 'video', 'audio', 'file'], archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
 }
 function supported(account, feature) { if (!inboxCapabilities(account.platform)[feature] || account.isActive === false) fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'This account does not support this inbox action. Reconnect the account if its permissions changed.'); }
 function scoped(row, accounts, expectedAccount) {
@@ -216,6 +223,97 @@ async function findMessage(api, account, conversationId, resolvedId, messageId) 
   }
   fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This message is beyond the verified history window. Open it in the provider dashboard.');
 }
+function deletionVersion(row, messages) {
+  if (messages.some(message => !Number.isFinite(Date.parse(message.createdAt)))) return null;
+  const latest = [...messages].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id.localeCompare(a.id));
+  return createHash('sha256').update(JSON.stringify([inboxConversationVersion(row), latest.map(message => inboxMessageVersion(message, row.accountId))])).digest('hex');
+}
+function deletionTable(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS inbox_conversation_deletions(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,conversation_id TEXT NOT NULL,status TEXT NOT NULL,operation_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(project_id,profile_id,account_id,conversation_id))`);
+  if (!db.prepare('PRAGMA table_info(inbox_conversation_deletions)').all().some(column => column.name === 'operation_id')) db.exec("ALTER TABLE inbox_conversation_deletions ADD COLUMN operation_id TEXT NOT NULL DEFAULT ''");
+}
+async function deleteConversation(context, api, account, conversationId, row, key) {
+  const { body, db, project } = context;
+  fields(body, ['accountId', 'expectedDeleteVersion', 'confirmConversationId']);
+  const latest = await history(api, account, conversationId, {}, row.id);
+  if (latest.sortOrderApplied !== 'desc' || !deletionVersion(row, latest.messages) || body.expectedDeleteVersion !== deletionVersion(row, latest.messages) || body.confirmConversationId !== conversationId) fail(409, 'CONVERSATION_DELETE_REVIEW_REQUIRED', 'Refresh the latest messages and confirm this stored conversation before deleting it.');
+  deletionTable(db);
+  const binding = [project.id, project.zernioProfileId, account._id, row.id];
+  const previous = db.prepare('SELECT status,operation_id FROM inbox_conversation_deletions WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?').get(...binding);
+  if (previous && (!['pending', 'uncertain'].includes(previous.status) || db.prepare('SELECT status FROM integration_operations WHERE id=? AND project_id=?').get(previous.operation_id, project.id)?.status !== 'reviewed-not-applied')) fail(409, 'CONVERSATION_DELETE_RECORDED', 'A deletion of this stored conversation is already complete or needs reconciliation. A new action key cannot repeat it until an operator verifies the original action was not applied.');
+  if (previous) db.prepare('DELETE FROM inbox_conversation_deletions WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?').run(...binding);
+  const original = db.prepare('SELECT id FROM integration_operations WHERE project_id=? AND request_key=?').get(project.id, context.req.headers['idempotency-key']);
+  db.prepare("INSERT INTO inbox_conversation_deletions(project_id,profile_id,account_id,conversation_id,status,operation_id) VALUES(?,?,?,?,'pending',?)").run(...binding, original.id);
+  try {
+    const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}`, { accountId: account._id }, undefined, key, 'DELETE'), receipt = result.data;
+    if (result.success !== true || !plain(receipt) || ![conversationId, row.id].includes(receipt.id) || receipt.accountId !== account._id || receipt.platform !== account.platform || !Number.isSafeInteger(receipt.deletedMessages) || receipt.deletedMessages < 0) invalid(true);
+    db.prepare("UPDATE inbox_conversation_deletions SET status='deleted' WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?").run(...binding);
+    return { accepted: true, deleted: true, scope: 'zernio_copy', conversationId, deletedMessages: receipt.deletedMessages };
+  } catch (error) {
+    if (!(error instanceof IntegrationError) || error.uncertain) db.prepare("UPDATE inbox_conversation_deletions SET status='uncertain' WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?").run(...binding);
+    else db.prepare('DELETE FROM inbox_conversation_deletions WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?').run(...binding);
+    throw error;
+  }
+}
+async function attachment(context, api, accounts, account, conversationId, messageId, index, download, apiKey) {
+  const row = await conversation(api, accounts, account, conversationId), message = await findMessage(api, account, conversationId, row.id, messageId), item = message?.attachments?.[index];
+  if (!item || message.isDeleted || message.deliveryStatus === 'deleted') fail(404, 'ATTACHMENT_NOT_FOUND', 'This attachment was not found in the selected account and conversation.');
+  if (account.platform !== 'whatsapp') {
+    if (download) fail(400, 'ATTACHMENT_DOWNLOAD_UNSUPPORTED', 'Resolve this platform’s public media link before opening it.');
+    let result;
+    try { result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/attachments/${index}`, { accountId: account._id, format: 'json' }); }
+    catch (error) { if (error.providerStatus === 404) fail(410, 'ATTACHMENT_UNAVAILABLE', 'This attachment is unavailable or expired at the provider. Refresh the thread; the media may no longer be recoverable.'); throw error; }
+    let url;
+    try { url = publicMediaUrl(result.url); } catch { invalid(); }
+    if (result.status !== 'success' || typeof result.refreshed !== 'boolean') invalid();
+    return { attachment: { type: item.type, url, refreshed: result.refreshed, ...(typeof item.filename === 'string' ? { filename: item.filename.slice(0, 255) } : {}) } };
+  }
+  let target;
+  try {
+    target = new URL(item.url);
+    const parts = target.pathname.match(/^\/api\/v1\/whatsapp\/media\/([^/]+)$/);
+    if (target.origin !== 'https://zernio.com' || target.username || target.password || target.hash || !parts || !valid(decodeURIComponent(parts[1])) || [...target.searchParams.keys()].some(name => name !== 'accountId') || target.searchParams.getAll('accountId').length > 1 || target.searchParams.has('accountId') && target.searchParams.get('accountId') !== account._id || item.payload?.id != null && String(item.payload.id) !== decodeURIComponent(parts[1])) throw new Error();
+    target.search = new URLSearchParams({ accountId: account._id }).toString();
+  } catch { fail(502, 'INVALID_ATTACHMENT', 'The provider attachment is outside its verified WhatsApp account.'); }
+  const downloadUrl = `${context.url.pathname}?${new URLSearchParams({ accountId: account._id, download: '1' })}`;
+  if (!download) return { attachment: { type: item.type, downloadUrl, refreshed: false } };
+  let response, reader;
+  const abort = new AbortController(), closed = () => abort.abort(); context.res.once('close', closed);
+  try {
+    response = await fetch(target, { headers: { Authorization: `Bearer ${apiKey}` }, redirect: 'error', signal: AbortSignal.any([AbortSignal.timeout(20000), abort.signal]) });
+    context.assertProjectMapping?.(context.project.zernioProfileId);
+    if (!response.ok) fail(response.status === 400 || response.status === 404 ? 410 : 502, 'ATTACHMENT_UNAVAILABLE', response.status === 400 || response.status === 404 ? 'WhatsApp no longer serves this attachment. It cannot be recovered by retrying.' : 'WhatsApp could not provide this attachment. Try again later.');
+    const mime = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase(), details = downloadTypes.get(mime), expected = item.type === 'sticker' ? 'image' : item.type, length = response.headers.get('content-length');
+    if (!details || details[0] !== expected || item.mimeType && item.mimeType.split(';')[0].toLowerCase() !== mime || length !== null && (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) < 1 || Number(length) > details[2] * 1024 * 1024)) fail(502, 'ATTACHMENT_UNAVAILABLE', 'WhatsApp returned an unsupported file type or an attachment beyond its download limit.');
+    const maximum = details[2] * 1024 * 1024;
+    reader = response.body?.[Symbol.asyncIterator](); let part = await reader?.next();
+    if (!part || part.done || !part.value.length || part.value.length > maximum) fail(502, 'ATTACHMENT_UNAVAILABLE', 'WhatsApp did not return an attachment within its download limit.');
+    context.assertProjectMapping?.(context.project.zernioProfileId);
+    context.res.writeHead(200, { 'Content-Type': mime, 'Content-Disposition': `attachment; filename="inbox-attachment.${details[1]}"`, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+    let size = 0;
+    while (!part.done) {
+      const chunk = part.value;
+      size += chunk.length;
+      if (size > maximum) fail(502, 'ATTACHMENT_UNAVAILABLE', 'This attachment exceeds its download limit.');
+      context.assertProjectMapping?.(context.project.zernioProfileId);
+      if (context.res.destroyed) throw new Error();
+      if (!context.res.write(chunk)) await new Promise((resolve, reject) => {
+        const cleanup = () => { context.res.off('drain', drain); context.res.off('close', close); }, drain = () => { cleanup(); resolve(); }, close = () => { cleanup(); reject(new Error('Download closed')); };
+        context.res.once('drain', drain); context.res.once('close', close);
+      });
+      part = await reader.next();
+    }
+    if (length !== null && size !== Number(length)) throw new Error();
+    context.res.end();
+    return null;
+  } catch (error) {
+    abort.abort(); await reader?.return?.().catch(() => {});
+    await response?.body?.cancel().catch(() => {});
+    if (context.res.headersSent) { context.res.destroy(); return null; }
+    if (error instanceof IntegrationError || error?.status) throw error;
+    fail(502, 'ATTACHMENT_UNAVAILABLE', 'This WhatsApp attachment could not be downloaded. Try again later.');
+  } finally { context.res.off('close', closed); }
+}
 function emoji(value, platform) {
   if (typeof value !== 'string' || !value || value.length > 64 || (platform === 'slack' ? !/^:[a-z0-9_+\-]{1,60}:$/i.test(value) : [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(value)].length !== 1 || !/[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(value))) fail(400, 'INVALID_REACTION', platform === 'slack' ? 'Use a Slack emoji name such as :thumbsup:.' : 'Choose one standard emoji reaction.');
   return value;
@@ -358,11 +456,11 @@ export async function handleInbox(context) {
   const { req, url, project, role, send, body = {} } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/inbox`;
   if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
   const path = url.pathname.slice(prefix.length).replace(/^\//, '');
-  const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status|thread-control|accept))?$/), messageAction = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/(edit|delete|react|unreact)$/), action = path.match(/^(comments|reviews)\/(reply|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
-  if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews'].includes(path) && !route && !messageAction && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
+  const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status|thread-control|accept|typing|delete))?$/), messageAction = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/(edit|delete|react|unreact)$/), media = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/attachments\/(0|[1-9]\d?)$/), action = path.match(/^(comments|reviews)\/(reply|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
+  if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews'].includes(path) && !route && !messageAction && !media && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
   try {
     if (!['GET', 'POST'].includes(req.method)) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available inbox controls.');
-    const mutation = Boolean(path === 'conversations/start' || route && ['reply', 'read', 'status', 'thread-control', 'accept'].includes(route[2]) || messageAction || action);
+    const mutation = Boolean(path === 'conversations/start' || route && ['reply', 'read', 'status', 'thread-control', 'accept', 'typing', 'delete'].includes(route[2]) || messageAction || action);
     if (req.method !== (mutation ? 'POST' : 'GET')) fail(405, 'METHOD_NOT_ALLOWED', 'This inbox action does not support that method.');
     if (mutation && !WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this inbox action.');
     const env = { ...(context.config?.env || process.env), ...(context.config || {}) }, profileId = project.zernioProfileId, assertMapping = () => context.assertProjectMapping?.(profileId);
@@ -378,6 +476,13 @@ export async function handleInbox(context) {
     accounts.forEach(account => renderFields(account, ['_id', 'platform', 'displayName', 'username', 'name'], [], ['isActive']));
     if (['status', 'accounts'].includes(path)) { send(200, { configured: true, mapped: true, webhookConfigured: Boolean(env.ZERNIO_WEBHOOK_SECRET), accounts: accounts.filter(account => { const c = inboxCapabilities(account.platform); return c.messages || c.comments || c.reviews; }).map(account => ({ id: account._id, platform: account.platform, name: account.displayName || account.username || account.name || account.platform, capabilities: inboxCapabilities(account.platform) })) }); return true; }
     const accountId = id(req.method === 'GET' ? url.searchParams.get('accountId') : body.accountId), account = requireAccount(accounts, accountId);
+    if (media) {
+      supported(account, 'messages');
+      if (url.searchParams.has('download') && url.searchParams.get('download') !== '1') fail(400, 'INVALID_ATTACHMENT', 'Choose the supported attachment download.');
+      const result = await attachment(context, api, accounts, account, decodedId(media[1]), decodedId(media[2]), Number(media[3]), url.searchParams.get('download') === '1', env.ZERNIO_API_KEY);
+      if (result) send(200, result);
+      return true;
+    }
     const run = async key => {
       if (path === 'conversations/search') { supported(account, 'messages'); return searchConversations(api, accounts, account, url); }
       if (path === 'conversations/start') return startConversation(context, api, account, env, assertMapping, key);
@@ -402,7 +507,16 @@ export async function handleInbox(context) {
           const result = await history(api, account, conversationId, query(url, 'messages'), row.id), incoming = result.messages.some(message => message.direction === 'incoming' && message.senderId === row.participantId);
           let windowAge = Infinity;
           if (['facebook', 'instagram'].includes(account.platform)) try { windowAge = incomingAge(await recentHistory(api, account, conversationId, row.id)); } catch (error) { assertMapping(); if (!(error instanceof IntegrationError) || error.code === 'INVALID_PROVIDER_SCOPE') throw error; /* History remains readable when reaction eligibility cannot be verified. */ }
-          return { ...result, messages: result.messages.map(message => ({ ...message, version: inboxMessageVersion(message, accountId), actions: messageActions(account, message, windowAge) })), conversation: conversationView(account, row), contact: conversationContact(context, row, incoming) };
+          const latest = !url.searchParams.get('cursor') && result.sortOrderApplied === 'desc' ? result : await history(api, account, conversationId, {}, row.id);
+          return { ...result, messages: result.messages.map(message => ({ ...message, version: inboxMessageVersion(message, accountId), actions: messageActions(account, message, windowAge) })), conversation: { ...conversationView(account, row), deleteVersion: latest.sortOrderApplied === 'desc' ? deletionVersion(row, latest.messages) : null }, contact: conversationContact(context, row, incoming) };
+        }
+        if (route[2] === 'delete') return deleteConversation(context, api, account, conversationId, row, key);
+        if (route[2] === 'typing') {
+          supported(account, 'typing'); fields(body, ['accountId', 'confirmTyping']);
+          if (body.confirmTyping !== true) fail(400, 'TYPING_CONFIRMATION_REQUIRED', 'Choose Send typing indicator explicitly; WhatsApp may also mark the latest inbound message read.');
+          const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/typing`, {}, { accountId }, key);
+          if (typeof result.success !== 'boolean') invalid(true);
+          return { accepted: true, delivered: result.success, conversationId, ...(account.platform === 'whatsapp' ? { mayMarkRead: true } : {}) };
         }
         if (route[2] === 'thread-control') return changeControl(context, api, accounts, account, conversationId, row, key);
         if (route[2] === 'accept') return acceptRequest(context, api, accounts, account, conversationId, row, key);

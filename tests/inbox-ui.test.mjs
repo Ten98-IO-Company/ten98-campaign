@@ -12,6 +12,55 @@ function compile(code, context = {}) { return new Function(...Object.keys(contex
 const event = { preventDefault() {} }, path = '/projects/project-a/integrations/inbox';
 const merge = (before, after) => [...new Map([...before, ...after].map(row => [row.id, row])).values()];
 
+test('stored-copy deletion preserves review on failure, rejects changed messages and clears only the confirmed target', async () => {
+  const selected = { id: 'thread/opaque', deleteVersion: 'latest-message-v1' }, target = { ...selected, accountId: 'account-a' }, calls = [], cleared = [], rows = [], notices = [], version = { current: 1 };
+  const context = { readOnly: false, selected, deleteTarget: target, confirmStoredDelete: true, accountId: 'account-a', action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { deletedMessages: 3 }; }, version, resetSelection: () => cleared.push(true), setRows: update => rows.push(update([selected, { id: 'other' }])), setNotice: value => notices.push(value) };
+  const submit = changes => compile(section('async function submitStoredDelete(', '  function prepareMessageAction('), { ...context, ...changes })(event);
+  for (const change of [{ readOnly: true }, { confirmStoredDelete: false }, { selected: { ...selected, deleteVersion: 'new-message' } }, { accountId: 'other' }]) await submit(change);
+  assert.equal(calls.length, 0); await assert.rejects(submit({ write: async () => { throw new Error('Unknown'); } }), /Unknown/); assert.equal(cleared.length, 0);
+  await submit(); assert.deepEqual(calls[0], ['conversations/thread%2Fopaque/delete', { accountId: 'account-a', expectedDeleteVersion: selected.deleteVersion, confirmConversationId: selected.id }]); assert.deepEqual(rows[0], [{ id: 'other' }]); assert.equal(cleared.length, 1); assert.match(notices[0], /platform thread and local contact remain/);
+  version.current = 2; await submit(); assert.equal(cleared.length, 1, 'A late receipt cannot clear another project’s selection.');
+});
+
+test('typing uses an inline WhatsApp review, binds its current thread and reports false without claiming delivery', async () => {
+  const calls = [], notices = [], reviews = [], errors = [], selected = { id: 'thread', deleteVersion: 'latest-v1' }, context = { readOnly: false, selected, accountId: 'wa', account: { platform: 'whatsapp' }, capabilities: { typing: true }, typingReview: '', setTypingReview: value => reviews.push(value), setError: value => errors.push(value), action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { delivered: false }; }, version: { current: 1 }, setNotice: value => notices.push(value) };
+  const send = (changes = {}, confirmed = false) => compile(section('async function sendTyping(', '  function prepareStoredDelete('), { ...context, ...changes })(confirmed);
+  await send(); assert.equal(calls.length, 0); const reviewed = reviews.at(-1); assert.equal(reviewed, JSON.stringify(['wa', 'thread', 'latest-v1']));
+  await send({ typingReview: reviewed, selected: { ...selected, deleteVersion: 'new-message' } }, true); assert.equal(calls.length, 0); assert.match(errors.at(-1), /conversation changed/);
+  await send({ typingReview: reviewed }, true); assert.deepEqual(calls[0], ['conversations/thread/typing', { accountId: 'wa', confirmTyping: true }]); assert.match(notices[0], /No typing indicator was sent/);
+  await send({ account: { platform: 'telegram' }, write: async () => ({ delivered: true }) }); assert.match(notices.at(-1), /Typing indicator sent to the platform/);
+  const count = calls.length; await send({ readOnly: true }); assert.equal(calls.length, count);
+  assert.doesNotMatch(section('async function sendTyping(', '  function prepareStoredDelete('), /window\.confirm/); assert.match(source, /onClick=\{\(\) => sendTyping\(true\)\}/);
+});
+
+test('attachment loading validates returned URLs and ignores a late completion after the target changes', async () => {
+  const component = section('function InboxAttachment(', 'function MessageActions('), handler = component.slice(component.indexOf('async function load('), component.indexOf('\n  return <div'));
+  const calls = [], saved = [], errors = [], generation = { current: 1 }, target = path + '/conversations/thread/messages/message/attachments/0', item = { type: 'image' };
+  const context = { loading: false, busy: false, generation, target, accountId: 'wa', item, request: async (...args) => { calls.push(args); return { attachment: { type: 'image', downloadUrl: `/api${target}?accountId=wa&download=1`, refreshed: false } }; }, link: value => value?.startsWith('https:') ? value : undefined, setLoading() {}, setError: value => errors.push(value), setResolved: value => saved.push(value) };
+  const load = changes => compile(handler, { ...context, ...changes })();
+  await load(); assert.equal(saved.length, 1); assert.deepEqual(calls[0], [target + '?accountId=wa']);
+  await load({ request: async () => ({ attachment: { type: 'image', downloadUrl: '/api/foreign-private-file', refreshed: false } }) }); assert.match(errors.at(-1), /could not be verified/); assert.equal(saved.length, 1);
+  await load({ request: async () => { generation.current++; return { attachment: { type: 'image', url: 'https://cdn.example.test/image.jpg', refreshed: true } }; } }); assert.equal(saved.length, 1);
+});
+
+test('a refreshed message attachment remounts its resolver at the same message and index', async () => {
+  const element = source.match(/<InboxAttachment key=.+?\/>/)[0];
+  const { code } = await transformWithOxc(`function render(selected, item, attachment, index) { return ${element}; }`, 'AttachmentKey.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', 'InboxAttachment', 'path', 'accountId', 'requester', 'busy', `${code}; return render;`)(React, () => null, path, 'account', { current() {} }, false);
+  const before = render({ id: 'thread' }, { id: 'message', version: 'attachment-before' }, { type: 'image', filename: 'before.jpg' }, 0), after = render({ id: 'thread' }, { id: 'message', version: 'attachment-after' }, { type: 'image', filename: 'after.jpg' }, 0);
+  assert.notEqual(before.key, after.key, 'A changed canonical message version must discard both the old resolved URL and its pending request.');
+  assert.notEqual(render({ id: 'thread' }, { id: 'message' }, { type: 'image', url: 'https://cdn.example.test/a.jpg' }, 0).key, render({ id: 'thread' }, { id: 'message' }, { type: 'image', url: 'https://cdn.example.test/b.jpg' }, 0).key, 'Legacy responses without a version still reset on attachment identity changes.');
+});
+
+test('typing and conversation deletion receipts retain keys until their exact result is verified', async () => {
+  const keys = { current: new Map() }, calls = []; let result = { operation: { status: 'complete' }, accepted: true, conversationId: 'other-thread', deleted: true, deletedMessages: 2, scope: 'zernio_copy' };
+  const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, requester: { current: async (...args) => { calls.push(args); return result; } } });
+  await assert.rejects(write('conversations/thread/delete', { accountId: 'account' }), /retained/); assert.equal(keys.current.size, 1);
+  result = { ...result, conversationId: 'thread' }; await write('conversations/thread/delete', { accountId: 'account' }); assert.equal(keys.current.size, 0); assert.equal(calls[0][3], calls[1][3]);
+  result = { operation: { status: 'complete' }, accepted: true, conversationId: 'thread' }; await assert.rejects(write('conversations/thread/typing', { accountId: 'account' }), /retained/);
+  result.delivered = false; await write('conversations/thread/typing', { accountId: 'account' }); assert.equal(keys.current.size, 0);
+});
+
 test('message action handlers submit the reviewed snapshot, retain failures and reject a stale or read-only target', async () => {
   const calls = [], cleared = [], notices = [], version = { current: 1 }, item = { id: 'message/opaque', version: 'message-version', message: 'Original', actions: { canEdit: true, canDelete: true } }, target = { kind: 'edit', item, conversationId: 'thread/opaque', accountId: 'account-a' };
   const context = { readOnly: false, selected: { id: 'thread/opaque' }, accountId: 'account-a', messageActionTarget: target, actionText: 'Edited message', actionEmoji: '👍', confirmMessageAction: true, action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { observed: true }; }, version, setMessageActionTarget: value => cleared.push(value), setNotice: value => notices.push(value), refreshAfterWrite: async () => {} };
@@ -192,12 +241,12 @@ test('reply template loading keeps only approved scoped definitions and ignores 
 test('read/archive are explicit writes and destructive public changes require confirmation', async () => {
   const calls = [], rows = [], selected = { id: 'thread/opaque', status: 'active', unreadCount: 2 };
   const context = { selected, readOnly: false, conversationStatus: 'active', accountId: 'account', version: { current: 1 }, action: async (_, run) => run(1), write: async (...args) => calls.push(args), setSelected() {}, setRows: update => rows.push(update([selected])), setNotice() {} };
-  const change = compile(section('async function conversationAction(', '  function prepareMessageAction('), context);
+  const change = compile(section('async function conversationAction(', '  async function sendTyping('), context);
   await change('read'); assert.deepEqual(calls[0], ['conversations/thread%2Fopaque/read', { accountId: 'account' }]); assert.equal(rows[0][0].unreadCount, 0);
   await change('status'); assert.deepEqual(calls[1][1], { accountId: 'account', status: 'archived' }); assert.deepEqual(rows[1], []);
   const reopened = [], archiveContext = { ...context, selected: { ...selected, status: 'archived' }, setRows: update => reopened.push(update([])) };
-  await compile(section('async function conversationAction(', '  function prepareMessageAction('), archiveContext)('status'); assert.equal(reopened[0][0].id, selected.id); assert.equal(reopened[0][0].status, 'active');
-  const readArchived = []; await compile(section('async function conversationAction(', '  function prepareMessageAction('), { ...archiveContext, setRows: update => readArchived.push(update([])) })('read'); assert.deepEqual(readArchived[0], [], 'Marking the archived selected thread read must not insert it into the active list.');
+  await compile(section('async function conversationAction(', '  async function sendTyping('), archiveContext)('status'); assert.equal(reopened[0][0].id, selected.id); assert.equal(reopened[0][0].status, 'active');
+  const readArchived = []; await compile(section('async function conversationAction(', '  async function sendTyping('), { ...archiveContext, setRows: update => readArchived.push(update([])) })('read'); assert.deepEqual(readArchived[0], [], 'Marking the archived selected thread read must not insert it into the active list.');
   let confirmed = false; const comment = compile(section('async function commentAction(', '  async function deleteReviewReply('), { ...context, window: { confirm: () => confirmed }, refreshAfterWrite: async () => {} });
   await comment('delete', { id: 'comment' }); assert.equal(calls.length, 4); confirmed = true; await comment('delete', { id: 'comment' }); assert.deepEqual(calls[4], ['comments/delete', { accountId: 'account', postId: selected.id, commentId: 'comment' }]);
   const remove = compile(section('async function deleteReviewReply(', '  return <div className="unified-inbox">'), { ...context, window: { confirm: () => confirmed }, setReplyTarget() {}, setMessage() {}, refreshAfterWrite: async () => {} });

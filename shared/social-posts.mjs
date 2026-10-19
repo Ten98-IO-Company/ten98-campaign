@@ -182,11 +182,25 @@ export function resolveVariant(post, platform, assets = [], accountId) {
   return { platform, content: own(variant, 'content') ? variant.content : typeof post.content === 'string' ? post.content : '', mediaItems, options: variant.options || {}, ...(assetId ? { assetId } : {}), ...(variant.scheduledAt ? { scheduledAt: variant.scheduledAt } : {}) };
 }
 function assetMedia(asset) {
-  return { type: asset.mimeType?.toLowerCase() === 'image/gif' ? 'gif' : asset.kind || asset.type, url: asset.deliveryUrl || asset.url,
-    ...Object.fromEntries(['mimeType', 'title', 'filename'].filter(key => typeof asset[key] === 'string' && asset[key]).map(key => [key, asset[key]])),
+  const metadata = asset.deliverySource === 'zernio' ? { kind: asset.deliveryKind, mimeType: asset.deliveryMimeType, size: asset.deliverySize, filename: asset.deliveryFilename } : asset;
+  return { type: metadata.mimeType?.toLowerCase() === 'image/gif' ? 'gif' : metadata.kind || asset.type, url: asset.deliveryUrl || asset.url,
+    ...Object.fromEntries(['mimeType', 'title', 'filename'].filter(key => typeof metadata[key] === 'string' && metadata[key]).map(key => [key, metadata[key]])),
     ...(asset.altText || asset.description ? { altText: asset.altText || asset.description } : {}),
-    ...Object.fromEntries(['width', 'height', 'duration', 'size'].filter(key => Number.isFinite(Number(asset[key])) && Number(asset[key]) > 0).map(key => [key, Number(asset[key])])),
+    ...Object.fromEntries(['width', 'height', 'duration', 'size'].filter(key => Number.isFinite(Number(metadata[key])) && Number(metadata[key]) > 0).map(key => [key, Number(metadata[key])])),
   };
+}
+
+export function assetDeliveryIssue(asset, now = Date.now()) {
+  if (asset?.deliverySource !== 'zernio') return '';
+  if (!validPostInstant(asset.deliveryUploadedAt) || !validPostInstant(asset.deliveryExpiresAt) || Date.parse(asset.deliveryExpiresAt) <= Date.parse(asset.deliveryUploadedAt)) return 'This hosted delivery file has no verified expiry. Upload it again before publishing.';
+  return Date.parse(asset.deliveryExpiresAt) <= now ? 'This hosted delivery file has expired. Upload it again before publishing.' : '';
+}
+
+// Callers must obtain this post from their verified provider read, never from submitted form fields.
+export function providerPostMediaUrls(post) {
+  if (post?.isDraft === true || !['scheduled', 'published', 'publishing', 'failed', 'partial', 'cancelled'].includes(post?.status)) return new Set();
+  const targets = Array.isArray(post.platforms) && post.platforms.every(plain) ? post.platforms : Array.isArray(post.providerResults) ? post.providerResults : [], media = Array.isArray(post.mediaItems) ? post.mediaItems : [];
+  return new Set(targets.filter(plain).flatMap(target => [...(Array.isArray(target.customMedia) ? target.customMedia : media), ...(Array.isArray(target.platformSpecificData?.threadItems) ? target.platformSpecificData.threadItems.flatMap(item => Array.isArray(item.mediaItems) ? item.mediaItems : []) : [])]).map(item => item?.url).filter(url => typeof url === 'string' && url));
 }
 
 export function buildPlatformEntry(post, platform, accountId, assets = []) {
@@ -227,7 +241,7 @@ export function captionLimitForVariant(variant) {
   return platform === 'telegram' && mediaItems.length ? 1024 : platform === 'tiktok' && mediaItems.some(item => item.type === 'image') ? 4000 : platform === 'snapchat' && options.contentType === 'saved_story' ? 45 : PLATFORM_RULES[platform]?.captionLimit || 0;
 }
 
-export function validatePostForPlatforms(post, platforms, { assets = [], requireMediaMetadata = false, accountId } = {}) {
+export function validatePostForPlatforms(post, platforms, { assets = [], requireMediaMetadata = false, accountId, now = Date.now(), providerOwnedMediaUrls = new Set() } = {}) {
   const errors = [], warnings = [], variants = {};
   const issue = (list, platform, field, message) => list.push({ platform, field, message });
   try { normalizePostVariants(post); normalizeAccountVariants(post); } catch (error) { issue(errors, '', 'platformOverrides', error.message); }
@@ -242,6 +256,9 @@ export function validatePostForPlatforms(post, platforms, { assets = [], require
     const { content, mediaItems: media, options } = variant, videos = media.filter(item => item.type === 'video'), docs = media.filter(item => item.type === 'document'), images = media.filter(item => item.type === 'image');
     const add = (field, message) => issue(errors, platform, field, message), warn = (field, message) => issue(warnings, platform, field, message);
     if (variant.assetId && !assets.some(asset => asset.id === variant.assetId)) add('assetId', 'The selected creative asset is unavailable in this project.');
+    for (const asset of assets.filter(asset => asset.id === variant.assetId || media.some(item => item.url === asset.deliveryUrl))) {
+      const issue = providerOwnedMediaUrls.has(asset.deliveryUrl) ? '' : assetDeliveryIssue(asset, now); if (issue) add('assetId', issue);
+    }
     const story = options.contentType === 'story' || options.contentType === 'saved_story';
     const captionLimit = captionLimitForVariant(variant);
     const thread = Array.isArray(options.threadItems) && options.threadItems.length > 0;
@@ -312,7 +329,7 @@ export function validatePostForPlatforms(post, platforms, { assets = [], require
     if (thread) {
       if (!['twitter', 'threads', 'bluesky'].includes(platform)) add('options.threadItems', 'Threads are unsupported for this platform.');
       options.threadItems.forEach((item, index) => {
-        const nested = validatePostForPlatforms({ content: item.content || '', mediaItems: item.mediaItems || [] }, [platform], { requireMediaMetadata });
+        const nested = validatePostForPlatforms({ content: item.content || '', mediaItems: item.mediaItems || [] }, [platform], { assets, requireMediaMetadata, now, providerOwnedMediaUrls });
         for (const error of nested.errors) add(`options.threadItems[${index}].${error.field}`, error.message);
         for (const warning of nested.warnings) warn(`options.threadItems[${index}].${warning.field}`, warning.message);
       });

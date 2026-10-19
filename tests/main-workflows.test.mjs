@@ -131,6 +131,8 @@ test('asset previews select safe actual media and fall back after a thumbnail fa
   assert.equal(choose({ kind: 'image', url: 'https://cdn.example.com/original.jpg' }), 'https://cdn.example.com/original.jpg');
   assert.equal(choose({ kind: 'video', thumbnailUrl, url: 'https://cdn.example.com/movie.mp4' }), thumbnailUrl);
   assert.equal(choose({ kind: 'video', url: 'https://cdn.example.com/movie.mp4' }), undefined);
+  assert.equal(choose({ ...image, deliverySource: 'zernio', deliveryKind: 'video', deliveryUrl: 'https://media.zernio.com/temp/movie.mp4' }), undefined, 'A different delivery kind must not reuse the original Drive thumbnail or render a video as an image.');
+  assert.equal(choose({ kind: 'video', thumbnailUrl, url: original, deliverySource: 'zernio', deliveryKind: 'image', deliveryUrl }), deliveryUrl, 'The delivery file preview follows its observed kind, independently of the original.');
   for (const unsafe of ['http://cdn.example.com/a.jpg', 'javascript:alert(1)', 'https://user:secret@cdn.example.com/a.jpg', original, 'https://docs.google.com/document/d/private', 'https://localhost/a.jpg', 'https://127.1/a.jpg', 'https://0x7f000001/a.jpg', 'https://10.0.0.1/a.jpg', 'https://172.16.0.1/a.jpg', 'https://172.31.255.255/a.jpg', 'https://192.168.0.1/a.jpg', 'https://169.254.1.1/a.jpg', 'https://0.0.0.0/a.jpg', 'https://[::1]/a.jpg', 'https://media.local/a.jpg', 'https://media.internal/a.jpg']) {
     assert.equal(choose({ kind: 'image', thumbnailUrl: unsafe, url: unsafe, deliveryUrl: unsafe }), undefined, unsafe);
     assert.equal(choose({ ...image, thumbnailUrl: unsafe }), deliveryUrl, `An unsafe thumbnail must not hide safe delivery media: ${unsafe}`);
