@@ -1,4 +1,25 @@
-# ten98 Campaign v0.8.11 — verification
+# ten98 Campaign v0.8.12 — verification
+
+## Publishing, private replies, Search pins and webhooks
+
+Verified on 19 October 2026: **528 automated checks pass**, without failures, skips or cancellations. Type checking, the production frontend/container build and an offline non-root container smoke check pass. The production dependency audit reports **zero vulnerabilities**. No dependency was added. The established styles and side-panel sign-in are unchanged.
+
+| Workflow | Verification and limits |
+| --- | --- |
+| External post library | Browser checks cover native latest posts, paginated synced history, importing a published YouTube post, refreshing its campaign reference without losing the campaign link, importing a LinkedIn personal URN without inventing its missing caption, and project isolation. HTTP regressions cover ownership, whitespace-only locators, unknown acknowledgements and association preservation beyond the 250-reference display limit. References remain separate from publishable drafts and publication receipts; removing a reference never deletes the native post. |
+| Private comment replies | Browser checks cover an eligible Facebook comment, reviewed text/button preview and accepted private reply. Old and self-authored comments have no private action. Consumed and unknown outcomes immediately disable sending, retain the draft and remove the comment action. HTTP/UI checks cover Instagram and the Meta ad-comment bridge, receipt identity, quick replies, single-reply/age limits, changed permissions and safe retry boundaries. Consent is never inferred from a comment. |
+| Google Search pins | Browser checks cover pinning, moving, unpinning, replacing/removing text, retaining both destination URLs, draft discard choices and stale enrichment. HTTP/UI regressions check fresh scope/version matching, complete array replacement, legacy pin preservation and uncertain readback without duplicate dispatch. Provider caches and concurrent native edits cannot be made atomic by this app. |
+| Webhook settings | Browser checks cover scoped creation, unchanged Save for signing-secret rotation, signed synthetic delivery, delivery history, failed-event replay and pause. HTTP checks verify deletion/readback, role/profile/callback isolation, key-imposed exclusions, advanced configuration handoff, secret/payload redaction, pagination and durable unknown-outcome fences. A synthetic callback received HTTP 202 from the app receiver. Replay preserves event-ID deduplication. Only this app’s callback and the selected project’s exact profile are managed here. |
+
+Runnable anchors: [post library](../tests/zernio-post-library.test.mjs), [private reply HTTP](../tests/inbox-http.test.mjs), [inbox UI handlers](../tests/inbox-ui.test.mjs), [Search creative](../tests/google-rsa-review.test.mjs), [ad UI handlers](../tests/ads-ui.test.mjs) and [webhook settings](../tests/zernio-webhook-settings.test.mjs).
+
+![Campaign link retained after refreshing an external post reference](zernio-post-library-verification.png)
+
+![Private reply draft retained with sending blocked after an unknown result](zernio-private-reply-verification.png)
+
+Ponytail and [Paperthin](https://github.com/LilMGenius/paperthin) checks included independent correctness review, a fresh-reader review, evidence independence and consistency cleanup. Review found and fixed whitespace imports causing broad sync, older references losing their campaign link, restricted-key webhook normalization, generic test-event replay and the private-reply retry button.
+
+These are isolated synthetic-provider checks. They establish no real publication, message delivery or ad spend. Live provider acceptance awaits credentials supplied securely in Integrations. The [full Zernio plan](zernio-feature-plan.md) remains incomplete; this release completes the four bounded workflows above, not every provider feature.
 
 ## Sign-in layout restoration
 
@@ -8,7 +29,7 @@ All **499 automated checks** and the production frontend/type check pass. Browse
 
 ![Restored side-panel sign-in layout](sign-in-verification.png)
 
-## Current expansion and acceptance limits
+## Previous release acceptance — v0.8.11
 
 Verified on 19 October 2026: **499 automated checks pass**, without failures, skips or cancellations. Type checking, the production frontend/container build and an offline non-root container smoke check pass. No dependency was added. The smoke harness needs writable temporary storage; the initial read-only `/tmp` attempt was corrected before the successful run.
 
@@ -40,7 +61,7 @@ Verified on 19 October 2026: **488 automated checks pass**, with no failures, sk
 | --- | --- |
 | Attachment replies | X image/video replies and Instagram image/video/audio/PDF replies use their documented DM MIME/size restrictions. Metadata is checked before sending, then account, recipient, access, mapping, reply window and known hosted expiry are rechecked. Choices and explicit previews follow account capabilities. Filenames are offered only for WhatsApp documents. Metadata does not prove codecs or immutable remote file bytes. |
 | Partial sends and recovery | Meta attachments and accompanying text are separate messages. Full combined success requires both message IDs. A validated partial receipt clears only the accepted attachment and retains unsent text for an explicit text-only send. Malformed/lost acknowledgements keep the draft and original action identity. A known failed media preflight can retry with a new key; unknown/pending sends remain fenced. |
-| Google Search creative | Creative changes require explicit recent enrichment and an exact scoped snapshot, rechecked before dispatch. Existing pins follow unchanged text; replacing/removing pinned text remains a Google Ads handoff. All destination URLs are exposed and retained. Changed lists receive readback verification; unconfirmed writes stay uncertain. Missing/stale creative blocks text/destination editing while independent delivery controls remain available. Provider caches and external edits cannot be made atomic by this app. |
+| Google Search creative | Creative changes require explicit recent enrichment and an exact scoped snapshot, rechecked before dispatch. The explicit Search asset editor supports pinning, moving, unpinning and replacing/removing pinned text after a fresh scoped review. Legacy text-list callers still preserve existing pins. All destination URLs are exposed and retained. Changed lists receive readback verification; unconfirmed writes stay uncertain. Missing/stale creative blocks text/destination editing while independent delivery controls remain available. Provider caches and external edits cannot be made atomic by this app. |
 
 The isolated browser verifies X image/video acceptance, oversized-video rejection before dispatch, Instagram PDF partial success followed by a text-only send without a duplicate attachment, rejected MP3 and accepted M4A audio. The final UI removes ignored filename inputs. A Google Search walkthrough verifies a saved headline edit with retained pins and both URLs, rejection after a native creative change, and disabled creative fields on stale enrichment. Fixture receipts establish those requests and readbacks; they do not establish live platform delivery.
 

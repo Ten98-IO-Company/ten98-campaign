@@ -60,7 +60,7 @@ function validateReview(row) {
 }
 
 export function inboxCapabilities(platform) {
-  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), typing: TYPING.has(platform), deleteStoredConversation: DM.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'twitter', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : ['sms', 'twitter'].includes(platform) ? ['image', 'video'] : ['image', 'video', 'audio', 'file'], ...(REPLY_MEDIA[platform] ? { attachmentRules: REPLY_MEDIA[platform] } : {}), archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
+  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), typing: TYPING.has(platform), deleteStoredConversation: DM.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'twitter', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : ['sms', 'twitter'].includes(platform) ? ['image', 'video'] : ['image', 'video', 'audio', 'file'], ...(REPLY_MEDIA[platform] ? { attachmentRules: REPLY_MEDIA[platform] } : {}), archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentPrivateReply: ['facebook', 'instagram', 'metaads'].includes(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
 }
 function supported(account, feature) { if (!inboxCapabilities(account.platform)[feature] || account.isActive === false) fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'This account does not support this inbox action. Reconnect the account if its permissions changed.'); }
 function scoped(row, accounts, expectedAccount) {
@@ -415,7 +415,7 @@ function normalizedComment(row, platform, depth = 0) {
   if (!plain(row) || !valid(row.id) || row.platform && row.platform !== platform || depth > 3) invalid();
   renderFields(row, commentFields.filter(key => !['from', 'likeCount', 'replyCount', 'repliesHasMore', 'canReply', 'canDelete', 'canHide', 'canLike', 'isHidden', 'isLiked'].includes(key)), ['likeCount', 'replyCount'], ['repliesHasMore', 'canReply', 'canDelete', 'canHide', 'canLike', 'isHidden', 'isLiked']);
   if (row.from != null) renderFields(row.from, ['id', 'name', 'username', 'picture', 'verifiedType'], [], ['isOwner']);
-  const result = pick(row, commentFields);
+  const result = { ...pick(row, commentFields), platform };
   if (row.replies !== undefined) { if (!Array.isArray(row.replies) || row.replies.length > 100) invalid(); result.replies = row.replies.map(item => normalizedComment(item, platform, depth + 1)); }
   return result;
 }
@@ -458,6 +458,71 @@ function priorHiddenComment(context, account, post, commentId) {
   }
   return null;
 }
+const privateCommentVersion = row => createHash('sha256').update(JSON.stringify([row.id, row.platform, row.createdTime, row.from?.id, row.from?.isOwner, row.message])).digest('hex');
+function privateCommentEligible(row) {
+  const age = Date.now() - Date.parse(row.createdTime);
+  return ['facebook', 'instagram'].includes(row.platform) && valid(row.from?.id) && row.from?.isOwner === false && row.canReply !== false && age >= 0 && age < 7 * 86400000;
+}
+function privateReplyTable(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS inbox_private_replies(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,post_id TEXT NOT NULL,comment_id TEXT NOT NULL,status TEXT NOT NULL,operation_id TEXT NOT NULL,PRIMARY KEY(project_id,profile_id,account_id,post_id,comment_id))`);
+}
+function privateReplyThread(context, accounts, account, post, result) {
+  const accountId = post.isAd ? result.meta.platform === 'instagram' ? result.meta.instagramAccountId : result.meta.facebookAccountId : account._id, postId = post.isAd ? result.meta.effectiveStoryId : post.id;
+  const connected = accounts.some(row => row._id === accountId && row.isActive !== false && row.platform === result.meta.platform), exists = context.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_private_replies'").get();
+  const receipts = exists && context.db.prepare('SELECT r.status,o.status AS operationStatus FROM inbox_private_replies r LEFT JOIN integration_operations o ON r.operation_id=o.id AND r.project_id=o.project_id WHERE r.project_id=? AND r.profile_id=? AND r.account_id=? AND r.post_id=? AND r.comment_id=?');
+  const decorate = row => {
+    const receipt = receipts && receipts.get(context.project.id, context.project.zernioProfileId, accountId || '', postId || '', row.id), prior = receipt && !(receipt.operationStatus === 'reviewed-not-applied' && ['pending', 'uncertain'].includes(receipt.status)) ? receipt : null;
+    return { ...row, ...(['facebook', 'instagram'].includes(row.platform) ? { privateReplyVersion: privateCommentVersion(row), privateReplyEligible: connected && valid(postId) && !prior && privateCommentEligible(row), ...(prior ? { privateReplyStatus: prior.status } : {}) } : {}), ...(row.replies ? { replies: row.replies.map(decorate) } : {}) };
+  };
+  return { ...result, comments: result.comments.map(decorate), ...(result.parent ? { parent: decorate(result.parent) } : {}) };
+}
+function privateReplyElements(body, platform) {
+  if (body.buttons !== undefined && body.quickReplies !== undefined) fail(400, 'INVALID_PRIVATE_REPLY', 'Choose buttons or quick replies, rather than both.');
+  const payload = {};
+  const publicLink = value => { try { return publicMediaUrl(value); } catch { fail(400, 'INVALID_PRIVATE_REPLY', 'Use a public HTTPS link for private-reply buttons and thumbnails.'); } };
+  for (const name of ['buttons', 'quickReplies']) if (body[name] !== undefined) {
+    if (!Array.isArray(body[name]) || body[name].length < 1 || body[name].length > (name === 'buttons' ? 3 : 13)) fail(400, 'INVALID_PRIVATE_REPLY', 'Use one to three buttons or one to thirteen quick replies.');
+    payload[name] = body[name].map(row => {
+      const button = name === 'buttons', type = button ? row?.type : 'quick';
+      if (button && !['url', 'postback', 'phone'].includes(type) || type === 'phone' && platform !== 'facebook') fail(422, 'INVALID_PRIVATE_REPLY', 'Choose a supported button type. Phone buttons are available only on Facebook.');
+      fields(row, button ? ['type', 'title', type === 'url' ? 'url' : type === 'phone' ? 'phone' : 'payload'] : ['title', 'payload', 'imageUrl']);
+      const item = { ...(button ? { type } : {}), title: str(row.title, 'button or quick-reply label', 20) };
+      if (type === 'url') item.url = publicLink(row.url);
+      else if (type === 'phone') { if (typeof row.phone !== 'string' || !/^\+[1-9]\d{6,14}$/.test(row.phone)) fail(400, 'INVALID_PRIVATE_REPLY', 'Enter a phone button number in international format.'); item.phone = row.phone; }
+      else item.payload = str(row.payload, 'button or quick-reply value', 1000);
+      if (!button && row.imageUrl !== undefined) item.imageUrl = publicLink(row.imageUrl);
+      return item;
+    });
+  }
+  return payload;
+}
+async function privateCommentReply(context, api, account, post, target, moderationAccount, moderationPostId, key) {
+  const { body, db, project } = context;
+  supported(moderationAccount, 'commentPrivateReply');
+  if (!privateCommentEligible(target.row)) fail(422, 'PRIVATE_REPLY_INELIGIBLE', 'Choose another person’s comment with a verified time within the last seven days.');
+  if (body.confirmSend !== true || body.expectedCommentVersion !== privateCommentVersion(target.row)) fail(409, 'PRIVATE_REPLY_REVIEW_REQUIRED', 'Refresh this comment and review its author, account and message before sending privately.');
+  const payload = { accountId: moderationAccount._id, message: str(body.message, 'private comment reply', MESSAGE_LIMITS[moderationAccount.platform]), ...privateReplyElements(body, moderationAccount.platform) };
+  const fresh = await scopedAccounts(api, project.zernioProfileId);
+  for (const original of [account, moderationAccount]) { const current = requireAccount(fresh, original._id); supported(current, 'commentPrivateReply'); if (current.platform !== original.platform) fail(409, 'PRIVATE_REPLY_ACCOUNT_CHANGED', 'This comment’s connected account changed. Refresh before replying.'); }
+  if (!privateCommentEligible(target.row)) fail(422, 'PRIVATE_REPLY_INELIGIBLE', 'This comment is outside the seven-day private reply window.');
+  privateReplyTable(db);
+  const binding = [project.id, project.zernioProfileId, moderationAccount._id, moderationPostId, target.row.id], previous = db.prepare('SELECT status,operation_id FROM inbox_private_replies WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').get(...binding);
+  if (previous && (!['pending', 'uncertain'].includes(previous.status) || db.prepare('SELECT status FROM integration_operations WHERE id=? AND project_id=?').get(previous.operation_id, project.id)?.status !== 'reviewed-not-applied')) fail(409, 'PRIVATE_REPLY_RECORDED', 'This comment’s private reply was already sent, consumed or needs reconciliation. Check the original receipt and conversation before another action.');
+  if (previous) db.prepare('DELETE FROM inbox_private_replies WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(...binding);
+  const original = db.prepare('SELECT id FROM integration_operations WHERE project_id=? AND request_key=?').get(project.id, context.req.headers['idempotency-key']);
+  if (!db.prepare("INSERT OR IGNORE INTO inbox_private_replies(project_id,profile_id,account_id,post_id,comment_id,status,operation_id) VALUES(?,?,?,?,?,'pending',?)").run(...binding, original.id).changes) fail(409, 'PRIVATE_REPLY_RECORDED', 'Another private reply to this comment is already in progress.');
+  const update = status => db.prepare('UPDATE inbox_private_replies SET status=? WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(status, ...binding);
+  try {
+    const result = await api(`/inbox/comments/${encodeURIComponent(moderationPostId)}/${encodeURIComponent(target.row.id)}/private-reply`, {}, payload, key);
+    if (result.status !== 'success' || !valid(result.messageId) || result.commentId !== target.row.id || result.platform !== moderationAccount.platform) invalid(true);
+    update('sent'); return { sent: true, accountId: account._id, moderationAccountId: moderationAccount._id, postId: post.id, commentId: target.row.id, messageId: result.messageId, platform: result.platform };
+  } catch (error) {
+    if (error.privateReplyConsumed === true) { update('consumed'); fail(409, 'PRIVATE_REPLY_CONSUMED', 'The provider reports this comment’s single private reply is consumed. Do not retry it; check the conversation.'); }
+    if (!(error instanceof IntegrationError) || error.uncertain || error.privateReplyOutcome === 'unknown') { update('uncertain'); if (error instanceof IntegrationError) error.uncertain = true; }
+    else db.prepare('DELETE FROM inbox_private_replies WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(...binding);
+    throw error;
+  }
+}
 export const inboxReplyVersion = row => createHash('sha256').update(JSON.stringify([row.id, row.accountId, row.hasReply, row.reply?.id || null, row.reply?.text || null, row.reply?.created || null])).digest('hex');
 const review = row => ({ ...pick(row, reviewFields), replyVersion: inboxReplyVersion(row) });
 
@@ -465,7 +530,7 @@ export async function handleInbox(context) {
   const { req, url, project, role, send, body = {} } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/inbox`;
   if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
   const path = url.pathname.slice(prefix.length).replace(/^\//, '');
-  const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status|thread-control|accept|typing|delete))?$/), messageAction = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/(edit|delete|react|unreact)$/), media = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/attachments\/(0|[1-9]\d?)$/), action = path.match(/^(comments|reviews)\/(reply|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
+  const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status|thread-control|accept|typing|delete))?$/), messageAction = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/(edit|delete|react|unreact)$/), media = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/attachments\/(0|[1-9]\d?)$/), action = path.match(/^(comments|reviews)\/(reply|private-reply|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
   if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews'].includes(path) && !route && !messageAction && !media && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
   try {
     if (!['GET', 'POST'].includes(req.method)) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available inbox controls.');
@@ -594,9 +659,9 @@ export async function handleInbox(context) {
       if (path === 'comments') { supported(account, 'comments'); const result = await aggregate(api, accounts, account, 'comments', query(url, 'comments')); return { posts: result.rows.map(row => pick(row, postFields)), pagination: result.pagination, meta: result.meta }; }
       if (path === 'comments/thread' || action?.[1] === 'comments') {
         supported(account, 'comments'); const postId = id(req.method === 'GET' ? url.searchParams.get('postId') : body.postId), post = await findRow(api, accounts, account, 'comments', postId);
-        if (req.method === 'GET') return thread(api, accounts, account, post, { ...query(url, 'comments'), ...(url.searchParams.get('commentId') ? { commentId: id(url.searchParams.get('commentId')) } : {}) });
-        fields(body, ['accountId', 'postId', 'commentId', 'message', 'moderationStatus', 'banAuthor']);
-        const verb = action[2]; let target = null;
+        const verb = action?.[2]; let target = null;
+        if (req.method === 'GET') return privateReplyThread(context, accounts, account, post, await thread(api, accounts, account, post, { ...query(url, 'comments'), ...(url.searchParams.get('commentId') ? { commentId: id(url.searchParams.get('commentId')) } : {}) }));
+        fields(body, verb === 'private-reply' ? ['accountId', 'postId', 'commentId', 'message', 'expectedCommentVersion', 'confirmSend', 'buttons', 'quickReplies'] : ['accountId', 'postId', 'commentId', 'message', 'moderationStatus', 'banAuthor']);
         if (body.commentId) {
           const commentId = id(body.commentId);
           try { target = await findComment(api, accounts, account, post, commentId); }
@@ -610,6 +675,7 @@ export async function handleInbox(context) {
           if (moderationAccount.platform !== meta.platform) fail(403, 'INBOX_ITEM_OUTSIDE_PROJECT', 'The ad’s moderation account is not connected to this project.');
         }
         const platform = moderationAccount.platform, endpoint = `/inbox/comments/${encodeURIComponent(moderationPostId)}`, commentEndpoint = target ? `${endpoint}/${encodeURIComponent(target.row.id)}` : endpoint, payload = { accountId: moderationAccount._id };
+        if (verb === 'private-reply') return privateCommentReply(context, api, account, post, target, moderationAccount, moderationPostId, key);
         if (verb === 'reply') {
           if (target?.row.canReply === false) fail(422, 'COMMENT_ACTION_UNSUPPORTED', 'This comment cannot be replied to through the provider.');
           payload.message = str(body.message, 'comment reply'); if (target) payload.commentId = target.row.id;
