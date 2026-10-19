@@ -13,6 +13,7 @@ test('social refresh and publishing reject malformed preview fields before persi
   const project = { id: 'preview-project', zernioProfileId: 'preview-profile' }, account = { _id: 'preview-account', profileId: project.zernioProfileId, platform: 'facebook' };
   let remote;
   const store = {
+    list() { return []; },
     get(projectId, collection, id) { return projectId === project.id && collection === 'posts' ? structuredClone(records.get(id)) : undefined; },
     update(projectId, collection, id, patch) { const saved = { ...this.get(projectId, collection, id), ...patch }; records.set(id, saved); return saved; },
     activity() {},
@@ -112,7 +113,7 @@ test('a reviewed partial post retries only failed accounts and preserves publish
 test('minimal retry receipts identify original accounts without duplicating successful copies or guessing ambiguous targets', async () => {
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'minimal-project', zernioProfileId: 'minimal-profile' }, records = new Map();
   let remote, acknowledgement, writes = 0;
-  const store = { get(projectId, collection, id) { return collection === 'posts' ? structuredClone(records.get(id)) : undefined; }, update(projectId, collection, id, patch) { const saved = { ...this.get(projectId, collection, id), ...patch }; records.set(id, saved); return saved; }, activity() {} };
+  const store = { list() { return []; }, get(projectId, collection, id) { return collection === 'posts' ? structuredClone(records.get(id)) : undefined; }, update(projectId, collection, id, patch) { const saved = { ...this.get(projectId, collection, id), ...patch }; records.set(id, saved); return saved; }, activity() {} };
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target);
     if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: remote.platforms.map(copy => ({ _id: copy.accountId, platform: copy.platform, profileId: project.zernioProfileId })) });

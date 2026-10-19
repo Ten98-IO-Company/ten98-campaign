@@ -8,6 +8,7 @@ test('social write receipts reject malformed or cross-account acknowledgements b
   const project = { id: 'confirmation-project', zernioProfileId: 'confirmation-profile' };
   const account = { _id: 'confirmation-account', profileId: project.zernioProfileId, platform: 'facebook' };
   const store = {
+    list() { return []; },
     get(projectId, collection, id) { return collection === 'posts' && projectId === project.id ? structuredClone(records.get(id)) : undefined; },
     update(projectId, collection, id, patch) { const post = this.get(projectId, collection, id); if (!post) return; const saved = { ...post, ...patch }; records.set(id, saved); return saved; },
     activity() {},

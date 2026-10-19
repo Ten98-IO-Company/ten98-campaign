@@ -32,7 +32,7 @@ export default function PostManagement({ request, post, canWrite, assets = [], c
   useEffect(() => { let active = true; setCurrent(post); setBusy(true); setError(''); setNotice(''); requester.current('social/status?postId=' + encodeURIComponent(post.id)).then(async result => { if (active) { setCurrent(result.post); await changed.current?.(); } }).catch(err => { if (active) setError(err.message); }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [post.id]);
   async function act(path: string, body: any, message: string) {
     setBusy(true); setError(''); setNotice('');
-    try { const result = await requester.current(path, body); setCurrent(result.post); setNotice(message); onChanged?.(); }
+    try { const result = await requester.current(path, body); setCurrent(result.post); setNotice([message, ...(Array.isArray(result.validationWarnings) ? result.validationWarnings.filter((value: unknown) => typeof value === 'string') : [])].join(' ')); onChanged?.(); }
     catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   }
   async function update(values: Record<string, any>) {
@@ -41,7 +41,7 @@ export default function PostManagement({ request, post, canWrite, assets = [], c
     setBusy(true); setError(''); setNotice('');
     try {
       const result = await requester.current('social/update', { postId: post.id, content: values.content, mediaItems: values.mediaItems, assetId: values.assetId, platformOverrides: values.platformOverrides, ...(values.accountOverrides !== undefined ? { accountOverrides: values.accountOverrides } : {}), ...(replaceVariants ? { confirmReplaceVariants: true } : {}), mode: values.scheduledAt ? 'scheduled' : 'draft', ...(values.scheduledAt ? { scheduledAt: values.scheduledAt } : {}) });
-      setCurrent(result.post); setNotice('Platform versions and schedule saved with Zernio.'); onChanged?.();
+      setCurrent(result.post); setNotice(['Platform versions and schedule saved with Zernio.', ...(Array.isArray(result.validationWarnings) ? result.validationWarnings.filter((value: unknown) => typeof value === 'string') : [])].join(' ')); onChanged?.();
     } finally { setBusy(false); }
   }
   return <section>

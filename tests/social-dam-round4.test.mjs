@@ -12,7 +12,7 @@ test('late social refreshes cannot overwrite newer edits or cancellation receipt
     let remote = { _id: post.externalId, status: 'scheduled', content: post.content, scheduledFor: '2070-01-01T10:00:00Z', platforms: [{ platform: account.platform, accountId: account._id, status: 'pending' }] };
     let release, entered, holdNextRead = true, refresh;
     const reached = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; });
-    const store = { get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+    const store = { list() { return []; }, get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
     globalThis.fetch = async (target, options = {}) => {
       const url = new URL(target);
       if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
@@ -46,7 +46,7 @@ test('a social write accepted during a newer local status update remains uncerta
   const account = { _id: 'write-race-account', platform: 'facebook', profileId: project.zernioProfileId };
   let post = { id: 'write-race-local', externalId: 'write-race-remote', zernioProfileId: project.zernioProfileId, content: 'Original caption', status: 'draft' }, writes = 0;
   let remote = { _id: post.externalId, status: 'draft', content: post.content, platforms: [{ platform: account.platform, accountId: account._id }] };
-  const store = { get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+  const store = { list() { return []; }, get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
   globalThis.fetch = async (target, options = {}) => {
     if (new URL(target).pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
     if (options.method === 'PUT') { writes++; remote = { ...remote, ...JSON.parse(options.body) }; post = { ...post, status: 'published', providerStatus: 'published', providerEventAt: '2070-01-01T10:00:00Z' }; }
@@ -69,7 +69,7 @@ test('a first publication cannot mark a newer local caption as published after t
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'publish-race-project', zernioProfileId: 'publish-race-profile' };
   const account = { _id: 'publish-race-account', platform: 'facebook', profileId: project.zernioProfileId };
   let post = { id: 'publish-race-local', content: 'Original caption', platforms: ['facebook'], accounts: [account._id], status: 'draft', updatedAt: 'same-timestamp' }, writes = 0;
-  const store = { get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+  const store = { list() { return []; }, get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target);
     if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
@@ -98,7 +98,7 @@ test('a minimal first publication receipt preserves the submitted schedule and p
   const account = { _id: 'minimal-publish-account', platform: 'facebook', profileId: project.zernioProfileId };
   const original = { id: 'minimal-publish-local', content: 'Shared caption', platforms: ['facebook'], accounts: [account._id], status: 'scheduled', scheduledAt: '2070-01-01T10:00:00Z', platformOverrides: { facebook: { content: 'Facebook caption', options: { firstComment: 'First comment' } } } };
   let post = structuredClone(original);
-  const store = { get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+  const store = { list() { return []; }, get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target);
     if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
@@ -149,7 +149,7 @@ test('editing the shared post schedule preserves each independently scheduled ac
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'schedule-project', zernioProfileId: 'schedule-profile' }, writes = [];
   const copies = [{ platform: 'facebook', accountId: 'facebook-copy', status: 'pending', scheduledFor: '2070-01-01T10:00:00Z', customContent: 'Facebook caption' }, { platform: 'linkedin', accountId: 'linkedin-copy', status: 'pending', scheduledFor: '2070-01-01T11:00:00Z', customContent: 'LinkedIn caption' }];
   let remote = { _id: 'schedule-remote', status: 'scheduled', content: 'Shared caption', scheduledFor: '2070-01-01T09:00:00Z', platforms: copies }, post = { id: 'schedule-local', externalId: remote._id, zernioProfileId: project.zernioProfileId, content: remote.content, status: 'scheduled' };
-  const store = { get(projectId, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(projectId, collection, id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+  const store = { list() { return []; }, get(projectId, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(projectId, collection, id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target);
     if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: copies.map(copy => ({ _id: copy.accountId, platform: copy.platform, profileId: project.zernioProfileId })) });
@@ -180,7 +180,7 @@ test('a documented minimal update receipt retains the newly saved platform draft
   let post = { id: 'minimal-edit-local', externalId: 'minimal-edit-remote', zernioProfileId: project.zernioProfileId, content: 'Shared caption', status: 'draft', mediaItems: [], platformOverrides: { facebook: { content: 'Old Facebook caption' } } };
   let remote = { _id: post.externalId, status: 'draft', content: post.content, mediaItems: [], platforms: [{ platform: account.platform, accountId: account._id, customContent: 'Old Facebook caption' }] }, failReadback = false, unreadable = false, writes = 0;
   const overrides = { facebook: { content: 'New Facebook caption', mediaItems: [{ type: 'image', url: 'https://cdn.example.test/new.png' }], options: { firstComment: 'New first comment' } } };
-  const store = { get(projectId, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(projectId, collection, id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
+  const store = { list() { return []; }, get(projectId, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(projectId, collection, id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
   globalThis.fetch = async (target, options = {}) => {
     if (new URL(target).pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
     if (options.method === 'PUT') {

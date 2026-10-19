@@ -1,16 +1,18 @@
 # Full Zernio feature support: scope and delivery breakdown
 
-Updated 19 October 2026. Application baseline: **v0.8.7**. Provider baseline: **Zernio OpenAPI 1.292.0**.
+Updated 19 October 2026. Application baseline: **v0.8.8**. Provider baseline: **Zernio OpenAPI 1.292.0**.
 
-Full Zernio support is the target. **The app does not provide it yet.** Version 0.8.5 implements the first connection, publishing, measurement and inbox subsets below. Missing workflows remain implementation work; completing a subset does not complete its API family.
+Full Zernio support is the target. **The app does not provide it yet.** Releases through v0.8.8 implement the connection, publishing, measurement and inbox subsets below. Missing workflows remain implementation work; completing a subset does not complete its API family.
 
 ## Current expansion
 
-This ten98 Campaign implementation-status update covers the v0.8.7 expansion. The listed subsets are implemented; their exact verification boundaries are linked below. Their wider API families remain incomplete.
+This ten98 Campaign implementation-status update includes the v0.8.8 media and inbox expansion. The listed subsets are implemented; their exact verification boundaries are linked below. Their wider API families remain incomplete.
 
 | Area | Added workflow | Remaining boundary |
 | --- | --- | --- |
-| Per-account publishing | Separate captions, media, options and fixed times survive approval, submission, refresh, edits and retries. Groups resolve to reviewed explicit recipients; up to 50 account targets can be saved. | Repeated destinations using the same account remain protected from ambiguous edits. Bulk import, hosted media libraries and remaining platform formats stay pending. |
+| Hosted delivery media | Stream image/video/PDF uploads with progress, cancel, status, interrupted-transfer recovery and explicit pending asset save. Replacements retain Drive originals. Expired library URLs block new publications; verified retained provider copies support edits/rescheduling. | Temporary links last seven days. Storage receipt and metadata checks do not prove platform encoding acceptance. No upstream file removal is promised. Bulk libraries and remaining platform formats stay pending. |
+| Inbox retrieval and controls | Resolve a verified message attachment, download WhatsApp media through authenticated routes, explicitly send typing and review removal of Zernio's stored conversation/contact-channel copy. | Rich sends, inbound archival, private comment replies and broader engagement remain pending. Deletion retains the native thread and local contacts; provider sync can reimport it. |
+| Per-account publishing | Separate captions, media, options and fixed times survive approval, submission, refresh, edits and retries. Groups resolve to reviewed explicit recipients; up to 50 account targets can be saved. | Repeated destinations using the same account remain protected from ambiguous edits. Bulk import and remaining platform formats stay pending. |
 | Lead forms | Verified Meta/LinkedIn form selection in ad creation/boosting, in addition to form/response reads, basic creation/archive, test leads and explicit consent-preserving imports. | Advanced form formats/localization and automatic lead-answer ingestion. Paid notifications record provenance without answers or automatic consent. |
 | Google conversions | All 11 documented configuration operations for actions, account goals, custom goals and campaign selection, with scoped review and recovery. | Conversion ingestion, adjustments, matching and other networks' complete event management. |
 | Connected contacts | Scoped contacts/channels, explicit local links, reviewed bulk phone imports, subscriptions and all six custom-field operations. Consent, suppression, origin membership and field versions are checked again before dispatch. | Segments, platform broadcasts and automations; shared metadata changes require verified global review. |
@@ -38,7 +40,7 @@ Snapshot SHA-256: `324a4675b576bbd15f7f1f7c60397d5832b76e49fd976479028b22cd572d7
 | Unavailable/gated | Zernio or the platform restricts it; show the reason and required approval rather than a false success. |
 | Excluded | An earlier explicit user decision still applies. |
 
-Each domain report below contains current code anchors, capability rows, primary references and acceptance work. The v0.8.7 combined run passed 436 automated checks, the production frontend/container builds, an offline non-root container check and a production dependency audit with no vulnerabilities. Browser walkthroughs use isolated synthetic upstream providers; they do not establish live eligibility, delivery, installation or spend. Exact evidence and browser boundaries are recorded in [verification](verification.md).
+Each domain report below contains current code anchors, capability rows, primary references and acceptance work. The v0.8.8 combined run passed 473 automated checks, the production frontend/container builds, an offline non-root container check and a production dependency audit with no vulnerabilities. Browser walkthroughs use isolated synthetic upstream providers; they do not establish live eligibility, delivery, installation or spend. Exact evidence and browser boundaries are recorded in [verification](verification.md).
 
 ## Foundation delivered in v0.8.5 (historical)
 
@@ -64,7 +66,7 @@ Each domain report below contains current code anchors, capability rows, primary
 | Pixels, conversions and attribution | Partial | Tag discovery/detail/code/events/create, Meta rename/diagnostics and Google website-action/account/custom/campaign conversion settings are present. Complete event management, installation, sharing, matching quality, conversion destinations/adjustments and consent-aware server events. Existing UTM/short-link tracking is separate. [Ads breakdown](zernio-ads-coverage.md) |
 | Leads and catalogs | Partial | Meta/LinkedIn forms, basic creation/archive, response reads, explicit consent-preserving imports, Meta test leads and a verified form picker in ad creation/boosting are present. Paid lead notifications retain provenance without answers or automatic consent. Complete advanced forms, catalog/product/feed/set management, store sync and campaign use. [Ads](zernio-ads-coverage.md), [stores](zernio-commerce-admin-coverage.md) |
 | Paid/social analytics | Partial | Account/post/platform specialist reports, demographics, retention, timing, comparisons, breakdowns, asynchronous exports, missing/stale data and provider account operations. [Social](zernio-social-coverage.md), [ads](zernio-ads-coverage.md) |
-| Unified inbox | Partial | History/search/opening sends, eligible message edits/deletion/reactions, control handover and request acceptance are present. Complete rich messages, attachment retrieval, typing and whole-conversation deletion. [Messaging breakdown](zernio-messaging-coverage.md) |
+| Unified inbox | Partial | History/search/opening sends, eligible message edits/deletion/reactions, attachment retrieval, explicit typing, reviewed stored-conversation deletion, control handover and request acceptance are present. Complete rich messages and remaining platform-specific controls. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Comments, mentions and reviews | Partial | Supported engagement/moderation actions, private replies, mentions, additional filters and platform-specific actions. [Messaging breakdown](zernio-messaging-coverage.md) |
 | WhatsApp suite | Partial | Advanced templates and lifecycle, Flows, interactive/commerce messages, catalogs, business settings, quality/tier health, sandbox, groups and conversion analytics. [Messaging breakdown](zernio-messaging-coverage.md) |
 | Contacts and direct campaigns | Partial | Scoped provider contacts/channels, explicit local links, consent-checked bulk phone import, reviewed metadata/subscription and typed custom fields are present. Complete provider segments and all supported platform broadcasts while retaining local consent, suppression and Twilio delivery paths. [Messaging breakdown](zernio-messaging-coverage.md) |
@@ -85,7 +87,7 @@ RCS and iMessage are messaging products, not extra destinations in a public soci
 
 ## Delivery sequence
 
-This is the continuing implementation order. No stage is complete: v0.8.7 advances bounded parts of stages 1, 2, 3, 4, 5 and 8. Expand existing components and shared validation/operation helpers; add a module only when the workflow needs a distinct screen.
+This is the continuing implementation order. No stage is complete: releases through v0.8.8 advance bounded parts of stages 1, 2, 3, 4, 5 and 8. Expand existing components and shared validation/operation helpers; add a module only when the workflow needs a distinct screen.
 
 | Stage | Deliverable | Dependencies and completion check |
 | --- | --- | --- |
@@ -98,7 +100,7 @@ This is the continuing implementation order. No stage is complete: v0.8.7 advanc
 | 7. Stores and additional channels | Blogs/commerce, catalog sync, Zernio SMS, RCS and iMessage sender/campaign lifecycle. | Provider capabilities, reviewed grants, approved senders and cost visibility. Test fallback and carrier/store failures with synthetic fixtures; live acceptance uses designated test accounts. |
 | 8. Administration and release closure | Complete provider logs/usage/support, webhook administration, change tracking and cross-module acceptance. | All relevant event families and role boundaries. Every included operation must map to a workflow and a test or an explicit unavailable/excluded reason. |
 
-The first compatibility and foundation increment is implemented in v0.8.5; it was not included in v0.8.4. The detailed reports distinguish these tested changes from the remaining stages. Next work must close the named missing workflows rather than count routes as complete: campaign hierarchy/advanced formats, remaining conversion and advanced lead resources, media/bulk/repeated-destination publishing, richer engagement/WhatsApp, segmentation/automation, stores/additional channels and provider operations remain substantial work.
+The first compatibility and foundation increment is implemented in v0.8.5; it was not included in v0.8.4. The detailed reports distinguish these tested changes from the remaining stages. Next work must close the named missing workflows rather than count routes as complete: campaign hierarchy/advanced formats, remaining conversion and advanced lead resources, bulk/repeated-destination publishing, specialist media tools, richer engagement/WhatsApp, segmentation/automation, stores/additional channels and provider operations remain substantial work.
 
 ## UI structure
 

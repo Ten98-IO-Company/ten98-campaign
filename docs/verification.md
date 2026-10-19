@@ -1,6 +1,28 @@
-# ten98 Campaign v0.8.7 — verification
+# ten98 Campaign v0.8.8 — verification
 
 ## Current expansion and acceptance limits
+
+Verified on 19 October 2026: **473 automated checks pass**, with no failures, skips or cancellations. Type checking, the production frontend/container builds and offline non-root container startup pass. The production dependency audit reports **zero vulnerabilities**. No dependency was added.
+
+| Workflow | Implemented behavior and limits |
+| --- | --- |
+| Hosted delivery uploads | Project-scoped image/video/PDF uploads stream through authenticated same-origin routes, with progress, cancellation, status and recovery. Signed storage grants remain in memory and are never returned to the browser or saved in records. A verified received file becomes an asset only after explicit save; new/replaced delivery media requires approval. Drive originals, original metadata, tags and descriptions remain intact. Temporary URLs expire after seven days. Cancellation cannot remove a file storage may already have received. |
+| Delivery lifecycle and publishing | Verified delivery size/type stays separate from the original file's metadata. Managed lifecycle fields cannot be forged through ordinary asset edits. New use of an expired library URL is blocked, including pasted URLs and thread items. A fresh scoped provider read can establish an already-retained copy for edits, rescheduling or retries; unchanged root media is omitted from updates and full provider post validation still runs. Saving a provider draft does not retain a permanent media copy. File receipt/metadata inspection does not establish platform codec acceptance. |
+| Inbox attachments and controls | Retrieval binds to the current account, conversation, message and attachment index. WhatsApp binary downloads use protected same-origin routes with bounded type/size and safe filenames. Explicit typing distinguishes success from no-op; WhatsApp requires inline review of its read-acknowledgement side effect. Reviewed deletion removes Zernio's stored conversation/messages and unlinks its provider contact channel, retaining the native thread and local contacts. Sync can reimport it. Exact review versions and receipt-linked recovery fences protect retries; the provider has no conditional deletion to exclude a new arrival after final review. |
+
+The synthetic browser pass verifies new uploads and pending asset saves, delivery replacement with preserved Drive source/tags/description, lost-transfer-acknowledgement recovery without a second storage transfer, cancellation while storage confirmation is delayed, and rescheduling an existing provider-owned expired creative with a visible retained-media notice. The cancelled transfer stays cancelled after status refresh and creates no asset. Sanitized fixture receipts show full post validation followed by an update that omits unchanged media.
+
+The media lifecycle follows Zernio's [upload and retention contract](https://docs.zernio.com/guides/media-uploads). Its [post dry run](https://docs.zernio.com/validate/validate-post) performs structural checks without processing media; it remains enabled for retained-copy changes. Snapchat was rechecked on 19 October: the [provider guide](https://docs.zernio.com/platforms/snapchat) still blocks every new connection pending app approval.
+
+Browser input resumed after the earlier native prompt was dismissed. Additional walkthroughs verify the previous release's two-account Facebook draft, separate captions/media/options/times, exact approval and scheduling/status readback, plus Google website conversion creation and a reviewed settings change. Other earlier manual acceptance gaps remain as recorded below; automated evidence is not relabelled as browser evidence.
+
+![Drive original retained after a delivery-file replacement in the isolated browser run](zernio-media-verification.png)
+
+Runnable anchors include [media HTTP checks](../tests/zernio-media.test.mjs), [upload UI handlers](../tests/zernio-media-upload-ui.test.mjs), [shared publishing validation](../tests/social-posts.test.mjs), [approvals](../tests/approvals.test.mjs), [inbox HTTP](../tests/inbox-http.test.mjs) and [inbox UI](../tests/inbox-ui.test.mjs). Independent review reproduced and fixed late cancellation writes, nonterminal recovery caching, orphan preparation fences, stale asset receipts, expiry bypasses, attachment identity drift and deletion-fence recovery. Ponytail and [Paperthin](https://github.com/LilMGenius/paperthin) read, evidence, consistency and fresh-reader checks are used.
+
+All accounts, transfers, provider receipts and campaign actions above are synthetic. No real publication, message, upload, account change, booking, activation or spend was tested. Live provider acceptance still needs designated credentials, permissions and eligibility. The [full Zernio plan](zernio-feature-plan.md) remains incomplete: advanced ad hierarchy/formats/audiences/catalogs, conversion ingestion, bulk/repeated-destination publishing, richer messaging/WhatsApp and engagement, segmentation/automation, stores/additional channels and provider administration remain substantial work. Voice is excluded; organic SEO stays in ten98 Discover.
+
+## Previous expansion — v0.8.7
 
 Verified on 19 October 2026: **436 automated checks pass**, with no failures, skips or cancellations. Type checking, the production frontend/container builds and offline non-root container startup pass. The production dependency audit reports **zero vulnerabilities**. Authenticated running-app contact/conversion acceptance separately passed **16 checks**.
 

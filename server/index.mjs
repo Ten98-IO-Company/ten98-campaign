@@ -23,6 +23,7 @@ import { createSmsInbox } from './sms-inbox.mjs';
 import { createLinks } from './links.mjs';
 import { normalizePostVariants, normalizeAccountVariants, normalizeMediaItems } from '../shared/social-posts.mjs';
 import { validateQueueIntent } from './zernio-queues.mjs';
+import { MEDIA_UPLOAD_TIMEOUT, MEDIA_DELIVERY_FIELDS, closeMediaUploads } from './zernio-media.mjs';
 
 const roles = ['owner', 'admin', 'editor', 'viewer'];
 const projectFields = 'p.id,p.workspace_id AS workspaceId,p.name,p.color,p.zernio_profile_id AS zernioProfileId,p.drive_folder_id AS driveFolderId';
@@ -139,8 +140,11 @@ export function createApp(options = {}) {
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     if (parsed.protocol === 'https:') res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     const send = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
+    let bodyTimer, rawMediaContent = false;
     try {
       const url = new URL(req.url, appUrl), path = url.pathname, mutating = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+      rawMediaContent = req.method === 'PUT' && /^\/api\/projects\/[^/]+\/integrations\/media\/uploads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/content$/i.test(path);
+      if (req.headers['content-length'] && req.headers['content-length'] !== '0' || req.headers['transfer-encoding']) { bodyTimer = setTimeout(() => req.destroy(), rawMediaContent ? MEDIA_UPLOAD_TIMEOUT : 30000); bodyTimer.unref(); req.once('end', () => clearTimeout(bodyTimer)); req.once('close', () => clearTimeout(bodyTimer)); }
       if (await links.publicHandle({ req, res, url })) return;
       if (path.startsWith('/api/')) {
         res.setHeader('Cache-Control', 'no-store');
@@ -150,7 +154,7 @@ export function createApp(options = {}) {
         if (unsubscribe && ['GET', 'POST'].includes(req.method)) { if (req.method === 'POST') await readRawBody(req, 4096); const html = direct.handleUnsubscribe(unsubscribe[1], req.method); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Email preferences</title><main>' + html + '</main></html>'); }
         if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
         if (mutating && req.headers.origin !== appUrl) throw new HttpError(403, 'A matching Origin header is required.');
-        const body = mutating && req.method !== 'DELETE' ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : /^\/api\/projects\/[^/]+\/(?:posts(?:\/[^/]+)?|integrations\/social\/(?:validate|update)|direct\/(?:contacts\/import|campaigns(?:\/[^/]+)?))$/.test(path) ? 2 * 1024 * 1024 : 65536) : {};
+        const body = mutating && req.method !== 'DELETE' && !rawMediaContent ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : /^\/api\/projects\/[^/]+\/(?:posts(?:\/[^/]+)?|integrations\/social\/(?:validate|update)|direct\/(?:contacts\/import|campaigns(?:\/[^/]+)?))$/.test(path) ? 2 * 1024 * 1024 : 65536) : {};
         if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(auth.user(req, res)), setupRequired: !db.prepare('SELECT id FROM users LIMIT 1').get(), oidcEnabled: config.oidcEnabled });
         if (path === '/api/auth/setup' && req.method === 'POST') {
           auth.limit('setup:' + req.socket.remoteAddress, 10);
@@ -312,6 +316,7 @@ export function createApp(options = {}) {
               if (collection === 'assets') {
                 if (body.approval !== undefined && body.approval !== previous.approval && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
                 if (['url', 'deliveryUrl', 'kind'].some(key => data[key] !== previous[key])) data.approval = 'pending';
+                if (Object.hasOwn(body, 'deliveryUrl') && data.deliveryUrl !== previous.deliveryUrl) for (const key of MEDIA_DELIVERY_FIELDS) data[key] = null;
               }
               const record = store.update(project.id, collection, id, data); store.activity(project.id, `${collection.slice(0, -1)} updated.`); return send(200, { record });
             }
@@ -328,10 +333,11 @@ export function createApp(options = {}) {
       if (extname(file) === '.html') contents = Buffer.from(contents.toString('utf8').replace(/<script\b/g, `<script nonce="${nonce}"`));
       const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
       res.writeHead(200, { 'Content-Type': (mime[extname(file)] || 'application/octet-stream') + (['.html', '.js', '.css'].includes(extname(file)) ? '; charset=utf-8' : ''), 'Cache-Control': extname(file) === '.html' ? 'no-cache' : 'public, max-age=3600' }); res.end(req.method === 'HEAD' ? undefined : contents);
-    } catch (error) { if (!res.headersSent) send(error instanceof HttpError || error instanceof IntegrationError ? error.status : 500, { error: error instanceof HttpError ? error.message : error instanceof IntegrationError ? { code: error.code, message: error.message } : 'The request could not be completed.' }); else res.end(); }
+    } catch (error) { if (rawMediaContent && !res.headersSent) { res.setHeader('Connection', 'close'); req.resume(); } if (!res.headersSent) send(error instanceof HttpError || error instanceof IntegrationError ? error.status : 500, { error: error instanceof HttpError ? error.message : error instanceof IntegrationError ? { code: error.code, message: error.message } : 'The request could not be completed.' }); else res.end(); }
+    finally { clearTimeout(bodyTimer); }
   });
-  server.requestTimeout = 30000; server.headersTimeout = 10000;
-  return { server, db, store, config, webhooks, direct, smsInbox, links, close: async () => { clearInterval(directTimer); direct.close(); await direct.idle(); return new Promise((resolveClose, reject) => { clearInterval(webhookTimer); if (!server.listening) { db.close(); resolveClose(); return; } server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); server.closeIdleConnections(); }); } };
+  server.requestTimeout = MEDIA_UPLOAD_TIMEOUT; server.headersTimeout = 10000;
+  return { server, db, store, config, webhooks, direct, smsInbox, links, close: async () => { closeMediaUploads(db); clearInterval(directTimer); direct.close(); await direct.idle(); return new Promise((resolveClose, reject) => { clearInterval(webhookTimer); if (!server.listening) { db.close(); resolveClose(); return; } server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); server.closeIdleConnections(); }); } };
 }
 function checkProfileMapping(db, profileId, projectId = '') { if (profileId && db.prepare('SELECT id FROM projects WHERE zernio_profile_id=? AND id<>?').get(profileId, projectId)) throw new HttpError(409, 'This Zernio profile is already mapped to another project. Use one profile per project for publishing and analytics.'); }
 function projectInput(data) {
@@ -348,6 +354,7 @@ function checkDependants(store, projectId, collection, id, realOnly = false) {
   if (field && collections.some(name => store.list(projectId, name).some(record => (record[field] === id || (collection === 'assets' && [...Object.values(record.platformOverrides || {}), ...Object.values(record.accountOverrides || {})].some(variant => variant?.assetId === id))) && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
 }
 function rejectProviderFields(body, collection = '') {
+  if (collection === 'assets' && MEDIA_DELIVERY_FIELDS.some(key => Object.hasOwn(body, key))) bad('Hosted delivery metadata is managed by the upload workflow.');
   if (['nativeProvider', 'nativeCustomerId', 'nativeCampaignResource', 'nativeResources', 'nativeAccountId', 'nativeCampaignId', 'nativeAdGroupId', 'nativeAdId', 'externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'modifiedTime', 'md5Checksum', 'approvalStatus', 'approvedBy', 'reviewedBy', 'providerDeletedAt', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key) && !(collection === 'assets' && key === 'deliveryUrl'))) bad('Provider identifiers and publication evidence are managed by integrations.');
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

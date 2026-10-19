@@ -54,7 +54,7 @@ async function fixture() {
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`;
   async function request(path, method = 'GET', body, key = randomUUID()) {
     const response = await fetch(base + path, { method, headers: { Origin: 'https://campaign.example.test', ...(cookie ? { Cookie: cookie } : {}), ...(method !== 'GET' ? { 'Content-Type': 'application/json', 'Idempotency-Key': key } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
+    return { status: response.status, data: response.headers.get('content-type')?.startsWith('application/json') ? await response.json() : Buffer.from(await response.arrayBuffer()), headers: response.headers, cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   const setup = await request('/api/auth/setup', 'POST', { name: 'Inbox owner', email: 'inbox-owner@example.test', password: 'inbox fixture passphrase long enough', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
   await request(`/api/projects/${projectId}`, 'PATCH', { zernioProfileId: 'inbox-profile' }); const path = `/api/projects/${projectId}/integrations/inbox`;
@@ -99,6 +99,99 @@ async function actionFixture(platform = 'telegram') {
   const write = (message, verb, extra = {}, key = randomUUID()) => f.request(`${f.path}/conversations/thread-1/messages/${encodeURIComponent(message.id)}/${verb}`, 'POST', { accountId: account._id, expectedMessageVersion: message.version, ...extra }, key);
   return { ...f, state, account, thread, write };
 }
+
+test('attachment resolution proves account, conversation, message and index before requesting a fresh public link', async () => {
+  const f = await fixture(); let mode = 'valid';
+  f.setHook((url, options) => {
+    if (url.pathname.endsWith('/messages')) return Response.json({ messages: [{ id: 'media/message', conversationId: 'thread-1', accountId: 'ig', platform: 'instagram', direction: 'incoming', createdAt: new Date().toISOString(), attachments: [{ type: 'image', url: 'https://cdn.example.test/expired.jpg', refreshUrl: 'https://evil.example.test/never-follow' }] }], pagination: { hasMore: false, nextCursor: null } });
+    if (url.pathname.endsWith('/attachments/0')) {
+      assert.equal(options.method, 'GET'); assert.equal(url.searchParams.get('format'), 'json'); assert.equal(url.searchParams.get('accountId'), 'ig');
+      return mode === 'expired' ? Response.json({}, { status: 404 }) : Response.json({ status: 'success', url: mode === 'private' ? 'https://127.0.0.1/private' : 'https://cdn.example.test/fresh.jpg', refreshed: true });
+    }
+  });
+  try {
+    const target = `${f.path}/conversations/thread-1/messages/media%2Fmessage/attachments/0?accountId=ig`;
+    let result = await f.request(target); assert.equal(result.status, 200); assert.deepEqual(result.data.attachment, { type: 'image', url: 'https://cdn.example.test/fresh.jpg', refreshed: true });
+    const count = f.calls.filter(call => call.url.pathname.endsWith('/attachments/0')).length;
+    assert.equal((await f.request(target.replace('/attachments/0', '/attachments/1'))).status, 404);
+    assert.equal((await f.request(target.replace('media%2Fmessage', 'foreign-message'))).status, 404);
+    assert.equal((await f.request(target.replace('accountId=ig', 'accountId=foreign'))).status, 403);
+    assert.equal(f.calls.filter(call => call.url.pathname.endsWith('/attachments/0')).length, count);
+    mode = 'private'; assert.equal((await f.request(target)).status, 502);
+    mode = 'expired'; assert.equal((await f.request(target)).status, 410);
+    assert.equal(f.calls.some(call => call.url.hostname === 'evil.example.test'), false); assert.equal(f.writes().length, 0);
+  } finally { await f.close(); }
+});
+
+test('WhatsApp attachment downloads keep credentials server-side and reject unsafe, expired, oversized and changed-access responses', async () => {
+  const f = await fixture(); let mode = 'valid', mediaUrl = 'https://zernio.com/api/v1/whatsapp/media/media-id?accountId=wa';
+  f.setHook((url, options) => {
+    if (url.pathname.endsWith('/messages')) return Response.json({ messages: [{ id: 'media-message', accountId: 'wa', platform: 'whatsapp', conversationId: 'thread-1', direction: 'incoming', createdAt: new Date().toISOString(), attachments: [{ type: 'image', url: mediaUrl, payload: { id: 'media-id' } }] }], pagination: { hasMore: false, nextCursor: null } });
+    if (url.pathname.endsWith('/whatsapp/media/media-id')) {
+      assert.equal(options.redirect, 'error'); assert.equal(options.headers.Authorization, 'Bearer inbox-fixture-key');
+      assert.equal(url.searchParams.get('accountId'), 'wa');
+      if (mode === 'expired') return Response.json({}, { status: 400 });
+      if (mode === 'redirect') return new Response(null, { status: 302, headers: { Location: 'https://evil.example.test/never-follow' } });
+      if (mode === 'stream-oversized') return new Response(Buffer.alloc(6 * 1024 * 1024), { headers: { 'Content-Type': 'image/jpeg' } });
+      if (mode === 'access') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+      return new Response(Buffer.from('image bytes'), { headers: { 'Content-Type': mode === 'html' ? 'text/html' : 'image/jpeg', 'Content-Length': mode === 'oversized' ? String(6 * 1024 * 1024) : '11' } });
+    }
+  });
+  try {
+    const target = `${f.path}/conversations/thread-1/messages/media-message/attachments/0?accountId=wa`;
+    let result = await f.request(target); assert.equal(result.status, 200); assert.equal(result.data.attachment.url, undefined); assert.equal(result.data.attachment.downloadUrl, target + '&download=1');
+    assert.equal(f.calls.some(call => call.url.pathname.includes('/whatsapp/media/')), false, 'Descriptor loading does not fetch the binary or generate a read receipt.');
+    result = await f.request(target + '&download=1'); assert.equal(result.status, 200); assert.equal(result.data.toString(), 'image bytes'); assert.equal(result.headers.get('content-disposition'), 'attachment; filename="inbox-attachment.jpg"'); assert.equal(result.headers.get('cache-control'), 'private, no-store');
+    for (mode of ['html', 'oversized', 'stream-oversized', 'redirect', 'expired']) { result = await f.request(target + '&download=1'); assert.equal(result.status, mode === 'expired' ? 410 : 502, JSON.stringify(result.data)); }
+    mediaUrl = 'https://evil.example.test/api/v1/whatsapp/media/media-id?accountId=wa'; assert.equal((await f.request(target + '&download=1')).status, 502);
+    mediaUrl = 'https://zernio.com/api/v1/whatsapp/media/media-id?accountId=other'; assert.equal((await f.request(target + '&download=1')).status, 502);
+    mediaUrl = 'https://zernio.com/api/v1/whatsapp/media/media-id'; mode = 'valid'; assert.equal((await f.request(target + '&download=1')).status, 200, 'A verified attachment without the query receives the scoped account parameter.');
+    mode = 'access'; assert.equal((await f.request(target + '&download=1')).status, 403);
+  } finally { await f.close(); }
+});
+
+test('typing is an explicit scoped action and a provider no-op never becomes delivered', async () => {
+  const f = await fixture(); let delivered = false;
+  f.setHook(url => url.pathname.endsWith('/typing') ? Response.json({ success: delivered }) : undefined);
+  try {
+    const target = `${f.path}/conversations/thread-1/typing`;
+    assert.equal((await f.request(target, 'POST', { accountId: 'wa' })).status, 400);
+    assert.equal((await f.request(target, 'POST', { accountId: 'xx', confirmTyping: true })).status, 422);
+    let result = await f.request(target, 'POST', { accountId: 'wa', confirmTyping: true }); assert.equal(result.status, 200); assert.equal(result.data.delivered, false); assert.equal(result.data.mayMarkRead, true);
+    delivered = true; result = await f.request(target, 'POST', { accountId: 'wa', confirmTyping: true }); assert.equal(result.data.delivered, true);
+    const count = f.writes().length; f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await f.request(target, 'POST', { accountId: 'wa', confirmTyping: true })).status, 403); assert.equal(f.writes().length, count);
+  } finally { await f.close(); }
+});
+
+test('stored-copy deletion binds the latest message and protects completed or unknown outcomes across fresh keys', async () => {
+  for (const outcome of ['success', 'malformed', 'network']) {
+    const f = await fixture(); let latest = 'message-a', retryAllowed = false;
+    f.setHook((url, options) => {
+      if (url.pathname.endsWith('/messages')) return Response.json({ messages: [...new Set(['message-a', latest])].map(id => ({ id, accountId: 'fb', platform: 'facebook', conversationId: 'thread-1', direction: 'incoming', senderId: 'participant-a', message: id, createdAt: '2026-10-18T12:00:00Z', attachments: [] })), pagination: { hasMore: false, nextCursor: null }, sortOrderApplied: 'desc' });
+      if (url.pathname.endsWith('/inbox/conversations/thread-1') && options.method === 'DELETE') {
+        if (outcome === 'network' && !retryAllowed) throw new Error('Lost deletion receipt');
+        return Response.json({ success: true, data: { id: outcome === 'malformed' ? 'other-thread' : 'thread-1', accountId: 'fb', platform: 'facebook', deletedMessages: 2 } });
+      }
+    });
+    try {
+      const target = `${f.path}/conversations/thread-1`, detail = await f.request(target + '/messages?accountId=fb');
+      const body = { accountId: 'fb', expectedDeleteVersion: detail.data.conversation.deleteVersion, confirmConversationId: 'thread-1' }, contactCount = f.app.db.prepare('SELECT COUNT(*) AS count FROM direct_contacts').get().count;
+      latest = '0-new-arrival'; assert.equal((await f.request(target + '/delete', 'POST', body)).status, 409); assert.equal(f.writes().length, 0, 'An arrival with the same timestamp invalidates review even when its ID sorts below the old latest message.');
+      body.expectedDeleteVersion = (await f.request(target + '/messages?accountId=fb')).data.conversation.deleteVersion;
+      const result = await f.request(target + '/delete', 'POST', body, 'stored-delete-key'); assert.equal(result.status, outcome === 'success' ? 200 : 409);
+      if (outcome === 'success') { assert.equal(result.data.scope, 'zernio_copy'); assert.equal(result.data.deletedMessages, 2); }
+      assert.equal((await f.request(target + '/delete', 'POST', body, 'stored-delete-fresh-key')).status, 409); assert.equal(f.writes().length, 1);
+      assert.equal(f.app.db.prepare('SELECT COUNT(*) AS count FROM direct_contacts').get().count, contactCount);
+      assert.equal(f.calls.some(call => /\/contacts\//.test(call.url.pathname)), false);
+      if (outcome !== 'success') {
+        const review = await f.request(`/api/projects/${f.projectId}/operations/${result.data.operation.id}/review`, 'POST', { resolution: outcome === 'network' ? 'not_applied' : 'applied', confirmChecked: true, note: 'Fixture operator checked the provider outcome.' }); assert.equal(review.status, 200);
+        retryAllowed = true;
+        const retried = await f.request(target + '/delete', 'POST', body, 'stored-delete-after-review'); assert.equal(retried.status, outcome === 'network' ? 200 : 409); assert.equal(f.writes().length, outcome === 'network' ? 2 : 1, 'Only an explicit not-applied review releases the original resource fence.');
+        assert.equal((await f.request(target + '/delete', 'POST', body, 'stored-delete-key')).status, 409, 'An operator-reviewed original key always remains closed.');
+      }
+    } finally { await f.close(); }
+  }
+});
 
 test('own text edits and platform deletions revalidate scoped snapshots and confirm exact message history', async () => {
   const f = await actionFixture();

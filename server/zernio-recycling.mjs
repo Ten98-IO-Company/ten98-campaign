@@ -43,7 +43,7 @@ function tables(db) {
 }
 function assetSnapshots(context, post) {
   const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map(row => row?.assetId), ...Object.values(post.accountOverrides || {}).map(row => row?.assetId)].filter(Boolean))];
-  return ids.map(id => { const asset = context.store.get(context.project.id, 'assets', id); return asset ? Object.fromEntries(['id', 'approval', 'url', 'deliveryUrl', 'kind', 'mimeType', 'size', 'width', 'height', 'duration', 'modifiedTime', 'md5Checksum'].filter(key => asset[key] !== undefined).map(key => [key, asset[key]])) : { id, missing: true }; });
+  return ids.map(id => { const asset = context.store.get(context.project.id, 'assets', id); return asset ? Object.fromEntries(['id', 'approval', 'url', 'deliveryUrl', 'kind', 'mimeType', 'size', 'width', 'height', 'duration', 'modifiedTime', 'md5Checksum', 'deliverySource', 'deliveryUploadedAt', 'deliveryExpiresAt', 'deliveryKey', 'deliveryAttemptId', 'deliveryKind', 'deliveryMimeType', 'deliverySize', 'deliveryFilename'].filter(key => asset[key] !== undefined).map(key => [key, asset[key]])) : { id, missing: true }; });
 }
 async function readPost(context, api, profileId, postId, activeOnly = false) {
   const local = context.store.get(context.project.id, 'posts', postId);

@@ -107,6 +107,13 @@ test('content approval policy binds current posts and creative to audited review
     store.update(project.id, 'assets', asset.id, { deliveryUrl: 'https://cdn.example.test/changed-during-preflight.jpg' });
     assertRejected(prepared, 'APPROVAL_POST_CHANGED', 'owner');
     assert.equal((await invoke('policy', { selectedProject: foreignProject })).data.requireApproval, false);
+    const hostedAsset = store.create(project.id, 'assets', { name: 'Hosted delivery', kind: 'image', url: 'https://drive.google.com/file/d/original/view', deliveryUrl: 'https://media.zernio.com/temp/approved.png', approval: 'approved', deliverySource: 'zernio', deliveryUploadedAt: '2026-10-19T00:00:00Z', deliveryExpiresAt: '2026-10-26T00:00:00Z', deliveryKey: 'temp/approved.png', deliveryAttemptId: 'upload-one', deliveryKind: 'image', deliveryMimeType: 'image/png', deliverySize: 100, deliveryFilename: 'approved.png' });
+    store.update(project.id, 'posts', post.id, { assetId: hostedAsset.id });
+    await invoke('policy', { method: 'POST', role: 'owner', body: { requireApproval: true } });
+    assert.equal((await review((await requestReview()).data.item.review.id)).status, 200);
+    for (const changed of [{ deliveryExpiresAt: '2026-10-27T00:00:00Z' }, { deliveryUploadedAt: '2026-10-20T00:00:00Z' }, { deliveryKey: 'temp/replaced.png' }, { deliveryAttemptId: 'upload-two' }, { deliverySize: 200 }, { deliveryMimeType: 'image/webp' }, { deliveryKind: 'video' }, { deliveryFilename: 'replacement.png' }]) {
+      store.update(project.id, 'assets', hostedAsset.id, changed); assertRejected(current(), 'PUBLISHING_APPROVAL_STALE'); store.update(project.id, 'assets', hostedAsset.id, hostedAsset);
+    }
     assert.ok(db.prepare('SELECT count(*) AS count FROM post_approval_reviews WHERE project_id=? AND post_id=?').get(project.id, post.id).count >= 5);
     assert.ok(db.prepare('SELECT message FROM activity WHERE project_id=?').all(project.id).some(row => row.message.includes('Content approved by Reviewer')));
   } finally { db.close(); }

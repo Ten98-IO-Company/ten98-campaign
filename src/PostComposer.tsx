@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PLATFORM_RULES, captionLimitForVariant, countCaption, normalizePostVariants, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, captionLimitForVariant, countCaption, normalizePostVariants, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms, providerPostMediaUrls } from '../shared/social-posts.mjs';
 import './post-composer.css';
 
 type Row = { id: string; [key: string]: any };
@@ -199,7 +199,8 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   const accountChoices = accounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))), editingAccount = accountChoices.find(account => accountId(account) === activeAccount), editingAccountId = editingAccount ? accountId(editingAccount) : '', editKey = selected + ':' + editingAccountId;
   const override = editingAccountId ? accountOverrides[editingAccountId] || {} : overrides[selected] || {};
   const values = useMemo(() => ({ content, platforms, ...(queueId ? { queueId, queueVersion } : post?.queueId ? { queueId: '', queueVersion: '' } : {}), ...(post?.accounts !== undefined || accountsTouched || accounts.some(account => platforms.includes(account.platform) && PLATFORM_RULES[account.platform] && account.isActive !== false) ? { accounts: selectedAccounts } : {}), assetId: baseMode === 'asset' ? assetId : '', campaignId, scheduledAt: scheduledAt && Number.isFinite(Date.parse(scheduledAt)) ? new Date(scheduledAt).toISOString() : '', status: scheduledAt ? 'scheduled' : 'draft', mediaItems: baseMode === 'asset' ? null : baseMode === 'custom' ? baseMedia : [], platformOverrides: Object.fromEntries(Object.entries(overrides).filter(([platform]) => platforms.includes(platform))), ...(Object.keys(accountOverrides).length || post?.accountOverrides ? { accountOverrides: Object.fromEntries(Object.entries(accountOverrides).filter(([id, copy]) => selectedAccounts.includes(id) && platforms.includes(copy.platform))) } : {}) }), [content, platforms, selectedAccounts, accountsTouched, accounts, post?.accounts, post?.accountOverrides, baseMode, assetId, campaignId, scheduledAt, queueId, queueVersion, baseMedia, overrides, accountOverrides]);
-  const destinationChecks = platforms.flatMap(platform => { const ids = selectedAccounts.filter(id => accounts.find(account => accountId(account) === id)?.platform === platform || values.accountOverrides?.[id]?.platform === platform); return (ids.length ? ids : [undefined]).map(id => ({ ...validatePostForPlatforms(values, [platform], { assets, accountId: id }), accountId: id })); });
+  const providerOwnedMediaUrls = providerPost ? providerPostMediaUrls(post) : new Set<string>();
+  const destinationChecks = platforms.flatMap(platform => { const ids = selectedAccounts.filter(id => accounts.find(account => accountId(account) === id)?.platform === platform || values.accountOverrides?.[id]?.platform === platform); return (ids.length ? ids : [undefined]).map(id => ({ ...validatePostForPlatforms(values, [platform], { assets, accountId: id, providerOwnedMediaUrls }), accountId: id })); });
   const checks = { errors: destinationChecks.flatMap(check => check.errors.map((item: any) => ({ ...item, accountId: check.accountId }))), warnings: destinationChecks.flatMap(check => check.warnings.map((item: any) => ({ ...item, accountId: check.accountId }))) }, variant = selected ? resolveVariant(values, selected, assets, editingAccountId || undefined) : null;
   async function shortenLinks() {
     if (!onShortenLinks || disabled) return; setShortening(true); setError('');
@@ -207,7 +208,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     catch (failure) { if (alive.current && (failure as Error).name !== 'AbortError') setError((failure as Error).message); }
     finally { if (alive.current) setShortening(false); }
   }
-  const selectedCheck = editingAccountId ? validatePostForPlatforms(values, [selected], { assets, accountId: editingAccountId }) : validatePostForPlatforms(values, [selected], { assets }), errors = selectedCheck.errors, warnings = selectedCheck.warnings;
+  const selectedCheck = editingAccountId ? validatePostForPlatforms(values, [selected], { assets, accountId: editingAccountId, providerOwnedMediaUrls }) : validatePostForPlatforms(values, [selected], { assets, providerOwnedMediaUrls }), errors = selectedCheck.errors, warnings = selectedCheck.warnings;
   const socialAccounts = accounts.filter(account => PLATFORM_RULES[account.platform] && account.isActive !== false), activeAccounts = socialAccounts.filter(account => platforms.includes(account.platform));
   function changeOverride(patch: Override, remove: string[] = []) {
     if (own(patch, 'options') || remove.includes('options')) { const keep = (previous: Record<string, string>) => Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith(editKey + ':'))); setOptionInputs(keep); setOptionErrors(keep); }

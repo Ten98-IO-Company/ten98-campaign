@@ -28,6 +28,7 @@ test('social lifecycle updates, cancellation, failed retry, published-copy edits
   const project = { id: 'social-project', zernioProfileId: 'profile-social' }, account = { _id: 'facebook-a', profileId: project.zernioProfileId, platform: 'facebook' };
   let remote = { _id: 'remote-social', status: 'scheduled', content: 'Original', scheduledFor: '2070-01-01T10:00:00Z', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] }, mappedProfile = project.zernioProfileId, remapOnWrite = false, failedReadback = false;
   const store = {
+    list(projectId, collection) { return [...records.values()].filter(record => record.projectId === projectId && collection === 'posts').map(record => ({ ...record })); },
     get(projectId, collection, id) { const record = records.get(id); return record?.projectId === projectId && collection === 'posts' ? { ...record } : null; },
     update(projectId, collection, id, data) { const record = this.get(projectId, collection, id); if (!record) return null; const result = { ...record, ...data }; records.set(id, result); return result; },
     activity() {},

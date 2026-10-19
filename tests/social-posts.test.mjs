@@ -1,10 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PLATFORM_RULES, normalizeMediaItems, normalizePostVariants, normalizeAccountVariants, assertAccountSchedules, normalizePlatformOptions, resolveVariant, buildPlatformEntry, validatePostForPlatforms, countCaption, captionLimitForVariant } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, normalizeMediaItems, normalizePostVariants, normalizeAccountVariants, assertAccountSchedules, normalizePlatformOptions, resolveVariant, buildPlatformEntry, validatePostForPlatforms, assetDeliveryIssue, providerPostMediaUrls, countCaption, captionLimitForVariant } from '../shared/social-posts.mjs';
 
 const image = (extra = {}) => ({ type: 'image', url: 'https://cdn.example.com/creative.jpg', width: 1080, height: 1080, size: 100000, mimeType: 'image/jpeg', ...extra });
 const video = (extra = {}) => ({ type: 'video', url: 'https://cdn.example.com/video.mp4', width: 1080, height: 1920, duration: 30, size: 1000000, mimeType: 'video/mp4', ...extra });
 const valid = (post, platforms) => validatePostForPlatforms(post, platforms).valid;
+
+test('hosted delivery uses observed file metadata and expires at its own deadline without borrowing Drive metadata', () => {
+  const uploaded = Date.parse('2026-10-19T00:00:00Z'), expiry = uploaded + 7 * 86400000;
+  const asset = { id: 'hosted', url: 'https://drive.google.com/file/d/original/view', kind: 'video', mimeType: 'video/mp4', filename: 'original.mp4', size: 900000, width: 1920, height: 1080, duration: 90, description: 'Original description', deliveryUrl: 'https://media.zernio.com/temp/hosted.gif', deliverySource: 'zernio', deliveryUploadedAt: new Date(uploaded).toISOString(), deliveryExpiresAt: new Date(expiry).toISOString(), deliveryKind: 'image', deliveryMimeType: 'image/gif', deliverySize: 2000, deliveryFilename: 'replacement.gif' };
+  const media = resolveVariant({ assetId: asset.id }, 'facebook', [asset]).mediaItems;
+  assert.deepEqual(media, [{ type: 'gif', url: asset.deliveryUrl, mimeType: 'image/gif', filename: 'replacement.gif', size: 2000, altText: asset.description }]);
+  assert.equal(assetDeliveryIssue(asset, expiry - 1), ''); assert.match(assetDeliveryIssue(asset, expiry), /expired/); assert.match(assetDeliveryIssue({ ...asset, deliveryExpiresAt: '' }, uploaded), /no verified expiry/);
+  assert.equal(assetDeliveryIssue({ ...asset, deliverySource: 'manual' }, expiry), '');
+  const post = { content: 'Campaign', assetId: asset.id, scheduledAt: '2027-01-01T00:00:00Z' };
+  assert.equal(validatePostForPlatforms(post, ['facebook'], { assets: [asset], now: expiry - 1 }).valid, true, 'Provider scheduling copies the file at submission, before its future posting time.');
+  assert.equal(validatePostForPlatforms(post, ['facebook'], { assets: [asset], now: expiry }).valid, false);
+  assert.equal(validatePostForPlatforms({ ...post, accountOverrides: { page: { platform: 'facebook', mediaItems: [] } } }, ['facebook'], { assets: [asset], accountId: 'page', now: expiry }).valid, true, 'An unused shared delivery file must not block an overridden account copy.');
+  assert.equal(validatePostForPlatforms({ content: 'Copied provider media', mediaItems: [{ type: 'image', url: 'https://media.zernio.com/permanent/copy.gif' }] }, ['facebook'], { assets: [asset], now: expiry }).valid, true);
+  assert.equal(validatePostForPlatforms({ content: 'Same expired URL', mediaItems: media }, ['facebook'], { assets: [asset], now: expiry }).valid, false);
+  const native = { status: 'scheduled', mediaItems: media, platforms: [{ platform: 'facebook', accountId: 'page' }] }, retained = providerPostMediaUrls(native);
+  assert.equal(validatePostForPlatforms(post, ['facebook'], { assets: [asset], now: expiry, providerOwnedMediaUrls: retained }).valid, true, 'Verified provider-owned copies survive the library URL deadline.');
+  for (const unretained of [{ ...native, status: 'draft' }, { ...native, isDraft: true }, { ...native, status: 'unknown' }, { ...native, platforms: [{ platform: 'facebook', customMedia: [] }] }]) assert.equal(providerPostMediaUrls(unretained).size, 0);
+  assert.deepEqual([...providerPostMediaUrls({ ...native, providerResults: native.platforms, platforms: ['facebook'] })], [asset.deliveryUrl], 'Normalized status readback supports the same display hint.');
+  assert.equal(providerPostMediaUrls({ ...native, platforms: [{ platform: 'facebook', customMedia: [] }], providerResults: [{ customMedia: media }] }).size, 0, 'Validated raw destinations take priority over an unrelated extra response field.');
+  assert.equal(validatePostForPlatforms(post, ['facebook'], { assets: [{ ...asset, deliveryUrl: 'https://media.zernio.com/temp/new-expired.gif' }], now: expiry, providerOwnedMediaUrls: retained }).valid, false, 'Unchanged native media must never exempt a different expired URL.');
+  const threadAsset = { ...asset, deliveryUrl: 'https://media.zernio.com/temp/thread.png', deliveryMimeType: 'image/png' }, threadMedia = [{ type: 'image', url: threadAsset.deliveryUrl, mimeType: 'image/png', size: 2000 }];
+  for (const platform of ['twitter', 'threads', 'bluesky']) {
+    const thread = { content: 'Thread', platformOverrides: { [platform]: { options: { threadItems: [{ content: 'Attached copy', mediaItems: threadMedia }] } } } };
+    assert.equal(validatePostForPlatforms(thread, [platform], { assets: [threadAsset], now: expiry - 1 }).valid, true);
+    assert.ok(validatePostForPlatforms(thread, [platform], { assets: [threadAsset], now: expiry }).errors.some(row => /expired/.test(row.message)), 'Thread attachments use the same expiry deadline: ' + platform);
+    const retainedThread = providerPostMediaUrls({ status: 'scheduled', platforms: [{ platform, platformSpecificData: { threadItems: [{ mediaItems: threadMedia }] } }] });
+    assert.equal(validatePostForPlatforms(thread, [platform], { assets: [threadAsset], now: expiry, providerOwnedMediaUrls: retainedThread }).valid, true);
+  }
+});
 
 test('same-platform accounts independently inherit or replace caption, media, options and zoned times', () => {
   const assets = [{ id: 'account-asset', kind: 'image', deliveryUrl: 'https://cdn.example.test/account.jpg' }];

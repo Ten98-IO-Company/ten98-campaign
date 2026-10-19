@@ -10,6 +10,17 @@ import { PLATFORM_RULES, normalizePostVariants, normalizeAccountVariants, public
 
 const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');
 
+test('provider post updates and lifecycle actions display retained-media warnings returned by the server', async () => {
+  const management = await readFile(new URL('../src/PostManagement.tsx', import.meta.url), 'utf8'), notices = [], saved = [], post = { id: 'post' }, warning = 'Existing provider media was retained. Its temporary library link has expired.';
+  const context = { ambiguousCopies: false, divergentCopies: false, accountCopiesReady: true, replaceVariants: false, post, setBusy() {}, setError() {}, setNotice: value => notices.push(value), setCurrent: value => saved.push(value), requester: { current: async () => ({ post, validationWarnings: [warning, null] }) }, onChanged() {} };
+  for (const [name, next, args] of [['act', '  async function update(', ['social/retry', {}, 'Retry submitted.']], ['update', '\n  return <section>', [{ content: 'Caption', scheduledAt: '2070-01-02T00:00:00Z' }]]]) {
+    const start = management.indexOf('async function ' + name + '('), declaration = stripTypeScriptTypes(management.slice(start, management.indexOf(next, start)).trim());
+    await new Function(...Object.keys(context), `return (${declaration});`)(...Object.values(context))(...args);
+    assert.match(notices.at(-1), /Existing provider media was retained/);
+  }
+  assert.equal(saved.length, 2);
+});
+
 test('late browser and provider media inspections cannot restore removed media or cross platform editors', async () => {
   const compile = (value, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(value)});`)(...Object.values(context));
   const updateSource = source.slice(source.indexOf('function update(index:'), source.indexOf('  async function inspect('));
