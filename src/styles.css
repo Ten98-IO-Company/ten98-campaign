@@ -46,3 +46,38 @@
 .ad-details-discard .button-wrap{margin-top:12px}
 .ad-details ul{padding-left:20px;font-size:12px;line-height:1.7;margin-bottom:20px}
 @media(max-width:760px){.ad-details{padding:20px}.ad-details .button{white-space:normal}.ad-details>.panel-heading{flex-wrap:wrap}}
+
+.auth-split{display:grid;align-items:stretch;grid-template-columns:minmax(0,1fr) minmax(0,1fr);background:white}
+.auth-story{min-width:0;background:#eee9fa;padding:40px 50px;display:flex;flex-direction:column;justify-content:space-between;isolation:isolate;position:relative;overflow:hidden}
+.auth-story>.brand{padding:0}
+.auth-story>div:not(.auth-orbit){padding:60px 0}
+.auth-story .eyebrow{color:#766088;font-size:11px;letter-spacing:2px;margin-bottom:25px}
+.auth-story h1{font-size:clamp(40px,5vw,76px);line-height:1.1;letter-spacing:-4px;font-weight:750;color:#785793}
+.auth-story h1 em{color:#745c89;font-style:normal}
+.auth-story p{font-size:13px;color:#736180;margin-top:30px;line-height:1.9}
+.auth-channels{display:flex;flex-wrap:wrap;gap:22px;margin-top:38px;color:#736081;font-size:12px}
+.auth-channels span{display:flex;align-items:center;gap:8px}
+.auth-channels svg{width:17px;height:17px}
+.auth-story>small{font-size:12px;color:#71637a}
+.auth-orbit{position:absolute;height:550px;width:550px;right:-240px;bottom:-310px;border:90px solid #e4daf3;border-radius:50%;z-index:-1}
+.auth-split>.auth-form{display:flex;align-items:center;justify-content:center;min-width:0;max-width:none;margin:0;padding:45px;border:0;border-radius:0}
+.auth-split .auth-form h2{font-size:27px;letter-spacing:-1px;color:#755a85}
+@media(max-width:1200px){.auth-story,.auth-split>.auth-form{padding:35px}.auth-story h1{letter-spacing:-2.5px}}
+@media(max-width:960px){.auth-split{grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr)}.auth-story,.auth-split>.auth-form{padding:30px}.auth-story h1{font-size:45px}.auth-channels{gap:13px}}
+@media(max-width:760px){
+  .auth-split{grid-template-columns:minmax(0,1fr);align-content:start}
+  .auth-story{padding:25px 25px 30px}
+  .auth-story>.brand{gap:8px}
+  .auth-story .brand-mark{height:31px;width:31px;font-size:18px;border-radius:9px}
+  .auth-story .brand strong{font-size:22px}
+  .auth-story .brand small{font-size:8px;letter-spacing:2px}
+  .auth-story>div:not(.auth-orbit){padding:35px 0 0}
+  .auth-story h1{font-size:42px;letter-spacing:-1.5px;line-height:1.12}
+  .auth-story h1 br{display:none}
+  .auth-story h1 em{display:block}
+  .auth-story .eyebrow{font-size:9px;letter-spacing:1.5px;margin-bottom:13px}
+  .auth-story p,.auth-story>small,.auth-channels{display:none}
+  .auth-orbit{width:300px;height:300px;border-width:50px;right:-130px;bottom:-220px}
+  .auth-split>.auth-form{padding:35px 25px 45px}
+  .auth-split .auth-form h2{font-size:25px}
+}
