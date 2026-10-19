@@ -2,7 +2,7 @@
 
 Use Node.js 24, run `npm ci`, then `npm run dev`. Verify changes with `npm run build` and `npm test` before opening a pull request.
 
-Keep `main` and `dev` as the two permanent branches. Develop on `dev`, promote tested changes to `main` through a pull request, then fast-forward `dev` to the merge result so both branches stay synchronized. Keep `dev` when merging; do not delete it as a feature branch.
+Keep `main` and `dev` as the two permanent branches. Start each feature on a temporary `codex/` branch from the updated `dev` branch and merge its tested pull request into `dev`. Promote `dev` to `main` through a pull request, then fast-forward `dev` to the merge result so both branches stay synchronized. Tag and release the promoted `main` commit. Delete the merged feature branch; keep `dev`.
 
 Keep changes focused. Reuse the existing provider helpers and native platform features before adding dependencies. Every nontrivial behavior change needs a small runnable regression check. Provider tests must use mocks, never real spending or credentials.
 

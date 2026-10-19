@@ -1,4 +1,12 @@
-# ten98 Campaign v0.8.10 — verification
+# ten98 Campaign v0.8.11 — verification
+
+## Sign-in layout restoration
+
+Version 0.8.11 restores the original lavender side panel and white sign-in form, with short, factual copy. The split layout is scoped to sign-in and initial setup; invitation, workspace-access and error screens retain their existing card layout. Authentication handlers, validation and OIDC invitation continuation are unchanged.
+
+All **499 automated checks** and the production frontend/type check pass. Browser checks used an isolated synthetic account: initial setup display, an incorrect-password alert, successful local sign-in, sign-out, and the conditional single sign-on link. At a measured 390px viewport the layout stacks without horizontal overflow; at 1280px both columns fill the viewport height. No live identity-provider login is claimed.
+
+![Restored side-panel sign-in layout](sign-in-verification.png)
 
 ## Current expansion and acceptance limits
 
