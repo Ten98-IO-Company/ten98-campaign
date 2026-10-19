@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { stripTypeScriptTypes } from 'node:module';
 import { createApp } from '../server/index.mjs';
 
 async function fixture() {
@@ -99,6 +100,95 @@ async function actionFixture(platform = 'telegram') {
   const write = (message, verb, extra = {}, key = randomUUID()) => f.request(`${f.path}/conversations/thread-1/messages/${encodeURIComponent(message.id)}/${verb}`, 'POST', { accountId: account._id, expectedMessageVersion: message.version, ...extra }, key);
   return { ...f, state, account, thread, write };
 }
+
+test('X and Instagram attachment replies use DM limits, inspect exact URLs and replay accepted sends without duplicates', async () => {
+  const f = await fixture(), route = f.path + '/conversations/thread-1/reply'; let metadata;
+  f.setHook(url => url.pathname.endsWith('/tools/validate/media') ? Response.json(metadata) : undefined);
+  try {
+    const status = await f.request(f.path + '/status'), x = status.data.accounts.find(item => item.id === 'xx'), ig = status.data.accounts.find(item => item.id === 'ig');
+    assert.deepEqual(x.capabilities.attachmentTypes, ['image', 'video']); assert.equal(x.capabilities.attachmentRules.video.maxMB, 25); assert.deepEqual(ig.capabilities.attachmentTypes, ['image', 'video', 'audio', 'file']); assert.equal(ig.capabilities.attachmentRules.image.maxMB, 8);
+    for (const [index, [accountId, attachmentType, contentType, mb]] of [
+      ['xx', 'image', 'image/png', 25], ['xx', 'video', 'video/mp4', 25],
+      ['ig', 'image', 'image/jpeg', 8], ['ig', 'video', 'video/quicktime', 25], ['ig', 'video', 'video/ogg', 25], ['ig', 'video', 'video/x-msvideo', 25], ['ig', 'video', 'video/webm', 25],
+      ['ig', 'audio', 'audio/aac', 25], ['ig', 'audio', 'audio/mp4', 25], ['ig', 'audio', 'audio/wav', 25], ['ig', 'file', 'application/pdf', 25],
+    ].entries()) {
+      const body = { accountId, attachmentUrl: `https://cdn.example.com/attachment-${index}`, attachmentType }, key = randomUUID(); metadata = { valid: true, url: body.attachmentUrl, size: mb * 1024 * 1024, contentType };
+      const sent = await f.request(route, 'POST', body, key); assert.equal(sent.status, 200, JSON.stringify(sent.data)); assert.equal(sent.data.platform, accountId === 'ig' ? 'instagram' : 'twitter'); assert.equal(sent.data.accountId, accountId); assert.deepEqual(f.writes().at(-1).body, body);
+      const beforeReplay = f.writes().length; assert.equal((await f.request(route, 'POST', body, key)).status, 200); assert.equal(f.writes().length, beforeReplay);
+    }
+    const rejected = [
+      ['xx', 'image', { valid: true, size: 25 * 1024 * 1024 + 1, contentType: 'image/png' }], ['xx', 'video', { valid: true, size: 100, contentType: 'text/html' }],
+      ['xx', 'audio', { valid: true, size: 100, contentType: 'audio/mp4' }], ['ig', 'image', { valid: true, size: 8 * 1024 * 1024 + 1, contentType: 'image/png' }],
+      ['ig', 'image', { valid: true, size: 100, contentType: 'image/gif' }], ['ig', 'audio', { valid: true, size: 100, contentType: 'audio/mpeg' }], ['ig', 'audio', { valid: true, size: 100, contentType: 'audio/ogg' }],
+      ['ig', 'file', { valid: true, size: 100, contentType: 'text/plain' }], ['ig', 'file', { valid: true, size: 25 * 1024 * 1024 + 1, contentType: 'application/pdf' }],
+      ['ig', 'file', { valid: true, size: null, contentType: 'application/pdf' }], ['ig', 'file', { valid: false, size: 100, contentType: 'application/pdf' }],
+      ['ig', 'file', { valid: true, size: 100, contentType: 'application/pdf', url: 'https://cdn.example.com/different.pdf' }],
+    ];
+    const beforeRejected = f.writes().length;
+    for (const [index, [accountId, attachmentType, checked]] of rejected.entries()) { metadata = checked; const result = await f.request(route, 'POST', { accountId, attachmentUrl: `https://cdn.example.com/rejected-${index}`, attachmentType }); assert.ok([400, 409, 422].includes(result.status), JSON.stringify(result.data)); assert.equal(result.data.operation?.status, 'failed', 'A media preflight failure is not an uncertain send.'); }
+    assert.equal(f.writes().length, beforeRejected);
+  } finally { await f.close(); }
+});
+
+test('attachment preflight cannot outlive current account, recipient, project access, reply window or hosted-file expiry', async () => {
+  const f = await fixture(), route = f.path + '/conversations/thread-1/reply', originalAccount = f.accounts.find(item => item._id === 'ig'); let mode = '', inspected = false;
+  const asset = f.app.store.create(f.projectId, 'assets', { name: 'Hosted inbox PDF', source: 'zernio', url: 'https://media.zernio.com/temp/inbox.pdf', deliveryUrl: 'https://media.zernio.com/temp/inbox.pdf', deliverySource: 'zernio', deliveryUploadedAt: new Date(Date.now() - 86400000).toISOString(), deliveryExpiresAt: new Date(Date.now() + 86400000).toISOString() });
+  f.setHook((url, options) => {
+    if (url.pathname.endsWith('/tools/validate/media')) {
+      inspected = true;
+      if (mode === 'inactive') originalAccount.isActive = false;
+      if (mode === 'foreign') originalAccount.profileId = 'foreign-profile';
+      if (mode === 'viewer') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+      if (mode === 'mapping') f.app.db.prepare("UPDATE projects SET zernio_profile_id='different-profile'").run();
+      if (mode === 'window') f.setIncoming(Date.now() - 25 * 3600000);
+      if (mode === 'expiry') f.app.store.update(f.projectId, 'assets', asset.id, { deliveryExpiresAt: new Date(Date.now() - 1000).toISOString() });
+      return Response.json({ valid: true, size: 100, contentType: 'application/pdf' });
+    }
+    if (inspected && mode === 'recipient' && url.pathname.endsWith('/inbox/conversations/thread-1') && options.method === 'GET') return Response.json({ data: { id: 'thread-1', accountId: 'ig', platform: 'instagram', participantId: 'changed-recipient', status: 'active' } });
+  });
+  try {
+    for (const next of ['inactive', 'foreign', 'viewer', 'mapping', 'recipient', 'window', 'expiry']) {
+      mode = next; inspected = false; originalAccount.isActive = true; originalAccount.profileId = 'inbox-profile'; f.setIncoming(Date.now()); f.app.db.prepare("UPDATE memberships SET role='owner'").run(); f.app.db.prepare("UPDATE projects SET zernio_profile_id='inbox-profile'").run();
+      const before = f.writes().length, result = await f.request(route, 'POST', { accountId: 'ig', attachmentUrl: mode === 'expiry' ? asset.deliveryUrl : `https://cdn.example.com/${mode}.pdf`, attachmentType: 'file' });
+      assert.ok([403, 409, 422].includes(result.status), `${mode}: ${JSON.stringify(result.data)}`); assert.equal(f.writes().length, before, `${mode} must stop before an external send.`);
+    }
+  } finally { await f.close(); }
+});
+
+test('Meta combined replies validate independent message IDs and partial text failures before completing an operation', async () => {
+  const f = await fixture(), route = f.path + '/conversations/thread-1/reply'; let receipt;
+  f.setHook((url, options) => url.pathname.endsWith('/messages') && options.method === 'POST' ? Response.json({ success: true, data: { messageId: 'attachment-sent', conversationId: 'thread-1', ...receipt } }) : undefined);
+  try {
+    const body = { accountId: 'ig', message: 'Text after attachment', attachmentUrl: 'https://cdn.example.com/details.png', attachmentType: 'image' };
+    receipt = { messageIds: ['attachment-sent', 'text-sent'], attachments: [{ type: 'image', url: 'https://cdn.example.com/sent.png', privateToken: 'must-not-return' }] };
+    const success = await f.request(route, 'POST', body); assert.equal(success.status, 200); assert.deepEqual(success.data.messageIds, ['attachment-sent', 'text-sent']); assert.equal(success.data.attachments[0].privateToken, undefined);
+    receipt = { partialFailure: { part: 'text', error: 'Synthetic text rejection', platformError: { code: 10, subcode: 20, type: 'OAuthException', fbtraceId: 'synthetic', privateToken: 'must-not-return' } }, messageIds: ['attachment-sent'] };
+    const partialBody = { ...body, message: 'Unsent text retained by client' }, key = randomUUID(), partial = await f.request(route, 'POST', partialBody, key);
+    assert.equal(partial.status, 200); assert.equal(partial.data.operation.status, 'complete'); assert.equal(partial.data.partialFailure.part, 'text'); assert.equal(partial.data.partialFailure.platformError.privateToken, undefined); const writes = f.writes().length; assert.equal((await f.request(route, 'POST', partialBody, key)).status, 200); assert.equal(f.writes().length, writes);
+    delete receipt.messageIds; assert.equal((await f.request(route, 'POST', { ...body, message: 'Explicit partial failure needs only its attachment message ID' })).status, 200);
+    for (const [index, bad] of [
+      {}, { messageIds: ['different', 'text-sent'] }, { messageIds: ['attachment-sent', 'attachment-sent'] }, { messageIds: ['attachment-sent', {}] },
+      { partialFailure: true }, { partialFailure: { part: 'attachment', error: 'Wrong part' } }, { partialFailure: { part: 'text', error: '' } }, { partialFailure: { part: 'text', error: 'Bad diagnostics', platformError: { code: 'invalid' } } },
+      { partialFailure: { part: 'text', error: 'Contradictory success' }, messageIds: ['attachment-sent', 'text-sent'] }, { attachments: [{ type: 'video', url: 'https://cdn.example.com/file.mp4' }] },
+    ].entries()) {
+      receipt = bad; const malformedBody = { ...body, message: `Malformed receipt ${index}` }, malformedKey = randomUUID(), before = f.writes().length, result = await f.request(route, 'POST', malformedBody, malformedKey);
+      assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.operation.status, 'uncertain'); assert.equal((await f.request(route, 'POST', malformedBody, malformedKey)).status, 409); assert.equal((await f.request(route, 'POST', malformedBody)).status, 409); assert.equal(f.writes().length, before + 1);
+    }
+  } finally { await f.close(); }
+});
+
+test('the actual UI writer retries a definitely failed media inspection without duplicating the accepted message', async () => {
+  const f = await fixture(), suffix = 'conversations/thread-1/reply', body = { accountId: 'ig', attachmentUrl: 'https://cdn.example.com/recover.pdf', attachmentType: 'file' }, keys = { current: new Map() }, sentKeys = []; let inspectionCalls = 0;
+  f.setHook(url => url.pathname.endsWith('/tools/validate/media') ? ++inspectionCalls === 1 ? Response.json({ error: 'Synthetic inspection outage' }, { status: 502 }) : Response.json({ valid: true, size: 100, contentType: 'application/pdf' }) : undefined);
+  try {
+    const source = await readFile(new URL('../src/UnifiedInbox.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function write('), handler = source.slice(start, source.indexOf('  async function loadAccounts(', start));
+    const context = { readOnly: false, path: f.path.replace(/^\/api/, ''), keys, crypto: globalThis.crypto, account: { platform: 'instagram' }, requester: { current: async (path, method, payload, key) => { sentKeys.push(key); const response = await f.request('/api' + path, method, payload, key); if (response.status >= 400) throw Object.assign(new Error(response.data.error.message), { status: response.status, code: response.data.error.code, operation: response.data.operation }); return response.data; } } };
+    const write = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(handler)});`)(...Object.values(context));
+    await assert.rejects(write(suffix, body), error => error.status === 502 && error.operation.status === 'failed'); assert.equal(keys.current.size, 0); assert.equal(f.writes().length, 0);
+    const sent = await write(suffix, body); assert.equal(sent.operation.status, 'complete'); assert.equal(inspectionCalls, 2); assert.equal(f.writes().length, 1); assert.notEqual(sentKeys[0], sentKeys[1]);
+    assert.equal((await f.request(f.path + '/' + suffix, 'POST', body, sentKeys[1])).status, 200); assert.equal(inspectionCalls, 2); assert.equal(f.writes().length, 1, 'The accepted retry still replays its exact receipt without a second message.');
+  } finally { await f.close(); }
+});
 
 test('attachment resolution proves account, conversation, message and index before requesting a fresh public link', async () => {
   const f = await fixture(); let mode = 'valid';

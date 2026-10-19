@@ -101,6 +101,25 @@ test('Display editing forwards replacement creative fields and unchanged or stal
   await edit({ name: 'Unsupported rename' }, { platform: 'tiktok', channel: '' }); assert.equal(calls.length, 1);
 });
 
+test('RSA editing submits the reviewed full URL list and blocks missing, expired or unreadable creative reviews', async () => {
+  const renderCopy = new Function(`return ${stripTypeScriptTypes('(' + details.match(/const copy = (.+);/)[1] + ')')};`)();
+  const pins = new Function('creative', `return ${stripTypeScriptTypes('(' + details.match(/const pinnedText = (.+);/)[1] + ')')};`);
+  assert.equal(renderCopy({ unexpected: 'stored data' }), ''); assert.equal(renderCopy([null, { text: {} }, 'https://brand.example/two']), '\n\nhttps://brand.example/two');
+  assert.deepEqual(pins({ headlines: null, descriptions: [{ text: 'Unverified pin', pinnedField: {} }, null] }), []);
+  const handler = javascript(details.slice(details.indexOf('async function edit('), details.indexOf('  async function editSet('))), calls = [], errors = [];
+  const creative = { headlines: [{ text: 'Pinned first', pinnedField: 'HEADLINE_1' }, { text: 'Second' }, { text: 'Third' }], descriptions: [{ text: 'First description' }, { text: 'Second description' }], finalUrls: ['https://brand.example/one', 'https://brand.example/two'] };
+  const base = { FormData: FormValues, busy: false, needsRefresh: false, live: { _id: 'search-ad' }, selected: { creativeReview: { version: 'a'.repeat(64), expiresAt: new Date(Date.now() + 60000).toISOString() } }, platform: 'google', channel: 'search', creative, lines, copy: value => (value || []).map(row => typeof row === 'string' ? row : row.text).join('\n'), setError: error => errors.push(error), act: async action => action(), scopedRequest: async (path, payload) => calls.push({ path, payload }), readAd: async () => {} };
+  async function edit(values, extra = {}) { const context = { ...base, ...extra }; await new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context))({ preventDefault() {}, currentTarget: values }); }
+  await edit({ finalUrls: 'https://brand.example/new\nhttps://brand.example/two' });
+  assert.deepEqual(calls[0], { path: 'ads/edit', payload: { adId: 'search-ad', finalUrls: ['https://brand.example/new', 'https://brand.example/two'], expectedCreativeVersion: 'a'.repeat(64) } });
+  for (const selected of [null, { creativeReview: null }, { creativeReview: { version: 'a'.repeat(64), expiresAt: new Date(Date.now() - 1000).toISOString() } }, { creativeReview: { version: 'a'.repeat(64), expiresAt: 'unreadable' } }]) {
+    await edit({ headlines: 'Pinned first\nChanged second\nThird' }, { selected });
+    assert.match(errors.at(-1), /Refresh ad details/); assert.equal(calls.length, 1);
+  }
+  await edit({ countries: 'AE' }, { selected: null });
+  assert.deepEqual(calls.at(-1).payload, { adId: 'search-ad', targeting: { countries: ['AE'] } }, 'Unrelated audience settings do not require RSA creative enrichment.');
+});
+
 test('a failed readback after a confirmed ad write requires refresh without claiming the write failed', async () => {
   const helper = stripTypeScriptTypes(details.slice(details.indexOf('async function readAd('), details.indexOf('  async function edit(')));
   const refreshStates = [], selections = [], errors = [], revisions = [];

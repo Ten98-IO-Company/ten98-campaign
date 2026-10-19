@@ -393,9 +393,38 @@ async function scopedCampaign(api, profileId, id, platform, dates = {}) {
   if (campaign.profileId !== undefined && String(campaign.profileId?._id || campaign.profileId) !== profileId) fail(403, 'CAMPAIGN_OUTSIDE_PROJECT', 'This campaign is not in this project.');
   return campaign;
 }
+const rsaReviewAge = 5 * 60 * 1000;
+function rsaCreativeReview(result, ad, profileId, now = Date.now()) {
+  const remote = result.ad, scopeId = value => String(value?._id || value?.id || value);
+  if (remote?._id !== ad._id || scopeId(remote.profileId) !== profileId || remote.platform !== 'google' || String(remote.advertisingChannelType).toLowerCase() !== 'search' || ['accountId', 'platformAdAccountId', 'platformCampaignId', 'platformAdSetId', 'platformAdId'].some(key => ad[key] != null && scopeId(remote[key]) !== scopeId(ad[key]))) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio did not confirm the selected Google Search ad’s scope.');
+  const cached = result.cachedAt === null ? now : validPostInstant(result.cachedAt) ? Date.parse(result.cachedAt) : NaN;
+  if (result.stale !== false || !Number.isFinite(cached) || cached > now + 30000 || now - cached > rsaReviewAge) return null;
+  const creative = remote.creative, normalized = {};
+  for (const [key, minimum, maximum, limit, pins] of [['headlines', 3, 15, 30, ['HEADLINE_1', 'HEADLINE_2', 'HEADLINE_3']], ['descriptions', 2, 4, 90, ['DESCRIPTION_1', 'DESCRIPTION_2']]]) {
+    const rows = creative?.[key];
+    if (!Array.isArray(rows) || rows.length < minimum || rows.length > maximum || rows.some(row => !reportObject(row) || typeof row.text !== 'string' || !row.text.trim() || row.text.length > limit || row.pinnedField != null && !pins.includes(row.pinnedField)) || new Set(rows.map(row => row.text)).size !== rows.length) return null;
+    normalized[key] = rows.map(row => ({ text: row.text, ...(row.pinnedField ? { pinnedField: row.pinnedField } : {}) }));
+  }
+  if (!Array.isArray(creative.finalUrls) || !creative.finalUrls.length || creative.finalUrls.length > 10 || creative.finalUrls.some(value => typeof value !== 'string' || !value || value.length > 4000)) return null;
+  normalized.finalUrls = creative.finalUrls;
+  const version = createHash('sha256').update(canonical({ profileId, adId: ad._id, platformAdId: scopeId(remote.platformAdId), accountId: scopeId(remote.accountId), adAccountId: scopeId(remote.platformAdAccountId), campaignId: scopeId(remote.platformCampaignId), adSetId: scopeId(remote.platformAdSetId), creative: normalized })).digest('hex');
+  return { version, observedAt: new Date(now).toISOString(), expiresAt: new Date(Math.min(now, cached) + rsaReviewAge).toISOString(), creative: normalized };
+}
+function reviewedRsaPayload(payload, review, expectedVersion) {
+  if (!review || Date.parse(review.expiresAt) <= Date.now()) fail(409, 'GOOGLE_CREATIVE_NOT_CURRENT', 'Current Google Search text could not be verified. Refresh ad details before changing its creative.');
+  if (expectedVersion !== review.version) fail(409, 'GOOGLE_CREATIVE_REVIEW_CHANGED', 'This Google Search creative changed since your review. Refresh ad details and review the current text and pinned positions.');
+  const result = { ...payload };
+  for (const key of ['headlines', 'descriptions']) if (payload[key]) {
+    const previous = review.creative[key];
+    if (previous.some(row => row.pinnedField && !payload[key].some(item => item.text === row.text))) fail(409, 'GOOGLE_PINNED_TEXT_CHANGED', 'Keep the existing pinned text in this list. Replace or remove pinned text in Google Ads, then refresh here.');
+    result[key] = payload[key].map(row => { const pinnedField = previous.find(item => item.text === row.text)?.pinnedField; return { ...row, ...(pinnedField ? { pinnedField } : {}) }; });
+  }
+  return result;
+}
 function editableAd(body, ad) {
-  fields(body, ['adId', 'name', 'creative', 'targeting', 'headlines', 'descriptions', 'finalUrls', 'assetGroup', 'demandGen']);
+  fields(body, ['adId', 'name', 'creative', 'targeting', 'headlines', 'descriptions', 'finalUrls', 'assetGroup', 'demandGen', 'expectedCreativeVersion']);
   const platform = ad.platform, google = platform === 'google', channel = String(ad.advertisingChannelType || '').toLowerCase(), payload = {};
+  if (body.expectedCreativeVersion !== undefined && !(google && channel === 'search')) fail(400, 'UNSUPPORTED_AD_FIELD', 'Creative review versions apply to Google Search ads.');
   if (['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(ad.status)) fail(409, 'TERMINAL_AD_STATUS', 'This ad cannot be edited. Create a new ad.');
   if (platform === 'tiktok' && ad.isSmartPlus === true) fail(422, 'SMART_PLUS_EDIT_UNSUPPORTED', 'Change this TikTok Smart+ ad’s creative and audience in TikTok Ads Manager. Its delivery switch remains available here.');
   if (body.name !== undefined) { if (!['facebook', 'instagram'].includes(platform)) fail(422, 'UNSUPPORTED_AD_FIELD', 'Rename this ad in its provider dashboard.'); payload.name = text(body.name, 'ad name', 255); }
@@ -918,7 +947,8 @@ export async function handleIntegration(context) {
       const ad = await scopedAd(api, profileId, identifier(url.searchParams.get('adId'), 'ad ID'));
       const result = await api(`/ads/${encodeURIComponent(ad._id)}`, { live: true });
       if (result.ad?._id !== ad._id || String(result.ad.profileId?._id || result.ad.profileId) !== profileId) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm this project’s ad details.');
-      send(200, redact(result)); return true;
+      const review = ad.platform === 'google' && String(ad.advertisingChannelType).toLowerCase() === 'search' ? rsaCreativeReview(result, ad, profileId) : null;
+      send(200, { ...redact(result), creativeReview: review ? { version: review.version, observedAt: review.observedAt, expiresAt: review.expiresAt } : null }); return true;
     }
     if (req.method === 'GET' && path === 'ads/targeting') {
       const accountId = identifier(url.searchParams.get('accountId'), 'account ID'), account = requireAccount(await scopedAccounts(api, profileId), accountId);
@@ -1158,10 +1188,25 @@ export async function handleIntegration(context) {
         if (ad.platform === 'twitter') fail(422, 'AD_SET_STATUS_REQUIRED', 'X uses one switch for the entire ad set. Change that switch in X Ads Manager.');
         payload = { status: body.status };
       } else payload = editableAd(body, ad);
+      const rsaEditing = path === 'ads/edit' && ad.platform === 'google' && String(ad.advertisingChannelType).toLowerCase() === 'search' && ['headlines', 'descriptions', 'finalUrls'].some(key => payload[key] !== undefined);
+      if (rsaEditing && (typeof body.expectedCreativeVersion !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedCreativeVersion))) fail(400, 'GOOGLE_CREATIVE_REVIEW_REQUIRED', 'Refresh and review the current Google Search creative before saving text or destination changes.');
       const outcome = await operation(context, async key => {
-        const result = await api(`/ads/${encodeURIComponent(ad._id)}${path === 'ads/ad-status' ? '/status' : ''}`, {}, payload, key, 'PUT');
+        let reviewed, outgoing = payload;
+        if (rsaEditing) {
+          const current = await scopedAd(api, profileId, ad._id);
+          editableAd(body, current);
+          reviewed = rsaCreativeReview(await api(`/ads/${encodeURIComponent(ad._id)}`, { live: true }), current, profileId);
+          outgoing = reviewedRsaPayload(payload, reviewed, body.expectedCreativeVersion);
+          checkMapping(() => context.assertProjectMapping?.(profileId));
+        }
+        const result = await api(`/ads/${encodeURIComponent(ad._id)}${path === 'ads/ad-status' ? '/status' : ''}`, {}, outgoing, key, 'PUT');
         if (path === 'ads/ad-status') { if (String(result.configuredStatus || '').toUpperCase() !== body.status.toUpperCase()) throw new IntegrationError(502, 'AD_STATUS_NOT_CONFIRMED', 'The ad switch was not confirmed by the provider.', true); }
         else if (result.ad?._id !== ad._id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the edited ad.', true);
+        if (rsaEditing) try {
+          const after = rsaCreativeReview(await api(`/ads/${encodeURIComponent(ad._id)}`, { live: true }), ad, profileId);
+          const expected = { ...reviewed.creative, ...Object.fromEntries(['headlines', 'descriptions', 'finalUrls'].filter(key => outgoing[key] !== undefined).map(key => [key, outgoing[key]])) };
+          if (!after || canonical(after.creative) !== canonical(expected)) throw new Error();
+        } catch { throw new IntegrationError(502, 'GOOGLE_CREATIVE_UPDATE_NOT_CONFIRMED', 'Google accepted the change, but the current text and pinned positions could not be confirmed. Review the provider before repeating this edit.', true); }
         return { result: redact(result) };
       }, ['ads', ad.platform, ad.platformCampaignId || `ad:${ad._id}`]); send(outcome.status, outcome.data); return true;
     }

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { IntegrationError, operation, redact, zernioClient, scopedAccounts, requireAccount } from './integrations.mjs';
 import { listWhatsAppTemplates, validateWhatsAppTemplate } from './direct-providers.mjs';
-import { publicMediaUrl } from '../shared/social-posts.mjs';
+import { publicMediaUrl, assetDeliveryIssue } from '../shared/social-posts.mjs';
 
 const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -15,6 +15,15 @@ const invalid = (uncertain = false) => fail(502, 'INVALID_PROVIDER_RESPONSE', 'Z
 const DM = new Set(['facebook', 'instagram', 'twitter', 'bluesky', 'reddit', 'telegram', 'whatsapp', 'imessage', 'slack', 'tiktok', 'sms', 'rcs']);
 const MESSAGE_LIMITS = { facebook: 2000, instagram: 1000, telegram: 4096, whatsapp: 4096, imessage: 9999, tiktok: 6000, slack: 40000, sms: 1600, rcs: 3072 };
 const DOCUMENT_MIMES = new Set(['application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']);
+const REPLY_MEDIA = {
+  instagram: {
+    image: { maxMB: 8, formats: 'PNG or JPEG', mimes: ['image/png', 'image/jpeg'] },
+    video: { maxMB: 25, formats: 'MP4, OGG, AVI, MOV or WebM', mimes: ['video/mp4', 'video/ogg', 'video/x-msvideo', 'video/avi', 'video/quicktime', 'video/webm'] },
+    audio: { maxMB: 25, formats: 'AAC, M4A, WAV or MP4; no MP3 or OGG/Opus', mimes: ['audio/aac', 'audio/mp4', 'audio/x-m4a', 'audio/wav', 'audio/x-wav', 'audio/vnd.wave', 'video/mp4'] },
+    file: { maxMB: 25, formats: 'PDF only', mimes: ['application/pdf'] },
+  },
+  twitter: { image: { maxMB: 25, formats: 'Image files; X checks the file format', mimePrefix: 'image/' }, video: { maxMB: 25, formats: 'Video files; X checks the codec and container', mimePrefix: 'video/' } },
+};
 const COMMENTS = new Set(['facebook', 'instagram', 'twitter', 'bluesky', 'threads', 'youtube', 'linkedin', 'reddit', 'tiktok', 'metaads']);
 const HIDE = new Set(['facebook', 'instagram', 'threads', 'twitter', 'tiktok']);
 const LIKE = new Set(['facebook', 'twitter', 'bluesky', 'reddit', 'linkedin']);
@@ -51,7 +60,7 @@ function validateReview(row) {
 }
 
 export function inboxCapabilities(platform) {
-  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), typing: TYPING.has(platform), deleteStoredConversation: DM.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : platform === 'sms' ? ['image', 'video'] : platform === 'instagram' ? ['image', 'video', 'audio'] : ['image', 'video', 'audio', 'file'], archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
+  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), typing: TYPING.has(platform), deleteStoredConversation: DM.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'twitter', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : ['sms', 'twitter'].includes(platform) ? ['image', 'video'] : ['image', 'video', 'audio', 'file'], ...(REPLY_MEDIA[platform] ? { attachmentRules: REPLY_MEDIA[platform] } : {}), archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
 }
 function supported(account, feature) { if (!inboxCapabilities(account.platform)[feature] || account.isActive === false) fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'This account does not support this inbox action. Reconnect the account if its permissions changed.'); }
 function scoped(row, accounts, expectedAccount) {
@@ -539,12 +548,14 @@ export async function handleInbox(context) {
           payload.attachmentType = body.attachmentType; if (body.attachmentName) payload.attachmentName = str(body.attachmentName, 'attachment filename', 255);
           if (!inboxCapabilities(account.platform).attachmentTypes.includes(payload.attachmentType) || account.platform === 'tiktok' && payload.message) fail(422, 'ATTACHMENT_UNSUPPORTED', 'This platform does not support that attachment or a combined text and media message.');
           if (payload.message && ['telegram', 'whatsapp'].includes(account.platform) && payload.message.length > 1024) fail(400, 'ATTACHMENT_CAPTION_TOO_LONG', 'Keep the attachment caption to 1024 characters.');
-          if (['whatsapp', 'tiktok', 'sms'].includes(account.platform)) {
+          if (['whatsapp', 'tiktok', 'sms', 'instagram', 'twitter'].includes(account.platform)) {
             let checked;
             try { checked = await api('/tools/validate/media', {}, { url: payload.attachmentUrl }); } catch (error) { if (error instanceof IntegrationError) error.uncertain = false; throw error; }
             if (checked.valid !== true || !Number.isSafeInteger(checked.size) || checked.size < 1 || typeof checked.contentType !== 'string') fail(409, 'ATTACHMENT_NOT_VERIFIED', 'The provider could not verify this attachment’s file type and size.');
-            const mime = checked.contentType.split(';')[0].toLowerCase(), limit = account.platform === 'tiktok' ? 3 : account.platform === 'sms' ? 1 : payload.attachmentType === 'image' ? 5 : payload.attachmentType === 'file' ? 100 : 16;
-            if (checked.size > limit * 1024 * 1024 || payload.attachmentType === 'image' && !['image/jpeg', 'image/png', ...(account.platform === 'sms' ? ['image/gif', 'image/webp'] : [])].includes(mime) || payload.attachmentType === 'video' && !['video/mp4', 'video/3gpp'].includes(mime) || payload.attachmentType === 'audio' && !['audio/mpeg', 'audio/ogg', 'audio/amr', 'audio/aac', 'audio/mp4'].includes(mime) || payload.attachmentType === 'file' && !DOCUMENT_MIMES.has(mime)) fail(400, 'ATTACHMENT_RESTRICTION', `Choose a supported attachment within the ${limit} MB limit.`);
+            if (checked.url !== undefined) { let echoed; try { echoed = publicMediaUrl(checked.url); } catch { /* An unreadable echo cannot prove the requested file. */ } if (echoed !== payload.attachmentUrl) fail(409, 'ATTACHMENT_NOT_VERIFIED', 'The provider inspected a different attachment. Review its URL before sending.'); }
+            const rule = REPLY_MEDIA[account.platform]?.[payload.attachmentType], mime = checked.contentType.split(';')[0].trim().toLowerCase(), limit = rule?.maxMB || (account.platform === 'tiktok' ? 3 : account.platform === 'sms' ? 1 : payload.attachmentType === 'image' ? 5 : payload.attachmentType === 'file' ? 100 : 16);
+            const acceptedType = rule ? rule.mimes ? rule.mimes.includes(mime) : mime.startsWith(rule.mimePrefix) && mime.length > rule.mimePrefix.length : payload.attachmentType === 'image' ? ['image/jpeg', 'image/png', ...(account.platform === 'sms' ? ['image/gif', 'image/webp'] : [])].includes(mime) : payload.attachmentType === 'video' ? ['video/mp4', 'video/3gpp'].includes(mime) : payload.attachmentType === 'audio' ? ['audio/mpeg', 'audio/ogg', 'audio/amr', 'audio/aac', 'audio/mp4'].includes(mime) : DOCUMENT_MIMES.has(mime);
+            if (checked.size > limit * 1024 * 1024 || !acceptedType) fail(400, 'ATTACHMENT_RESTRICTION', `Choose ${rule?.formats || 'a supported attachment'} within the ${limit} MB limit.`);
           }
         } else if (body.attachmentType || body.attachmentName) fail(400, 'INVALID_ATTACHMENT', 'Choose an attachment URL before setting its type or filename.');
         if (body.replyTo) { if (!['whatsapp', 'telegram', 'slack'].includes(account.platform)) fail(422, 'QUOTE_REPLY_UNSUPPORTED', 'This platform does not support quoted replies.'); payload.replyTo = id(body.replyTo); }
@@ -554,6 +565,12 @@ export async function handleInbox(context) {
           payload.template = { elements: [validateWhatsAppTemplate(draft, approved)] };
         }
         if (!payload.message && !payload.attachmentUrl && !payload.template) fail(400, 'EMPTY_MESSAGE', 'Enter a message or choose an attachment or approved template.');
+        if (payload.attachmentUrl) {
+          const freshAccounts = await scopedAccounts(api, profileId), freshAccount = requireAccount(freshAccounts, accountId);
+          supported(freshAccount, 'attachments'); if (freshAccount.platform !== account.platform) fail(409, 'INBOX_ACCOUNT_CHANGED', 'This account changed while checking the attachment. Refresh before sending.');
+          const fresh = await conversation(api, freshAccounts, freshAccount, conversationId);
+          if (fresh.id !== row.id || fresh.participantId !== row.participantId) fail(409, 'INBOX_CONVERSATION_CHANGED', 'The conversation recipient changed while checking the attachment. Refresh before sending.');
+        }
         if (['facebook', 'instagram', 'whatsapp', 'tiktok'].includes(account.platform) && !payload.template) {
           const messages = await recentHistory(api, account, conversationId, row.id), lastIncoming = incomingTime(messages), age = Date.now() - lastIncoming;
           if (account.platform === 'tiktok' && (!(age >= 0 && age <= 2 * 86400000) || messages.filter(message => message.direction === 'outgoing' && Date.parse(message.createdAt) >= lastIncoming).length >= 10)) fail(409, 'MESSAGING_WINDOW_CLOSED', 'TikTok permits up to ten replies within 48 hours of the customer’s last message.');
@@ -563,10 +580,16 @@ export async function handleInbox(context) {
             payload.messagingType = 'MESSAGE_TAG'; payload.messageTag = body.messageTag;
           } else if (account.platform !== 'tiktok' && !(age >= 0 && age <= 86400000)) fail(409, 'MESSAGING_WINDOW_CLOSED', account.platform === 'whatsapp' ? 'Choose an approved WhatsApp template outside the 24-hour reply window.' : 'Choose a permitted non-promotional message tag outside the 24-hour reply window.');
         } else if (body.messageTag) fail(422, 'MESSAGE_TAG_UNSUPPORTED', 'Message tags are only available for Facebook and Instagram.');
+        if (payload.attachmentUrl && context.store?.list(project.id, 'assets').some(asset => asset.deliveryUrl === payload.attachmentUrl && assetDeliveryIssue(asset))) fail(409, 'ATTACHMENT_EXPIRED', 'This hosted delivery file has expired or has no verified expiry. Upload it again before sending.');
         const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/messages`, {}, payload, key);
         if (result.success !== true || !plain(result.data) || account.platform !== 'reddit' && !valid(result.data.messageId) || result.data.accountId !== undefined && result.data.accountId !== accountId || result.data.platform !== undefined && result.data.platform !== account.platform || result.data.conversationId !== undefined && !valid(result.data.conversationId) || !['facebook', 'instagram', 'bluesky', 'reddit'].includes(account.platform) && result.data.conversationId !== undefined && ![conversationId, row.id].includes(result.data.conversationId)) invalid(true);
         if (result.warnings != null && (!Array.isArray(result.warnings) || result.warnings.length > 100 || result.warnings.some(warning => typeof warning !== 'string' && (!plain(warning) || ['code', 'param', 'message'].some(field => warning[field] != null && typeof warning[field] !== 'string'))))) invalid(true);
-        return { sent: true, ...pick(result.data, ['messageId', 'conversationId', 'messageIds', 'attachments', 'partialFailure']), warnings: (result.warnings || []).map(warning => typeof warning === 'string' ? warning : pick(warning, ['code', 'param', 'message'])) };
+        const combined = ['facebook', 'instagram'].includes(account.platform) && payload.attachmentUrl && payload.message, receipt = result.data, partial = receipt.partialFailure;
+        if (combined && partial === undefined && receipt.messageIds === undefined) invalid(true);
+        if (receipt.messageIds !== undefined && (!combined || !Array.isArray(receipt.messageIds) || receipt.messageIds.length !== (partial ? 1 : 2) || receipt.messageIds.some(value => !valid(value)) || new Set(receipt.messageIds).size !== receipt.messageIds.length || receipt.messageIds[0] !== receipt.messageId)) invalid(true);
+        if (partial !== undefined && (!combined || !plain(partial) || partial.part !== 'text' || typeof partial.error !== 'string' || !partial.error.trim() || partial.error.length > 4000 || partial.platformError !== undefined && (!plain(partial.platformError) || ['code', 'subcode'].some(name => partial.platformError[name] !== undefined && !Number.isSafeInteger(partial.platformError[name])) || ['fbtraceId', 'type'].some(name => partial.platformError[name] !== undefined && (typeof partial.platformError[name] !== 'string' || partial.platformError[name].length > 500))))) invalid(true);
+        if (receipt.attachments !== undefined && (!payload.attachmentUrl || !Array.isArray(receipt.attachments) || receipt.attachments.length > 1 || receipt.attachments.some(item => !plain(item) || item.type !== payload.attachmentType || typeof item.url !== 'string' || !(() => { try { return Boolean(publicMediaUrl(item.url)); } catch { return false; } })()))) invalid(true);
+        return { sent: true, accountId, platform: account.platform, ...pick(receipt, ['messageId', 'conversationId', 'messageIds']), ...(receipt.attachments ? { attachments: receipt.attachments.map(item => pick(item, ['type', 'url'])) } : {}), ...(partial ? { partialFailure: { ...pick(partial, ['part', 'error']), ...(partial.platformError ? { platformError: pick(partial.platformError, ['code', 'subcode', 'fbtraceId', 'type']) } : {}) } } : {}), warnings: (result.warnings || []).map(warning => typeof warning === 'string' ? warning : pick(warning, ['code', 'param', 'message'])) };
       }
       if (path === 'comments') { supported(account, 'comments'); const result = await aggregate(api, accounts, account, 'comments', query(url, 'comments')); return { posts: result.rows.map(row => pick(row, postFields)), pagination: result.pagination, meta: result.meta }; }
       if (path === 'comments/thread' || action?.[1] === 'comments') {

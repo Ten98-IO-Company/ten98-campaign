@@ -1,6 +1,28 @@
-# ten98 Campaign v0.8.8 — verification
+# ten98 Campaign v0.8.9 — verification
 
 ## Current expansion and acceptance limits
+
+Verified on 19 October 2026: **488 automated checks pass**, with no failures, skips or cancellations. Type checking, the production frontend/container builds and offline non-root container startup pass. The production dependency audit reports **zero vulnerabilities**. No dependency was added.
+
+| Workflow | Implemented behavior and limits |
+| --- | --- |
+| Attachment replies | X image/video replies and Instagram image/video/audio/PDF replies use their documented DM MIME/size restrictions. Metadata is checked before sending, then account, recipient, access, mapping, reply window and known hosted expiry are rechecked. Choices and explicit previews follow account capabilities. Filenames are offered only for WhatsApp documents. Metadata does not prove codecs or immutable remote file bytes. |
+| Partial sends and recovery | Meta attachments and accompanying text are separate messages. Full combined success requires both message IDs. A validated partial receipt clears only the accepted attachment and retains unsent text for an explicit text-only send. Malformed/lost acknowledgements keep the draft and original action identity. A known failed media preflight can retry with a new key; unknown/pending sends remain fenced. |
+| Google Search creative | Creative changes require explicit recent enrichment and an exact scoped snapshot, rechecked before dispatch. Existing pins follow unchanged text; replacing/removing pinned text remains a Google Ads handoff. All destination URLs are exposed and retained. Changed lists receive readback verification; unconfirmed writes stay uncertain. Missing/stale creative blocks text/destination editing while independent delivery controls remain available. Provider caches and external edits cannot be made atomic by this app. |
+
+The isolated browser verifies X image/video acceptance, oversized-video rejection before dispatch, Instagram PDF partial success followed by a text-only send without a duplicate attachment, rejected MP3 and accepted M4A audio. The final UI removes ignored filename inputs. A Google Search walkthrough verifies a saved headline edit with retained pins and both URLs, rejection after a native creative change, and disabled creative fields on stale enrichment. Fixture receipts establish those requests and readbacks; they do not establish live platform delivery.
+
+The previous release's additional inbox browser pass verifies Telegram attachment resolution/expired feedback, explicit Telegram typing, WhatsApp's inline read-side-effect confirmation and truthful typing no-op, plus reviewed stored-copy deletion followed by cancellation. The protected WhatsApp media request returned synthetic PNG bytes; the browser did not produce a download-completion event, so final file saving is not claimed. Stored-copy deletion execution has authenticated HTTP evidence, rather than a destructive browser walkthrough.
+
+![Unsent text retained after a synthetic Instagram attachment-only success](zernio-rich-reply-verification.png)
+
+![Stale Google Search creative disabled while delivery controls remain available](google-rsa-review-verification.png)
+
+Runnable anchors are [inbox HTTP](../tests/inbox-http.test.mjs), [actual inbox UI handlers](../tests/inbox-ui.test.mjs), [Search review contracts](../tests/google-rsa-review.test.mjs) and [ad UI handlers](../tests/ads-ui.test.mjs). Independent review reproduced missing combined acknowledgements, failed-preflight retry traps and missing native-ad identity binding; all have regressions. Primary references are [message receipts](https://docs.zernio.com/messages/send-inbox-message), [X inbox](https://docs.zernio.com/platforms/twitter/inbox), [Instagram DMs](https://docs.zernio.com/platforms/instagram#direct-messages), [Search enrichment](https://docs.zernio.com/ad-campaigns/get-ad) and [RSA list replacement](https://docs.zernio.com/platforms/google-ads/create-ads). Ponytail and [Paperthin](https://github.com/LilMGenius/paperthin) read, evidence, consistency and fresh-reader checks are applied.
+
+These tests use synthetic accounts and provider receipts. No real publication, message, upload, activation or spend is established by this release. Live checks await secure credentials and the requested hosted deployment. The [full Zernio plan](zernio-feature-plan.md) remains incomplete; advanced campaign hierarchy/formats, audiences/catalogs/conversion ingestion, bulk publishing, richer engagement/WhatsApp, automation, stores and provider administration remain tracked work.
+
+## Previous expansion — v0.8.8
 
 Verified on 19 October 2026: **473 automated checks pass**, with no failures, skips or cancellations. Type checking, the production frontend/container builds and offline non-root container startup pass. The production dependency audit reports **zero vulnerabilities**. No dependency was added.
 
