@@ -1,15 +1,17 @@
 # Full Zernio feature support: scope and delivery breakdown
 
-Updated 19 October 2026. Application baseline: **v0.8.8**. Provider baseline: **Zernio OpenAPI 1.292.0**.
+Updated 19 October 2026. Application baseline: **v0.8.9**. Provider baseline: **Zernio OpenAPI 1.292.0**.
 
-Full Zernio support is the target. **The app does not provide it yet.** Releases through v0.8.8 implement the connection, publishing, measurement and inbox subsets below. Missing workflows remain implementation work; completing a subset does not complete its API family.
+Full Zernio support is the target. **The app does not provide it yet.** Releases through v0.8.9 implement the connection, publishing, measurement and inbox subsets below. Missing workflows remain implementation work; completing a subset does not complete its API family.
 
 ## Current expansion
 
-This ten98 Campaign implementation-status update includes the v0.8.8 media and inbox expansion. The listed subsets are implemented; their exact verification boundaries are linked below. Their wider API families remain incomplete.
+This ten98 Campaign implementation-status update includes the v0.8.9 attachment replies and Search creative protections. The listed subsets are implemented; their exact verification boundaries are linked below. Their wider API families remain incomplete.
 
 | Area | Added workflow | Remaining boundary |
 | --- | --- | --- |
+| Attachment replies | X image/video and Instagram audio/PDF, account-specific metadata checks, explicit previews, partial attachment/text handling and retry after known failed preflight. | Rich buttons/cards/interactives and broader engagement remain pending. Metadata does not establish codec acceptance or live delivery. |
+| Search creative protection | Recent scoped creative review, pre-dispatch version checks, pin preservation, all destination URLs and confirmed changed-list readback. | Full pin editing remains a provider handoff. Caches and simultaneous external changes cannot be made atomic; advanced hierarchy/assets remain pending. |
 | Hosted delivery media | Stream image/video/PDF uploads with progress, cancel, status, interrupted-transfer recovery and explicit pending asset save. Replacements retain Drive originals. Expired library URLs block new publications; verified retained provider copies support edits/rescheduling. | Temporary links last seven days. Storage receipt and metadata checks do not prove platform encoding acceptance. No upstream file removal is promised. Bulk libraries and remaining platform formats stay pending. |
 | Inbox retrieval and controls | Resolve a verified message attachment, download WhatsApp media through authenticated routes, explicitly send typing and review removal of Zernio's stored conversation/contact-channel copy. | Rich sends, inbound archival, private comment replies and broader engagement remain pending. Deletion retains the native thread and local contacts; provider sync can reimport it. |
 | Per-account publishing | Separate captions, media, options and fixed times survive approval, submission, refresh, edits and retries. Groups resolve to reviewed explicit recipients; up to 50 account targets can be saved. | Repeated destinations using the same account remain protected from ambiguous edits. Bulk import and remaining platform formats stay pending. |
@@ -40,7 +42,7 @@ Snapshot SHA-256: `324a4675b576bbd15f7f1f7c60397d5832b76e49fd976479028b22cd572d7
 | Unavailable/gated | Zernio or the platform restricts it; show the reason and required approval rather than a false success. |
 | Excluded | An earlier explicit user decision still applies. |
 
-Each domain report below contains current code anchors, capability rows, primary references and acceptance work. The v0.8.8 combined run passed 473 automated checks, the production frontend/container builds, an offline non-root container check and a production dependency audit with no vulnerabilities. Browser walkthroughs use isolated synthetic upstream providers; they do not establish live eligibility, delivery, installation or spend. Exact evidence and browser boundaries are recorded in [verification](verification.md).
+Each domain report below contains current code anchors, capability rows, primary references and acceptance work. The v0.8.9 combined run passed 488 automated checks, the production frontend/container builds, an offline non-root container check and a production dependency audit with no vulnerabilities. Browser walkthroughs use isolated synthetic upstream providers; they do not establish live eligibility, delivery, installation or spend. Exact evidence and browser boundaries are recorded in [verification](verification.md).
 
 ## Foundation delivered in v0.8.5 (historical)
 
@@ -87,7 +89,7 @@ RCS and iMessage are messaging products, not extra destinations in a public soci
 
 ## Delivery sequence
 
-This is the continuing implementation order. No stage is complete: releases through v0.8.8 advance bounded parts of stages 1, 2, 3, 4, 5 and 8. Expand existing components and shared validation/operation helpers; add a module only when the workflow needs a distinct screen.
+This is the continuing implementation order. No stage is complete: releases through v0.8.9 advance bounded parts of stages 1, 2, 3, 4, 5 and 8. Expand existing components and shared validation/operation helpers; add a module only when the workflow needs a distinct screen.
 
 | Stage | Deliverable | Dependencies and completion check |
 | --- | --- | --- |

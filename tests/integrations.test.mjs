@@ -371,8 +371,8 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
       result = { ad: { _id: `created-${writes.length}`, platformCampaignId: `campaign-${writes.length}`, status: 'pending_review', platform: payload.accountId === 'metaads' ? 'facebook' : payload.accountId === 'xads' ? 'twitter' : payload.accountId.replace(/ads$/, '') } };
     } else if (url.pathname === '/api/v1/ads/tree') { assert.equal(url.searchParams.get('profileId'), 'profile-a'); result = { campaigns: [campaign], pagination: { pages: 1 } }; }
     else if (url.pathname === '/api/v1/ads' && !payload) { assert.equal(url.searchParams.get('profileId'), 'profile-a'); result = { ads: [currentAd, { ...currentAd, _id: 'ad-outside', profileId: 'profile-b' }], pagination: { pages: 1 } }; }
-    else if (url.pathname === '/api/v1/ads/ad-in-project' && !payload) { assert.equal(url.searchParams.get('live'), 'true'); result = { ad: currentAd, statusReadAt: '2026-10-18T00:00:00Z' }; }
-    else if (url.pathname === '/api/v1/ads/ad-in-project') result = { ad: { ...currentAd, ...payload } };
+    else if (url.pathname === '/api/v1/ads/ad-in-project' && !payload) { assert.equal(url.searchParams.get('live'), 'true'); result = { ad: currentAd, statusReadAt: '2026-10-18T00:00:00Z', cachedAt: null, stale: false }; }
+    else if (url.pathname === '/api/v1/ads/ad-in-project') { if (currentAd.platform === 'google' && currentAd.advertisingChannelType === 'SEARCH') currentAd.creative = { ...currentAd.creative, ...Object.fromEntries(['headlines', 'descriptions', 'finalUrls'].filter(key => payload[key] !== undefined).map(key => [key, payload[key]])) }; result = { ad: { ...currentAd, ...payload } }; }
     else if (url.pathname === '/api/v1/ads/ad-in-project/status') result = { configuredStatus: confirmStatus ? payload.status.toUpperCase() : null, status: 'paused', updated: 1 };
     else if (url.pathname === '/api/v1/ads/campaigns/native-campaign/status') result = { platformCampaignStatus: confirmStatus ? payload.status.toUpperCase() : null, statusReadAt: confirmStatus ? '2026-10-18T00:00:00Z' : null, status: payload.status, updated: 1, skipped: 0 };
     else if (url.pathname === '/api/v1/ads/ad-sets/native-set') { if (payload.name) campaign.adSets[0].adSetName = payload.name; if (payload.budget) campaign.adSets[0].budget = payload.budget; result = { updated: 1, ...payload }; }
@@ -462,8 +462,9 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     assert.equal((await invoke('ads/edit', { adId: 'ad-outside', creative: { body: 'Wrong tenant' } })).status, 403); assert.equal(writes.length, beforeOutside);
     assert.equal((await invoke('ads/edit', { adId: currentAd._id, creative: { body: 'Updated copy' }, targeting: { countries: ['AE', 'SA'] } })).status, 200);
     assert.deepEqual(writes.at(-1).payload, { creative: { body: 'Updated copy' }, targeting: { countries: ['AE', 'SA'] } });
-    currentAd = { ...currentAd, platform: 'google', advertisingChannelType: 'SEARCH' };
-    assert.equal((await invoke('ads/edit', { adId: currentAd._id, headlines: ['One headline', 'Second headline', 'Third headline'], descriptions: ['One description', 'Another description'], finalUrls: ['https://example.com/new'] })).status, 200);
+    currentAd = { ...currentAd, platform: 'google', advertisingChannelType: 'SEARCH', creative: { headlines: [{ text: 'Old first' }, { text: 'Old second' }, { text: 'Old third' }], descriptions: [{ text: 'Old description' }, { text: 'Other description' }], finalUrls: ['https://example.com/old'] } };
+    const searchReview = (await invoke('ads/details?adId=' + currentAd._id)).data.creativeReview;
+    assert.equal((await invoke('ads/edit', { adId: currentAd._id, expectedCreativeVersion: searchReview.version, headlines: ['One headline', 'Second headline', 'Third headline'], descriptions: ['One description', 'Another description'], finalUrls: ['https://example.com/new'] })).status, 200);
     assert.deepEqual(writes.at(-1).payload.headlines, [{ text: 'One headline' }, { text: 'Second headline' }, { text: 'Third headline' }]);
     const beforeWrongChannel = writes.length;
     assert.equal((await invoke('ads/edit', { adId: currentAd._id, assetGroup })).status, 400); assert.equal(writes.length, beforeWrongChannel);
