@@ -26,7 +26,7 @@ Application evidence used throughout:
 | Evidence | Exact implementation boundary |
 | --- | --- |
 | [Ad builder](../src/AdComposer.tsx) | `formats`, `goals`, `submit`; connection/account selection and explicit per-format controls. |
-| [Zernio server](../server/integrations.mjs) | `CREATE_CONNECTIONS`, `adBody`, `adTargeting`, `editableAd`; explicit `ads/*` handlers; unsupported actions end with `INTEGRATION_NOT_FOUND`. |
+| [Zernio server](../server/integrations.ts) | `CREATE_CONNECTIONS`, `adBody`, `adTargeting`, `editableAd`; explicit `ads/*` handlers; unsupported actions end with `INTEGRATION_NOT_FOUND`. |
 | [Ad details](../src/AdDetails.tsx) | `edit`, `editSet`, `editCampaign`; selected ad, ad-set and campaign controls. |
 | [Google paid-search server](../server/google-ads.ts) and [UI](../src/GoogleAdsTools.tsx) | `handleGoogleAds`: keywords, search terms, planner, negatives, targeting and bidding only. |
 | [Inbox server](../server/inbox.ts) and [UI](../src/UnifiedInbox.tsx) | Scoped ad comment discovery, thread reads and permitted moderation/replies. |

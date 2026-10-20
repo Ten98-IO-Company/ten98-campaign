@@ -5,8 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleIntegration } from '../server/integrations.mjs';
-import { createApp } from '../server/index.mjs';
+import { handleIntegration } from '../server/integrations.ts';
+import { createApp } from '../server/index.ts';
 
 // Current contract: https://docs.zernio.com/platforms/openai-ads
 async function scenario(run) {

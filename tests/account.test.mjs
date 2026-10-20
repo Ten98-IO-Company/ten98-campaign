@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('account updates, password changes, session revocation and host recovery preserve account boundaries', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-account-')), origin = 'http://127.0.0.1:3018';
@@ -35,7 +35,7 @@ test('account updates, password changes, session revocation and host recovery pr
     cookie = updated.cookie; assert.equal((await api('/account')).data.localPassword, true);
     assert.equal((await api('/auth/login', 'POST', { email: 'account@example.test', password: initial })).status, 401);
     const result = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ['server/cli.mjs', 'reset-password'], { cwd: new URL('..', import.meta.url), env: { ...process.env, DATA_DIR: dataDir }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn(process.execPath, ['server/cli.ts', 'reset-password'], { cwd: new URL('..', import.meta.url), env: { ...process.env, DATA_DIR: dataDir }, stdio: ['pipe', 'pipe', 'pipe'] });
       let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; }); child.on('error', reject); child.on('close', code => resolve({ code, output }));
       child.stdin.end(JSON.stringify({ email: 'account@example.test', password: recovered }));
     });

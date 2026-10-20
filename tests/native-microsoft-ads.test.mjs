@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 const input = { name: 'Native Microsoft search', dailyBudget: 20, maxCpc: 2, finalUrl: 'https://example.test/offer', headlines: ['Plan Better Campaigns', 'Coordinate Your Launch', 'See Campaign Performance'], descriptions: ['Plan and review campaign work in one place.', 'Bring channels and teams together for your next launch.'], keywords: ['campaign manager', 'campaign planning'], matchType: 'Exact', locationIds: ['190'], confirmed: true };
 async function fixture() {

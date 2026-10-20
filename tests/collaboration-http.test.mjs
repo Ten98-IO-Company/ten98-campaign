@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('HTTP invitation links safely onboard new accounts, require the existing identity, preserve workspace scope and cannot reset passwords', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-collaboration-http-')), origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, env: {}, appUrl: origin });

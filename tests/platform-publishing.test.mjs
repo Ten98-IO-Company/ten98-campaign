@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('HTTP platform variants publish, schedule, refresh, edit and retry the exact approved creative with fail-closed provider preflight', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-platform-posts-')), distDir = join(dataDir, 'dist');

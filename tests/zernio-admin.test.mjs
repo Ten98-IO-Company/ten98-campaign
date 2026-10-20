@@ -11,7 +11,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioAdmin } from '../server/zernio-admin.ts';
 import { IntegrationError } from '../server/provider-core.ts';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 const profileId = 'profile-a';
 function setup() {

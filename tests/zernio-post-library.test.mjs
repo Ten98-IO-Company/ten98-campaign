@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 // External contracts: current official OpenAPI 1.295.0 /accounts/{accountId}/posts,
 // /posts?source=external and /posts/sync-external, checked 2026-10-19.

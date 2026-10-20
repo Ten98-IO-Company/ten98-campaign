@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 import { createContacts } from '../server/contacts.ts';
 import { createDirectCampaigns } from '../server/direct-campaigns.ts';
 import { createSmsInbox } from '../server/sms-inbox.ts';

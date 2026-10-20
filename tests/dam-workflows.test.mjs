@@ -4,7 +4,7 @@ import { generateKeyPairSync, verify } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 import { resolveVariant, validatePostForPlatforms } from '../shared/social-posts.ts';
 
 test('Drive HTTP sync and upload preserve publishing metadata, validate complete batches and atomically deduplicate concurrent imports', async () => {

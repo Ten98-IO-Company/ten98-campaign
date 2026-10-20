@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac, randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('HTTP feature wiring preserves signed bytes, project boundaries, protected records and public map configuration', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-features-http-')), distDir = join(dataDir, 'dist');

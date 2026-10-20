@@ -11,7 +11,7 @@ import { transformWithOxc } from 'vite';
 import { handleZernioContacts } from '../server/zernio-contacts.ts';
 import { createContacts } from '../server/contacts.ts';
 import { IntegrationError } from '../server/provider-core.ts';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 const profileId = 'profile-a', id = value => String(value).padStart(24, '0');
 function setup() {

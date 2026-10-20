@@ -4,7 +4,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 import { closeMediaUploads, MEDIA_DELIVERY_FIELDS } from '../server/zernio-media.ts';
 
 const appUrl = 'https://hosted-media.example.test', profileId = 'media-profile', storageHost = 'a'.repeat(32) + '.r2.cloudflarestorage.com';

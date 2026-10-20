@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { generateKeyPairSync, verify } from 'node:crypto';
-import { handleIntegration } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.ts';
 import { providerRequest, zernioClient, scopedAccounts, adAccounts, remotePostModel, remoteRestrictionPayload, savePostSnapshot, operation } from '../server/provider-core.ts';
 
 test('only documented exact product GET absence codes survive and revoked access cannot prove deletion', async () => {

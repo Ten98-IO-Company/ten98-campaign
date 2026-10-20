@@ -8,9 +8,9 @@
   },
   "scripts": {
     "dev": "node --env-file-if-exists=.env scripts/dev.mjs",
-    "dev:server": "node --env-file-if-exists=.env --watch server/index.mjs",
+    "dev:server": "node --env-file-if-exists=.env --watch server/index.ts",
     "build": "npm run check:architecture && tsc --noEmit && vite build",
-    "start": "node --env-file-if-exists=.env server/index.mjs",
+    "start": "node --env-file-if-exists=.env server/index.ts",
     "test": "npm run check:architecture && node --test tests/*.test.mjs",
     "check:architecture": "node node_modules/@ten98/runtime/check.mjs ."
   },

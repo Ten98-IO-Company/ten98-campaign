@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('HTTP OOH inventory, proposals, booking, delivery and cancellation preserve exact scope and concurrent action receipts', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-ooh-workflows-')), origin = 'http://127.0.0.1:3000';

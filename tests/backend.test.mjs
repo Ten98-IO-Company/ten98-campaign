@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID, createHmac } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('local auth, CSRF, workspace isolation, roles, validated CRUD and session expiry', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-campaign-test-'));
@@ -39,7 +39,7 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: setup.email, password: 'wrong password' } })).status, 401);
     const login = await request('/api/auth/login', { method: 'POST', body: { email: setup.email, password: setup.password } });
     assert.equal(login.status, 200); ownerCookie = login.cookie;
-    const provision = spawnSync(process.execPath, [fileURLToPath(new URL('../server/cli.mjs', import.meta.url)), 'create-user'], { input: JSON.stringify({ name: 'Viewer', email: 'viewer@example.com', password: setup.password }), env: { ...process.env, DATA_DIR: dataDir }, encoding: 'utf8' });
+    const provision = spawnSync(process.execPath, [fileURLToPath(new URL('../server/cli.ts', import.meta.url)), 'create-user'], { input: JSON.stringify({ name: 'Viewer', email: 'viewer@example.com', password: setup.password }), env: { ...process.env, DATA_DIR: dataDir }, encoding: 'utf8' });
     assert.equal(provision.status, 0, provision.stderr); assert.equal(provision.stdout.includes(setup.password), false);
     const viewerId = app.db.prepare('SELECT id FROM users WHERE email=?').get('viewer@example.com').id;
     viewerCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'viewer@example.com', password: setup.password } })).cookie;
@@ -88,7 +88,7 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request(`/api/workspaces/${workspaceId}/members/${state.user.id}`, { method: 'DELETE' })).status, 409);
     assert.equal((await request(`/api/workspaces/${workspaceId}/members/${viewerId}`, { method: 'DELETE' })).status, 200);
     assert.equal((await request(`/api/state?projectId=${projectId}`, { cookie: viewerCookie })).status, 404);
-    const grant = spawnSync(process.execPath, [fileURLToPath(new URL('../server/cli.mjs', import.meta.url)), 'grant-operator'], { input: JSON.stringify({ email: 'viewer@example.com' }), env: { ...process.env, DATA_DIR: dataDir }, encoding: 'utf8' });
+    const grant = spawnSync(process.execPath, [fileURLToPath(new URL('../server/cli.ts', import.meta.url)), 'grant-operator'], { input: JSON.stringify({ email: 'viewer@example.com' }), env: { ...process.env, DATA_DIR: dataDir }, encoding: 'utf8' });
     assert.equal(grant.status, 0, grant.stderr);
     assert.equal((await request('/api/session', { cookie: viewerCookie })).data.user.isOperator, true);
     assert.equal((await request(`/api/projects/${newWorkspace.projectId}`, { method: 'PATCH', body: { zernioProfileId: 'operator-approved-profile' }, cookie: viewerCookie })).status, 200);

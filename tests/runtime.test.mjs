@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('startup rejects unsafe OIDC issuers before opening the database or starting background work', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-campaign-oidc-'));

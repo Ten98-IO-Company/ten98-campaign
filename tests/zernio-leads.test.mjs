@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 import { transformWithOxc } from 'vite';
 
 async function fixture() {

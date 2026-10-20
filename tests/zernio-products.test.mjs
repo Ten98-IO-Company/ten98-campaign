@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleZernioProducts } from '../server/zernio-products.ts';
-import { handleIntegration } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.ts';
 import { IntegrationError, operation } from '../server/provider-core.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 // Synthetic replies exercise the pinned Commerce contract without contacting a store.
 function fixture() {

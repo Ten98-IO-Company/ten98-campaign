@@ -10,7 +10,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioWhatsAppTemplates, templateComponents } from '../server/zernio-whatsapp-templates.ts';
 import { IntegrationError } from '../server/provider-core.ts';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 const profileId = 'profile-a', wabaId = '1234567890';
 const form = () => ({ headerFormat: 'text', headerText: 'Hello {{1}}', headerExamples: ['Ana'], headerMediaUrl: '', bodyText: 'Your order {{1}} is ready.', bodyExamples: ['ORDER-123'], footerText: 'Contact our team for help', buttons: [{ type: 'url', text: 'View order', url: 'https://example.com/orders/{{1}}', phoneNumber: '', example: 'ORDER-123' }] });

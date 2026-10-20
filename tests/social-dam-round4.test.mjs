@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { handleIntegration } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.ts';
 
 test('late social refreshes cannot overwrite newer edits or cancellation receipts, even with identical update timestamps', async () => {
   for (const action of ['update', 'cancel']) {

@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // Run from the repository/image root. The container needs only loopback networking.
-const { createApp } = await import(pathToFileURL(resolve('server/index.mjs')));
+const { createApp } = await import(pathToFileURL(resolve('server/index.ts')));
 const dataDir = await mkdtemp(join(tmpdir(), 'ten98-container-check-'));
 const app = createApp({ dataDir, env: {}, appUrl: 'http://127.0.0.1:3018', directScheduler: false });
 try {

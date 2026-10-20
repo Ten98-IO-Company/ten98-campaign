@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'publishing-tools-')), originalFetch = globalThis.fetch, calls = [], origin = 'https://tools.example.test';

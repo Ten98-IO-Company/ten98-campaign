@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { transformWithOxc } from 'vite';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 const sid = (prefix, number) => prefix + String(number).padStart(32, '0');
 

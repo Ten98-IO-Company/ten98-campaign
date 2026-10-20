@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { handleIntegration } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.ts';
 import { providerRequest } from '../server/provider-core.ts';
 
 test('social write receipts reject malformed or cross-account acknowledgements before changing local posts', async () => {

@@ -5,8 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleIntegration } from '../server/integrations.mjs';
-import { createApp } from '../server/index.mjs';
+import { handleIntegration } from '../server/integrations.ts';
+import { createApp } from '../server/index.ts';
 
 test('social refresh and publishing reject malformed preview fields before persisting them', async () => {
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, records = new Map(), accepted = [];

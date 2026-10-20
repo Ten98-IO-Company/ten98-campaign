@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('Meta interest HTTP reads project safe results only while account access stays current', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-ad-targeting-')), origin = 'http://127.0.0.1:3018';

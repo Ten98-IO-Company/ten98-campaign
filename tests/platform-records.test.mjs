@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('platform drafts keep metadata and explicit resets, protect DAM references, and enforce request schemas', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-platform-records-')), origin = 'http://127.0.0.1:3000';

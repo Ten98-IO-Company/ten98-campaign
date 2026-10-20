@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { handleIntegration } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.ts';
 
 // Provider contracts: https://docs.zernio.com/ad-campaigns/boost-post and /api/openapi.
 async function audit(run) {

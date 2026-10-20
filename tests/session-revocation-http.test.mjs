@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('revoked sessions cannot complete provider reads or imports, while accepted writes retain uncertain receipts', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-session-revocation-')), origin = 'http://127.0.0.1:3018';

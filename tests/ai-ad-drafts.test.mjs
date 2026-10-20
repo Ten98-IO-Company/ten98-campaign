@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('AI ad suggestions stay private, reviewable and unsubmitted until the user completes the ad builder', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-ai-ads-')), origin = 'http://127.0.0.1:3018';

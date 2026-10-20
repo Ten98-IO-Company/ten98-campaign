@@ -8,7 +8,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { transformWithOxc } from 'vite';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'campaign-destinations-')), origin = 'https://destinations.example.test', originalFetch = globalThis.fetch, calls = [];

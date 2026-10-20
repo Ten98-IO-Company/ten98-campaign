@@ -21,4 +21,4 @@ COPY --chown=node:node shared ./shared
 RUN mkdir data && chown node:node data
 USER node
 EXPOSE 3018
-CMD ["node", "server/index.mjs"]
+CMD ["node", "server/index.ts"]

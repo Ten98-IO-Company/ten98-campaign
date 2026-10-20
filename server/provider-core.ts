@@ -195,7 +195,7 @@ export function postRestrictions(post: ProviderRecord, platforms: string[], asse
   for (const variant of Object.values(result.variants)) checkMediaUrls(variant.mediaItems);
   return result;
 }
-export function assertPostRestrictions(result: RestrictionCheck): void {
+export function assertPostRestrictions(result: Pick<RestrictionCheck, 'valid' | 'errors'>): void {
   if (!result.valid) fail(422, 'POST_RESTRICTIONS', result.errors.map(item => `${item.platform}: ${item.message}`).join(' ').slice(0, 4000));
 }
 export async function providerPostValidation(api: ZernioApi, payload: ProviderRecord, { assets = [], providerOwnedMediaUrls = new Set() }: { assets?: ProviderRecord[]; providerOwnedMediaUrls?: Set<string> } = {}) {

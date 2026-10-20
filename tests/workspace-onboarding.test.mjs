@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 import { hashPassword } from '../server/auth.ts';
 
 test('failed no-project refresh and workspace readback remain visible through the actual app handlers', async () => {

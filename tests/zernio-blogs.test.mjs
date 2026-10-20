@@ -6,7 +6,7 @@ import { IntegrationError } from '../server/provider-core.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 // Contract: cached official Zernio OpenAPI 1.295.0 Blogs; WordPress scheduling
 // requires native future status and an exact publication time, without a content write.

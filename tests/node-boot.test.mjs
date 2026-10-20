@@ -12,7 +12,7 @@ test('the production entrypoint boots on Node 24 and serves a request', { timeou
   assert.equal(process.versions.node.split('.')[0], '24');
   const port = await new Promise(resolve => { const probe = createServer().listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); }); });
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-boot-')), origin = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/index.mjs', import.meta.url))], { env: { PATH: process.env.PATH, DATA_DIR: dataDir, PORT: String(port), APP_URL: origin }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/index.ts', import.meta.url))], { env: { PATH: process.env.PATH, DATA_DIR: dataDir, PORT: String(port), APP_URL: origin }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
   const exited = new Promise(resolve => child.once('exit', resolve));
   try {

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { transformWithOxc } from 'vite';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 

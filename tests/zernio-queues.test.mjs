@@ -8,7 +8,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-queue-')), originalFetch = globalThis.fetch, origin = 'https://queue.example.test', calls = [], queues = [], remotePosts = new Map();

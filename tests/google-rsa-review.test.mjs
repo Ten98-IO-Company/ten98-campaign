@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { handleIntegration } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.ts';
 
 // Independent provider contract: GET /ads/{id} enriches RSA creative only with
 // explicit cache metadata; cachedAt:null + stale:false is successful enrichment.

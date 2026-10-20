@@ -212,14 +212,14 @@ For OIDC, configure `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, and t
 Provision a local account using the operator CLI, supplying one JSON object on standard input:
 
 ```sh
-node --env-file-if-exists=.env server/cli.mjs create-user
+node --env-file-if-exists=.env server/cli.ts create-user
 ```
 
 Input: `{"name":"Team member","email":"member@example.com","password":"a unique password of at least 12 characters"}`. Use a secure terminal or password-manager pipe, keeping real passwords out of shell arguments and history. The new account has no workspace membership until invited. The `grant-operator` and `revoke-operator` commands accept `{"email":"operator@example.com"}` on standard input and change instance authority without changing workspace membership. Revocation takes effect for existing sessions immediately. The host can revoke the final operator and later regrant authority to an existing account through this CLI.
 
 Bootstrap and successful host operator commands append user ID, action, source and time to SQLite's `instance_operator_audit` in the same transaction as the grant or revocation. Repeated grant/revoke commands keep the role state idempotent and append another command event, matching Discover. An audit insertion failure fails the command and rolls back the transaction. Existing installations retain their operators and begin with an empty audit table; earlier operator history is unavailable. The source identifies host CLI or bootstrap provenance, not an authenticated human actor. Passwords, setup capabilities and session tokens are not audit fields.
 
-To recover a local password, run `node --env-file-if-exists=.env server/cli.mjs reset-password` with `{"email":"member@example.com","password":"a new unique password of at least 12 characters"}` on standard input. It works only for an existing local password account and revokes **all** that account's sessions. It cannot reset an OIDC identity's password. Operator access to the host and private data directory is required.
+To recover a local password, run `node --env-file-if-exists=.env server/cli.ts reset-password` with `{"email":"member@example.com","password":"a new unique password of at least 12 characters"}` on standard input. It works only for an existing local password account and revokes **all** that account's sessions. It cannot reset an OIDC identity's password. Operator access to the host and private data directory is required.
 
 ## Deployment and operations
 

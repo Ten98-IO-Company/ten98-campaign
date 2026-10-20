@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('HTTP account copies retain separate caption, DAM media, options, approvals and schedules through publication, edit, status and retry', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-account-posts-')), distDir = join(dataDir, 'dist');

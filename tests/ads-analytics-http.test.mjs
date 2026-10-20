@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('HTTP paused campaign copies bind reviewed scope, durable native claims and explicit read-only verification', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-campaign-copy-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;

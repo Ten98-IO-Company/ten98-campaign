@@ -8,7 +8,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 const config = () => ({ enabled: true, gap: 2, gapFreq: 'week', startDate: '2070-01-01T09:00:00.000Z', expireCount: 5, expireDate: null, contentVariations: ['First campaign caption', 'Second campaign caption'] });
 async function fixture() {

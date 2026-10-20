@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('native ad connection tests persist rotated tokens, survive restart and reject credentials changed in flight', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-native-settings-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;

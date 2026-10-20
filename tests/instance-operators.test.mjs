@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDatabase } from '../server/database.ts';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
-const cli = fileURLToPath(new URL('../server/cli.mjs', import.meta.url));
+const cli = fileURLToPath(new URL('../server/cli.ts', import.meta.url));
 function runCli(dataDir, command, input) {
   // Honor explicit source-control preloads in the CLI child as well as the test process.
   const preloads = process.execArgv.flatMap((value, index, values) => value === '--import' ? [value, values[index + 1]] : []);

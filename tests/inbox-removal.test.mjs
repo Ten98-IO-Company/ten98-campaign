@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('legacy inbox routes and sample records stay private while campaign agent access remains explicitly scoped', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-inbox-removal-')), origin = 'http://127.0.0.1:3000';
