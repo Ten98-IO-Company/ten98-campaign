@@ -10,7 +10,7 @@ import { transformWithOxc } from 'vite';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createWebhookService } from '../server/webhooks.mjs';
-import { createContacts } from '../server/contacts.mjs';
+import { createContacts } from '../server/contacts.ts';
 import { handleZernioAdEvents } from '../server/zernio-ad-events.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { createApp } from '../server/index.mjs';

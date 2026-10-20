@@ -9,7 +9,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioContacts } from '../server/zernio-contacts.ts';
-import { createContacts } from '../server/contacts.mjs';
+import { createContacts } from '../server/contacts.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { createApp } from '../server/index.mjs';
 

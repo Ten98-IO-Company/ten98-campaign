@@ -6,11 +6,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.mjs';
-import { createContacts } from '../server/contacts.mjs';
+import { createContacts } from '../server/contacts.ts';
 import { createDirectCampaigns } from '../server/direct-campaigns.mjs';
 import { createSmsInbox } from '../server/sms-inbox.mjs';
 import { createIntegrationSettings } from '../server/integration-settings.mjs';
-import { sendDirect } from '../server/direct-providers.mjs';
+import { sendDirect } from '../server/direct-providers.ts';
 import { HttpError } from '../server/auth.ts';
 
 const token = (prefix, value) => prefix + String(value).padStart(32, '0');

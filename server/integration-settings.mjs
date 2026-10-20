@@ -1,8 +1,8 @@
 import { createCipheriv, createDecipheriv, createPrivateKey, hkdfSync, randomBytes } from 'node:crypto';
 import { openRouterFetch, readResponseText } from '@ten98/runtime';
 import { googleToken, providerRequest, IntegrationError } from './provider-core.ts';
-import { testNativeGoogleAds } from './native-google-ads.mjs';
-import { testMicrosoftAds } from './native-microsoft-ads.mjs';
+import { testNativeGoogleAds } from './native-google-ads.ts';
+import { testMicrosoftAds } from './native-microsoft-ads.ts';
 
 const groups = {
   zernio: { apiKey: 'ZERNIO_API_KEY', webhookSecret: 'ZERNIO_WEBHOOK_SECRET' },

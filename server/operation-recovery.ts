@@ -1,34 +1,36 @@
-import { IntegrationError, operation } from './provider-core.ts';
+import { fail, operation } from './provider-core.ts';
+import type { DatabaseSync } from 'node:sqlite';
+import type { OperationContext, ProviderRecord } from './provider-core.ts';
 import { transaction } from './database.ts';
 import { validPostInstant } from '../shared/social-posts.ts';
 
-const initialized = new WeakSet(), fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
-function initialize(db) {
+const initialized = new WeakSet<DatabaseSync>();
+function initialize(db: DatabaseSync) {
   if (initialized.has(db)) return;
   db.exec(`CREATE TABLE IF NOT EXISTS integration_operations(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL,request_hash TEXT NOT NULL,status TEXT NOT NULL,response TEXT,http_status INTEGER,created_at TEXT NOT NULL,action_path TEXT NOT NULL DEFAULT '',run_id TEXT NOT NULL DEFAULT '',UNIQUE(project_id,request_key));
     CREATE TABLE IF NOT EXISTS integration_operation_reviews(operation_id TEXT PRIMARY KEY REFERENCES integration_operations(id),project_id TEXT NOT NULL,reviewer_id TEXT NOT NULL,resolution TEXT NOT NULL CHECK(resolution IN ('not_applied','applied')),note TEXT NOT NULL,reference TEXT NOT NULL,reviewed_at TEXT NOT NULL);`);
-  const columns = new Set(db.prepare('PRAGMA table_info(integration_operations)').all().map(column => column.name));
+  const columns = new Set(db.prepare('PRAGMA table_info(integration_operations)').all().map((column: any) => column.name));
   for (const name of ['action_path', 'run_id']) if (!columns.has(name)) db.exec(`ALTER TABLE integration_operations ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
   initialized.add(db);
 }
-function eligibility(db, row) {
+function eligibility(db: DatabaseSync, row: ProviderRecord) {
   if (!['pending', 'uncertain'].includes(row.status)) return { canReview: false, reason: row.status.startsWith('reviewed-') ? 'This review is final.' : 'Only unconfirmed provider outcomes can be reviewed.' };
   if (operation.active.get(db)?.has(row.id)) return { canReview: false, reason: 'This action is still running. Wait for its receipt before reviewing it.' };
   if (row.status === 'pending' && row.run_id === operation.runId && Date.now() - Date.parse(row.created_at) < 10 * 60000) return { canReview: false, reason: 'Wait ten minutes before reviewing an interrupted request from this server session.' };
   return { canReview: true, reason: '' };
 }
-const reviewView = row => row ? { resolution: row.resolution, note: row.note, reference: row.reference, reviewerId: row.reviewer_id, reviewedAt: row.reviewed_at } : null;
-function safeAction(value) { return typeof value === 'string' && /^(POST|PUT|PATCH|DELETE|GET) \/[a-zA-Z/:_-]{1,250}$/.test(value) ? value : 'Earlier provider action'; }
-function view(db, row) {
-  const creation = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zernio_product_create_receipts'").get() && db.prepare('SELECT account_id,native_product_id FROM zernio_product_create_receipts WHERE project_id=? AND request_key=?').get(row.project_id, row.request_key);
-  const safeId = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !['.', '..'].includes(value) && !/[\s\u0000-\u001f\u007f-\u009f/?#]/.test(value);
-  const copy = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zernio_campaign_copy_receipts'").get() && db.prepare('SELECT source_campaign_id,platform,copied_campaign_id,discovery,verification,status_read_at FROM zernio_campaign_copy_receipts WHERE project_id=? AND request_key=?').get(row.project_id, row.request_key);
+const reviewView = (row: ProviderRecord | undefined) => row ? { resolution: row.resolution, note: row.note, reference: row.reference, reviewerId: row.reviewer_id, reviewedAt: row.reviewed_at } : null;
+function safeAction(value: unknown) { return typeof value === 'string' && /^(POST|PUT|PATCH|DELETE|GET) \/[a-zA-Z/:_-]{1,250}$/.test(value) ? value : 'Earlier provider action'; }
+function view(db: DatabaseSync, row: ProviderRecord) {
+  const creation = (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zernio_product_create_receipts'").get() && db.prepare('SELECT account_id,native_product_id FROM zernio_product_create_receipts WHERE project_id=? AND request_key=?').get(row.project_id, row.request_key)) as ProviderRecord | undefined;
+  const safeId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 500 && !['.', '..'].includes(value) && !/[\s\u0000-\u001f\u007f-\u009f/?#]/.test(value);
+  const copy = (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zernio_campaign_copy_receipts'").get() && db.prepare('SELECT source_campaign_id,platform,copied_campaign_id,discovery,verification,status_read_at FROM zernio_campaign_copy_receipts WHERE project_id=? AND request_key=?').get(row.project_id, row.request_key)) as ProviderRecord | undefined;
   const copiedCampaignId = copy && safeId(copy.copied_campaign_id) && copy.copied_campaign_id !== copy.source_campaign_id ? copy.copied_campaign_id : null;
-  const paused = row.status === 'complete' && copiedCampaignId && copy.platform !== 'linkedin' && copy.verification === 'paused' && validPostInstant(copy.status_read_at);
+  const paused = row.status === 'complete' && copiedCampaignId && copy!.platform !== 'linkedin' && copy!.verification === 'paused' && validPostInstant(copy!.status_read_at);
   return { id: row.id, action: safeAction(row.action_path), status: row.status, createdAt: row.created_at, ...eligibility(db, row), ...(creation && safeId(creation.account_id) ? { productCreation: { accountId: creation.account_id, productId: safeId(creation.native_product_id) ? creation.native_product_id : null } } : {}), ...(copy && safeId(copy.source_campaign_id) && ['facebook', 'instagram', 'tiktok', 'linkedin'].includes(copy.platform) ? { campaignCopy: { sourceCampaignId: copy.source_campaign_id, platform: copy.platform, copiedCampaignId, discovery: ['triggered', 'skipped', 'failed'].includes(copy.discovery) ? copy.discovery : null, requestedStatus: 'PAUSED', verification: paused ? 'paused' : 'pending', statusReadAt: paused ? copy.status_read_at : null } } : {}), error: ['pending', 'uncertain'].includes(row.status) ? { code: 'OPERATION_UNCERTAIN', message: 'The provider outcome has not been confirmed.' } : null, review: reviewView(db.prepare('SELECT * FROM integration_operation_reviews WHERE operation_id=? AND project_id=?').get(row.id, row.project_id)) };
 }
 
-export async function handleOperationRecovery(context) {
+export async function handleOperationRecovery(context: OperationContext & { body?: ProviderRecord }) {
   const { req, url, body = {}, project, role, user, db, send } = context;
   const prefix = `/api/projects/${encodeURIComponent(project.id)}/operations`;
   if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
@@ -36,7 +38,7 @@ export async function handleOperationRecovery(context) {
   initialize(db);
   if (url.pathname === prefix && req.method === 'GET') {
     const rows = db.prepare("SELECT * FROM integration_operations WHERE project_id=? ORDER BY CASE WHEN status IN ('pending','uncertain') THEN 0 ELSE 1 END,created_at DESC,rowid DESC LIMIT 100").all(project.id);
-    send(200, { operations: rows.map(row => view(db, row)) }); return true;
+    send(200, { operations: rows.map((row: ProviderRecord) => view(db, row)) }); return true;
   }
   const match = url.pathname.slice(prefix.length).match(/^\/([^/]+)\/review$/);
   if (!match || req.method !== 'POST') fail(405, 'INVALID_REVIEW_ACTION', 'This operation review action is unavailable.');

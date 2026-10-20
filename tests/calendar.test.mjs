@@ -5,8 +5,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, createStore } from '../server/database.ts';
-import { handleCalendar, calendarPlan } from '../server/calendar.mjs';
-import { handleOperationRecovery } from '../server/operation-recovery.mjs';
+import { handleCalendar, calendarPlan } from '../server/calendar.ts';
+import { handleOperationRecovery } from '../server/operation-recovery.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
 
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });

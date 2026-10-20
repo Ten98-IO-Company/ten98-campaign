@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createStore } from '../server/database.ts';
-import { handleOoh } from '../server/ooh.mjs';
+import { handleOoh } from '../server/ooh.ts';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 

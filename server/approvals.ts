@@ -1,90 +1,91 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { IntegrationError, targetConfiguration, zernioClient } from './provider-core.ts';
+import type { DatabaseSync } from 'node:sqlite';
+import { fail, IntegrationError, targetConfiguration, zernioClient, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
 import { queueList, reviewedQueue } from './zernio-queues.ts';
 
+type ApprovalContext = Omit<OperationContext, 'project' | 'body'> & { project: ProviderRecord; body?: any };
 const initialized = new WeakSet(), administrators = new Set(['owner', 'admin']);
-const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
-function tables(db) {
+function tables(db: DatabaseSync) {
   if (initialized.has(db)) return;
   db.exec(`CREATE TABLE IF NOT EXISTS project_approval_policy(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,require_approval INTEGER NOT NULL CHECK(require_approval IN (0,1)),updated_by TEXT NOT NULL REFERENCES users(id),updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS post_approval_reviews(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,post_id TEXT NOT NULL,fingerprint TEXT NOT NULL,snapshot TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),requested_by TEXT NOT NULL REFERENCES users(id),requested_at TEXT NOT NULL,reviewed_by TEXT REFERENCES users(id),reviewed_at TEXT,note TEXT NOT NULL DEFAULT '');
     CREATE INDEX IF NOT EXISTS post_approval_reviews_post ON post_approval_reviews(project_id,post_id);`);
   initialized.add(db);
 }
-function policy(db, projectId) {
-  tables(db); const row = db.prepare('SELECT require_approval AS requireApproval,updated_by AS updatedBy,updated_at AS updatedAt FROM project_approval_policy WHERE project_id=?').get(projectId);
+function policy(db: DatabaseSync, projectId: string) {
+  tables(db); const row = db.prepare('SELECT require_approval AS requireApproval,updated_by AS updatedBy,updated_at AS updatedAt FROM project_approval_policy WHERE project_id=?').get(projectId) as ProviderRecord | undefined;
   return row ? { ...row, requireApproval: Boolean(row.requireApproval) } : { requireApproval: false, updatedBy: null, updatedAt: null };
 }
-function postSnapshot(context, post) {
+function postSnapshot(context: ApprovalContext, post: ProviderRecord) {
   const accountOverrides = normalizeAccountVariants(post);
-  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map(item => item?.assetId), ...Object.values(accountOverrides).map(item => item?.assetId)].filter(Boolean))];
+  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map((item: any) => item?.assetId), ...Object.values(accountOverrides).map(item => item?.assetId)].filter(Boolean))];
   const records = ids.map(id => context.store.get(context.project.id, 'assets', id));
   const assets = ids.map((id, index) => {
     const asset = records[index];
     return asset ? { id: asset.id, url: asset.url || '', deliveryUrl: asset.deliveryUrl || '', approval: asset.approval || 'pending', kind: asset.kind || '', size: asset.size ?? null, mimeType: asset.mimeType || '', width: asset.width ?? null, height: asset.height ?? null, duration: asset.duration ?? null, modifiedTime: asset.modifiedTime || '', md5Checksum: asset.md5Checksum || '', ...(asset.deliverySource === 'zernio' ? Object.fromEntries(['deliverySource', 'deliveryUploadedAt', 'deliveryExpiresAt', 'deliveryKey', 'deliveryAttemptId', 'deliveryKind', 'deliveryMimeType', 'deliverySize', 'deliveryFilename'].map(key => [key, asset[key] ?? null])) : {}) } : { id, missing: true };
   });
-  const variants = Object.fromEntries((post.platforms || []).map(platform => {
+  const variants = Object.fromEntries((post.platforms || []).map((platform: string) => {
     const variant = resolveVariant(post, platform, records.filter(Boolean));
     return [platform, { content: variant.content, mediaItems: variant.mediaItems, options: variant.options }];
   }));
   const mediaItems = resolveVariant({ ...post, platformOverrides: {} }, 'facebook', records.filter(Boolean)).mediaItems;
   const accountVariants = Object.fromEntries(Object.entries(accountOverrides).map(([id, copy]) => { const variant = resolveVariant(post, copy.platform, records.filter(Boolean), id); return [id, { platform: copy.platform, content: variant.content, mediaItems: variant.mediaItems, options: variant.options, ...(copy.scheduledAt ? { scheduledAt: copy.scheduledAt } : {}) }]; }));
-  const wireItems = items => items.map(({ width, height, duration, ...item }) => item);
-  const configuration = target => {
+  const wireItems = (items: ProviderRecord[]) => items.map(({ width, height, duration, ...item }) => item);
+  const configuration = (target: ProviderRecord) => {
     const current = targetConfiguration(target);
-    const options = Array.isArray(current.options?.threadItems) ? { ...current.options, threadItems: current.options.threadItems.map(item => ({ ...item, ...(Array.isArray(item.mediaItems) ? { mediaItems: wireItems(item.mediaItems) } : {}) })) } : current.options;
+    const options = Array.isArray(current.options?.threadItems) ? { ...current.options, threadItems: current.options.threadItems.map((item: ProviderRecord) => ({ ...item, ...(Array.isArray(item.mediaItems) ? { mediaItems: wireItems(item.mediaItems) } : {}) })) } : current.options;
     return { ...(typeof current.content === 'string' ? { customContent: current.content } : {}), ...(current.mediaItems ? { customMedia: wireItems(current.mediaItems) } : {}), ...(options && Object.keys(options).length ? { platformSpecificData: options } : {}) };
   };
-  const providerVariants = (post.providerResults || []).filter(target => target.platform && target.accountId).flatMap(target => {
+  const providerVariants = (post.providerResults || []).filter((target: ProviderRecord) => target.platform && target.accountId).flatMap((target: ProviderRecord) => {
     const id = String(target.accountId?._id || target.accountId), actual = configuration(target), expected = configuration(buildPlatformEntry(post, target.platform, id, records.filter(Boolean)));
     const scheduledFor = typeof target.scheduledFor === 'string' && Date.parse(target.scheduledFor) !== Date.parse(accountOverrides[id]?.scheduledAt || post.scheduledAt || post.scheduledFor) ? target.scheduledFor : '';
     return JSON.stringify(actual) === JSON.stringify(expected) && !scheduledFor ? [] : [{ platform: target.platform, accountId: String(target.accountId?._id || target.accountId), ...actual, ...(scheduledFor ? { scheduledFor } : {}) }];
   });
   return { tags: normalizePostTags(post.tags, { preserve: true }), ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), ...(Object.keys(accountVariants).length ? { accountOverrides: accountVariants } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null };
 }
-const fingerprint = snapshot => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
-const latest = (db, projectId, postId) => db.prepare('SELECT * FROM post_approval_reviews WHERE project_id=? AND post_id=? ORDER BY rowid DESC LIMIT 1').get(projectId, postId);
-const submitted = post => Boolean(post.externalId || post.zernioPostId || ['published', 'submitted', 'partial'].includes(post.status));
-const retryableFailure = post => Boolean((post.externalId || post.zernioPostId) && ['failed', 'partial'].includes(post.status) && Array.isArray(post.providerResults) && post.providerResults.some(copy => copy.status === 'failed') && (post.status === 'partial') === post.providerResults.some(copy => copy.status === 'published') && post.providerResults.every(copy => ['failed', 'published', 'cancelled'].includes(copy.status)));
-function localPost(context, id) {
+const fingerprint = (snapshot: ProviderRecord) => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
+const latest = (db: DatabaseSync, projectId: string, postId: string) => db.prepare('SELECT * FROM post_approval_reviews WHERE project_id=? AND post_id=? ORDER BY rowid DESC LIMIT 1').get(projectId, postId) as ProviderRecord | undefined;
+const submitted = (post: ProviderRecord) => Boolean(post.externalId || post.zernioPostId || ['published', 'submitted', 'partial'].includes(post.status));
+const retryableFailure = (post: ProviderRecord) => Boolean((post.externalId || post.zernioPostId) && ['failed', 'partial'].includes(post.status) && Array.isArray(post.providerResults) && post.providerResults.some((copy: ProviderRecord) => copy.status === 'failed') && (post.status === 'partial') === post.providerResults.some((copy: ProviderRecord) => copy.status === 'published') && post.providerResults.every((copy: ProviderRecord) => ['failed', 'published', 'cancelled'].includes(copy.status)));
+function localPost(context: ApprovalContext, id: string) {
   const post = context.store.get(context.project.id, 'posts', id);
   if (!post) fail(404, 'APPROVAL_POST_NOT_FOUND', 'This post was not found in the current project.');
   if (post.sample || (submitted(post) && !retryableFailure(post))) fail(409, 'APPROVAL_LOCAL_POST_REQUIRED', 'Request approval for a local draft or failed provider copies after refreshing every account’s status.');
   return post;
 }
-function assetApproved(snapshot) {
-  if (snapshot.assets.some(asset => asset.missing || asset.approval !== 'approved')) fail(409, 'APPROVAL_ASSET_REQUIRED', 'Approve every referenced creative asset before approving or publishing this post.');
+function assetApproved(snapshot: ProviderRecord) {
+  if (snapshot.assets.some((asset: ProviderRecord) => asset.missing || asset.approval !== 'approved')) fail(409, 'APPROVAL_ASSET_REQUIRED', 'Approve every referenced creative asset before approving or publishing this post.');
 }
-function approvalAccounts(post) {
+function approvalAccounts(post: ProviderRecord) {
   if (!Array.isArray(post.accounts) || !post.accounts.length) fail(409, 'APPROVAL_ACCOUNTS_REQUIRED', 'Edit this post, select its connected publishing accounts, and save it before requesting approval or publishing.');
 }
-function publicReview(db, row) {
+function publicReview(db: DatabaseSync, row: ProviderRecord | undefined) {
   if (!row) return null;
-  const actor = id => id ? db.prepare('SELECT id,name FROM users WHERE id=?').get(id) || { id, name: 'Former team member' } : null;
+  const actor = (id: string) => id ? db.prepare('SELECT id,name FROM users WHERE id=?').get(id) || { id, name: 'Former team member' } : null;
   return { id: row.id, status: row.status, requestedBy: actor(row.requested_by), requestedAt: row.requested_at, reviewedBy: actor(row.reviewed_by), reviewedAt: row.reviewed_at, note: row.note, snapshot: JSON.parse(row.snapshot) };
 }
-function fields(body, allowed) {
+function fields(body: any, allowed: string[]) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_APPROVAL_FIELDS', 'Use only the fields shown in the approval form.');
 }
-function queueItem(context, post, queue = null) {
+function queueItem(context: ApprovalContext, post: ProviderRecord, queue: ProviderRecord | null = null) {
   const snapshot = postSnapshot(context, post), review = latest(context.db, context.project.id, post.id);
   const status = submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
   return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: snapshot.queueId || '', queueVersion: snapshot.queueVersion || '', content: snapshot.content, tags: snapshot.tags, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, ...(snapshot.accountOverrides ? { accountOverrides: snapshot.accountOverrides } : {}), providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
 }
-async function publishingQueues(context) {
+async function publishingQueues(context: ApprovalContext) {
   const env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) }, profileId = String(context.project.zernioProfileId || '');
   if (!env.ZERNIO_API_KEY || !profileId) fail(409, 'QUEUE_UNAVAILABLE', 'Configure Zernio and this project’s profile before reviewing a queued post.');
   return (await queueList(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping?.(profileId)), profileId)).queues;
 }
-function queueSummary(post, queues, unavailable = false) {
+function queueSummary(post: ProviderRecord, queues: ProviderRecord[] | undefined, unavailable = false) {
   if (!post.queueId || submitted(post)) return null;
-  const queue = queues?.find(row => row._id === post.queueId);
+  const queue = queues?.find((row: ProviderRecord) => row._id === post.queueId);
   try { if (unavailable) fail(503, 'QUEUE_UNAVAILABLE', 'The publishing queue could not be verified. Refresh before reviewing this post.'); reviewedQueue(post, queues || []); return { ...queue, ready: true }; }
   catch (error) { return { ...(queue || { _id: post.queueId }), ready: false, message: error instanceof IntegrationError ? error.message : 'The publishing queue could not be verified.' }; }
 }
 
-export function assertPublishingApproval(context, post) {
+export function assertPublishingApproval(context: ApprovalContext, post: ProviderRecord) {
   const current = context.store.get(context.project.id, 'posts', post?.id);
   if (!current || post.sample || current.sample) fail(409, 'APPROVAL_POST_NOT_FOUND', 'Use a real post from this project before publishing.');
   const snapshot = postSnapshot(context, current), currentFingerprint = fingerprint(snapshot);
@@ -97,11 +98,11 @@ export function assertPublishingApproval(context, post) {
   if (review.fingerprint !== currentFingerprint) fail(409, 'PUBLISHING_APPROVAL_STALE', 'This post or its creative changed after approval. Request a new review before publishing.');
 }
 
-export function assertProviderPostEdit(context) {
+export function assertProviderPostEdit(context: ApprovalContext) {
   if (policy(context.db, context.project.id).requireApproval && !administrators.has(context.role)) fail(403, 'APPROVED_PROVIDER_EDIT_RESTRICTED', 'An owner or administrator must make changes to submitted posts while publishing approval is required.');
 }
 
-export async function handleApprovals(context) {
+export async function handleApprovals(context: ApprovalContext) {
   const { req, url, project, role, user, db, store, body = {}, send } = context;
   const prefix = `/api/projects/${project.id}/approvals/`; if (!url.pathname.startsWith(prefix)) return false;
   const path = url.pathname.slice(prefix.length); tables(db);
@@ -114,12 +115,12 @@ export async function handleApprovals(context) {
       store.activity(project.id, `Publishing approval ${body.requireApproval ? 'required' : 'made optional'} by ${user.name || user.id}.`); send(200, policy(db, project.id)); return true;
     }
     if (req.method === 'GET' && path === 'posts') {
-      const posts = store.list(project.id, 'posts'); let queues, unavailable = false;
-      if (posts.some(post => post.queueId && !submitted(post))) {
+      const posts = store.list(project.id, 'posts'); let queues: ProviderRecord[] | undefined, unavailable = false;
+      if (posts.some((post: ProviderRecord) => post.queueId && !submitted(post))) {
         try { queues = await publishingQueues(context); } catch { unavailable = true; }
         context.assertIntegrationSettings?.(); if (project.zernioProfileId) context.assertProjectMapping?.(String(project.zernioProfileId));
       }
-      send(200, { ...policy(db, project.id), posts: posts.map(post => queueItem(context, post, queueSummary(post, queues, unavailable))) }); return true;
+      send(200, { ...policy(db, project.id), posts: posts.map((post: ProviderRecord) => queueItem(context, post, queueSummary(post, queues, unavailable))) }); return true;
     }
     const match = path.match(/^posts\/([^/]+)\/(request|review)$/);
     if (!match || req.method !== 'POST') fail(404, 'APPROVAL_ACTION_NOT_FOUND', 'This approval action was not found.');

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createStore } from '../server/database.ts';
-import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from '../server/approvals.mjs';
+import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from '../server/approvals.ts';
 
 test('content approval policy binds current posts and creative to audited review requests and enforces role and project boundaries', async () => {
   const db = new DatabaseSync(':memory:');

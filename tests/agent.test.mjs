@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createStore } from '../server/database.ts';
-import { handleAgent } from '../server/agent.mjs';
+import { handleAgent } from '../server/agent.ts';
 
 test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries durable, and user history private', async () => {
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, calls = [];

@@ -1,33 +1,32 @@
-import { IntegrationError, providerRequest, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
+import { IntegrationError, fail, reportObject as plain, providerRequest, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
+import type { ProviderRecord } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
-const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
-const plain = value => value && typeof value === 'object' && !Array.isArray(value);
-const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
-const number = value => Number.isSafeInteger(value) && value >= 0;
-const sid = (value, prefix) => typeof value === 'string' && new RegExp(`^${prefix}[a-fA-F0-9]{32}$`).test(value);
-const email = value => typeof value === 'string' && value.length <= 254 && /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value);
-const phone = value => typeof value === 'string' && /^\+[1-9]\d{6,14}$/.test(value);
-const text = (value, label, max) => { if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) fail(400, 'INVALID_DIRECT_CONTENT', `Enter a valid ${label}.`); return value; };
-const invalid = (provider, uncertain = false) => fail(502, 'INVALID_PROVIDER_RESPONSE', `${provider} did not return a complete, scoped acknowledgement. Reconcile with the provider before retrying a send.`, uncertain);
+const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
+const number = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+const sid = (value: unknown, prefix: string) => typeof value === 'string' && new RegExp(`^${prefix}[a-fA-F0-9]{32}$`).test(value);
+const email = (value: unknown): value is string => typeof value === 'string' && value.length <= 254 && /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value);
+const phone = (value: unknown): value is string => typeof value === 'string' && /^\+[1-9]\d{6,14}$/.test(value);
+const text = (value: unknown, label: string, max: number): string => { if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) fail(400, 'INVALID_DIRECT_CONTENT', `Enter a valid ${label}.`); return value; };
+function invalid(provider: string, uncertain = false): never { return fail(502, 'INVALID_PROVIDER_RESPONSE', `${provider} did not return a complete, scoped acknowledgement. Reconcile with the provider before retrying a send.`, uncertain); }
 const SMS_STATUSES = new Set(['accepted', 'queued', 'sending', 'sent', 'delivered', 'undelivered', 'failed', 'canceled', 'scheduled', 'partially_delivered']);
 const BROADCAST_STATUSES = new Set(['draft', 'scheduled', 'sending', 'completed', 'failed', 'cancelled']);
 
-function twilio(env) {
+function twilio(env: ProviderRecord) {
   if (!sid(env.TWILIO_ACCOUNT_SID, 'AC') || !env.TWILIO_AUTH_TOKEN) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure the Twilio account and auth token in Integrations.');
   return { base: `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}`, headers: { Authorization: `Basic ${Buffer.from(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`).toString('base64')}` } };
 }
-function smsReceipt(data, env, uncertain, expectedId, expectedRecipient) {
+function smsReceipt(data: any, env: ProviderRecord, uncertain: boolean, expectedId?: string, expectedRecipient?: string) {
   if (!plain(data) || !sid(data.sid, 'SM') || data.account_sid !== env.TWILIO_ACCOUNT_SID || !phone(data.to) || !SMS_STATUSES.has(data.status) || expectedId && data.sid !== expectedId || expectedRecipient && data.to !== expectedRecipient) invalid('Twilio', uncertain);
   if (data.from != null && !phone(data.from) || data.messaging_service_sid != null && !sid(data.messaging_service_sid, 'MG')) invalid('Twilio', uncertain);
   return { providerId: data.sid, status: data.status === 'canceled' ? 'cancelled' : data.status, recipient: data.to, ...(data.from ? { sender: data.from } : {}), ...(data.messaging_service_sid ? { messagingServiceSid: data.messaging_service_sid } : {}), ...(data.error_code != null ? { errorCode: String(data.error_code).slice(0, 100) } : {}) };
 }
-function cloudflare(env) {
+function cloudflare(env: ProviderRecord) {
   if (!/^[a-fA-F0-9]{32}$/.test(env.CLOUDFLARE_ACCOUNT_ID || '') || !env.CLOUDFLARE_EMAIL_API_TOKEN || !email(env.CLOUDFLARE_EMAIL_FROM_ADDRESS)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure the Cloudflare account, Email Sending API token, and sender address in Integrations.');
   return { base: `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/email/sending`, headers: { Authorization: `Bearer ${env.CLOUDFLARE_EMAIL_API_TOKEN}`, 'Content-Type': 'application/json' } };
 }
 
-export async function sendDirect({ channel, campaign, contact, delivery = {}, env, appUrl, unsubscribeUrl, assertMapping }) {
+export async function sendDirect({ channel, campaign, contact, delivery = {}, env, appUrl, unsubscribeUrl, assertMapping }: ProviderRecord) {
   if (channel === 'sms') {
     const api = twilio(env);
     if (!phone(contact.phone)) fail(400, 'INVALID_RECIPIENT', 'SMS recipients need an international phone number, including + and country code.');
@@ -56,11 +55,11 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
   const api = cloudflare(env);
   if (!email(contact.email)) fail(400, 'INVALID_RECIPIENT', 'Enter a valid email recipient.');
   const subject = text(campaign.subject, 'email subject', 998); if (/[\r\n]/.test(subject)) fail(400, 'INVALID_DIRECT_CONTENT', 'Email subjects cannot contain line breaks.');
-  const body = { from: env.CLOUDFLARE_EMAIL_FROM_NAME ? { address: env.CLOUDFLARE_EMAIL_FROM_ADDRESS, name: text(env.CLOUDFLARE_EMAIL_FROM_NAME, 'sender name', 200) } : env.CLOUDFLARE_EMAIL_FROM_ADDRESS, to: [contact.email], subject, text: text(campaign.text, 'plain-text email', 100000) };
+  const body: ProviderRecord = { from: env.CLOUDFLARE_EMAIL_FROM_NAME ? { address: env.CLOUDFLARE_EMAIL_FROM_ADDRESS, name: text(env.CLOUDFLARE_EMAIL_FROM_NAME, 'sender name', 200) } : env.CLOUDFLARE_EMAIL_FROM_ADDRESS, to: [contact.email], subject, text: text(campaign.text, 'plain-text email', 100000) };
   if (campaign.html) body.html = text(campaign.html, 'HTML email', 500000);
   if (env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS) { if (!email(env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS)) fail(409, 'INVALID_REPLY_TO', 'Configure a valid email reply address.'); body.reply_to = env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS; }
   if (unsubscribeUrl) {
-    let url;
+    let url: string;
     try { url = publicMediaUrl(unsubscribeUrl); if (new URL(url).origin !== new URL(appUrl).origin) throw new Error(); }
     catch { fail(409, 'INVALID_UNSUBSCRIBE_URL', 'Email preferences require this app’s public HTTPS address.'); }
     body.text += `\n\nManage email preferences: ${url}`;
@@ -79,17 +78,17 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
   return { providerId: data.result.message_id || null, status: matches[0], recipient: contact.email, ...(matches[0] === 'failed' ? { suppressionReason: 'hard-bounce' } : matches[0] === 'suppressed' ? { suppressionReason: 'Provider suppression' } : {}) };
 }
 
-export function sendSmsReply({ env, sender, recipient, message, callbackUrl, appUrl, assertMapping }) {
+export function sendSmsReply({ env, sender, recipient, message, callbackUrl, appUrl, assertMapping }: ProviderRecord) {
   return sendDirect({ channel: 'sms', env, contact: { phone: recipient }, campaign: { text: message }, delivery: { sender, callbackUrl }, appUrl, assertMapping });
 }
 
-export async function getSmsStatus({ env, providerId, assertMapping }) {
+export async function getSmsStatus({ env, providerId, assertMapping }: ProviderRecord) {
   const api = twilio(env); if (!sid(providerId, 'SM')) fail(400, 'INVALID_PROVIDER_ID', 'Choose a valid SMS delivery.');
   return smsReceipt(await providerRequest(`${api.base}/Messages/${providerId}.json`, { method: 'GET', headers: api.headers }, 'Twilio', assertMapping), env, false, providerId);
 }
 
-export async function syncEmailSuppressions({ env, assertMapping }) {
-  const api = cloudflare(env), suppressions = [], seen = new Set(); let cursor;
+export async function syncEmailSuppressions({ env, assertMapping }: ProviderRecord) {
+  const api = cloudflare(env), suppressions: ProviderRecord[] = [], seen = new Set<string>(); let cursor: string | null | undefined;
   // ponytail: cap a refresh at 10,000 suppressions; use a persisted cursor if an account exceeds it.
   for (let page = 0; page < 10; page++) {
     const url = new URL(`${api.base}/suppressions`); url.searchParams.set('per_page', '1000'); if (cursor) url.searchParams.set('cursor', cursor);
@@ -101,12 +100,12 @@ export async function syncEmailSuppressions({ env, assertMapping }) {
     }
     cursor = data.result_info.next_cursor;
     if (cursor === null) return { suppressions, complete: true };
-    if (seen.has(cursor)) invalid('Cloudflare Email Sending'); seen.add(cursor);
+    if (seen.has(cursor!)) invalid('Cloudflare Email Sending'); seen.add(cursor!);
   }
   fail(503, 'INCOMPLETE_PROVIDER_DATA', 'The suppression list exceeds this refresh limit. No partial suppression list was applied.');
 }
 
-async function whatsapp({ env, project, campaign, accountId = campaign?.accountId, assertMapping }) {
+async function whatsapp({ env, project, campaign, accountId = campaign?.accountId, assertMapping }: ProviderRecord) {
   if (!env.ZERNIO_API_KEY || !validId(project?.zernioProfileId)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure Zernio and map a profile to this project.');
   if (!validId(accountId)) fail(400, 'INVALID_ACCOUNT', 'Choose a WhatsApp account.');
   const api = zernioClient(env.ZERNIO_API_KEY, assertMapping), account = requireAccount(await scopedAccounts(api, project.zernioProfileId), accountId);
@@ -114,13 +113,13 @@ async function whatsapp({ env, project, campaign, accountId = campaign?.accountI
   return api;
 }
 
-export async function listWhatsAppTemplates(options) {
+export async function listWhatsAppTemplates(options: ProviderRecord) {
   const api = await whatsapp(options), data = await api('/whatsapp/templates', { accountId: options.accountId || options.campaign?.accountId, status: 'APPROVED' });
   if (data?.success !== true || !Array.isArray(data.templates) || data.templates.length > 10000) invalid('Zernio');
   const templates = data.templates.filter(row => row?.status === 'APPROVED').map(row => {
-    if (!validId(row.id) || typeof row.name !== 'string' || !/^[a-z0-9_]{1,512}$/.test(row.name) || typeof row.language !== 'string' || !/^[A-Za-z]{2,3}(?:_[A-Za-z0-9]{2,8})?$/.test(row.language) || !['AUTHENTICATION', 'MARKETING', 'UTILITY'].includes(row.category) || !Array.isArray(row.components) || row.components.length > 20 || row.components.some(component => !plain(component))) invalid('Zernio');
+    if (!validId(row.id) || typeof row.name !== 'string' || !/^[a-z0-9_]{1,512}$/.test(row.name) || typeof row.language !== 'string' || !/^[A-Za-z]{2,3}(?:_[A-Za-z0-9]{2,8})?$/.test(row.language) || !['AUTHENTICATION', 'MARKETING', 'UTILITY'].includes(row.category) || !Array.isArray(row.components) || row.components.length > 20 || row.components.some((component: any) => !plain(component))) invalid('Zernio');
     for (const component of row.components) {
-      if (['type', 'format', 'text'].some(field => component[field] != null && typeof component[field] !== 'string') || component.buttons != null && (!Array.isArray(component.buttons) || component.buttons.some(button => !plain(button) || ['type', 'text', 'url', 'phone_number'].some(field => button[field] != null && typeof button[field] !== 'string')))) invalid('Zernio');
+      if (['type', 'format', 'text'].some(field => component[field] != null && typeof component[field] !== 'string') || component.buttons != null && (!Array.isArray(component.buttons) || component.buttons.some((button: any) => !plain(button) || ['type', 'text', 'url', 'phone_number'].some(field => button[field] != null && typeof button[field] !== 'string')))) invalid('Zernio');
     }
     return { id: row.id, name: row.name, language: row.language, status: row.status, category: row.category, components: row.components };
   });
@@ -128,20 +127,20 @@ export async function listWhatsAppTemplates(options) {
   return { templates };
 }
 
-export function validateWhatsAppTemplate(campaign, approved) {
+export function validateWhatsAppTemplate(campaign: ProviderRecord, approved: ProviderRecord) {
   if (!approved || approved.status !== 'APPROVED' || approved.name !== campaign.templateName || approved.language !== campaign.templateLanguage) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template and language.');
-  const template = { name: approved.name, language: approved.language };
+  const template: ProviderRecord = { name: approved.name, language: approved.language };
   const components = campaign.templateComponents === undefined ? [] : campaign.templateComponents;
   if (!Array.isArray(components) || components.length > 20 || components.some(row => !plain(row)) || JSON.stringify(components).length > 100000) fail(400, 'INVALID_TEMPLATE', 'Enter valid approved template values.');
   if (!Array.isArray(approved.components) || approved.components.some(row => !plain(row))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned an unreadable approved template.');
-  const expected = new Map();
+  const expected = new Map<string, ProviderRecord>();
   for (const row of approved.components) {
     const type = String(row.type).toLowerCase();
     if (!['header', 'body', 'footer', 'buttons'].includes(type)) fail(400, 'UNSUPPORTED_TEMPLATE', 'Flows, carousels and advanced template components are not supported.');
     if (type === 'footer') continue;
     if (type === 'buttons') {
-      if (!Array.isArray(row.buttons) || row.buttons.some(button => !plain(button) || !['url', 'phone_number', 'quick_reply'].includes(String(button.type).toLowerCase()))) fail(400, 'UNSUPPORTED_TEMPLATE', 'Choose URL, phone or quick reply buttons. Advanced template buttons are not supported.');
-      row.buttons.forEach((button, index) => {
+      if (!Array.isArray(row.buttons) || row.buttons.some((button: any) => !plain(button) || !['url', 'phone_number', 'quick_reply'].includes(String(button.type).toLowerCase()))) fail(400, 'UNSUPPORTED_TEMPLATE', 'Choose URL, phone or quick reply buttons. Advanced template buttons are not supported.');
+      row.buttons.forEach((button: any, index: number) => {
         if (String(button.type).toLowerCase() !== 'url') return;
         const url = button.url;
         if (typeof url !== 'string') fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned an unreadable template button URL.');
@@ -164,7 +163,7 @@ export function validateWhatsAppTemplate(campaign, approved) {
     if (/\{\{/.test(content.replace(/\{\{\d+\}\}/g, '')) || positions.some((position, index) => position !== index + 1)) fail(400, 'UNSUPPORTED_TEMPLATE', 'Choose a template with consecutive numbered variables. Named variables are not supported.');
     expected.set(type, { type, count: positions.length });
   }
-  const seen = new Set(), wire = [];
+  const seen = new Set<string>(), wire: ProviderRecord[] = [];
   for (const row of components) {
     const key = row.type === 'button' ? `button:${row.index}` : row.type, spec = expected.get(key), fields = row.type === 'button' ? ['type', 'sub_type', 'index', 'parameters'] : ['type', 'parameters'];
     if (!spec || seen.has(key) || Object.keys(row).some(field => !fields.includes(field)) || row.type !== spec.type || !Array.isArray(row.parameters) || row.parameters.length !== spec.count || row.type === 'button' && (row.sub_type !== 'url' || row.index !== spec.index)) fail(400, 'INVALID_TEMPLATE', 'Fill each approved template field exactly once.');
@@ -176,7 +175,7 @@ export function validateWhatsAppTemplate(campaign, approved) {
       if (media.filename !== undefined && (typeof media.filename !== 'string' || !media.filename.trim() || media.filename.length > 255 || /[\u0000-\u001f\u007f\\/]/.test(media.filename))) fail(400, 'INVALID_TEMPLATE', 'Enter a document filename without paths or control characters.');
       wire.push({ type: 'header', parameters: [{ type: spec.mediaType, [spec.mediaType]: { link, ...(media.filename ? { filename: media.filename } : {}) } }] });
     } else {
-      const parameters = row.parameters.map(parameter => {
+      const parameters = row.parameters.map((parameter: any) => {
         if (!plain(parameter) || parameter.type !== 'text' || Object.keys(parameter).some(field => !['type', 'text'].includes(field))) fail(400, 'INVALID_TEMPLATE', 'Use text values for approved template variables.');
         return { type: 'text', text: text(parameter.text, 'template value', spec.type === 'button' ? 2000 : 32768) };
       });
@@ -194,15 +193,15 @@ export function validateWhatsAppTemplate(campaign, approved) {
   return template;
 }
 
-function broadcastReceipt(data, options, uncertain = false) {
+function broadcastReceipt(data: any, options: ProviderRecord, uncertain = false) {
   const row = data?.broadcast;
   if (data?.success !== true || !plain(row) || !validId(row.id) || options.providerId && row.id !== options.providerId || row.platform !== 'whatsapp' || String(row.accountId?._id || row.accountId) !== options.campaign.accountId || row.profileId != null && String(row.profileId?._id || row.profileId) !== options.project.zernioProfileId || !BROADCAST_STATUSES.has(row.status)) invalid('Zernio', uncertain);
-  const stats = {};
+  const stats: ProviderRecord = {};
   for (const key of ['recipientCount', 'sentCount', 'deliveredCount', 'readCount', 'failedCount']) if (row[key] !== undefined) { if (!number(row[key])) invalid('Zernio', uncertain); stats[key] = row[key]; }
   return { providerId: row.id, status: row.status, stats };
 }
 
-export async function createWhatsAppBroadcast(options) {
+export async function createWhatsAppBroadcast(options: ProviderRecord) {
   const { templates } = await listWhatsAppTemplates(options), approved = templates.find(row => row.name === options.campaign.templateName && row.language === options.campaign.templateLanguage);
   if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template and language.');
   const api = await whatsapp(options), body = { profileId: options.project.zernioProfileId, accountId: options.campaign.accountId, platform: 'whatsapp', name: text(options.campaign.name, 'campaign name', 200), template: validateWhatsAppTemplate(options.campaign, approved) };
@@ -211,13 +210,13 @@ export async function createWhatsAppBroadcast(options) {
   return receipt;
 }
 
-async function readBroadcast(options) {
+async function readBroadcast(options: ProviderRecord) {
   if (!validId(options.providerId)) fail(400, 'INVALID_PROVIDER_ID', 'Choose a valid WhatsApp broadcast.');
   const api = await whatsapp(options), data = await api(`/broadcasts/${encodeURIComponent(options.providerId)}`);
   return { api, receipt: broadcastReceipt(data, options) };
 }
 
-export async function addWhatsAppRecipients(options) {
+export async function addWhatsAppRecipients(options: ProviderRecord) {
   const { api, receipt } = await readBroadcast(options);
   if (receipt.status !== 'draft') fail(409, 'BROADCAST_NOT_DRAFT', 'Recipients can only be added to a draft broadcast.');
   if (!Array.isArray(options.contacts) || !options.contacts.length || options.contacts.length > 20000 || options.contacts.some(row => !phone(row?.phone))) fail(400, 'INVALID_RECIPIENT', 'Choose at most 20,000 WhatsApp recipients with international phone numbers.');
@@ -226,7 +225,7 @@ export async function addWhatsAppRecipients(options) {
   return { added: data.added, skipped: data.skipped };
 }
 
-export async function sendWhatsAppBroadcast(options) {
+export async function sendWhatsAppBroadcast(options: ProviderRecord) {
   const { api, receipt } = await readBroadcast(options);
   if (receipt.status !== 'draft') fail(409, 'BROADCAST_NOT_DRAFT', 'Only a draft WhatsApp broadcast can be sent. Reconcile the existing delivery before retrying.');
   if (options.expectedRecipientCount !== undefined && (!number(options.expectedRecipientCount) || receipt.stats.recipientCount !== options.expectedRecipientCount)) fail(409, 'AUDIENCE_CHANGED', 'The provider audience changed before dispatch. Review the broadcast before sending.');
@@ -235,14 +234,14 @@ export async function sendWhatsAppBroadcast(options) {
   return { providerId: options.providerId, status: data.status, stats: { sentCount: data.sent, failedCount: data.failed, recipientCount: data.recipientCount } };
 }
 
-export async function cancelWhatsAppBroadcast(options) {
+export async function cancelWhatsAppBroadcast(options: ProviderRecord) {
   const { api, receipt } = await readBroadcast(options);
   if (receipt.status === 'cancelled') return receipt;
   if (receipt.status === 'draft') {
     await api(`/broadcasts/${encodeURIComponent(options.providerId)}`, {}, undefined, options.idempotencyKey, 'DELETE');
     // Zernio documents no deletion response schema; read back to confirm before reporting cancellation.
     try { await api(`/broadcasts/${encodeURIComponent(options.providerId)}`); }
-    catch (error) { if (error.providerStatus === 404) return { providerId: options.providerId, status: 'cancelled', deletedDraft: true }; throw new IntegrationError(502, 'BROADCAST_DELETE_UNCONFIRMED', 'The draft deletion could not be confirmed. Reconcile the broadcast in Zernio.', true); }
+    catch (error: any) { if (error.providerStatus === 404) return { providerId: options.providerId, status: 'cancelled', deletedDraft: true }; throw new IntegrationError(502, 'BROADCAST_DELETE_UNCONFIRMED', 'The draft deletion could not be confirmed. Reconcile the broadcast in Zernio.', true); }
     invalid('Zernio', true);
   }
   if (!['scheduled', 'sending'].includes(receipt.status)) fail(409, 'BROADCAST_NOT_CANCELLABLE', 'Only a scheduled or sending broadcast can be cancelled at Zernio. Draft schedules are cancelled locally.');
@@ -251,8 +250,8 @@ export async function cancelWhatsAppBroadcast(options) {
   return { providerId: options.providerId, status: 'cancelled' };
 }
 
-export async function getWhatsAppBroadcast(options) {
-  const { api, receipt } = await readBroadcast(options), recipients = [];
+export async function getWhatsAppBroadcast(options: ProviderRecord) {
+  const { api, receipt } = await readBroadcast(options), recipients: ProviderRecord[] = [];
   // ponytail: refresh at most 20,000 recipients; add persisted paging for larger broadcasts.
   for (let skip = 0; skip < 20000; skip += 100) {
     const data = await api(`/broadcasts/${encodeURIComponent(options.providerId)}/recipients`, { limit: 100, skip });

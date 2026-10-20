@@ -1,8 +1,8 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { transaction } from './database.ts';
 import { IntegrationError, scopedAccounts, zernioClient } from './provider-core.ts';
-import { createContacts } from './contacts.mjs';
-import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions } from './direct-providers.mjs';
+import { createContacts } from './contacts.ts';
+import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions } from './direct-providers.ts';
 
 const channels = ['email', 'sms', 'whatsapp'];
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };

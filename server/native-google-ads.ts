@@ -1,14 +1,16 @@
-import { IntegrationError, providerRequest, operation } from './provider-core.ts';
+import { fail, IntegrationError, providerRequest, operation, reportObject as object, type OperationContext, type ProviderRecord } from './provider-core.ts';
+
+type NativeContext = OperationContext & { project: ProviderRecord; user: ProviderRecord; role: string; store: ProviderRecord; send: (status: number, body: unknown) => void; body?: any };
+type CurrentCheck = (() => void) | undefined;
+type RefreshSaver = ((expected: string, next: string) => void) | undefined;
 
 const BASE = 'https://googleads.googleapis.com/v25';
-const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
-const object = value => value && typeof value === 'object' && !Array.isArray(value);
-const configured = env => ['GOOGLE_ADS_CLIENT_ID', 'GOOGLE_ADS_CLIENT_SECRET', 'GOOGLE_ADS_REFRESH_TOKEN', 'GOOGLE_ADS_DEVELOPER_TOKEN'].every(key => typeof env[key] === 'string' && Boolean(env[key].trim()));
-function customerId(value) { if (typeof value !== 'string' || !/^\d{10}$/.test(value)) fail(400, 'INVALID_GOOGLE_CUSTOMER', 'Enter the ten-digit Google Ads customer ID without hyphens.'); return value; }
-function fields(value, allowed) { if (!object(value) || Object.keys(value).some(key => !allowed.includes(key))) fail(400, 'UNSUPPORTED_GOOGLE_FIELD', 'Use only the supported Google Shopping fields.'); }
-function name(value, label = 'campaign name') { if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\u0000-\u001f]/.test(value)) fail(400, 'INVALID_GOOGLE_INPUT', `Enter a valid ${label} of at most 120 characters.`); return value.trim(); }
-function current(check, uncertain = false) { try { check?.(); } catch { throw new IntegrationError(409, 'NATIVE_GOOGLE_CONNECTION_CHANGED', 'The Google Ads authorization or project account changed. Refresh before continuing and review any unconfirmed provider outcome.', uncertain); } }
-async function googleToken(env, assertCurrent, persistRefresh) {
+const configured = (env: ProviderRecord) => ['GOOGLE_ADS_CLIENT_ID', 'GOOGLE_ADS_CLIENT_SECRET', 'GOOGLE_ADS_REFRESH_TOKEN', 'GOOGLE_ADS_DEVELOPER_TOKEN'].every(key => typeof env[key] === 'string' && Boolean(env[key].trim()));
+function customerId(value: any) { if (typeof value !== 'string' || !/^\d{10}$/.test(value)) fail(400, 'INVALID_GOOGLE_CUSTOMER', 'Enter the ten-digit Google Ads customer ID without hyphens.'); return value; }
+function fields(value: any, allowed: string[]) { if (!object(value) || Object.keys(value).some(key => !allowed.includes(key))) fail(400, 'UNSUPPORTED_GOOGLE_FIELD', 'Use only the supported Google Shopping fields.'); }
+function name(value: any, label = 'campaign name') { if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\u0000-\u001f]/.test(value)) fail(400, 'INVALID_GOOGLE_INPUT', `Enter a valid ${label} of at most 120 characters.`); return value.trim(); }
+function current(check: CurrentCheck, uncertain = false) { try { check?.(); } catch { throw new IntegrationError(409, 'NATIVE_GOOGLE_CONNECTION_CHANGED', 'The Google Ads authorization or project account changed. Refresh before continuing and review any unconfirmed provider outcome.', uncertain); } }
+async function googleToken(env: ProviderRecord, assertCurrent: CurrentCheck, persistRefresh: RefreshSaver) {
   if (!configured(env)) fail(503, 'NATIVE_GOOGLE_NOT_CONFIGURED', 'Configure the native Google Ads OAuth credentials and developer token first.');
   if (env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) customerId(env.GOOGLE_ADS_LOGIN_CUSTOMER_ID);
   current(assertCurrent);
@@ -21,31 +23,31 @@ async function googleToken(env, assertCurrent, persistRefresh) {
   }
   return result.access_token;
 }
-const headers = (env, token) => ({ Authorization: `Bearer ${token}`, 'developer-token': env.GOOGLE_ADS_DEVELOPER_TOKEN, ...(env.GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { 'login-customer-id': env.GOOGLE_ADS_LOGIN_CUSTOMER_ID } : {}) });
+const headers = (env: ProviderRecord, token: string) => ({ Authorization: `Bearer ${token}`, 'developer-token': env.GOOGLE_ADS_DEVELOPER_TOKEN, ...(env.GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { 'login-customer-id': env.GOOGLE_ADS_LOGIN_CUSTOMER_ID } : {}) });
 
-export async function testNativeGoogleAds(env, assertCurrent, persistRefresh) {
+export async function testNativeGoogleAds(env: ProviderRecord, assertCurrent: CurrentCheck, persistRefresh: RefreshSaver) {
   const token = await googleToken(env, assertCurrent, persistRefresh);
   current(assertCurrent);
   const result = await providerRequest(BASE + '/customers:listAccessibleCustomers', { headers: headers(env, token) }, 'Google Ads');
   current(assertCurrent);
   const resources = result.resourceNames === undefined ? [] : result.resourceNames;
-  if (result.error || !Array.isArray(resources) || resources.length > 10000 || resources.some(value => typeof value !== 'string' || !/^customers\/\d{10}$/.test(value))) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not return a readable customer list.');
+  if (result.error || !Array.isArray(resources) || resources.length > 10000 || resources.some((value: any) => typeof value !== 'string' || !/^customers\/\d{10}$/.test(value))) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not return a readable customer list.');
   return { message: `Google Ads authorization works. ${resources.length} directly accessible account${resources.length === 1 ? '' : 's'} found. Map an advertising customer to each project; manager child accounts are verified when mapped.` };
 }
 
-export async function handleNativeGoogleAds(context) {
+export async function handleNativeGoogleAds(context: NativeContext) {
   const { req, url, project, user, role, db, body, store, send } = context;
   const prefix = `/api/projects/${encodeURIComponent(project.id)}/native-google-ads/`;
   if (!url.pathname.startsWith(prefix)) return false;
   const action = url.pathname.slice(prefix.length), env = { ...(context.config?.env || process.env) };
   db.exec('CREATE TABLE IF NOT EXISTS native_google_connections(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,customer_id TEXT UNIQUE NOT NULL)');
-  let connection = db.prepare('SELECT customer_id AS customerId FROM native_google_connections WHERE project_id=?').get(project.id);
+  let connection = db.prepare('SELECT customer_id AS customerId FROM native_google_connections WHERE project_id=?').get(project.id) as { customerId: string } | undefined;
   const originalCustomer = connection?.customerId || '';
-  const assertCurrent = () => { context.assertIntegrationSettings?.(); if ((db.prepare('SELECT customer_id FROM native_google_connections WHERE project_id=?').get(project.id)?.customer_id || '') !== originalCustomer) throw new Error('Google customer mapping changed.'); };
-  const persistRefresh = context.persistNativeRefreshToken ? (expected, next) => context.persistNativeRefreshToken('googleAdsNative', expected, next) : undefined;
+  const assertCurrent = () => { context.assertIntegrationSettings?.(); if (((db.prepare('SELECT customer_id FROM native_google_connections WHERE project_id=?').get(project.id) as ProviderRecord | undefined)?.customer_id || '') !== originalCustomer) throw new Error('Google customer mapping changed.'); };
+  const persistRefresh = context.persistNativeRefreshToken ? (expected: string, next: string) => context.persistNativeRefreshToken('googleAdsNative', expected, next) : undefined;
   try {
     if (action === 'status' && req.method === 'GET') { send(200, { configured: configured(env), mapped: Boolean(connection), customerId: originalCustomer, videoCreationSupported: false }); return true; }
-    if (!['GET', 'POST'].includes(req.method)) fail(405, 'GOOGLE_METHOD_NOT_ALLOWED', 'This Google Ads action is not available.');
+    if (!['GET', 'POST'].includes(req.method!)) fail(405, 'GOOGLE_METHOD_NOT_ALLOWED', 'This Google Ads action is not available.');
     if (req.method === 'POST' && !['owner', 'admin', 'editor'].includes(role)) fail(403, 'GOOGLE_WRITE_PERMISSION_REQUIRED', 'Editing permission is required.');
     if (action === 'connection' && req.method === 'POST') {
       if (!user.isOperator || !['owner', 'admin'].includes(role)) fail(403, 'GOOGLE_MAPPING_PERMISSION_REQUIRED', 'An instance operator with workspace administration must map the native Google Ads customer.');
@@ -61,9 +63,9 @@ export async function handleNativeGoogleAds(context) {
     }
     if (!connection) fail(409, 'NATIVE_GOOGLE_NOT_MAPPED', 'Map a Google advertising customer to this project first.');
     const token = await googleToken(env, assertCurrent, persistRefresh);
-    const call = async (endpoint, payload, mutation = false) => {
+    const call = async (endpoint: string, payload: ProviderRecord, mutation = false): Promise<ProviderRecord> => {
       current(assertCurrent);
-      let result;
+      let result: ProviderRecord;
       try { result = await providerRequest(`${BASE}/customers/${originalCustomer}/${endpoint}`, { method: 'POST', headers: { ...headers(env, token), 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, 'Google Ads'); }
       catch (error) { if (!mutation && error instanceof IntegrationError) error.uncertain = false; throw error; }
       current(assertCurrent, mutation); return result;
@@ -73,18 +75,18 @@ export async function handleNativeGoogleAds(context) {
       const range = dateRange(url), query = `SELECT customer.id, campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign_budget.period, campaign_budget.amount_micros, campaign_budget.total_amount_micros, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM campaign WHERE campaign.advertising_channel_type IN ('SHOPPING', 'VIDEO') AND campaign.status != 'REMOVED' AND segments.date BETWEEN '${range.fromDate}' AND '${range.toDate}' ORDER BY campaign.id`;
       const result = await call('googleAds:search', { query, ...(url.searchParams.get('pageToken') ? { pageToken: pageToken(url.searchParams.get('pageToken')) } : {}) });
       const rows = searchRows(result);
-      const counter = (value, integer = true) => value == null || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && (!integer || Number.isSafeInteger(value))) || (typeof value === 'string' && (integer ? /^\d{1,20}$/.test(value) : /^\d+(?:\.\d+)?$/.test(value)) && Number.isFinite(Number(value)));
-      if (rows.some(row => String(row.customer?.id) !== originalCustomer || !/^\d{1,20}$/.test(String(row.campaign?.id)) || !['SHOPPING', 'VIDEO'].includes(row.campaign?.advertisingChannelType))) fail(502, 'INVALID_GOOGLE_SCOPE', 'Google returned campaign data outside this customer.');
-      if (new Set(rows.map(row => String(row.campaign.id))).size !== rows.length || rows.some(row => typeof row.campaign.name !== 'string' || !row.campaign.name || row.campaign.name.length > 1024 || !['ENABLED', 'PAUSED', 'UNKNOWN', 'UNSPECIFIED'].includes(row.campaign.status) || row.campaignBudget != null && !object(row.campaignBudget) || row.campaignBudget?.period !== undefined && !['DAILY', 'CUSTOM_PERIOD', 'UNKNOWN', 'UNSPECIFIED'].includes(row.campaignBudget.period) || !counter(row.campaignBudget?.amountMicros) || !counter(row.campaignBudget?.totalAmountMicros) || row.metrics != null && !object(row.metrics) || ['impressions', 'clicks', 'costMicros'].some(key => !counter(row.metrics?.[key])) || !counter(row.metrics?.conversions, false)) || result.nextPageToken && result.nextPageToken === url.searchParams.get('pageToken')) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not return readable campaign states, budgets and performance counters.');
-      const managed = store.list(project.id, 'campaigns').filter(row => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer);
-      send(200, { campaigns: rows.map(row => ({ id: String(row.campaign.id), name: row.campaign.name, status: row.campaign.status, channel: row.campaign.advertisingChannelType, budgetPeriod: row.campaignBudget?.period || 'UNKNOWN', ...(row.campaignBudget?.period === 'DAILY' ? { dailyBudgetMicros: row.campaignBudget.amountMicros } : row.campaignBudget?.period === 'CUSTOM_PERIOD' ? { totalBudgetMicros: row.campaignBudget.totalAmountMicros } : {}), metrics: row.metrics || {}, appManaged: managed.some(item => item.nativeCampaignResource === `customers/${originalCustomer}/campaigns/${row.campaign.id}`) })), nextPageToken: result.nextPageToken || '', ...range }); return true;
+      const counter = (value: any, integer = true) => value == null || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && (!integer || Number.isSafeInteger(value))) || (typeof value === 'string' && (integer ? /^\d{1,20}$/.test(value) : /^\d+(?:\.\d+)?$/.test(value)) && Number.isFinite(Number(value)));
+      if (rows.some((row: ProviderRecord) => String(row.customer?.id) !== originalCustomer || !/^\d{1,20}$/.test(String(row.campaign?.id)) || !['SHOPPING', 'VIDEO'].includes(row.campaign?.advertisingChannelType))) fail(502, 'INVALID_GOOGLE_SCOPE', 'Google returned campaign data outside this customer.');
+      if (new Set(rows.map((row: ProviderRecord) => String(row.campaign.id))).size !== rows.length || rows.some((row: ProviderRecord) => typeof row.campaign.name !== 'string' || !row.campaign.name || row.campaign.name.length > 1024 || !['ENABLED', 'PAUSED', 'UNKNOWN', 'UNSPECIFIED'].includes(row.campaign.status) || row.campaignBudget != null && !object(row.campaignBudget) || row.campaignBudget?.period !== undefined && !['DAILY', 'CUSTOM_PERIOD', 'UNKNOWN', 'UNSPECIFIED'].includes(row.campaignBudget.period) || !counter(row.campaignBudget?.amountMicros) || !counter(row.campaignBudget?.totalAmountMicros) || row.metrics != null && !object(row.metrics) || ['impressions', 'clicks', 'costMicros'].some((key: string) => !counter(row.metrics?.[key])) || !counter(row.metrics?.conversions, false)) || result.nextPageToken && result.nextPageToken === url.searchParams.get('pageToken')) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not return readable campaign states, budgets and performance counters.');
+      const managed = store.list(project.id, 'campaigns').filter((row: ProviderRecord) => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer);
+      send(200, { campaigns: rows.map((row: ProviderRecord) => ({ id: String(row.campaign.id), name: row.campaign.name, status: row.campaign.status, channel: row.campaign.advertisingChannelType, budgetPeriod: row.campaignBudget?.period || 'UNKNOWN', ...(row.campaignBudget?.period === 'DAILY' ? { dailyBudgetMicros: row.campaignBudget.amountMicros } : row.campaignBudget?.period === 'CUSTOM_PERIOD' ? { totalBudgetMicros: row.campaignBudget.totalAmountMicros } : {}), metrics: row.metrics || {}, appManaged: managed.some((item: ProviderRecord) => item.nativeCampaignResource === `customers/${originalCustomer}/campaigns/${row.campaign.id}`) })), nextPageToken: result.nextPageToken || '', ...range }); return true;
     }
     if (action === 'campaign/cpc') {
       const values = req.method === 'POST' ? body : Object.fromEntries(url.searchParams);
       fields(values, req.method === 'POST' ? ['campaignId', 'maxCpc', 'confirmChange'] : ['campaignId']);
       if (typeof values.campaignId !== 'string' || !/^\d{1,20}$/.test(values.campaignId)) fail(400, 'INVALID_GOOGLE_CAMPAIGN', 'Choose a Shopping campaign created by this app.');
       const resource = `customers/${originalCustomer}/campaigns/${values.campaignId}`;
-      const managed = store.list(project.id, 'campaigns').find(row => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer && row.nativeCampaignResource === resource), children = managed?.nativeResources;
+      const managed = store.list(project.id, 'campaigns').find((row: ProviderRecord) => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer && row.nativeCampaignResource === resource), children = managed?.nativeResources;
       if (!children || children.campaign !== resource || !new RegExp(`^customers/${originalCustomer}/adGroups/\\d+$`).test(children.adGroup) || !new RegExp(`^customers/${originalCustomer}/adGroupCriteria/${children.adGroup.split('/').at(-1)}~\\d+$`).test(children.listingGroup)) fail(409, 'GOOGLE_CREATED_RESOURCES_REQUIRED', 'This CPC editor only changes the all-products group created by this app.');
       const readBid = async () => {
         const campaignsResult = await call('googleAds:search', { query: `SELECT customer.id, campaign.id, campaign.status, campaign.advertising_channel_type, campaign.bidding_strategy_type, campaign.bidding_strategy FROM campaign WHERE campaign.resource_name = '${resource}'` }), campaigns = searchRows(campaignsResult);
@@ -92,8 +94,8 @@ export async function handleNativeGoogleAds(context) {
         if (campaigns[0].campaign.biddingStrategyType !== 'MANUAL_CPC' || campaigns[0].campaign.biddingStrategy) fail(409, 'GOOGLE_MANUAL_CPC_REQUIRED', 'Manage automated or portfolio bidding in Google Ads. This editor requires campaign-level Manual CPC.');
         const groupResult = await call('googleAds:search', { query: `SELECT customer.id, campaign.id, ad_group.resource_name, ad_group.status, ad_group.cpc_bid_micros FROM ad_group WHERE ad_group.resource_name = '${children.adGroup}' AND campaign.id = ${values.campaignId}` }), groups = searchRows(groupResult);
         const listingResult = await call('googleAds:search', { query: `SELECT customer.id, campaign.id, ad_group.resource_name, ad_group_criterion.resource_name, ad_group_criterion.status, ad_group_criterion.negative, ad_group_criterion.listing_group.type, ad_group_criterion.listing_group.parent_ad_group_criterion, ad_group_criterion.cpc_bid_micros FROM ad_group_criterion WHERE ad_group.resource_name = '${children.adGroup}' AND campaign.id = ${values.campaignId} AND ad_group_criterion.type = 'LISTING_GROUP' AND ad_group_criterion.status != 'REMOVED'` }), listings = searchRows(listingResult);
-        const group = groups[0]?.adGroup, listing = listings[0]?.adGroupCriterion, positiveMicros = value => /^\d{1,16}$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
-        if (groupResult.nextPageToken || listingResult.nextPageToken || groups.length !== 1 || listings.length !== 1 || [groups[0], listings[0]].some(row => String(row.customer?.id) !== originalCustomer || String(row.campaign?.id) !== values.campaignId || row.adGroup?.resourceName !== children.adGroup) || !['PAUSED', 'ENABLED'].includes(group?.status) || listing?.resourceName !== children.listingGroup || !['PAUSED', 'ENABLED'].includes(listing?.status) || listing.negative !== undefined && listing.negative !== false || listing.listingGroup?.type !== 'UNIT' || listing.listingGroup.parentAdGroupCriterion || !positiveMicros(group?.cpcBidMicros) || !positiveMicros(listing?.cpcBidMicros)) fail(409, 'GOOGLE_PRODUCT_GROUP_CHANGED', 'The app-created all-products group or its bids changed. Review product partitions and bidding in Google Ads.');
+        const group = groups[0]?.adGroup, listing = listings[0]?.adGroupCriterion, positiveMicros = (value: any) => /^\d{1,16}$/.test(String(value)) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
+        if (groupResult.nextPageToken || listingResult.nextPageToken || groups.length !== 1 || listings.length !== 1 || [groups[0], listings[0]].some((row: ProviderRecord) => String(row.customer?.id) !== originalCustomer || String(row.campaign?.id) !== values.campaignId || row.adGroup?.resourceName !== children.adGroup) || !['PAUSED', 'ENABLED'].includes(group?.status) || listing?.resourceName !== children.listingGroup || !['PAUSED', 'ENABLED'].includes(listing?.status) || listing.negative !== undefined && listing.negative !== false || listing.listingGroup?.type !== 'UNIT' || listing.listingGroup.parentAdGroupCriterion || !positiveMicros(group?.cpcBidMicros) || !positiveMicros(listing?.cpcBidMicros)) fail(409, 'GOOGLE_PRODUCT_GROUP_CHANGED', 'The app-created all-products group or its bids changed. Review product partitions and bidding in Google Ads.');
         return { campaignId: values.campaignId, adGroupId: children.adGroup.split('/').at(-1), maxCpcMicros: String(listing.cpcBidMicros), groupMaxCpcMicros: String(group.cpcBidMicros) };
       };
       const account = await readCustomer(env, token, originalCustomer, assertCurrent);
@@ -125,9 +127,9 @@ export async function handleNativeGoogleAds(context) {
         if (selected.campaign.advertisingChannelType !== 'SHOPPING') fail(422, 'GOOGLE_VIDEO_WRITE_UNSUPPORTED', 'Standard Video campaigns are read only through Google’s API.');
         if (selected.campaign.status === 'REMOVED') fail(409, 'GOOGLE_CAMPAIGN_REMOVED', 'A removed campaign cannot be changed.');
         if (!['PAUSED', 'ENABLED'].includes(selected.campaign.status)) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not confirm the campaign’s current switch.');
-        const operations = [], expected = [];
-        const managed = store.list(project.id, 'campaigns').find(row => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer && row.nativeCampaignResource === resource);
-        let createdChildren;
+        const operations: ProviderRecord[] = [], expected: [string, string][] = [];
+        const managed = store.list(project.id, 'campaigns').find((row: ProviderRecord) => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer && row.nativeCampaignResource === resource);
+        let createdChildren: ProviderRecord | undefined;
         if (body.status) {
           operations.push({ campaignOperation: { update: { resourceName: resource, status: body.status }, updateMask: 'status' } }); expected.push(['campaignResult', resource]);
           if (body.enableCreatedChildren) {
@@ -148,7 +150,7 @@ export async function handleNativeGoogleAds(context) {
         }
         const response = await call('googleAds:mutate', { mutateOperations: operations, partialFailure: false, responseContentType: 'RESOURCE_NAME_ONLY' }, true);
         if (response.partialFailureError || !Array.isArray(response.mutateOperationResponses) || response.mutateOperationResponses.length !== expected.length || expected.some(([kind, name], index) => response.mutateOperationResponses[index]?.[kind]?.resourceName !== name)) throw new IntegrationError(502, 'GOOGLE_UPDATE_UNCONFIRMED', 'Google did not confirm every campaign update.', true);
-        let after;
+        let after: ProviderRecord[];
         try {
           after = searchRows(await call('googleAds:search', { query: stateQuery }));
           if (after.length !== 1 || String(after[0].customer?.id) !== originalCustomer || String(after[0].campaign?.id) !== body.campaignId || body.status && after[0].campaign?.status !== body.status || body.dailyBudget !== undefined && (after[0].campaignBudget?.period !== 'DAILY' || String(after[0].campaignBudget?.amountMicros) !== operations[0].campaignBudgetOperation.update.amountMicros)) throw new Error('Campaign update mismatch.');
@@ -168,18 +170,18 @@ export async function handleNativeGoogleAds(context) {
       if (body.confirmCreate !== true) fail(400, 'GOOGLE_CREATION_CONFIRMATION_REQUIRED', 'Confirm creation of a paused Shopping campaign for all products in this feed.');
       if (body.validateOnly !== undefined && typeof body.validateOnly !== 'boolean') fail(400, 'INVALID_GOOGLE_INPUT', 'Validation-only must be true or false.');
       const account = await readCustomer(env, token, originalCustomer, assertCurrent), payload = shoppingPayload(body, originalCustomer, account.currencyCode);
-      const countryCodes = [...new Set(body.countries)];
-      const geoResult = await call('googleAds:search', { query: `SELECT geo_target_constant.id, geo_target_constant.country_code, geo_target_constant.target_type, geo_target_constant.status FROM geo_target_constant WHERE geo_target_constant.country_code IN (${countryCodes.map(code => `'${code}'`).join(',')}) AND geo_target_constant.target_type = 'Country' AND geo_target_constant.status = 'ENABLED'` });
-      const geos = searchRows(geoResult).map(row => row.geoTargetConstant);
-      if (geoResult.nextPageToken || geos.length !== countryCodes.length || geos.some(row => !object(row) || !/^\d+$/.test(String(row.id)) || !countryCodes.includes(row.countryCode) || row.targetType !== 'Country' || row.status !== 'ENABLED') || new Set(geos.map(row => row.countryCode)).size !== countryCodes.length || new Set(geos.map(row => String(row.id))).size !== countryCodes.length) fail(502, 'GOOGLE_COUNTRIES_UNCONFIRMED', 'Google did not resolve every targeted country. No campaign was created.');
-      payload.mutateOperations.push(...geos.map(row => ({ campaignCriterionOperation: { create: { campaign: `customers/${originalCustomer}/campaigns/-2`, location: { geoTargetConstant: `geoTargetConstants/${row.id}` } } } })));
+      const countryCodes = [...new Set<string>(body.countries)];
+      const geoResult = await call('googleAds:search', { query: `SELECT geo_target_constant.id, geo_target_constant.country_code, geo_target_constant.target_type, geo_target_constant.status FROM geo_target_constant WHERE geo_target_constant.country_code IN (${countryCodes.map((code: any) => `'${code}'`).join(',')}) AND geo_target_constant.target_type = 'Country' AND geo_target_constant.status = 'ENABLED'` });
+      const geos = searchRows(geoResult).map((row: ProviderRecord) => row.geoTargetConstant);
+      if (geoResult.nextPageToken || geos.length !== countryCodes.length || geos.some((row: ProviderRecord) => !object(row) || !/^\d+$/.test(String(row.id)) || !countryCodes.includes(row.countryCode) || row.targetType !== 'Country' || row.status !== 'ENABLED') || new Set(geos.map((row: ProviderRecord) => row.countryCode)).size !== countryCodes.length || new Set(geos.map((row: ProviderRecord) => String(row.id))).size !== countryCodes.length) fail(502, 'GOOGLE_COUNTRIES_UNCONFIRMED', 'Google did not resolve every targeted country. No campaign was created.');
+      payload.mutateOperations.push(...geos.map((row: ProviderRecord) => ({ campaignCriterionOperation: { create: { campaign: `customers/${originalCustomer}/campaigns/-2`, location: { geoTargetConstant: `geoTargetConstants/${row.id}` } } } })));
       if (body.validateOnly) { const result = await call('googleAds:mutate', { ...payload, validateOnly: true }); if (result.partialFailureError || result.mutateOperationResponses?.length) fail(502, 'INVALID_GOOGLE_VALIDATION', 'Google did not return an empty validation-only receipt.'); send(200, { validated: true, customerId: originalCustomer, status: 'PAUSED' }); return true; }
       const outcome = await operation(context, async () => {
         const result = await call('googleAds:mutate', payload, true);
         const created = createdResources(result, originalCustomer, payload.mutateOperations.length);
-        let rows;
+        let rows: ProviderRecord[];
         try { rows = searchRows(await call('googleAds:search', { query: `SELECT customer.id, campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign_budget.amount_micros FROM campaign WHERE campaign.resource_name = '${created.campaign}'` })); }
-        catch (error) { error.uncertain = true; throw error; }
+        catch (error: any) { error.uncertain = true; throw error; }
         if (rows.length !== 1 || String(rows[0].customer?.id) !== originalCustomer || rows[0].campaign?.status !== 'PAUSED' || rows[0].campaign?.advertisingChannelType !== 'SHOPPING' || rows[0].campaign?.name !== body.name.trim() || `customers/${originalCustomer}/campaigns/${rows[0].campaign?.id}` !== created.campaign || String(rows[0].campaignBudget?.amountMicros) !== payload.mutateOperations[0].campaignBudgetOperation.create.amountMicros) throw new IntegrationError(502, 'GOOGLE_CREATION_UNCONFIRMED', 'The created Shopping campaign could not be verified as paused with the requested budget.', true);
         current(assertCurrent, true);
         const campaign = store.create(project.id, 'campaigns', { name: body.name.trim(), channel: 'paid', status: 'paused', budget: body.dailyBudget, budgetType: 'daily', spent: 0, currency: account.currencyCode, platform: 'google', nativeProvider: 'googleAdsNative', nativeCustomerId: originalCustomer, nativeCampaignResource: created.campaign, platformCampaignId: String(rows[0].campaign.id), nativeResources: created });
@@ -187,18 +189,18 @@ export async function handleNativeGoogleAds(context) {
       }); send(outcome.status, outcome.data); return true;
     }
     fail(404, 'NATIVE_GOOGLE_ACTION_NOT_FOUND', 'This native Google Ads action was not found.');
-  } catch (error) { send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'NATIVE_GOOGLE_ERROR', message: error instanceof IntegrationError ? error.message : 'The native Google Ads request could not be completed.' } }); return true; }
+  } catch (error: any) { send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'NATIVE_GOOGLE_ERROR', message: error instanceof IntegrationError ? error.message : 'The native Google Ads request could not be completed.' } }); return true; }
 }
 
-function searchRows(result) { const rows = result.results === undefined ? [] : result.results; if (result.error || result.partialFailureError || !Array.isArray(rows) || rows.length > 10000 || rows.some(row => !object(row)) || result.nextPageToken !== undefined && (typeof result.nextPageToken !== 'string' || result.nextPageToken.length > 4096)) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not return a readable search page.'); return rows; }
-function pageToken(value) { if (typeof value !== 'string' || value.length > 4096 || /[\u0000-\u001f]/.test(value)) fail(400, 'INVALID_PAGE', 'Use a valid Google page cursor.'); return value; }
-function dateRange(url) {
-  const valid = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
+function searchRows(result: ProviderRecord): ProviderRecord[] { const rows = result.results === undefined ? [] : result.results; if (result.error || result.partialFailureError || !Array.isArray(rows) || rows.length > 10000 || rows.some((row: any) => !object(row)) || result.nextPageToken !== undefined && (typeof result.nextPageToken !== 'string' || result.nextPageToken.length > 4096)) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not return a readable search page.'); return rows; }
+function pageToken(value: any) { if (typeof value !== 'string' || value.length > 4096 || /[\u0000-\u001f]/.test(value)) fail(400, 'INVALID_PAGE', 'Use a valid Google page cursor.'); return value; }
+function dateRange(url: URL) {
+  const valid = (value: any) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
   const toDate = url.searchParams.get('toDate') || new Date().toISOString().slice(0, 10); if (!valid(toDate)) fail(400, 'INVALID_DATE', 'Choose a valid report end date.');
   const fromDate = url.searchParams.get('fromDate') || new Date(Date.parse(toDate) - 29 * 86400000).toISOString().slice(0, 10);
   if (!valid(fromDate) || fromDate > toDate || Date.parse(toDate) - Date.parse(fromDate) >= 366 * 86400000) fail(400, 'INVALID_DATE', 'Choose a report window of at most 366 days.'); return { fromDate, toDate };
 }
-async function readCustomer(env, token, target, assertCurrent) {
+async function readCustomer(env: ProviderRecord, token: string, target: string, assertCurrent: CurrentCheck) {
   current(assertCurrent);
   const result = await providerRequest(`${BASE}/customers/${customerId(target)}/googleAds:search`, { method: 'POST', headers: { ...headers(env, token), 'Content-Type': 'application/json' }, body: JSON.stringify({ query: 'SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone, customer.manager, customer.test_account FROM customer LIMIT 1' }) }, 'Google Ads').catch(error => { if (error instanceof IntegrationError) error.uncertain = false; throw error; });
   current(assertCurrent);
@@ -206,18 +208,18 @@ async function readCustomer(env, token, target, assertCurrent) {
   if (rows.length !== 1 || String(account?.id) !== target || !/^[A-Z]{3}$/.test(account?.currencyCode) || account.manager === true || account.descriptiveName !== undefined && (typeof account.descriptiveName !== 'string' || account.descriptiveName.length > 1024) || account.timeZone !== undefined && (typeof account.timeZone !== 'string' || account.timeZone.length > 150)) fail(502, 'INVALID_GOOGLE_CUSTOMER', 'Google did not verify this advertising customer and its currency. Manager accounts cannot run Shopping campaigns.');
   return { id: target, name: account.descriptiveName || target, currencyCode: account.currencyCode, timeZone: account.timeZone, testAccount: account.testAccount === true };
 }
-function micros(value, currency, label) {
+function micros(value: any, currency: string, label: string) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 10000000 || Math.abs(value * 1000000 - Math.round(value * 1000000)) > 0.00001) fail(400, 'INVALID_GOOGLE_AMOUNT', `Enter a positive ${label} with at most six decimal places.`);
-  const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
+  const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits!;
   if (label === 'daily budget' && Math.abs(value * 10 ** digits - Math.round(value * 10 ** digits)) > 0.00001) fail(400, 'INVALID_GOOGLE_AMOUNT', `The ${currency} daily budget supports ${digits} decimal places.`);
   return String(Math.round(value * 1000000));
 }
-function shoppingPayload(body, customer, currency) {
+function shoppingPayload(body: ProviderRecord, customer: string, currency: string): ProviderRecord {
   const campaignName = name(body.name), merchantId = typeof body.merchantId === 'string' && /^\d{1,20}$/.test(body.merchantId) ? body.merchantId : fail(400, 'INVALID_MERCHANT', 'Enter the linked Merchant Center account ID.');
   if (typeof body.feedLabel !== 'string' || !/^[A-Z0-9_-]{1,20}$/.test(body.feedLabel)) fail(400, 'INVALID_FEED_LABEL', 'Enter the Merchant Center feed label using uppercase letters, numbers, underscores or hyphens.');
   if (!Number.isInteger(body.priority) || body.priority < 0 || body.priority > 2) fail(400, 'INVALID_SHOPPING_PRIORITY', 'Choose a Shopping campaign priority from zero to two.');
   if (!['DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING', 'CONTAINS_EU_POLITICAL_ADVERTISING'].includes(body.euPoliticalAdvertising)) fail(400, 'EU_POLITICAL_DECLARATION_REQUIRED', 'Declare whether this campaign contains EU political advertising.');
-  if (!Array.isArray(body.countries) || !body.countries.length || body.countries.length > 50 || body.countries.some(code => typeof code !== 'string' || !/^[A-Z]{2}$/.test(code))) fail(400, 'INVALID_COUNTRIES', 'Choose the countries the Shopping campaign should target.');
+  if (!Array.isArray(body.countries) || !body.countries.length || body.countries.length > 50 || body.countries.some((code: any) => typeof code !== 'string' || !/^[A-Z]{2}$/.test(code))) fail(400, 'INVALID_COUNTRIES', 'Choose the countries the Shopping campaign should target.');
   const budget = `customers/${customer}/campaignBudgets/-1`, campaign = `customers/${customer}/campaigns/-2`, group = `customers/${customer}/adGroups/-3`, maxCpc = micros(body.maxCpc, currency, 'maximum CPC');
   // Country geo IDs are resolved by Google rather than a local, stale ISO-to-ID table.
   return { partialFailure: false, responseContentType: 'RESOURCE_NAME_ONLY', mutateOperations: [
@@ -228,14 +230,14 @@ function shoppingPayload(body, customer, currency) {
     { adGroupCriterionOperation: { create: { adGroup: group, status: 'ENABLED', cpcBidMicros: maxCpc, listingGroup: { type: 'UNIT' } } } },
   ] };
 }
-function createdResources(result, customer, count) {
+function createdResources(result: ProviderRecord, customer: string, count: number) {
   const rows = result.mutateOperationResponses;
   if (result.partialFailureError || !Array.isArray(rows) || rows.length !== count) throw new IntegrationError(502, 'GOOGLE_CREATION_UNCONFIRMED', 'Google did not confirm every Shopping campaign resource.', true);
   const names = { budget: rows[0]?.campaignBudgetResult?.resourceName, campaign: rows[1]?.campaignResult?.resourceName, adGroup: rows[2]?.adGroupResult?.resourceName, ad: rows[3]?.adGroupAdResult?.resourceName, listingGroup: rows[4]?.adGroupCriterionResult?.resourceName };
-  const tails = { budget: 'campaignBudgets/\\d+', campaign: 'campaigns/\\d+', adGroup: 'adGroups/\\d+', ad: 'adGroupAds/\\d+~\\d+', listingGroup: 'adGroupCriteria/\\d+~\\d+' };
+  const tails: Record<string, string> = { budget: 'campaignBudgets/\\d+', campaign: 'campaigns/\\d+', adGroup: 'adGroups/\\d+', ad: 'adGroupAds/\\d+~\\d+', listingGroup: 'adGroupCriteria/\\d+~\\d+' };
   if (Object.entries(names).some(([kind, resource]) => typeof resource !== 'string' || !new RegExp(`^customers/${customer}/${tails[kind]}$`).test(resource))) throw new IntegrationError(502, 'INVALID_GOOGLE_SCOPE', 'Google returned unconfirmed resource identities for the Shopping campaign.', true);
   const groupId = names.adGroup.split('/').at(-1); if (!names.ad.includes('/' + groupId + '~') || !names.listingGroup.includes('/' + groupId + '~')) throw new IntegrationError(502, 'INVALID_GOOGLE_SCOPE', 'Google did not confirm the Shopping ad group relationships.', true);
   const campaignId = names.campaign.split('/').at(-1);
-  if (rows.slice(5).some(row => typeof row?.campaignCriterionResult?.resourceName !== 'string' || !new RegExp(`^customers/${customer}/campaignCriteria/${campaignId}~\\d+$`).test(row.campaignCriterionResult.resourceName))) throw new IntegrationError(502, 'INVALID_GOOGLE_SCOPE', 'Google did not confirm the Shopping campaign location criteria.', true);
+  if (rows.slice(5).some((row: ProviderRecord) => typeof row?.campaignCriterionResult?.resourceName !== 'string' || !new RegExp(`^customers/${customer}/campaignCriteria/${campaignId}~\\d+$`).test(row.campaignCriterionResult.resourceName))) throw new IntegrationError(502, 'INVALID_GOOGLE_SCOPE', 'Google did not confirm the Shopping campaign location criteria.', true);
   return names;
 }

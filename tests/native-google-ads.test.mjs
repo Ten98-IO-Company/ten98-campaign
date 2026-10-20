@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
 import { createApp } from '../server/index.mjs';
-import { testNativeGoogleAds } from '../server/native-google-ads.mjs';
+import { testNativeGoogleAds } from '../server/native-google-ads.ts';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';

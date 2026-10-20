@@ -57,7 +57,7 @@ Acceptance: operator versus editor/viewer access; full versus restricted/profile
 
 ## Additional Zernio communication products
 
-[server/inbox.mjs](../server/inbox.mjs) already recognizes `imessage`, `rcs` and `sms` for basic provider conversations. That is partial support, not sender provisioning or a full campaign editor. Local [SMS campaigns](../server/direct-providers.mjs) use Twilio and remain available.
+[server/inbox.mjs](../server/inbox.mjs) already recognizes `imessage`, `rcs` and `sms` for basic provider conversations. That is partial support, not sender provisioning or a full campaign editor. Local [SMS campaigns](../server/direct-providers.ts) use Twilio and remain available.
 
 | Product | Current app | Work required for full supported coverage |
 | --- | --- | --- |

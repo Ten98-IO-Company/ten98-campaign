@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { IntegrationError, operation } from './provider-core.ts';
-import { sendSmsReply } from './direct-providers.mjs';
-import { createContacts } from './contacts.mjs';
+import { sendSmsReply } from './direct-providers.ts';
+import { createContacts } from './contacts.ts';
 import { nextDeliveryStatus } from './direct-campaigns.mjs';
 
 const phone = value => typeof value === 'string' && /^\+[1-9]\d{6,14}$/.test(value);

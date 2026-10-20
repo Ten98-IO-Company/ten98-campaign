@@ -4,7 +4,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { runInNewContext } from 'node:vm';
-import { createLinks } from '../server/links.mjs';
+import { createLinks } from '../server/links.ts';
 
 async function fixture() {
   const db = new DatabaseSync(':memory:');
