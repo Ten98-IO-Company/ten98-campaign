@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { IntegrationError, operation } from './integrations.mjs';
+import { IntegrationError, operation } from './provider-core.ts';
 import { sendSmsReply } from './direct-providers.mjs';
 import { createContacts } from './contacts.mjs';
 import { nextDeliveryStatus } from './direct-campaigns.mjs';

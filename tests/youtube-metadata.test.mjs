@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
-import { handleIntegration, IntegrationError } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.mjs';
+import { IntegrationError } from '../server/provider-core.ts';
 import { normalizePostTags } from '../shared/social-posts.ts';
 
 function fixture(t) {

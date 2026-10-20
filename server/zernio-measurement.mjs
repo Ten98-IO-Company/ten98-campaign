@@ -1,4 +1,4 @@
-import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts } from './integrations.mjs';
+import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts } from './provider-core.ts';
 
 const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);

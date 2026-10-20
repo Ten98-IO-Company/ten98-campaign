@@ -12,7 +12,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { createWebhookService } from '../server/webhooks.mjs';
 import { createContacts } from '../server/contacts.mjs';
 import { handleZernioAdEvents } from '../server/zernio-ad-events.mjs';
-import { IntegrationError } from '../server/integrations.mjs';
+import { IntegrationError } from '../server/provider-core.ts';
 import { createApp } from '../server/index.mjs';
 
 const secret = 'synthetic-paid-events-secret', profileId = 'profile-a';

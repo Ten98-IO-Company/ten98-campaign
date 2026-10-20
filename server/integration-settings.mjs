@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createPrivateKey, hkdfSync, randomBytes } from 'node:crypto';
 import { openRouterFetch, readResponseText } from '@ten98/runtime';
-import { googleToken, providerRequest, IntegrationError } from './integrations.mjs';
+import { googleToken, providerRequest, IntegrationError } from './provider-core.ts';
 import { testNativeGoogleAds } from './native-google-ads.mjs';
 import { testMicrosoftAds } from './native-microsoft-ads.mjs';
 

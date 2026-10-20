@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { providerRequest, operation } from '../server/integrations.mjs';
+import { providerRequest, operation } from '../server/provider-core.ts';
 
 const encoder = new TextEncoder(), maxBytes = 8 * 1024 * 1024;
 const invalidUtf8 = () => new Uint8Array([...encoder.encode('{"value":"'), 255, ...encoder.encode('"}')]);

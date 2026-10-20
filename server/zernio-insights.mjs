@@ -1,4 +1,4 @@
-import { IntegrationError, scopedAccounts, requireAccount } from './integrations.mjs';
+import { IntegrationError, scopedAccounts, requireAccount } from './provider-core.ts';
 import { PLATFORM_RULES, validPostInstant } from '../shared/social-posts.ts';
 
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };

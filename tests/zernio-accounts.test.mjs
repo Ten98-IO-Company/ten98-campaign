@@ -9,7 +9,8 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioAccounts } from '../server/zernio-accounts.mjs';
-import { handleIntegration, IntegrationError } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.mjs';
+import { IntegrationError } from '../server/provider-core.ts';
 
 const profileId = 'profile-a';
 const account = (id = 'instagram-a', platform = 'instagram') => ({ _id: id, platform, profileId, isActive: true, displayName: 'Acme', username: '@acme' });

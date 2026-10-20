@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
-import { operation, IntegrationError } from '../server/integrations.mjs';
+import { operation, IntegrationError } from '../server/provider-core.ts';
 import { handleOperationRecovery } from '../server/operation-recovery.mjs';
 
 test('provider recovery is scoped, audited, read-only and final; only a checked not-applied review permits a fresh manual action', async () => {

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation } from './integrations.mjs';
+import { IntegrationError, operation } from './provider-core.ts';
 import { transaction } from './database.ts';
 
 export const MEDIA_UPLOAD_MAX_BYTES = 5_000_000_000;

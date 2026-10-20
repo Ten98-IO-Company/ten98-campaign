@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount, mediaUrl } from './integrations.mjs';
+import { IntegrationError, operation, scopedAccounts, requireAccount, mediaUrl } from './provider-core.ts';
 
 const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);

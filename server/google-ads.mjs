@@ -1,4 +1,4 @@
-import { IntegrationError, operation, redact, scopedAccounts, requireAccount, campaignTree, adAccounts } from './integrations.mjs';
+import { IntegrationError, operation, redact, scopedAccounts, requireAccount, campaignTree, adAccounts } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };

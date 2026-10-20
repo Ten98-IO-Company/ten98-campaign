@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, redact, zernioClient, scopedAccounts, requireAccount } from './integrations.mjs';
+import { IntegrationError, operation, redact, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
 import { listWhatsAppTemplates, validateWhatsAppTemplate } from './direct-providers.mjs';
 import { publicMediaUrl, assetDeliveryIssue } from '../shared/social-posts.ts';
 

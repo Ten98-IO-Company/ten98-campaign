@@ -8,7 +8,8 @@ import { openDatabase, createStore, collections, transaction } from './database.
 import { createAuth, sessionSecret, bootstrapToken, hashPassword, HttpError, publicUser } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
 import { seedSample } from './seed.ts';
-import { handleIntegration, IntegrationError, mediaUrl } from './integrations.mjs';
+import { handleIntegration } from './integrations.mjs';
+import { IntegrationError, mediaUrl } from './provider-core.ts';
 import { createIntegrationSettings } from './integration-settings.mjs';
 import { handleInvitations } from './invitations.mjs';
 import { handleOperationRecovery } from './operation-recovery.mjs';

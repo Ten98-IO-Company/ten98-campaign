@@ -7,7 +7,8 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioMeasurement } from '../server/zernio-measurement.mjs';
-import { IntegrationError, handleIntegration } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.mjs';
+import { IntegrationError } from '../server/provider-core.ts';
 
 const profileId = 'profile-a', platforms = ['metaads', 'googleads', 'linkedinads', 'tiktokads', 'pinterestads', 'xads', 'openaiads', 'redditads'];
 const pixel = (platform, id = `${platform}-pixel`) => ({ id, name: 'Website pixel', platform, kind: 'pixel', status: 'active', siteTagId: `site-${id}`, lastFiredTime: null, installed: false, code: '<script>example("public-pixel-id")</script>', secret: 'must-not-escape' });

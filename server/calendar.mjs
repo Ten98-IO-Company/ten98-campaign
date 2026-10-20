@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { googleToken, providerRequest, operation, IntegrationError } from './integrations.mjs';
+import { googleToken, providerRequest, operation, IntegrationError } from './provider-core.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
 
 const fail = (status, message) => { throw new IntegrationError(status, 'CALENDAR_ERROR', message); };

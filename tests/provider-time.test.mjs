@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validProviderInstant } from '../server/integrations.mjs';
+import { validProviderInstant } from '../server/provider-core.ts';
 import { assertQueueReceipt } from '../server/zernio-queues.mjs';
 
 test('provider publication timestamps require real calendar dates and an unambiguous offset', () => {

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts, campaignTree, validProviderInstant } from './integrations.mjs';
+import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts, campaignTree, validProviderInstant } from './provider-core.ts';
 
 const writers = new Set(['owner', 'admin', 'editor']), initialized = new WeakSet();
 const categories = ['DEFAULT', 'PAGE_VIEW', 'PURCHASE', 'SIGNUP', 'DOWNLOAD', 'ADD_TO_CART', 'BEGIN_CHECKOUT', 'SUBSCRIBE_PAID', 'PHONE_CALL_LEAD', 'IMPORTED_LEAD', 'SUBMIT_LEAD_FORM', 'BOOK_APPOINTMENT', 'REQUEST_QUOTE', 'GET_DIRECTIONS', 'OUTBOUND_CLICK', 'CONTACT', 'ENGAGEMENT', 'STORE_VISIT', 'STORE_SALE', 'QUALIFIED_LEAD', 'CONVERTED_LEAD'];

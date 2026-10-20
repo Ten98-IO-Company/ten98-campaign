@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleZernioProducts } from '../server/zernio-products.mjs';
-import { IntegrationError, handleIntegration, operation } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.mjs';
+import { IntegrationError, operation } from '../server/provider-core.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

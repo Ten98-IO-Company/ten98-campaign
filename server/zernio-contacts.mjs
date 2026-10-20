@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount } from './integrations.mjs';
+import { IntegrationError, operation, scopedAccounts, requireAccount } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };

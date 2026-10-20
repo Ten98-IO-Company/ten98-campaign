@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts, mediaUrl, validProviderInstant } from './integrations.mjs';
+import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts, mediaUrl, validProviderInstant } from './provider-core.ts';
 
 const platforms = new Set(['metaads', 'facebook', 'instagram', 'linkedinads']), administrators = new Set(['owner', 'admin']), writers = new Set(['owner', 'admin', 'editor']), initialized = new WeakSet();
 const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { handleOoh } from '../server/ooh.mjs';
 import { createStore } from '../server/database.ts';
-import { operation, IntegrationError } from '../server/integrations.mjs';
+import { operation, IntegrationError } from '../server/provider-core.ts';
 import { handleOperationRecovery } from '../server/operation-recovery.mjs';
 
 test('Broadsign contracts, approved inventory, paid confirmation, and durable partial failures', async () => {

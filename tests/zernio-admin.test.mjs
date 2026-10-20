@@ -10,7 +10,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioAdmin } from '../server/zernio-admin.mjs';
-import { IntegrationError } from '../server/integrations.mjs';
+import { IntegrationError } from '../server/provider-core.ts';
 import { createApp } from '../server/index.mjs';
 
 const profileId = 'profile-a';

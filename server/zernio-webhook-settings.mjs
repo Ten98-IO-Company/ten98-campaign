@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation } from './integrations.mjs';
+import { IntegrationError, operation } from './provider-core.ts';
 import { supportedWebhookEvents } from './webhooks.mjs';
 
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };

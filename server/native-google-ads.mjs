@@ -1,4 +1,4 @@
-import { IntegrationError, providerRequest, operation } from './integrations.mjs';
+import { IntegrationError, providerRequest, operation } from './provider-core.ts';
 
 const BASE = 'https://googleads.googleapis.com/v25';
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };

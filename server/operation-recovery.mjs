@@ -1,11 +1,9 @@
-import { randomUUID } from 'node:crypto';
-import { IntegrationError, operation } from './integrations.mjs';
+import { IntegrationError, operation } from './provider-core.ts';
 import { transaction } from './database.ts';
 import { validPostInstant } from '../shared/social-posts.ts';
 
 const initialized = new WeakSet(), fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
 function initialize(db) {
-  operation.runId ||= randomUUID(); operation.active ||= new WeakMap();
   if (initialized.has(db)) return;
   db.exec(`CREATE TABLE IF NOT EXISTS integration_operations(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL,request_hash TEXT NOT NULL,status TEXT NOT NULL,response TEXT,http_status INTEGER,created_at TEXT NOT NULL,action_path TEXT NOT NULL DEFAULT '',run_id TEXT NOT NULL DEFAULT '',UNIQUE(project_id,request_key));
     CREATE TABLE IF NOT EXISTS integration_operation_reviews(operation_id TEXT PRIMARY KEY REFERENCES integration_operations(id),project_id TEXT NOT NULL,reviewer_id TEXT NOT NULL,resolution TEXT NOT NULL CHECK(resolution IN ('not_applied','applied')),note TEXT NOT NULL,reference TEXT NOT NULL,reviewed_at TEXT NOT NULL);`);

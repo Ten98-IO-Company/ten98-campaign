@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount } from './integrations.mjs';
+import { IntegrationError, operation, scopedAccounts, requireAccount } from './provider-core.ts';
 import { validPostInstant } from '../shared/social-posts.ts';
 import { transaction } from './database.ts';
 

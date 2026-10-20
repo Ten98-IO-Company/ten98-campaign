@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { EvidenceSummary } from '@ten98/ui';
 import { handleZernioInsights } from '../server/zernio-insights.mjs';
-import { IntegrationError } from '../server/integrations.mjs';
+import { IntegrationError } from '../server/provider-core.ts';
 
 const profileId = 'profile-a', range = { fromDate: '2026-09-01', toDate: '2026-09-03' }, dateQuery = '?fromDate=2026-09-01&toDate=2026-09-03';
 function setup() {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { IntegrationError, operation } from './integrations.mjs';
+import { IntegrationError, operation } from './provider-core.ts';
 import { transaction } from './database.ts';
 
 // Contracts: https://docs.broadsign.com/broadsign-platform/en/Documentation_Gteed_Campaigns/g-c-new-campaign-rest.html

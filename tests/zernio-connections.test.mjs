@@ -7,7 +7,8 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioConnections } from '../server/zernio-connections.mjs';
-import { handleIntegration, IntegrationError } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.mjs';
+import { IntegrationError } from '../server/provider-core.ts';
 
 const profileId = 'profile-a';
 function setup() {

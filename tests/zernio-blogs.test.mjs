@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { handleZernioBlogs } from '../server/zernio-blogs.mjs';
-import { IntegrationError } from '../server/integrations.mjs';
+import { IntegrationError } from '../server/provider-core.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
