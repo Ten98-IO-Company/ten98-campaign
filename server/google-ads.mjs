@@ -1,5 +1,5 @@
 import { IntegrationError, operation, redact, scopedAccounts, requireAccount, campaignTree, adAccounts } from './integrations.mjs';
-import { publicMediaUrl } from '../shared/social-posts.mjs';
+import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);

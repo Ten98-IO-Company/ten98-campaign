@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { AppField as Field } from '@ten98/ui/app';
-import { publicMediaUrl } from '../shared/social-posts.mjs';
+import { publicMediaUrl } from '../shared/social-posts.ts';
 import { transformWithOxc } from 'vite';
 
 const source = await readFile(new URL('../src/ZernioAccounts.tsx', import.meta.url), 'utf8');

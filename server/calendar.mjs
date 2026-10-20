@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { googleToken, providerRequest, operation, IntegrationError } from './integrations.mjs';
-import { postScheduleEntries } from '../shared/post-schedule.mjs';
+import { postScheduleEntries } from '../shared/post-schedule.ts';
 
 const fail = (status, message) => { throw new IntegrationError(status, 'CALENDAR_ERROR', message); };
 const scope = 'https://www.googleapis.com/auth/calendar.events';

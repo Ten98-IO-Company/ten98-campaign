@@ -1,5 +1,5 @@
 import test from 'node:test';
-import { postScheduleEntries } from '../shared/post-schedule.mjs';
+import { postScheduleEntries } from '../shared/post-schedule.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

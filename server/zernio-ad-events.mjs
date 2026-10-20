@@ -1,5 +1,5 @@
 import { IntegrationError, scopedAccounts, requireAccount, adAccounts } from './integrations.mjs';
-import { validPostInstant } from '../shared/social-posts.mjs';
+import { validPostInstant } from '../shared/social-posts.ts';
 
 export const paidAdEvents = new Set(['account.ads.initial_sync_completed', 'account.ads.sync_failed', 'account.ads.sync_recovered', 'lead.received', 'ad.status_changed', 'ad.video.processed']);
 const platforms = new Set(['metaads', 'googleads', 'tiktokads', 'linkedinads', 'pinterestads', 'xads', 'redditads', 'openaiads', 'facebook', 'instagram']);

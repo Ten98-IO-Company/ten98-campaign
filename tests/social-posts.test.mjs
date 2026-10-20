@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PLATFORM_RULES, normalizeMediaItems, normalizePostVariants, normalizePostTags, normalizeAccountVariants, assertAccountSchedules, normalizePlatformOptions, resolveVariant, buildPlatformEntry, validatePostForPlatforms, assetDeliveryIssue, providerPostMediaUrls, countCaption, captionLimitForVariant } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, normalizeMediaItems, normalizePostVariants, normalizePostTags, normalizeAccountVariants, assertAccountSchedules, normalizePlatformOptions, resolveVariant, buildPlatformEntry, validatePostForPlatforms, assetDeliveryIssue, providerPostMediaUrls, countCaption, captionLimitForVariant } from '../shared/social-posts.ts';
 
 const image = (extra = {}) => ({ type: 'image', url: 'https://cdn.example.com/creative.jpg', width: 1080, height: 1080, size: 100000, mimeType: 'image/jpeg', ...extra });
 const video = (extra = {}) => ({ type: 'video', url: 'https://cdn.example.com/video.mp4', width: 1080, height: 1920, duration: 30, size: 1000000, mimeType: 'video/mp4', ...extra });

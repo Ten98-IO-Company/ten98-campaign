@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import { handleIntegration, IntegrationError } from '../server/integrations.mjs';
-import { normalizePostTags } from '../shared/social-posts.mjs';
+import { normalizePostTags } from '../shared/social-posts.ts';
 
 function fixture(t) {
   const previous = globalThis.fetch, db = new DatabaseSync(':memory:'), project = { id: 'metadata-project', zernioProfileId: 'metadata-profile' };

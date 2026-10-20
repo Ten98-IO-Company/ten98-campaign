@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { openDatabase, createStore } from '../server/database.mjs';
 import { handleCalendar, calendarPlan } from '../server/calendar.mjs';
 import { handleOperationRecovery } from '../server/operation-recovery.mjs';
-import { postScheduleEntries } from '../shared/post-schedule.mjs';
+import { postScheduleEntries } from '../shared/post-schedule.ts';
 
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 test('Local schedule entries retain two same-platform account captions, own dates and parent inheritance', () => {

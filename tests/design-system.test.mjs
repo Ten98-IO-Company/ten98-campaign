@@ -22,7 +22,7 @@ test('Campaign imports shared suite components and styles instead of defining du
 
 test('shared Campaign fields retain native labels, required markers and editable textarea defaults', () => {
   const html = renderToStaticMarkup(React.createElement(AppField, { label: 'Ad text', name: 'body', multiline: true, defaultValue: 'First line\nSecond line', required: true, disabled: true, maxLength: 200, placeholder: 'Write an ad' }));
-  assert.match(html, /<label class="field"><span>Ad text<span class="required"> \*<\/span><\/span>/);
+  assert.match(html, /<label class="field"><span>Ad text<span class="required" aria-hidden="true"> \*<\/span><\/span>/);
   assert.match(html, /<textarea[^>]*name="body"/);
   for (const attribute of ['required=""', 'disabled=""', 'maxLength="200"', 'placeholder="Write an ad"']) assert.ok(html.includes(attribute), attribute);
   assert.match(html, />First line\nSecond line<\/textarea>/);

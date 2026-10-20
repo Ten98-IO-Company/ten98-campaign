@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { IntegrationError, operation, scopedAccounts, requireAccount } from './integrations.mjs';
-import { validPostInstant } from '../shared/social-posts.mjs';
+import { validPostInstant } from '../shared/social-posts.ts';
 import { transaction } from './database.mjs';
 
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };

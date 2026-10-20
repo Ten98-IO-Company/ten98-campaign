@@ -3,7 +3,7 @@ import { Resolver } from 'node:dns/promises';
 import { domainToASCII } from 'node:url';
 import { HttpError } from './auth.mjs';
 import { transaction } from './database.mjs';
-import { publicMediaUrl } from '../shared/social-posts.mjs';
+import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const channels = ['email', 'sms', 'whatsapp'], own = (value, key) => Object.hasOwn(value, key);
 const fail = (status, message) => { throw new HttpError(status, message); };

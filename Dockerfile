@@ -3,7 +3,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY vendor ./vendor
 RUN npm ci
-COPY index.html tsconfig.json vite.config.mjs ./
+COPY index.html tsconfig.json tsconfig.backend.json vite.config.mjs ./
+COPY server ./server
 COPY src ./src
 COPY shared ./shared
 COPY public ./public

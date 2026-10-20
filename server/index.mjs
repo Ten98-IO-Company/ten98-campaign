@@ -6,7 +6,7 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import { oidcEndpoint, workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
 import { openDatabase, createStore, collections, transaction } from './database.mjs';
 import { createAuth, sessionSecret, bootstrapToken, hashPassword, HttpError, publicUser } from './auth.mjs';
-import { seedSample } from './seed.mjs';
+import { seedSample } from './seed.ts';
 import { handleIntegration, IntegrationError, mediaUrl } from './integrations.mjs';
 import { createIntegrationSettings } from './integration-settings.mjs';
 import { handleInvitations } from './invitations.mjs';
@@ -22,7 +22,7 @@ import { createDirectCampaigns } from './direct-campaigns.mjs';
 import { handleInbox } from './inbox.mjs';
 import { createSmsInbox } from './sms-inbox.mjs';
 import { createLinks } from './links.mjs';
-import { normalizePostVariants, normalizeAccountVariants, normalizeMediaItems, normalizePostTags } from '../shared/social-posts.mjs';
+import { normalizePostVariants, normalizeAccountVariants, normalizeMediaItems, normalizePostTags } from '../shared/social-posts.ts';
 import { validateQueueIntent } from './zernio-queues.mjs';
 import { MEDIA_UPLOAD_TIMEOUT, MEDIA_DELIVERY_FIELDS, closeMediaUploads } from './zernio-media.mjs';
 

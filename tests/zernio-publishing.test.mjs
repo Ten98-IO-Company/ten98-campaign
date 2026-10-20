@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.mjs';
-import { validatePostForPlatforms } from '../shared/social-posts.mjs';
+import { validatePostForPlatforms } from '../shared/social-posts.ts';
 
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-publishing-lookup-')), originalFetch = globalThis.fetch, calls = [], origin = 'https://publishing.example.test';

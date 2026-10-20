@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { transaction } from './database.mjs';
 import { HttpError } from './auth.mjs';
-import { publicMediaUrl } from '../shared/social-posts.mjs';
+import { publicMediaUrl } from '../shared/social-posts.ts';
 import { openRouterFetch, readResponseText } from '@ten98/runtime';
 const initialized = new WeakSet();
 

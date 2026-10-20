@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PLATFORM_RULES, captionLimitForVariant, countCaption, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms, providerPostMediaUrls } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, captionLimitForVariant, countCaption, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms, providerPostMediaUrls } from '../shared/social-posts.ts';
 import './post-composer.css';
 import InstagramPublishingTools from './InstagramPublishingTools';
 import TikTokPublishingTools from './TikTokPublishingTools';

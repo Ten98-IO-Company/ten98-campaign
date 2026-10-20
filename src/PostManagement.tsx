@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { OperationResults } from '@ten98/ui';
 import { AppField } from '@ten98/ui/app';
 import PostComposer, { PostVariantPreview } from './PostComposer';
-import { PLATFORM_RULES, normalizePostTags, resolveVariant } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
 
 type Props = { request: (path: string, body?: any, validate?: (result: any) => void) => Promise<any>; post: any; canWrite: boolean; assets?: any[]; campaigns?: any[]; accounts?: any[]; onCancel?: () => void; onChanged?: () => void; onShortenLinks?: (values: Record<string, any>) => Promise<{ content: string; platformOverrides: Record<string, any> }> };
 const editPlatforms = ['twitter', 'discord', 'facebook', 'reddit', 'linkedin', 'telegram', 'pinterest', 'googlebusiness', 'youtube', 'slack'];

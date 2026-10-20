@@ -1,5 +1,5 @@
 import { IntegrationError, scopedAccounts, requireAccount } from './integrations.mjs';
-import { PLATFORM_RULES, validPostInstant } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, validPostInstant } from '../shared/social-posts.ts';
 
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);

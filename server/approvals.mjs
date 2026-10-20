@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { IntegrationError, targetConfiguration, zernioClient } from './integrations.mjs';
-import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.mjs';
+import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
 import { queueList, reviewedQueue } from './zernio-queues.mjs';
 
 const initialized = new WeakSet(), administrators = new Set(['owner', 'admin']);

@@ -1,5 +1,5 @@
 import { IntegrationError, providerRequest, zernioClient, scopedAccounts, requireAccount } from './integrations.mjs';
-import { publicMediaUrl } from '../shared/social-posts.mjs';
+import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);

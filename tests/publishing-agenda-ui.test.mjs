@@ -6,7 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { PublishingAgenda } from '@ten98/ui';
-import { postScheduleEntries } from '../shared/post-schedule.mjs';
+import { postScheduleEntries } from '../shared/post-schedule.ts';
 
 const source = await readFile(new URL('../src/PublishingAgenda.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace('export default ', ''), 'PublishingAgenda.tsx', { jsx: { runtime: 'classic' } });

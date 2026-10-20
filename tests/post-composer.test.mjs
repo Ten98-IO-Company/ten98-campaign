@@ -5,8 +5,8 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as social from '../shared/social-posts.mjs';
-import { PLATFORM_RULES, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant } from '../shared/social-posts.mjs';
+import * as social from '../shared/social-posts.ts';
+import { PLATFORM_RULES, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant } from '../shared/social-posts.ts';
 
 const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');
 

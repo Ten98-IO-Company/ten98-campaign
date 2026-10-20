@@ -1,5 +1,10 @@
-export function seedSample(store, projectId) {
-  const add = (collection, data) => store.create(projectId, collection, { ...data, sample: true });
+interface SampleStore {
+  create(projectId: string, collection: string, data: Record<string, unknown>): { id: string };
+  activity(projectId: string, message: string, sample?: boolean): unknown;
+}
+
+export function seedSample(store: SampleStore, projectId: string): void {
+  const add = (collection: string, data: Record<string, unknown>) => store.create(projectId, collection, { ...data, sample: true });
   const provider = add('providers', { name: 'Cityscape Media', type: 'ooh', contact: 'hello@example.com', location: 'Dubai, UAE', inventory: 24 });
   const campaign = add('campaigns', { name: 'A new perspective', channel: 'mixed', status: 'active', budget: 24000, spent: 12480, startDate: '2026-10-01', endDate: '2026-10-31', impressions: 384200, clicks: 6840, conversions: 218, color: '#5943ce' });
   add('campaigns', { name: 'The everyday collection', channel: 'social', status: 'draft', budget: 8500, spent: 0, startDate: '2026-11-01', endDate: '2026-11-30', impressions: 0, clicks: 0, conversions: 0, color: '#e39254' });

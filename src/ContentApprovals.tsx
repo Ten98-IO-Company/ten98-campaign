@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { PostVariantPreview } from './PostComposer';
-import { PLATFORM_RULES } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES } from '../shared/social-posts.ts';
 
 type Props = { projectId: string; role: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void> };
 const label = (value: string) => ({ not_requested: 'Not requested', pending: 'Awaiting review', approved: 'Approved', rejected: 'Changes requested', stale: 'Changed since review', submitted: 'Submitted to provider' }[value] || value);

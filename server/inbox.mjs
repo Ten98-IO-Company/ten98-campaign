@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { IntegrationError, operation, redact, zernioClient, scopedAccounts, requireAccount } from './integrations.mjs';
 import { listWhatsAppTemplates, validateWhatsAppTemplate } from './direct-providers.mjs';
-import { publicMediaUrl, assetDeliveryIssue } from '../shared/social-posts.mjs';
+import { publicMediaUrl, assetDeliveryIssue } from '../shared/social-posts.ts';
 
 const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);

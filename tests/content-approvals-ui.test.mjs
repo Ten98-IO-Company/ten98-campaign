@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { PLATFORM_RULES } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES } from '../shared/social-posts.ts';
 
 test('approval cards expose every saved recipient when account copies inherit the shared version', async () => {
   const source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');

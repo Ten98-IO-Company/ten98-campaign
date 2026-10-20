@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.mjs';
-import { resolveVariant, validatePostForPlatforms } from '../shared/social-posts.mjs';
+import { resolveVariant, validatePostForPlatforms } from '../shared/social-posts.ts';
 
 test('Drive HTTP sync and upload preserve publishing metadata, validate complete batches and atomically deduplicate concurrent imports', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-dam-workflows-')), origin = 'http://127.0.0.1:3000', { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
