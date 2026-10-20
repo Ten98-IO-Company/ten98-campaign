@@ -1,45 +1,44 @@
-import { IntegrationError, operation, scopedAccounts, requireAccount } from './provider-core.ts';
+import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
+import { fail, reportObject as object, IntegrationError, operation, scopedAccounts, requireAccount } from './provider-core.ts';
 
-const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
-const object = value => value && typeof value === 'object' && !Array.isArray(value);
-const validId = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f]/.test(value);
-const plain = (value, max, empty = false) => typeof value === 'string' && value.length <= max && (empty || value.trim().length > 0) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
-const sameIds = (left, right) => left.length === right.length && left.every(value => right.includes(value));
-const timezone = value => { try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; } };
+const validId = (value: any) => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f]/.test(value);
+const plain = (value: any, max: any, empty = false) => typeof value === 'string' && value.length <= max && (empty || value.trim().length > 0) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
+const sameIds = (left: any, right: any) => left.length === right.length && left.every((value: any) => right.includes(value));
+const timezone = (value: any) => { try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; } };
 
-function profile(row, profileId) {
+function profile(row: any, profileId: any): ProviderRecord {
   if (!object(row) || row._id !== profileId) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned a different profile.');
   if (!plain(row.name, 200) || row.description != null && !plain(row.description, 4000, true) || row.color != null && !plain(row.color, 100) || row.timezone != null && (typeof row.timezone !== 'string' || !timezone(row.timezone))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned unreadable profile settings.');
   return { _id: profileId, name: row.name, description: row.description ?? null, color: row.color ?? '#64748b', timezone: row.timezone ?? null };
 }
-function group(row) {
+function group(row: any) {
   if (!object(row) || !validId(row._id) || !plain(row.name, 200) || !Array.isArray(row.accountIds) || row.accountIds.length > 1000 || row.accountIds.some(value => !validId(value)) || new Set(row.accountIds).size !== row.accountIds.length) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned an unreadable account group.');
   return { _id: row._id, name: row.name, accountIds: row.accountIds };
 }
-async function groupRows(api) {
+async function groupRows(api: ZernioApi) {
   const response = await api('/account-groups');
   if (!Array.isArray(response.groups) || response.groups.length > 10000) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return an account group list.');
   const rows = response.groups.map(group);
-  if (new Set(rows.map(row => row._id)).size !== rows.length) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned duplicate account groups.');
+  if (new Set(rows.map((row: any) => row._id)).size !== rows.length) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned duplicate account groups.');
   return rows;
 }
-function projectGroups(rows, accounts) {
-  const allowed = new Set(accounts.map(account => account._id));
+function projectGroups(rows: any, accounts: any) {
+  const allowed = new Set(accounts.map((account: any) => account._id));
   // Groups are global upstream. Empty and mixed-profile groups have no safe project ownership.
-  return rows.filter(row => row.accountIds.length && row.accountIds.every(id => allowed.has(id)));
+  return rows.filter((row: any) => row.accountIds.length && row.accountIds.every((id: any) => allowed.has(id)));
 }
-async function groups(api, accounts) { return projectGroups(await groupRows(api), accounts); }
-function members(value, accounts) {
+async function groups(api: ZernioApi, accounts: any) { return projectGroups(await groupRows(api), accounts); }
+function members(value: any, accounts: any) {
   if (!Array.isArray(value) || !value.length || value.length > 1000 || value.some(id => !validId(id)) || new Set(value).size !== value.length) fail(400, 'INVALID_GROUP_ACCOUNTS', 'Choose at least one distinct account from this project.');
   value.forEach(id => requireAccount(accounts, id)); return value;
 }
-function expectedGroup(value, current) {
+function expectedGroup(value: any, current: any) {
   if (!object(value) || !plain(value.name, 200) || !Array.isArray(value.accountIds) || value.accountIds.some(id => !validId(id)) || new Set(value.accountIds).size !== value.accountIds.length) fail(400, 'GROUP_SNAPSHOT_REQUIRED', 'Refresh the account group before changing it.');
   if (value.name !== current.name || !sameIds(value.accountIds, current.accountIds)) fail(409, 'GROUP_CHANGED', 'This account group changed. Refresh before making another change.');
 }
-function uncertain(error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+function uncertain(error: any): never { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
 
-function providerTeam(value) {
+function providerTeam(value: any) {
   if (!object(value) || !validId(value.currentUserId) || !Array.isArray(value.users) || !value.users.length || value.users.length > 10000) fail(502, 'INVALID_PROVIDER_TEAM', 'Zernio did not return a readable provider team.');
   const users = value.users.map(row => {
     if (!object(row) || !validId(row._id) || !plain(row.name, 200) || !plain(row.email, 320) || !plain(row.role, 100) || row.isRoot != null && typeof row.isRoot !== 'boolean') fail(502, 'INVALID_PROVIDER_TEAM', 'Zernio returned an unreadable provider member.');
@@ -51,19 +50,19 @@ function providerTeam(value) {
   return { currentUserId: value.currentUserId, users };
 }
 
-export async function handleZernioAdmin(context, api, profileId, action) {
+export async function handleZernioAdmin(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, action: any) {
   const { req, body, role, send } = context;
   if (action === 'team') {
     if (req.method !== 'GET') fail(405, 'METHOD_NOT_ALLOWED', 'Provider team members can only be read here.');
     const assertAccess = () => {
       if (!context.user?.id || !context.user.isOperator || !['owner', 'admin'].includes(role) || !context.db.prepare('SELECT 1 FROM instance_operators WHERE user_id=?').get(context.user.id)) fail(403, 'OPERATOR_REQUIRED', 'An app administrator who manages this workspace must read provider team members.');
       try { context.assertProjectMapping(profileId); }
-      catch (error) { fail([403, 404].includes(error.status) ? 403 : 409, 'PROVIDER_TEAM_ACCESS_CHANGED', 'Your access or provider connection changed. Refresh before reading provider team members.'); }
+      catch (error: any) { fail([403, 404].includes(error.status) ? 403 : 409, 'PROVIDER_TEAM_ACCESS_CHANGED', 'Your access or provider connection changed. Refresh before reading provider team members.'); }
     };
     assertAccess();
-    let result;
+    let result: any;
     try { result = await api('/users'); }
-    catch (error) {
+    catch (error: any) {
       if (error instanceof IntegrationError && error.providerStatus === 403) fail(403, 'PROVIDER_TEAM_FORBIDDEN', 'Zernio did not allow this credential to read provider team members. Check access in Zernio.');
       throw error;
     } finally { assertAccess(); }
@@ -90,7 +89,7 @@ export async function handleZernioAdmin(context, api, profileId, action) {
         const receipt = profile(response.profile, profileId), fresh = profile((await api(`/profiles/${encodeURIComponent(profileId)}`)).profile, profileId);
         if (Object.entries(patch).some(([name, value]) => receipt[name] !== value || fresh[name] !== value)) fail(502, 'PROFILE_CHANGE_NOT_CONFIRMED', 'Zernio has not confirmed these profile settings.');
         return { profile: fresh };
-      } catch (error) { uncertain(error); }
+      } catch (error: any) { uncertain(error); }
     }, `zernio-profile:${profileId}`);
     send(outcome.status, outcome.data); return true;
   }
@@ -101,22 +100,22 @@ export async function handleZernioAdmin(context, api, profileId, action) {
   if (task === 'delete' && body.confirmGroupId !== groupId) fail(400, 'GROUP_CONFIRMATION_REQUIRED', 'Confirm the selected account group before deleting it.');
   if (task !== 'delete' && (!plain(body.name, 200) || !Array.isArray(body.accountIds))) fail(400, 'INVALID_GROUP_UPDATE', 'Provide an account group name and select its accounts.');
   const outcome = await operation(context, async key => {
-    const accounts = await scopedAccounts(api, profileId), allBefore = await groupRows(api), before = projectGroups(allBefore, accounts), current = before.find(row => row._id === groupId);
+    const accounts = await scopedAccounts(api, profileId), allBefore = await groupRows(api), before = projectGroups(allBefore, accounts), current = before.find((row: any) => row._id === groupId);
     if (task !== 'create') { if (!current) fail(403, 'GROUP_OUTSIDE_PROJECT', 'This account group does not belong entirely to this project.'); expectedGroup(body.expectedGroup, current); }
-    const input = task === 'delete' ? undefined : { name: body.name.trim(), accountIds: members(body.accountIds, accounts) };
+    const input: any = task === 'delete' ? undefined : { name: body.name.trim(), accountIds: members(body.accountIds, accounts) };
     const response = await api(task === 'create' ? '/account-groups' : `/account-groups/${encodeURIComponent(groupId)}`, {}, input, key, task === 'delete' ? 'DELETE' : task === 'update' ? 'PUT' : 'POST');
     try {
       if (task === 'delete') {
         if (typeof response.message !== 'string' || !response.message.trim() || response.message.length > 2000) fail(502, 'GROUP_CHANGE_NOT_CONFIRMED', 'Zernio did not confirm the account group deletion.');
-        if ((await groupRows(api)).some(row => row._id === groupId)) fail(502, 'GROUP_CHANGE_NOT_CONFIRMED', 'This account group is still present in Zernio.');
+        if ((await groupRows(api)).some((row: any) => row._id === groupId)) fail(502, 'GROUP_CHANGE_NOT_CONFIRMED', 'This account group is still present in Zernio.');
         return { groupId, deleted: true };
       }
       const receipt = group(response.group);
-      if (task === 'update' && receipt._id !== groupId || task === 'create' && allBefore.some(row => row._id === receipt._id) || receipt.name !== input.name || !sameIds(receipt.accountIds, input.accountIds)) fail(502, 'GROUP_CHANGE_NOT_CONFIRMED', 'Zernio did not confirm the requested account group.');
-      const fresh = (await groups(api, await scopedAccounts(api, profileId))).find(row => row._id === receipt._id);
+      if (task === 'update' && receipt._id !== groupId || task === 'create' && allBefore.some((row: any) => row._id === receipt._id) || receipt.name !== input.name || !sameIds(receipt.accountIds, input.accountIds)) fail(502, 'GROUP_CHANGE_NOT_CONFIRMED', 'Zernio did not confirm the requested account group.');
+      const fresh = (await groups(api, await scopedAccounts(api, profileId))).find((row: any) => row._id === receipt._id);
       if (!fresh || fresh.name !== input.name || !sameIds(fresh.accountIds, input.accountIds)) fail(502, 'GROUP_CHANGE_NOT_CONFIRMED', 'Zernio did not return the saved account group.');
       return { group: fresh };
-    } catch (error) { uncertain(error); }
+    } catch (error: any) { uncertain(error); }
   }, `zernio-groups:${profileId}`);
   send(outcome.status, outcome.data); return true;
 }

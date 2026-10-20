@@ -25,8 +25,8 @@ import { handleInbox } from './inbox.mjs';
 import { createSmsInbox } from './sms-inbox.mjs';
 import { createLinks } from './links.mjs';
 import { normalizePostVariants, normalizeAccountVariants, normalizeMediaItems, normalizePostTags } from '../shared/social-posts.ts';
-import { validateQueueIntent } from './zernio-queues.mjs';
-import { MEDIA_UPLOAD_TIMEOUT, MEDIA_DELIVERY_FIELDS, closeMediaUploads } from './zernio-media.mjs';
+import { validateQueueIntent } from './zernio-queues.ts';
+import { MEDIA_UPLOAD_TIMEOUT, MEDIA_DELIVERY_FIELDS, closeMediaUploads } from './zernio-media.ts';
 
 const projectFields = 'p.id,p.workspace_id AS workspaceId,p.name,p.color,p.zernio_profile_id AS zernioProfileId,p.drive_folder_id AS driveFolderId';
 const bad = message => { throw new HttpError(400, message || 'Check the submitted fields.'); };

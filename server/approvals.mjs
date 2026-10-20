@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { IntegrationError, targetConfiguration, zernioClient } from './provider-core.ts';
 import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
-import { queueList, reviewedQueue } from './zernio-queues.mjs';
+import { queueList, reviewedQueue } from './zernio-queues.ts';
 
 const initialized = new WeakSet(), administrators = new Set(['owner', 'admin']);
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };

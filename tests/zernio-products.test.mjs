@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleZernioProducts } from '../server/zernio-products.mjs';
+import { handleZernioProducts } from '../server/zernio-products.ts';
 import { handleIntegration } from '../server/integrations.mjs';
 import { IntegrationError, operation } from '../server/provider-core.ts';
 import { mkdtemp, rm } from 'node:fs/promises';

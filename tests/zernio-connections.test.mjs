@@ -6,7 +6,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { handleZernioConnections } from '../server/zernio-connections.mjs';
+import { handleZernioConnections } from '../server/zernio-connections.ts';
 import { handleIntegration } from '../server/integrations.mjs';
 import { IntegrationError } from '../server/provider-core.ts';
 

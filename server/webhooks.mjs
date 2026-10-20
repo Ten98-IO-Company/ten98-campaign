@@ -3,7 +3,7 @@ import { transaction } from './database.ts';
 import { createContacts } from './contacts.mjs';
 import { HttpError } from './auth.ts';
 import { validPostInstant as iso } from '../shared/social-posts.ts';
-import { paidAdEvents, minimizeAdEvent, initializeAdEvents, recordAdEvent } from './zernio-ad-events.mjs';
+import { paidAdEvents, minimizeAdEvent, initializeAdEvents, recordAdEvent } from './zernio-ad-events.ts';
 
 export const WEBHOOK_MAX_BYTES = 1024 * 1024;
 const postEvents = new Set(['post.scheduled', 'post.published', 'post.failed', 'post.partial', 'post.cancelled', 'post.recycled', 'post.platform.published', 'post.platform.failed', 'post.platform.deleted', 'post.tiktok.url_resolved']);

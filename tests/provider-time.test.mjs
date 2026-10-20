@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validProviderInstant } from '../server/provider-core.ts';
-import { assertQueueReceipt } from '../server/zernio-queues.mjs';
+import { assertQueueReceipt } from '../server/zernio-queues.ts';
 
 test('provider publication timestamps require real calendar dates and an unambiguous offset', () => {
   for (const value of ['2070-11-01T09:00:00Z', '2068-02-29T00:00:00.123Z', '2070-11-01T00:05:06+14:00', '2070-11-01T09:00:00-04:00']) {

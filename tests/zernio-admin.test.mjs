@@ -9,7 +9,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { handleZernioAdmin } from '../server/zernio-admin.mjs';
+import { handleZernioAdmin } from '../server/zernio-admin.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { createApp } from '../server/index.mjs';
 

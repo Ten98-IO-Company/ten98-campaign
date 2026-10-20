@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createApp } from '../server/index.mjs';
-import { closeMediaUploads, MEDIA_DELIVERY_FIELDS } from '../server/zernio-media.mjs';
+import { closeMediaUploads, MEDIA_DELIVERY_FIELDS } from '../server/zernio-media.ts';
 
 const appUrl = 'https://hosted-media.example.test', profileId = 'media-profile', storageHost = 'a'.repeat(32) + '.r2.cloudflarestorage.com';
 const until = async check => { for (let i = 0; i < 1000; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); } assert.fail('Synthetic upload did not reach the expected state'); };

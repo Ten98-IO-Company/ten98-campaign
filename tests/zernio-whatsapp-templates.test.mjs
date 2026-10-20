@@ -8,7 +8,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { handleZernioWhatsAppTemplates, templateComponents } from '../server/zernio-whatsapp-templates.mjs';
+import { handleZernioWhatsAppTemplates, templateComponents } from '../server/zernio-whatsapp-templates.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { createApp } from '../server/index.mjs';
 
