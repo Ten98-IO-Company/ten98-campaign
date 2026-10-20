@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { sendDirect, getSmsStatus, syncEmailSuppressions, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast } from '../server/direct-providers.ts';
-import { createIntegrationSettings } from '../server/integration-settings.mjs';
+import { createIntegrationSettings } from '../server/integration-settings.ts';
 
 const env = { TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'secret-twilio-token', TWILIO_FROM_NUMBER: '+12025550100', CLOUDFLARE_ACCOUNT_ID: 'b'.repeat(32), CLOUDFLARE_EMAIL_API_TOKEN: 'secret-cloudflare-token', CLOUDFLARE_ZONE_ID: 'c'.repeat(32), CLOUDFLARE_EMAIL_FROM_ADDRESS: 'service@example.com', ZERNIO_API_KEY: 'secret-zernio-key' };
 const messageId = `SM${'d'.repeat(32)}`, contact = { phone: '+12025550123', email: 'recipient@example.com' }, appUrl = 'https://campaign.example.com';

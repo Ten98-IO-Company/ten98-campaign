@@ -9,7 +9,7 @@ import { handleZernioAdEvents } from './zernio-ad-events.ts';
 import { handleZernioAccounts } from './zernio-accounts.ts';
 import { handleZernioMeasurement } from './zernio-measurement.ts';
 import { handleZernioAdmin } from './zernio-admin.ts';
-import { handleWebhookSettings } from './zernio-webhook-settings.mjs';
+import { handleWebhookSettings } from './zernio-webhook-settings.ts';
 import { handleZernioPublishing } from './zernio-publishing.ts';
 import { handleZernioConnections } from './zernio-connections.ts';
 import { handleZernioInsights } from './zernio-insights.ts';

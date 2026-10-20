@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac, randomUUID } from 'node:crypto';
 import { createApp } from '../server/index.mjs';
-import { estimateSms, createDirectCampaigns } from '../server/direct-campaigns.mjs';
+import { estimateSms, createDirectCampaigns } from '../server/direct-campaigns.ts';
 
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-direct-')), origin = 'https://campaign.example.test';

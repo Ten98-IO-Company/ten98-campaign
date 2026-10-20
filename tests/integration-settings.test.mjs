@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { createIntegrationSettings } from '../server/integration-settings.mjs';
+import { createIntegrationSettings } from '../server/integration-settings.ts';
 
 const secret = 'integration-settings-fixture-secret-at-least-32-characters';
 const provider = (manager, id) => manager.describe().providers.find(value => value.id === id);

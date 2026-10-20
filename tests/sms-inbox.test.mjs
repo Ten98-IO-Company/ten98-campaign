@@ -7,9 +7,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.mjs';
 import { createContacts } from '../server/contacts.ts';
-import { createDirectCampaigns } from '../server/direct-campaigns.mjs';
-import { createSmsInbox } from '../server/sms-inbox.mjs';
-import { createIntegrationSettings } from '../server/integration-settings.mjs';
+import { createDirectCampaigns } from '../server/direct-campaigns.ts';
+import { createSmsInbox } from '../server/sms-inbox.ts';
+import { createIntegrationSettings } from '../server/integration-settings.ts';
 import { sendDirect } from '../server/direct-providers.ts';
 import { HttpError } from '../server/auth.ts';
 

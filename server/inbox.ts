@@ -1,21 +1,21 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, redact, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
+import { IntegrationError, fail, reportObject as plain, operation, redact, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
+import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
+import type { DatabaseSync } from 'node:sqlite';
 import { listWhatsAppTemplates, validateWhatsAppTemplate } from './direct-providers.ts';
 import { publicMediaUrl, assetDeliveryIssue } from '../shared/social-posts.ts';
 
-const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
-const plain = value => value && typeof value === 'object' && !Array.isArray(value);
-const id = value => { if (typeof value !== 'string' || !value || value.length > 2000 || /[\s\u0000-\u001f\u007f]/.test(value)) fail(400, 'INVALID_INBOX_ID', 'Choose a valid inbox item.'); return value; };
-const decodedId = value => { try { return id(decodeURIComponent(value)); } catch (error) { if (error instanceof IntegrationError) throw error; fail(400, 'INVALID_INBOX_ID', 'Choose a valid inbox item.'); } };
-const str = (value, label, max = 10000) => { if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) fail(400, 'INVALID_INBOX_CONTENT', `Enter a valid ${label} of at most ${max} characters.`); return value; };
-const fields = (body, allowed) => { if (!plain(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_INBOX_FIELD', 'Use only the fields shown for this inbox action.'); };
-const pick = (row, keys) => Object.fromEntries(keys.filter(key => row?.[key] !== undefined).map(key => [key, redact(row[key])]));
-const valid = value => typeof value === 'string' && value.length > 0 && value.length <= 2000 && !/[\s\u0000-\u001f\u007f]/.test(value);
-const invalid = (uncertain = false) => fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return a complete, scoped inbox response. Reconcile any external action before retrying.', uncertain);
+const id = (value: any): string => { if (typeof value !== 'string' || !value || value.length > 2000 || /[\s\u0000-\u001f\u007f]/.test(value)) fail(400, 'INVALID_INBOX_ID', 'Choose a valid inbox item.'); return value; };
+const decodedId = (value: string): string => { try { return id(decodeURIComponent(value)); } catch (error: any) { if (error instanceof IntegrationError) throw error; fail(400, 'INVALID_INBOX_ID', 'Choose a valid inbox item.'); } };
+const str = (value: any, label: string, max = 10000): string => { if (typeof value !== 'string' || !value.trim() || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) fail(400, 'INVALID_INBOX_CONTENT', `Enter a valid ${label} of at most ${max} characters.`); return value; };
+const fields = (body: any, allowed: string[]) => { if (!plain(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_INBOX_FIELD', 'Use only the fields shown for this inbox action.'); };
+const pick = (row: any, keys: string[]): ProviderRecord => Object.fromEntries(keys.filter(key => row?.[key] !== undefined).map(key => [key, redact(row[key])]));
+const valid = (value: any): boolean => typeof value === 'string' && value.length > 0 && value.length <= 2000 && !/[\s\u0000-\u001f\u007f]/.test(value);
+const invalid = (uncertain = false): never => fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return a complete, scoped inbox response. Reconcile any external action before retrying.', uncertain);
 const DM = new Set(['facebook', 'instagram', 'twitter', 'bluesky', 'reddit', 'telegram', 'whatsapp', 'imessage', 'slack', 'tiktok', 'sms', 'rcs']);
-const MESSAGE_LIMITS = { facebook: 2000, instagram: 1000, telegram: 4096, whatsapp: 4096, imessage: 9999, tiktok: 6000, slack: 40000, sms: 1600, rcs: 3072 };
+const MESSAGE_LIMITS: Record<string, number> = { facebook: 2000, instagram: 1000, telegram: 4096, whatsapp: 4096, imessage: 9999, tiktok: 6000, slack: 40000, sms: 1600, rcs: 3072 };
 const DOCUMENT_MIMES = new Set(['application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']);
-const REPLY_MEDIA = {
+const REPLY_MEDIA: Record<string, ProviderRecord> = {
   instagram: {
     image: { maxMB: 8, formats: 'PNG or JPEG', mimes: ['image/png', 'image/jpeg'] },
     video: { maxMB: 25, formats: 'MP4, OGG, AVI, MOV or WebM', mimes: ['video/mp4', 'video/ogg', 'video/x-msvideo', 'video/avi', 'video/quicktime', 'video/webm'] },
@@ -33,11 +33,11 @@ const WRITERS = new Set(['owner', 'admin', 'editor']);
 const START = new Set(['twitter', 'bluesky', 'reddit', 'slack', 'whatsapp', 'sms']);
 const EDIT_MESSAGE = new Set(['telegram', 'imessage']), DELETE_MESSAGE = new Set(['telegram', 'twitter', 'bluesky', 'reddit', 'imessage']), REACT_MESSAGE = new Set(['telegram', 'whatsapp', 'facebook', 'instagram', 'slack', 'imessage']);
 const TYPING = new Set(['facebook', 'instagram', 'telegram', 'whatsapp', 'imessage']);
-const downloadTypes = new Map([
+const downloadTypes = new Map<string, [string, string, number]>([
   ['image/jpeg', ['image', 'jpg', 5]], ['image/png', ['image', 'png', 5]], ['image/webp', ['image', 'webp', 5]],
   ['video/mp4', ['video', 'mp4', 16]], ['video/3gpp', ['video', '3gp', 16]],
   ['audio/aac', ['audio', 'aac', 16]], ['audio/mp4', ['audio', 'm4a', 16]], ['audio/mpeg', ['audio', 'mp3', 16]], ['audio/amr', ['audio', 'amr', 16]], ['audio/ogg', ['audio', 'ogg', 16]],
-  ...[...DOCUMENT_MIMES].map((mime, index) => [mime, ['file', ['pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'][index], 100]]),
+  ...[...DOCUMENT_MIMES].map((mime, index): [string, [string, string, number]] => [mime, ['file', ['pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'][index], 100]]),
 ]);
 const conversationFields = ['id', 'platform', 'accountId', 'accountUsername', 'participantId', 'participantName', 'participantUsername', 'participantPicture', 'participantVerifiedType', 'businessScopedUserId', 'whatsappUsername', 'lastMessage', 'lastMessageAt', 'updatedTime', 'status', 'unreadCount', 'threadControl', 'folder', 'url', 'instagramProfile', 'metadata'];
 const messageFields = ['id', 'conversationId', 'accountId', 'platform', 'message', 'senderId', 'senderName', 'direction', 'createdAt', 'attachments', 'subject', 'storyReply', 'isStoryMention', 'noRenderableContent', 'isEdited', 'editedAt', 'editCount', 'editHistory', 'isDeleted', 'deletedAt', 'deliveryStatus', 'reactions', 'sentVia'];
@@ -46,39 +46,39 @@ const commentFields = ['id', 'message', 'createdTime', 'from', 'likeCount', 'rep
 const reviewFields = ['id', 'platform', 'accountId', 'accountUsername', 'locationId', 'locationName', 'reviewer', 'rating', 'recommendationType', 'text', 'created', 'hasReply', 'hasPhotos', 'photoCount', 'photos', 'reply', 'reviewUrl'];
 const mentionFields = ['id', 'platform', 'accountId', 'accountUsername', 'content', 'permalink', 'authorUrn', 'authorName', 'authorUsername', 'authorPicture', 'organizationalEntity', 'publishedAt', 'createdAt'];
 
-function renderFields(row, strings = [], numbers = [], booleans = []) {
+function renderFields(row: any, strings: string[] = [], numbers: string[] = [], booleans: string[] = []): void {
   if (!plain(row) || strings.some(key => row[key] != null && typeof row[key] !== 'string') || numbers.some(key => row[key] != null && (typeof row[key] !== 'number' || !Number.isFinite(row[key]) || row[key] < 0)) || booleans.some(key => row[key] != null && typeof row[key] !== 'boolean')) invalid();
 }
-function validateConversation(row) {
+function validateConversation(row: any): void {
   renderFields(row, conversationFields.filter(key => !['unreadCount', 'instagramProfile', 'metadata'].includes(key)), ['unreadCount']);
   if (row.instagramProfile != null) renderFields(row.instagramProfile, ['fetchedAt'], ['followerCount'], ['isFollower', 'isFollowing', 'isVerified']);
   if (row.metadata != null && !plain(row.metadata)) invalid();
 }
-function validateReview(row) {
+function validateReview(row: any): void {
   renderFields(row, reviewFields.filter(key => !['rating', 'photoCount', 'hasReply', 'hasPhotos', 'reviewer', 'photos', 'reply'].includes(key)), ['rating', 'photoCount'], ['hasReply', 'hasPhotos']);
   if (row.reviewer != null) renderFields(row.reviewer, ['id', 'name', 'profileImage']);
   if (row.reply != null) renderFields(row.reply, ['id', 'text', 'created']);
-  if (row.photos != null) { if (!Array.isArray(row.photos)) invalid(); row.photos.forEach(photo => renderFields(photo, ['url'])); }
+  if (row.photos != null) { if (!Array.isArray(row.photos)) invalid(); row.photos.forEach((photo: any) => renderFields(photo, ['url'])); }
 }
 
-export function inboxCapabilities(platform, active = true) {
+export function inboxCapabilities(platform: string, active = true): ProviderRecord {
   return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), mentions: platform === 'linkedin' && active, reply: DM.has(platform), replyButtons: platform === 'whatsapp' && active, start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), typing: TYPING.has(platform), deleteStoredConversation: DM.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'twitter', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : ['sms', 'twitter'].includes(platform) ? ['image', 'video'] : ['image', 'video', 'audio', 'file'], ...(REPLY_MEDIA[platform] ? { attachmentRules: REPLY_MEDIA[platform] } : {}), archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentPrivateReply: ['facebook', 'instagram', 'metaads'].includes(platform), commentEdit: platform === 'reddit', commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
 }
-function supported(account, feature) { if (!inboxCapabilities(account.platform)[feature] || account.isActive === false) fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'This account does not support this inbox action. Reconnect the account if its permissions changed.'); }
-function scoped(row, accounts, expectedAccount) {
+function supported(account: ProviderRecord, feature: string): void { if (!inboxCapabilities(account.platform)[feature] || account.isActive === false) fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'This account does not support this inbox action. Reconnect the account if its permissions changed.'); }
+function scoped(row: any, accounts: ProviderRecord[], expectedAccount?: string): ProviderRecord {
   if (!plain(row) || !valid(row.id) || !valid(row.accountId)) invalid();
   const account = accounts.find(item => item._id === row.accountId);
   if (!account || expectedAccount && account._id !== expectedAccount || row.platform !== account.platform && !(row.isAd && ['facebook', 'instagram'].includes(row.platform) && ['metaads', 'facebook', 'instagram'].includes(account.platform))) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned inbox data outside this project account.');
   return account;
 }
-function pagination(value, comment = false, allowCursorless = false) {
+function pagination(value: any, comment = false, allowCursorless = false) {
   if (!plain(value) || typeof value.hasMore !== 'boolean') invalid();
   const cursor = value.nextCursor ?? value.cursor ?? null;
   if (cursor !== null && (typeof cursor !== 'string' || !cursor || cursor.length > 8192 || /[\u0000-\u001f]/.test(cursor)) || value.hasMore && !cursor && !allowCursorless) invalid();
   return { hasMore: value.hasMore, nextCursor: cursor, ...(comment ? { cursor } : {}) };
 }
-function query(url, type) {
-  const result = { limit: type === 'reviews' ? 25 : 50 }, rules = { status: ['active', 'archived'], folder: ['inbox', 'requests'], sortOrder: ['asc', 'desc'], sortBy: ['date', 'rating'], hasReply: ['true', 'false'] };
+function query(url: URL, type: string): ProviderRecord {
+  const result: ProviderRecord = { limit: type === 'reviews' ? 25 : 50 }, rules: Record<string, string[]> = { status: ['active', 'archived'], folder: ['inbox', 'requests'], sortOrder: ['asc', 'desc'], sortBy: ['date', 'rating'], hasReply: ['true', 'false'] };
   for (const name of ['cursor', 'status', 'folder', 'sortOrder', ...(type === 'reviews' ? ['minRating', 'maxRating', 'hasReply', 'sortBy'] : [])]) {
     const value = url.searchParams.get(name); if (value === null || value === '') continue;
     if (value.length > 8192 || /[\u0000-\u001f]/.test(value) || rules[name] && !rules[name].includes(value) || ['minRating', 'maxRating'].includes(name) && !/^[1-5]$/.test(value)) fail(400, 'INVALID_INBOX_FILTER', 'Choose valid inbox filters.');
@@ -89,7 +89,7 @@ function query(url, type) {
   if (type !== 'conversations') { delete result.status; delete result.folder; if (!['messages', 'reviews', 'mentions'].includes(type)) delete result.sortOrder; }
   return result;
 }
-function metadata(value, accounts) {
+function metadata(value: any, accounts: ProviderRecord[]): ProviderRecord {
   if (!value) return {};
   if (!plain(value)) invalid();
   renderFields(value, ['lastUpdated'], ['accountsQueried', 'accountsFailed']);
@@ -101,17 +101,17 @@ function metadata(value, accounts) {
   }
   return result;
 }
-async function searchConversations(api, accounts, account, url) {
+async function searchConversations(api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, url: URL) {
   const term = str(url.searchParams.get('query')?.trim(), 'search query', 200);
   if (term.length < 2) fail(400, 'INVALID_INBOX_FILTER', 'Enter at least two characters to search message history.');
   const params = query(url, 'search'), direction = url.searchParams.get('direction');
   if (params.limit > 50 || direction !== null && !['incoming', 'outgoing'].includes(direction)) fail(400, 'INVALID_INBOX_FILTER', 'Choose a valid search direction and a page size of at most 50.');
   const result = await api('/inbox/conversations/search', { profileId: account.profileId?._id || account.profileId, accountId: account._id, query: term, ...params, ...(direction ? { direction } : {}) });
   if (!Array.isArray(result.data) || result.data.length > params.limit) invalid();
-  const conversations = result.data.map(hit => {
+  const conversations = result.data.map((hit: any) => {
     if (!plain(hit) || !Number.isSafeInteger(hit.matchCount) || hit.matchCount < 0 || !Array.isArray(hit.matches) || hit.matches.length > 3 || hit.matchCount < hit.matches.length) invalid();
     scoped(hit.conversation, accounts, account._id); validateConversation(hit.conversation);
-    const matches = hit.matches.map(match => {
+    const matches = hit.matches.map((match: any) => {
       renderFields(match, ['id', 'text', 'direction', 'timestamp']);
       if (!valid(match.id) || !['incoming', 'outgoing'].includes(match.direction) || direction && match.direction !== direction || !Number.isFinite(Date.parse(match.timestamp))) invalid();
       return pick(match, ['id', 'text', 'direction', 'timestamp']);
@@ -120,32 +120,32 @@ async function searchConversations(api, accounts, account, url) {
   });
   return { conversations, pagination: pagination(result.pagination), meta: metadata(result.meta, [account]) };
 }
-async function slackMembers(api, account, search = '') {
+async function slackMembers(api: ZernioApi, account: ProviderRecord, search = '') {
   if (account.platform !== 'slack') fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'Choose a Slack account to load workspace members.');
   if (typeof search !== 'string' || search.length > 100 || /[\u0000-\u001f]/.test(search)) fail(400, 'INVALID_INBOX_FILTER', 'Use a member name or handle of at most 100 characters.');
   const result = await api(`/accounts/${encodeURIComponent(account._id)}/slack-members`, { query: search, limit: 2000 });
   if (!Array.isArray(result.members) || result.members.length > 2000) invalid();
-  const members = result.members.map(row => { renderFields(row, ['id', 'name', 'username', 'picture']); if (!/^U[A-Z0-9]+$/.test(row.id) || !row.name) invalid(); return pick(row, ['id', 'name', 'username']); });
-  if (new Set(members.map(row => row.id)).size !== members.length) invalid();
+  const members = result.members.map((row: any) => { renderFields(row, ['id', 'name', 'username', 'picture']); if (!/^U[A-Z0-9]+$/.test(row.id) || !row.name) invalid(); return pick(row, ['id', 'name', 'username']); });
+  if (new Set(members.map((row: any) => row.id)).size !== members.length) invalid();
   return members;
 }
-function permittedContact(context, channel, contactId) {
+function permittedContact(context: ProviderRecord, channel: string, contactId: string): ProviderRecord {
   const contact = context.contacts?.get(context.project.id, id(contactId));
   if (!contact || !/^\+[1-9]\d{6,14}$/.test(contact.phone || '') || contact.consents?.[channel] !== true || contact.suppression?.[channel]) fail(409, 'RECIPIENT_PERMISSION_REQUIRED', 'Choose a project contact with recorded permission for this channel and no suppression.');
   return contact;
 }
-async function startConversation(context, api, account, env, assertMapping, key) {
+async function startConversation(context: ProviderRecord, api: ZernioApi, account: ProviderRecord, env: ProviderRecord, assertMapping: () => void, key?: string) {
   const { body } = context;
   supported(account, 'start'); fields(body, ['accountId', 'participantUsername', 'participantId', 'contactId', 'message', 'templateName', 'templateLanguage', 'templateComponents', 'confirmSend']);
   if (body.confirmSend !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Review the recipient and message before confirming this send.');
-  const payload = { accountId: account._id };
+  const payload: ProviderRecord = { accountId: account._id };
   if (['sms', 'whatsapp'].includes(account.platform)) {
     if (body.participantId !== undefined || body.participantUsername !== undefined) fail(400, 'INVALID_RECIPIENT', 'Choose a contact rather than supplying an unverified phone number.');
     payload.participantId = permittedContact(context, account.platform, body.contactId).phone.replace(/^\+/, '');
   } else {
     if (body.contactId !== undefined || Boolean(body.participantId) === Boolean(body.participantUsername)) fail(400, 'INVALID_RECIPIENT', 'Choose exactly one recipient identity.');
     if (account.platform === 'slack') {
-      if (!body.participantId || body.participantUsername || !(await slackMembers(api, account)).some(member => member.id === body.participantId)) fail(422, 'RECIPIENT_UNAVAILABLE', 'Choose an eligible member of this connected Slack workspace.');
+      if (!body.participantId || body.participantUsername || !(await slackMembers(api, account)).some((member: any) => member.id === body.participantId)) fail(422, 'RECIPIENT_UNAVAILABLE', 'Choose an eligible member of this connected Slack workspace.');
       payload.participantId = body.participantId;
     } else if (body.participantId) {
       if (account.platform !== 'twitter' || typeof body.participantId !== 'string' || !/^\d{1,25}$/.test(body.participantId)) fail(400, 'INVALID_RECIPIENT', 'Use an X numeric user ID or a supported platform handle.');
@@ -158,12 +158,12 @@ async function startConversation(context, api, account, env, assertMapping, key)
   }
   if (account.platform === 'whatsapp') {
     if (body.message !== undefined) fail(400, 'TEMPLATE_REQUIRED', 'Use an approved template to start a WhatsApp conversation.');
-    const { templates } = await listWhatsAppTemplates({ env, project: context.project, accountId: account._id, assertMapping }), template = validateWhatsAppTemplate(body, templates.find(row => row.name === body.templateName && row.language === body.templateLanguage));
+    const { templates } = await listWhatsAppTemplates({ env, project: context.project, accountId: account._id, assertMapping }), template = validateWhatsAppTemplate(body, templates.find((row: any) => row.name === body.templateName && row.language === body.templateLanguage)!);
     payload.templateName = template.name; payload.templateLanguage = template.language; payload.templateParams = [];
-    for (const part of [...(template.components || [])].sort((a, b) => ({ header: 0, body: 1, button: 2 }[a.type] - { header: 0, body: 1, button: 2 }[b.type]) || Number(a.index || 0) - Number(b.index || 0))) {
+    for (const part of [...(template.components || [])].sort((a, b) => (({ header: 0, body: 1, button: 2 } as Record<string, number>)[a.type] - ({ header: 0, body: 1, button: 2 } as Record<string, number>)[b.type]) || Number(a.index || 0) - Number(b.index || 0))) {
       const media = part.type === 'header' && part.parameters[0]?.type !== 'text' ? part.parameters[0] : null;
       if (media) payload.headerMedia = { type: media.type, ...media[media.type] };
-      else payload.templateParams.push(...part.parameters.map(parameter => parameter.text));
+      else payload.templateParams.push(...part.parameters.map((parameter: any) => parameter.text));
     }
   } else {
     if (['templateName', 'templateLanguage', 'templateComponents'].some(field => body[field] !== undefined)) fail(400, 'INVALID_TEMPLATE', 'Templates are only available for WhatsApp.');
@@ -178,21 +178,21 @@ async function startConversation(context, api, account, env, assertMapping, key)
   if (payload.participantId && ['twitter', 'slack'].includes(account.platform) && result.data.participantId != null && result.data.participantId !== payload.participantId) invalid(true);
   return { sent: true, ...pick(result.data, ['messageId', 'conversationId', 'participantId', 'participantName', 'participantUsername']), accountId: account._id, platform: account.platform };
 }
-function conversationContact(context, row, incoming = false) {
+function conversationContact(context: ProviderRecord, row: ProviderRecord, incoming = false) {
   if (row.platform !== 'facebook' || !valid(row.participantId)) return undefined;
-  const identity = { accountId: row.accountId, participantId: row.participantId, conversationId: row.id, ...(typeof row.participantName === 'string' ? { name: row.participantName.slice(0, 200) } : {}) };
+  const identity: ProviderRecord = { accountId: row.accountId, participantId: row.participantId, conversationId: row.id, ...(typeof row.participantName === 'string' ? { name: row.participantName.slice(0, 200) } : {}) };
   if (row.participantPicture) try { identity.avatarUrl = publicMediaUrl(row.participantPicture); } catch { /* A missing profile picture must not prevent reading a conversation. */ }
   if (incoming) context.contacts?.fromMessenger?.(context.project.id, identity);
   return context.contacts?.findMessenger?.(context.project.id, row.accountId, row.participantId) || undefined;
 }
-async function conversation(api, accounts, account, conversationId) {
+async function conversation(api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, conversationId: string) {
   const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}`, { accountId: account._id }), row = result.data;
   scoped(row, accounts, account._id);
   validateConversation(row);
   // Meta lists platform thread IDs but detail/send can return a different stored ID.
   return pick(row, conversationFields);
 }
-async function history(api, account, conversationId, params = {}, resolvedId = conversationId) {
+async function history(api: ZernioApi, account: ProviderRecord, conversationId: string, params: ProviderRecord = {}, resolvedId = conversationId): Promise<ProviderRecord> {
   const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/messages`, { accountId: account._id, limit: 100, sortOrder: 'desc', ...params });
   if (!Array.isArray(result.messages) || result.messages.length > 100) invalid();
   for (const row of result.messages) if (!plain(row) || !valid(row.id) || row.accountId !== undefined && row.accountId !== account._id || row.platform !== undefined && row.platform !== account.platform || row.conversationId !== undefined && ![conversationId, resolvedId].includes(row.conversationId) || !['incoming', 'outgoing'].includes(row.direction) || row.attachments !== undefined && (!Array.isArray(row.attachments) || row.attachments.length > 100 || row.attachments.some(item => !plain(item) || typeof item.type !== 'string' || item.url !== undefined && typeof item.url !== 'string')) || row.reactions !== undefined && (!Array.isArray(row.reactions) || row.reactions.some(item => !plain(item) || typeof item.emoji !== 'string'))) invalid();
@@ -202,7 +202,7 @@ async function history(api, account, conversationId, params = {}, resolvedId = c
     for (const reaction of row.reactions || []) renderFields(reaction, ['emoji', 'reactedAt'], [], ['fromMe']);
     if (row.editHistory !== undefined) {
       if (!Array.isArray(row.editHistory) || row.editHistory.length > 1000) invalid();
-      row.editHistory = row.editHistory.map(entry => { renderFields(entry, ['text', 'editedAt']); if (!Array.isArray(entry.attachments) || entry.attachments.length > 100) invalid(); entry.attachments.forEach(item => renderFields(item, ['type', 'url'])); return { ...pick(entry, ['text', 'editedAt']), attachments: entry.attachments.map(item => pick(item, ['type', 'url'])) }; });
+      row.editHistory = row.editHistory.map((entry: any) => { renderFields(entry, ['text', 'editedAt']); if (!Array.isArray(entry.attachments) || entry.attachments.length > 100) invalid(); entry.attachments.forEach((item: any) => renderFields(item, ['type', 'url'])); return { ...pick(entry, ['text', 'editedAt']), attachments: entry.attachments.map((item: any) => pick(item, ['type', 'url'])) }; });
     }
     if (row.storyReply != null) renderFields(row.storyReply, ['storyId', 'storyUrl']);
     if (account.platform === 'whatsapp' && row.direction === 'incoming' && row.metadata != null) {
@@ -210,46 +210,46 @@ async function history(api, account, conversationId, params = {}, resolvedId = c
       if (row.metadata.interactiveType === 'button_reply' && (typeof row.metadata.interactiveId !== 'string' || !row.metadata.interactiveId.trim() || row.metadata.interactiveId.length > 2000 || /[\u0000-\u001f\u007f]/.test(row.metadata.interactiveId))) invalid();
     }
   }
-  return { messages: result.messages.map(row => ({ ...pick(row, messageFields), ...(account.platform === 'whatsapp' && row.direction === 'incoming' && row.metadata?.interactiveType === 'button_reply' ? { metadata: pick(row.metadata, ['interactiveType', 'interactiveId']) } : {}) })), pagination: pagination(result.pagination), sortOrderApplied: result.sortOrderApplied || 'desc' };
+  return { messages: result.messages.map((row: any) => ({ ...pick(row, messageFields), ...(account.platform === 'whatsapp' && row.direction === 'incoming' && row.metadata?.interactiveType === 'button_reply' ? { metadata: pick(row.metadata, ['interactiveType', 'interactiveId']) } : {}) })), pagination: pagination(result.pagination), sortOrderApplied: result.sortOrderApplied || 'desc' };
 }
-async function recentHistory(api, account, conversationId, resolvedId) {
+async function recentHistory(api: ZernioApi, account: ProviderRecord, conversationId: string, resolvedId: string) {
   const result = await history(api, account, conversationId, {}, resolvedId), seen = new Set();
   // ponytail: scan at most 2,000 recent messages; use the provider dashboard for longer reply-window history.
-  for (let page = 1; !result.messages.some(message => message.direction === 'incoming' && Number.isFinite(Date.parse(message.createdAt))) && result.pagination.hasMore; page++) {
+  for (let page = 1; !result.messages.some((message: any) => message.direction === 'incoming' && Number.isFinite(Date.parse(message.createdAt))) && result.pagination.hasMore; page++) {
     if (page >= 20) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This conversation exceeds the reply-window history limit. Open it in the provider dashboard.');
     const cursor = result.pagination.nextCursor; if (seen.has(cursor)) invalid(); seen.add(cursor);
     const next = await history(api, account, conversationId, { cursor }, resolvedId); result.messages.push(...next.messages); result.pagination = next.pagination;
   }
   return result.messages;
 }
-const incomingTime = messages => Math.max(...messages.filter(message => message.direction === 'incoming').map(message => Date.parse(message.createdAt)).filter(Number.isFinite));
-const incomingAge = messages => Date.now() - incomingTime(messages);
-export const inboxMessageVersion = (message, accountId) => createHash('sha256').update(JSON.stringify([accountId, message.id, message.direction, message.message ?? null, message.createdAt ?? null, message.editedAt ?? null, message.isDeleted || message.deliveryStatus === 'deleted', message.attachments || [], message.reactions || []])).digest('hex');
-function messageActions(account, message, windowAge = Infinity) {
+const incomingTime = (messages: ProviderRecord[]) => Math.max(...messages.filter(message => message.direction === 'incoming').map(message => Date.parse(message.createdAt)).filter(Number.isFinite));
+const incomingAge = (messages: ProviderRecord[]) => Date.now() - incomingTime(messages);
+export const inboxMessageVersion = (message: ProviderRecord, accountId: string) => createHash('sha256').update(JSON.stringify([accountId, message.id, message.direction, message.message ?? null, message.createdAt ?? null, message.editedAt ?? null, message.isDeleted || message.deliveryStatus === 'deleted', message.attachments || [], message.reactions || []])).digest('hex');
+function messageActions(account: ProviderRecord, message: ProviderRecord, windowAge = Infinity): ProviderRecord {
   const age = Date.now() - Date.parse(message.createdAt), own = message.direction === 'outgoing', live = account.isActive !== false && !message.isDeleted && message.deliveryStatus !== 'deleted', apple = account.platform === 'imessage';
-  return { canEdit: live && own && EDIT_MESSAGE.has(account.platform) && typeof message.message === 'string' && !!message.message.trim() && !message.attachments?.length && (!apple || age >= 0 && age < 15 * 60000), canDelete: live && own && DELETE_MESSAGE.has(account.platform) && (!apple || age >= 0 && age < 2 * 60000), canReact: live && REACT_MESSAGE.has(account.platform) && (!['facebook', 'instagram'].includes(account.platform) || windowAge >= 0 && windowAge <= 86400000), canUnreact: live && REACT_MESSAGE.has(account.platform) && (message.reactions || []).some(reaction => reaction.fromMe === true) && (!['facebook', 'instagram'].includes(account.platform) || windowAge >= 0 && windowAge <= 86400000), deleteScope: ['bluesky', 'reddit'].includes(account.platform) ? 'self' : apple ? 'unsend' : 'platform', ...(apple ? { editUntil: Number.isFinite(age) ? new Date(Date.parse(message.createdAt) + 15 * 60000).toISOString() : null, deleteUntil: Number.isFinite(age) ? new Date(Date.parse(message.createdAt) + 2 * 60000).toISOString() : null } : {}) };
+  return { canEdit: live && own && EDIT_MESSAGE.has(account.platform) && typeof message.message === 'string' && !!message.message.trim() && !message.attachments?.length && (!apple || age >= 0 && age < 15 * 60000), canDelete: live && own && DELETE_MESSAGE.has(account.platform) && (!apple || age >= 0 && age < 2 * 60000), canReact: live && REACT_MESSAGE.has(account.platform) && (!['facebook', 'instagram'].includes(account.platform) || windowAge >= 0 && windowAge <= 86400000), canUnreact: live && REACT_MESSAGE.has(account.platform) && (message.reactions || []).some((reaction: any) => reaction.fromMe === true) && (!['facebook', 'instagram'].includes(account.platform) || windowAge >= 0 && windowAge <= 86400000), deleteScope: ['bluesky', 'reddit'].includes(account.platform) ? 'self' : apple ? 'unsend' : 'platform', ...(apple ? { editUntil: Number.isFinite(age) ? new Date(Date.parse(message.createdAt) + 15 * 60000).toISOString() : null, deleteUntil: Number.isFinite(age) ? new Date(Date.parse(message.createdAt) + 2 * 60000).toISOString() : null } : {}) };
 }
-async function findMessage(api, account, conversationId, resolvedId, messageId) {
+async function findMessage(api: ZernioApi, account: ProviderRecord, conversationId: string, resolvedId: string, messageId: string): Promise<ProviderRecord | null> {
   let cursor; const seen = new Set();
   // ponytail: verify at most 2,000 messages; use the provider dashboard for older actions.
   for (let page = 0; page < 20; page++) {
-    const result = await history(api, account, conversationId, cursor ? { cursor } : {}, resolvedId), target = result.messages.find(message => message.id === messageId);
+    const result = await history(api, account, conversationId, cursor ? { cursor } : {}, resolvedId), target = result.messages.find((message: any) => message.id === messageId);
     if (target) return target;
     if (!result.pagination.hasMore) return null;
     cursor = result.pagination.nextCursor; if (seen.has(cursor)) invalid(); seen.add(cursor);
   }
   fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This message is beyond the verified history window. Open it in the provider dashboard.');
 }
-function deletionVersion(row, messages) {
+function deletionVersion(row: ProviderRecord, messages: ProviderRecord[]) {
   if (messages.some(message => !Number.isFinite(Date.parse(message.createdAt)))) return null;
   const latest = [...messages].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id.localeCompare(a.id));
   return createHash('sha256').update(JSON.stringify([inboxConversationVersion(row), latest.map(message => inboxMessageVersion(message, row.accountId))])).digest('hex');
 }
-function deletionTable(db) {
+function deletionTable(db: DatabaseSync): void {
   db.exec(`CREATE TABLE IF NOT EXISTS inbox_conversation_deletions(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,conversation_id TEXT NOT NULL,status TEXT NOT NULL,operation_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(project_id,profile_id,account_id,conversation_id))`);
-  if (!db.prepare('PRAGMA table_info(inbox_conversation_deletions)').all().some(column => column.name === 'operation_id')) db.exec("ALTER TABLE inbox_conversation_deletions ADD COLUMN operation_id TEXT NOT NULL DEFAULT ''");
+  if (!db.prepare('PRAGMA table_info(inbox_conversation_deletions)').all().some((column: any) => column.name === 'operation_id')) db.exec("ALTER TABLE inbox_conversation_deletions ADD COLUMN operation_id TEXT NOT NULL DEFAULT ''");
 }
-async function deleteConversation(context, api, account, conversationId, row, key) {
+async function deleteConversation(context: ProviderRecord, api: ZernioApi, account: ProviderRecord, conversationId: string, row: ProviderRecord, key?: string) {
   const { body, db, project } = context;
   fields(body, ['accountId', 'expectedDeleteVersion', 'confirmConversationId']);
   const latest = await history(api, account, conversationId, {}, row.id);
@@ -266,20 +266,20 @@ async function deleteConversation(context, api, account, conversationId, row, ke
     if (result.success !== true || !plain(receipt) || ![conversationId, row.id].includes(receipt.id) || receipt.accountId !== account._id || receipt.platform !== account.platform || !Number.isSafeInteger(receipt.deletedMessages) || receipt.deletedMessages < 0) invalid(true);
     db.prepare("UPDATE inbox_conversation_deletions SET status='deleted' WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?").run(...binding);
     return { accepted: true, deleted: true, scope: 'zernio_copy', conversationId, deletedMessages: receipt.deletedMessages };
-  } catch (error) {
+  } catch (error: any) {
     if (!(error instanceof IntegrationError) || error.uncertain) db.prepare("UPDATE inbox_conversation_deletions SET status='uncertain' WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?").run(...binding);
     else db.prepare('DELETE FROM inbox_conversation_deletions WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?').run(...binding);
     throw error;
   }
 }
-async function attachment(context, api, accounts, account, conversationId, messageId, index, download, apiKey) {
+async function attachment(context: ProviderRecord, api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, conversationId: string, messageId: string, index: number, download: boolean, apiKey: string) {
   const row = await conversation(api, accounts, account, conversationId), message = await findMessage(api, account, conversationId, row.id, messageId), item = message?.attachments?.[index];
   if (!item || message.isDeleted || message.deliveryStatus === 'deleted') fail(404, 'ATTACHMENT_NOT_FOUND', 'This attachment was not found in the selected account and conversation.');
   if (account.platform !== 'whatsapp') {
     if (download) fail(400, 'ATTACHMENT_DOWNLOAD_UNSUPPORTED', 'Resolve this platform’s public media link before opening it.');
     let result;
     try { result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/attachments/${index}`, { accountId: account._id, format: 'json' }); }
-    catch (error) { if (error.providerStatus === 404) fail(410, 'ATTACHMENT_UNAVAILABLE', 'This attachment is unavailable or expired at the provider. Refresh the thread; the media may no longer be recoverable.'); throw error; }
+    catch (error: any) { if (error.providerStatus === 404) fail(410, 'ATTACHMENT_UNAVAILABLE', 'This attachment is unavailable or expired at the provider. Refresh the thread; the media may no longer be recoverable.'); throw error; }
     let url;
     try { url = publicMediaUrl(result.url); } catch { invalid(); }
     if (result.status !== 'success' || typeof result.refreshed !== 'boolean') invalid();
@@ -300,7 +300,7 @@ async function attachment(context, api, accounts, account, conversationId, messa
     response = await fetch(target, { headers: { Authorization: `Bearer ${apiKey}` }, redirect: 'error', signal: AbortSignal.any([AbortSignal.timeout(20000), abort.signal]) });
     context.assertProjectMapping?.(context.project.zernioProfileId);
     if (!response.ok) fail(response.status === 400 || response.status === 404 ? 410 : 502, 'ATTACHMENT_UNAVAILABLE', response.status === 400 || response.status === 404 ? 'WhatsApp no longer serves this attachment. It cannot be recovered by retrying.' : 'WhatsApp could not provide this attachment. Try again later.');
-    const mime = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase(), details = downloadTypes.get(mime), expected = item.type === 'sticker' ? 'image' : item.type, length = response.headers.get('content-length');
+    const mime = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase(), details = downloadTypes.get(mime!), expected = item.type === 'sticker' ? 'image' : item.type, length = response.headers.get('content-length');
     if (!details || details[0] !== expected || item.mimeType && item.mimeType.split(';')[0].toLowerCase() !== mime || length !== null && (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) < 1 || Number(length) > details[2] * 1024 * 1024)) fail(502, 'ATTACHMENT_UNAVAILABLE', 'WhatsApp returned an unsupported file type or an attachment beyond its download limit.');
     const maximum = details[2] * 1024 * 1024;
     reader = response.body?.[Symbol.asyncIterator](); let part = await reader?.next();
@@ -314,16 +314,16 @@ async function attachment(context, api, accounts, account, conversationId, messa
       if (size > maximum) fail(502, 'ATTACHMENT_UNAVAILABLE', 'This attachment exceeds its download limit.');
       context.assertProjectMapping?.(context.project.zernioProfileId);
       if (context.res.destroyed) throw new Error();
-      if (!context.res.write(chunk)) await new Promise((resolve, reject) => {
+      if (!context.res.write(chunk)) await new Promise<void>((resolve, reject) => {
         const cleanup = () => { context.res.off('drain', drain); context.res.off('close', close); }, drain = () => { cleanup(); resolve(); }, close = () => { cleanup(); reject(new Error('Download closed')); };
         context.res.once('drain', drain); context.res.once('close', close);
       });
-      part = await reader.next();
+      part = await reader!.next();
     }
     if (length !== null && size !== Number(length)) throw new Error();
     context.res.end();
     return null;
-  } catch (error) {
+  } catch (error: any) {
     abort.abort(); await reader?.return?.().catch(() => {});
     await response?.body?.cancel().catch(() => {});
     if (context.res.headersSent) { context.res.destroy(); return null; }
@@ -331,11 +331,11 @@ async function attachment(context, api, accounts, account, conversationId, messa
     fail(502, 'ATTACHMENT_UNAVAILABLE', 'This WhatsApp attachment could not be downloaded. Try again later.');
   } finally { context.res.off('close', closed); }
 }
-function emoji(value, platform) {
+function emoji(value: any, platform: string): string {
   if (typeof value !== 'string' || !value || value.length > 64 || (platform === 'slack' ? !/^:[a-z0-9_+\-]{1,60}:$/i.test(value) : [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(value)].length !== 1 || !/[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(value))) fail(400, 'INVALID_REACTION', platform === 'slack' ? 'Use a Slack emoji name such as :thumbsup:.' : 'Choose one standard emoji reaction.');
   return value;
 }
-async function changeMessage(context, api, account, conversationId, resolvedId, messageId, verb, key) {
+async function changeMessage(context: ProviderRecord, api: ZernioApi, account: ProviderRecord, conversationId: string, resolvedId: string, messageId: string, verb: string, key?: string) {
   const { body } = context;
   supported(account, verb === 'edit' ? 'messageEdit' : verb === 'delete' ? 'messageDelete' : 'messageReact');
   fields(body, ['accountId', 'expectedMessageVersion', ...(verb === 'edit' ? ['text'] : verb === 'delete' ? ['confirmMessageId'] : verb === 'react' ? ['emoji'] : [])]);
@@ -343,23 +343,23 @@ async function changeMessage(context, api, account, conversationId, resolvedId, 
   if (!target) fail(403, 'MESSAGE_OUTSIDE_CONVERSATION', 'This message was not found in the selected account and conversation.');
   if (body.expectedMessageVersion !== inboxMessageVersion(target, account._id)) fail(409, 'MESSAGE_CHANGED', 'This message changed. Refresh the thread before changing it.');
   const age = ['facebook', 'instagram'].includes(account.platform) ? incomingAge(await recentHistory(api, account, conversationId, resolvedId)) : Infinity, eligibility = messageActions(account, target, age);
-  if (!eligibility[{ edit: 'canEdit', delete: 'canDelete', react: 'canReact', unreact: 'canUnreact' }[verb]]) fail(409, 'MESSAGE_ACTION_UNAVAILABLE', 'This message cannot be changed now. Check ownership, the edit/unsend or reply window, and whether your account has a reaction to remove.');
+  if (!eligibility[({ edit: 'canEdit', delete: 'canDelete', react: 'canReact', unreact: 'canUnreact' } as Record<string, string>)[verb]]) fail(409, 'MESSAGE_ACTION_UNAVAILABLE', 'This message cannot be changed now. Check ownership, the edit/unsend or reply window, and whether your account has a reaction to remove.');
   const endpoint = `/inbox/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`;
-  let payload, result;
+  let payload: any, result: any;
   if (verb === 'edit') { payload = { accountId: account._id, text: str(body.text, 'message text', inboxCapabilities(account.platform).messageLimit) }; if (payload.text === target.message) fail(400, 'MESSAGE_UNCHANGED', 'Change the message text before saving.'); result = await api(endpoint, {}, payload, key, 'PATCH'); }
   else if (verb === 'delete') { if (body.confirmMessageId !== messageId) fail(400, 'MESSAGE_CONFIRMATION_REQUIRED', 'Confirm the selected message before deleting it.'); result = await api(endpoint, { accountId: account._id }, undefined, key, 'DELETE'); }
   else { payload = { accountId: account._id, ...(verb === 'react' ? { emoji: emoji(body.emoji, account.platform) } : {}) }; result = await api(endpoint + '/reactions', verb === 'unreact' ? payload : {}, verb === 'react' ? payload : undefined, key, verb === 'react' ? 'POST' : 'DELETE'); }
   if (result.success !== true || verb === 'edit' && !(valid(result.data?.messageId) || Number.isSafeInteger(result.data?.messageId)) || ['react', 'unreact'].includes(verb) && (!valid(result.messageId) || result.platformMessageId !== messageId)) invalid(true);
   let fresh;
   try { fresh = await findMessage(api, account, conversationId, resolvedId, messageId); }
-  catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+  catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
   if (verb === 'edit' && (!fresh || fresh.isDeleted || fresh.message !== payload.text) || verb === 'delete' && fresh && fresh.isDeleted !== true && fresh.deliveryStatus !== 'deleted') fail(502, 'MESSAGE_CHANGE_NOT_CONFIRMED', 'The latest history has not confirmed this message change. Review the thread before another attempt.', true);
-  return { messageId, action: verb, accepted: true, observed: verb === 'edit' || verb === 'delete' || Boolean(fresh) && (verb === 'react' ? (fresh.reactions || []).some(reaction => reaction.fromMe === true && reaction.emoji === payload.emoji) : !(fresh.reactions || []).some(reaction => reaction.fromMe === true)), ...(fresh ? { message: { ...fresh, version: inboxMessageVersion(fresh, account._id), actions: messageActions(account, fresh, age) } } : {}), ...(verb === 'delete' ? { deleteScope: eligibility.deleteScope } : {}) };
+  return { messageId, action: verb, accepted: true, observed: verb === 'edit' || verb === 'delete' || Boolean(fresh) && (verb === 'react' ? (fresh!.reactions || []).some((reaction: any) => reaction.fromMe === true && reaction.emoji === payload.emoji) : !(fresh!.reactions || []).some((reaction: any) => reaction.fromMe === true)), ...(fresh ? { message: { ...fresh, version: inboxMessageVersion(fresh, account._id), actions: messageActions(account, fresh, age) } } : {}), ...(verb === 'delete' ? { deleteScope: eligibility.deleteScope } : {}) };
 }
-const controlActions = account => account.isActive === false ? [] : account.platform === 'whatsapp' ? ['take', 'release'] : account.platform === 'facebook' ? ['take', 'request', 'pass', 'release'] : account.platform === 'instagram' ? account.metadata?.loginMethod === 'facebook_login' ? ['take', 'request', 'pass', 'release'] : ['pass', 'release'] : [];
-export const inboxConversationVersion = row => createHash('sha256').update(JSON.stringify([row.id, row.accountId, row.platform, row.participantId ?? null, row.lastMessage ?? null, row.lastMessageAt ?? row.updatedTime ?? null, row.threadControl ?? null])).digest('hex');
-const conversationView = (account, row) => ({ ...row, version: inboxConversationVersion(row), controlActions: controlActions(account) });
-async function changeControl(context, api, accounts, account, conversationId, row, key) {
+const controlActions = (account: ProviderRecord): string[] => account.isActive === false ? [] : account.platform === 'whatsapp' ? ['take', 'release'] : account.platform === 'facebook' ? ['take', 'request', 'pass', 'release'] : account.platform === 'instagram' ? account.metadata?.loginMethod === 'facebook_login' ? ['take', 'request', 'pass', 'release'] : ['pass', 'release'] : [];
+export const inboxConversationVersion = (row: ProviderRecord) => createHash('sha256').update(JSON.stringify([row.id, row.accountId, row.platform, row.participantId ?? null, row.lastMessage ?? null, row.lastMessageAt ?? row.updatedTime ?? null, row.threadControl ?? null])).digest('hex');
+const conversationView = (account: ProviderRecord, row: ProviderRecord) => ({ ...row, version: inboxConversationVersion(row), controlActions: controlActions(account) });
+async function changeControl(context: ProviderRecord, api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, conversationId: string, row: ProviderRecord, key?: string) {
   const { body } = context;
   supported(account, 'threadControl'); fields(body, ['accountId', 'action', 'targetAppId', 'metadata', 'expectedConversationVersion', 'confirmControl']);
   if (body.confirmControl !== true || body.expectedConversationVersion !== inboxConversationVersion(row)) fail(409, 'CONTROL_CONFIRMATION_REQUIRED', 'Refresh the conversation and review who will answer before changing control.');
@@ -371,18 +371,18 @@ async function changeControl(context, api, accounts, account, conversationId, ro
   if (response.success !== true || !plain(control) || !['app', 'ai_agent', 'other'].includes(control.owner) || control.ownerAppId != null && (typeof control.ownerAppId !== 'string' || !/^\d{1,32}$/.test(control.ownerAppId)) || body.action === 'take' && control.owner !== 'app' || body.action === 'pass' && (control.owner !== 'other' || control.ownerAppId !== body.targetAppId) || account.platform === 'whatsapp' && body.action === 'release' && control.owner !== 'ai_agent') invalid(true);
   let fresh;
   try { fresh = await conversation(api, accounts, account, conversationId); }
-  catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+  catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
   if (body.action !== 'request' && fresh.threadControl !== control.owner) fail(502, 'CONTROL_CHANGE_NOT_CONFIRMED', 'The latest conversation has not confirmed its new owner. Refresh and review before another transfer.', true);
   return { action: body.action, accepted: true, requested: body.action === 'request', control: pick(control, ['owner', 'ownerAppId']), conversation: conversationView(account, fresh) };
 }
-async function acceptRequest(context, api, accounts, account, conversationId, row, key) {
+async function acceptRequest(context: ProviderRecord, api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, conversationId: string, row: ProviderRecord, key?: string) {
   const { body } = context;
   supported(account, 'acceptRequest'); fields(body, ['accountId', 'message', 'expectedConversationVersion', 'confirmSend']);
   if (body.confirmSend !== true || body.expectedConversationVersion !== inboxConversationVersion(row)) fail(409, 'REQUEST_CONFIRMATION_REQUIRED', 'Refresh this request and review the reply before sending it.');
   let cursor, found = false; const seen = new Set();
   for (let page = 0; page < 20; page++) {
     const requests = await aggregate(api, accounts, account, 'conversations', { folder: 'requests', status: 'active', limit: 100, ...(cursor ? { cursor } : {}) });
-    if (requests.rows.some(item => item.id === conversationId && item.folder === 'requests')) { found = true; break; }
+    if (requests.rows.some((item: any) => item.id === conversationId && item.folder === 'requests')) { found = true; break; }
     if (!requests.pagination.hasMore) break;
     cursor = requests.pagination.nextCursor; if (!cursor || seen.has(cursor)) fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This request could not be verified in the provider request folder. Refresh or use the provider dashboard.'); seen.add(cursor);
   }
@@ -393,14 +393,14 @@ async function acceptRequest(context, api, accounts, account, conversationId, ro
   if (response.success !== true || !valid(response.data?.messageId) || response.data?.accountId !== undefined && response.data.accountId !== account._id || response.data?.platform !== undefined && response.data.platform !== account.platform) invalid(true);
   let sent;
   try { sent = await findMessage(api, account, conversationId, row.id, response.data.messageId); }
-  catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+  catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
   if (!sent || sent.direction !== 'outgoing' || sent.message !== payload.message) fail(502, 'REQUEST_REPLY_NOT_CONFIRMED', 'The latest history has not confirmed this acceptance reply. Review the conversation before another send.', true);
   return { accepted: true, sent: true, messageId: response.data.messageId };
 }
-async function aggregate(api, accounts, account, kind, params) {
+async function aggregate(api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, kind: string, params: ProviderRecord): Promise<ProviderRecord> {
   const result = await api(`/inbox/${kind}`, { profileId: account.profileId?._id || account.profileId, accountId: account._id, ...params });
   if (!Array.isArray(result.data) || result.data.length > (kind === 'reviews' ? 50 : 100)) invalid();
-  result.data.forEach(row => {
+  result.data.forEach((row: any) => {
     scoped(row, accounts, account._id);
     if (kind === 'conversations') validateConversation(row);
     else if (kind === 'reviews') validateReview(row);
@@ -412,7 +412,7 @@ async function aggregate(api, accounts, account, kind, params) {
   });
   const page = pagination(kind === 'mentions' ? { hasMore: result.pagination?.hasMore, cursor: result.pagination?.cursor } : result.pagination, false, kind === 'conversations' && params.folder === 'requests');
   if (kind === 'mentions') {
-    if (result.data.length > params.limit || new Set(result.data.map(row => row.id)).size !== result.data.length || page.hasMore && (!result.data.length || page.nextCursor === params.cursor)) invalid();
+    if (result.data.length > params.limit || new Set(result.data.map((row: any) => row.id)).size !== result.data.length || page.hasMore && (!result.data.length || page.nextCursor === params.cursor)) invalid();
     if (result.meta != null) {
       renderFields(result.meta, ['sortOrder'], ['total']);
       if (result.meta.total != null && !Number.isSafeInteger(result.meta.total) || result.meta.sortOrder != null && result.meta.sortOrder !== (params.sortOrder || 'desc')) invalid();
@@ -420,26 +420,26 @@ async function aggregate(api, accounts, account, kind, params) {
   }
   return { rows: result.data, pagination: page, meta: kind === 'mentions' ? pick(result.meta, ['total', 'sortOrder']) : metadata(result.meta, accounts), ...(result.summary ? { summary: pick(result.summary, ['totalReviews', 'averageRating']) } : {}) };
 }
-async function findRow(api, accounts, account, kind, resourceId) {
+async function findRow(api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, kind: string, resourceId: string): Promise<ProviderRecord> {
   let cursor; const seen = new Set();
   // ponytail: scope checks scan at most 2,000 posts or 1,000 reviews; use a persisted resource index for older items.
   for (let page = 0; page < 20; page++) {
-    const result = await aggregate(api, accounts, account, kind, { limit: kind === 'reviews' ? 50 : 100, ...(cursor ? { cursor } : {}) }), row = result.rows.find(item => item.id === resourceId);
+    const result = await aggregate(api, accounts, account, kind, { limit: kind === 'reviews' ? 50 : 100, ...(cursor ? { cursor } : {}) }), row = result.rows.find((item: any) => item.id === resourceId);
     if (row) return row;
     if (!result.pagination.hasMore) fail(403, 'INBOX_ITEM_OUTSIDE_PROJECT', 'This item was not found in this project account.');
     cursor = result.pagination.nextCursor; if (seen.has(cursor)) invalid(); seen.add(cursor);
   }
   fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This inbox feed exceeds the scope-check limit. Use the provider dashboard for older items.');
 }
-function normalizedComment(row, platform, depth = 0) {
+function normalizedComment(row: any, platform: string, depth = 0): ProviderRecord {
   if (!plain(row) || !valid(row.id) || row.platform && row.platform !== platform || depth > 3) invalid();
   renderFields(row, commentFields.filter(key => !['from', 'likeCount', 'replyCount', 'repliesHasMore', 'canReply', 'canDelete', 'canHide', 'canLike', 'isHidden', 'isLiked'].includes(key)), ['likeCount', 'replyCount'], ['repliesHasMore', 'canReply', 'canDelete', 'canHide', 'canLike', 'isHidden', 'isLiked']);
   if (row.from != null) renderFields(row.from, ['id', 'name', 'username', 'picture', 'verifiedType'], [], ['isOwner']);
-  const result = { ...pick(row, commentFields), platform };
-  if (row.replies !== undefined) { if (!Array.isArray(row.replies) || row.replies.length > 100) invalid(); result.replies = row.replies.map(item => normalizedComment(item, platform, depth + 1)); }
+  const result: ProviderRecord = { ...pick(row, commentFields), platform };
+  if (row.replies !== undefined) { if (!Array.isArray(row.replies) || row.replies.length > 100) invalid(); result.replies = row.replies.map((item: any) => normalizedComment(item, platform, depth + 1)); }
   return result;
 }
-async function thread(api, accounts, account, post, params = {}) {
+async function thread(api: ZernioApi, _accounts: ProviderRecord[], account: ProviderRecord, post: ProviderRecord, params: ProviderRecord = {}): Promise<ProviderRecord> {
   const result = post.isAd ? await api(`/ads/${encodeURIComponent(id(post.adId))}/comments`, { placement: post.placement, limit: 100, ...params }) : await api(`/inbox/comments/${encodeURIComponent(post.id)}`, { accountId: account._id, limit: 100, ...(post.subreddit ? { subreddit: post.subreddit } : {}), ...params });
   if (!Array.isArray(result.comments) || result.comments.length > 100 || !plain(result.meta) || result.meta.accountId !== account._id) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned another account’s comment thread.');
   const platform = result.meta.platform;
@@ -450,8 +450,8 @@ async function thread(api, accounts, account, post, params = {}) {
   if (params.commentId && parent && parent.id !== params.commentId) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned another comment’s replies.');
   return { comments, ...(parent ? { parent } : {}), post: pick(post, postFields), pagination: pagination(result.pagination, true), meta: pick(result.meta, ['platform', 'postId', 'accountId', 'subreddit', 'postUrn', 'adId', 'effectiveStoryId', 'facebookAccountId', 'instagramAccountId', 'placement', 'adComments']) };
 }
-const flatten = rows => rows.flatMap(row => [row, ...flatten(row.replies || [])]);
-async function findComment(api, accounts, account, post, commentId) {
+const flatten = (rows: ProviderRecord[]): ProviderRecord[] => rows.flatMap(row => [row, ...flatten(row.replies || [])]);
+async function findComment(api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, post: ProviderRecord, commentId: string): Promise<ProviderRecord> {
   let cursor; const seen = new Set();
   for (let page = 0; page < 20; page++) {
     const result = await thread(api, accounts, account, post, { ...(cursor ? { cursor } : {}) }), row = flatten(result.comments).find(item => item.id === commentId);
@@ -467,7 +467,7 @@ async function findComment(api, accounts, account, post, commentId) {
   }
   fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This post exceeds the comment scope-check limit. Open it in the provider dashboard.');
 }
-function priorHiddenComment(context, account, post, commentId) {
+function priorHiddenComment(context: ProviderRecord, account: ProviderRecord, post: ProviderRecord, commentId: string) {
   if (account.platform !== 'instagram' && post.placement !== 'instagram') return null;
   // Instagram via Facebook Login omits hidden comments. Only this app's completed, scoped hide receipt can substitute for a missing fresh row.
   // ponytail: search the latest 500 receipts; use an indexed resource table if operators need older hidden-comment recovery.
@@ -478,16 +478,16 @@ function priorHiddenComment(context, account, post, commentId) {
   }
   return null;
 }
-const privateCommentVersion = row => createHash('sha256').update(JSON.stringify([row.id, row.platform, row.createdTime, row.from?.id, row.from?.isOwner, row.message])).digest('hex');
-const editableCommentVersion = (account, postId, row) => createHash('sha256').update(JSON.stringify([account._id, account.platform, account.platformUserId ?? null, postId, row.id, row.message ?? null, row.from?.id ?? null, row.from?.isOwner ?? null])).digest('hex');
-function privateCommentEligible(row) {
+const privateCommentVersion = (row: ProviderRecord) => createHash('sha256').update(JSON.stringify([row.id, row.platform, row.createdTime, row.from?.id, row.from?.isOwner, row.message])).digest('hex');
+const editableCommentVersion = (account: ProviderRecord, postId: string, row: ProviderRecord) => createHash('sha256').update(JSON.stringify([account._id, account.platform, account.platformUserId ?? null, postId, row.id, row.message ?? null, row.from?.id ?? null, row.from?.isOwner ?? null])).digest('hex');
+function privateCommentEligible(row: ProviderRecord): boolean {
   const age = Date.now() - Date.parse(row.createdTime);
   return ['facebook', 'instagram'].includes(row.platform) && valid(row.from?.id) && row.from?.isOwner === false && row.canReply !== false && age >= 0 && age < 7 * 86400000;
 }
-function privateReplyTable(db) {
+function privateReplyTable(db: DatabaseSync): void {
   db.exec(`CREATE TABLE IF NOT EXISTS inbox_private_replies(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,post_id TEXT NOT NULL,comment_id TEXT NOT NULL,status TEXT NOT NULL,operation_id TEXT NOT NULL,PRIMARY KEY(project_id,profile_id,account_id,post_id,comment_id))`);
 }
-function claimCommentReaction(context, account, postId, commentId, action, reactionType = '') {
+function claimCommentReaction(context: ProviderRecord, account: ProviderRecord, postId: string, commentId: string, action: string, reactionType = ''): void {
   const { db, project, req } = context, nativeId = account.platformUserId ?? '';
   if (account.platformUserId != null && !valid(nativeId)) invalid();
   db.exec(`CREATE TABLE IF NOT EXISTS inbox_comment_reactions(operation_id TEXT PRIMARY KEY,platform TEXT NOT NULL,account_id TEXT NOT NULL,native_account_id TEXT NOT NULL,post_id TEXT NOT NULL,comment_id TEXT NOT NULL,action TEXT NOT NULL,reaction_type TEXT NOT NULL);
@@ -512,27 +512,27 @@ function claimCommentReaction(context, account, postId, commentId, action, react
   // No await between the shared durable lookup and claim, or between this claim and provider dispatch.
   db.prepare('INSERT INTO inbox_comment_reactions VALUES(?,?,?,?,?,?,?,?)').run(operationId, account.platform, account._id, nativeId, postId, commentId, action, reactionType);
 }
-function privateReplyThread(context, accounts, account, post, result) {
+function privateReplyThread(context: ProviderRecord, accounts: ProviderRecord[], account: ProviderRecord, post: ProviderRecord, result: ProviderRecord) {
   const accountId = post.isAd ? result.meta.platform === 'instagram' ? result.meta.instagramAccountId : result.meta.facebookAccountId : account._id, postId = post.isAd ? result.meta.effectiveStoryId : post.id;
   const connected = accounts.some(row => row._id === accountId && row.isActive !== false && row.platform === result.meta.platform), exists = context.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_private_replies'").get();
   const receipts = exists && context.db.prepare('SELECT r.status,o.status AS operationStatus FROM inbox_private_replies r LEFT JOIN integration_operations o ON r.operation_id=o.id AND r.project_id=o.project_id WHERE r.project_id=? AND r.profile_id=? AND r.account_id=? AND r.post_id=? AND r.comment_id=?');
-  const decorate = row => {
+  const decorate = (row: ProviderRecord): ProviderRecord => {
     const receipt = receipts && receipts.get(context.project.id, context.project.zernioProfileId, accountId || '', postId || '', row.id), prior = receipt && !(receipt.operationStatus === 'reviewed-not-applied' && ['pending', 'uncertain'].includes(receipt.status)) ? receipt : null;
     return { ...row, ...(row.platform === 'reddit' ? { editVersion: editableCommentVersion(account, post.id, row) } : {}), ...(['facebook', 'instagram'].includes(row.platform) ? { privateReplyVersion: privateCommentVersion(row), privateReplyEligible: connected && valid(postId) && !prior && privateCommentEligible(row), ...(prior ? { privateReplyStatus: prior.status } : {}) } : {}), ...(row.replies ? { replies: row.replies.map(decorate) } : {}) };
   };
   return { ...result, comments: result.comments.map(decorate), ...(result.parent ? { parent: decorate(result.parent) } : {}) };
 }
-function privateReplyElements(body, platform) {
+function privateReplyElements(body: ProviderRecord, platform: string): ProviderRecord {
   if (body.buttons !== undefined && body.quickReplies !== undefined) fail(400, 'INVALID_PRIVATE_REPLY', 'Choose buttons or quick replies, rather than both.');
-  const payload = {};
-  const publicLink = value => { try { return publicMediaUrl(value); } catch { fail(400, 'INVALID_PRIVATE_REPLY', 'Use a public HTTPS link for private-reply buttons and thumbnails.'); } };
+  const payload: ProviderRecord = {};
+  const publicLink = (value: any): string => { try { return publicMediaUrl(value); } catch { fail(400, 'INVALID_PRIVATE_REPLY', 'Use a public HTTPS link for private-reply buttons and thumbnails.'); } };
   for (const name of ['buttons', 'quickReplies']) if (body[name] !== undefined) {
     if (!Array.isArray(body[name]) || body[name].length < 1 || body[name].length > (name === 'buttons' ? 3 : 13)) fail(400, 'INVALID_PRIVATE_REPLY', 'Use one to three buttons or one to thirteen quick replies.');
     payload[name] = body[name].map(row => {
       const button = name === 'buttons', type = button ? row?.type : 'quick';
       if (button && !['url', 'postback', 'phone'].includes(type) || type === 'phone' && platform !== 'facebook') fail(422, 'INVALID_PRIVATE_REPLY', 'Choose a supported button type. Phone buttons are available only on Facebook.');
       fields(row, button ? ['type', 'title', type === 'url' ? 'url' : type === 'phone' ? 'phone' : 'payload'] : ['title', 'payload', 'imageUrl']);
-      const item = { ...(button ? { type } : {}), title: str(row.title, 'button or quick-reply label', 20) };
+      const item: ProviderRecord = { ...(button ? { type } : {}), title: str(row.title, 'button or quick-reply label', 20) };
       if (type === 'url') item.url = publicLink(row.url);
       else if (type === 'phone') { if (typeof row.phone !== 'string' || !/^\+[1-9]\d{6,14}$/.test(row.phone)) fail(400, 'INVALID_PRIVATE_REPLY', 'Enter a phone button number in international format.'); item.phone = row.phone; }
       else item.payload = str(row.payload, 'button or quick-reply value', 1000);
@@ -542,7 +542,7 @@ function privateReplyElements(body, platform) {
   }
   return payload;
 }
-async function privateCommentReply(context, api, account, post, target, moderationAccount, moderationPostId, key) {
+async function privateCommentReply(context: ProviderRecord, api: ZernioApi, account: ProviderRecord, post: ProviderRecord, target: ProviderRecord, moderationAccount: ProviderRecord, moderationPostId: string, key?: string) {
   const { body, db, project } = context;
   supported(moderationAccount, 'commentPrivateReply');
   if (!privateCommentEligible(target.row)) fail(422, 'PRIVATE_REPLY_INELIGIBLE', 'Choose another person’s comment with a verified time within the last seven days.');
@@ -557,22 +557,22 @@ async function privateCommentReply(context, api, account, post, target, moderati
   if (previous) db.prepare('DELETE FROM inbox_private_replies WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(...binding);
   const original = db.prepare('SELECT id FROM integration_operations WHERE project_id=? AND request_key=?').get(project.id, context.req.headers['idempotency-key']);
   if (!db.prepare("INSERT OR IGNORE INTO inbox_private_replies(project_id,profile_id,account_id,post_id,comment_id,status,operation_id) VALUES(?,?,?,?,?,'pending',?)").run(...binding, original.id).changes) fail(409, 'PRIVATE_REPLY_RECORDED', 'Another private reply to this comment is already in progress.');
-  const update = status => db.prepare('UPDATE inbox_private_replies SET status=? WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(status, ...binding);
+  const update = (status: string) => db.prepare('UPDATE inbox_private_replies SET status=? WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(status, ...binding);
   try {
     const result = await api(`/inbox/comments/${encodeURIComponent(moderationPostId)}/${encodeURIComponent(target.row.id)}/private-reply`, {}, payload, key);
     if (result.status !== 'success' || !valid(result.messageId) || result.commentId !== target.row.id || result.platform !== moderationAccount.platform) invalid(true);
     update('sent'); return { sent: true, accountId: account._id, moderationAccountId: moderationAccount._id, postId: post.id, commentId: target.row.id, messageId: result.messageId, platform: result.platform };
-  } catch (error) {
+  } catch (error: any) {
     if (error.privateReplyConsumed === true) { update('consumed'); fail(409, 'PRIVATE_REPLY_CONSUMED', 'The provider reports this comment’s single private reply is consumed. Do not retry it; check the conversation.'); }
     if (!(error instanceof IntegrationError) || error.uncertain || error.privateReplyOutcome === 'unknown') { update('uncertain'); if (error instanceof IntegrationError) error.uncertain = true; }
     else db.prepare('DELETE FROM inbox_private_replies WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(...binding);
     throw error;
   }
 }
-export const inboxReplyVersion = row => createHash('sha256').update(JSON.stringify([row.id, row.accountId, row.hasReply, row.reply?.id || null, row.reply?.text || null, row.reply?.created || null])).digest('hex');
-const review = row => ({ ...pick(row, reviewFields), replyVersion: inboxReplyVersion(row) });
+export const inboxReplyVersion = (row: ProviderRecord) => createHash('sha256').update(JSON.stringify([row.id, row.accountId, row.hasReply, row.reply?.id || null, row.reply?.text || null, row.reply?.created || null])).digest('hex');
+const review = (row: ProviderRecord) => ({ ...pick(row, reviewFields), replyVersion: inboxReplyVersion(row) });
 
-export async function handleInbox(context) {
+export async function handleInbox(context: ProviderRecord): Promise<boolean> {
   const { req, url, project, role, send, body = {} } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/inbox`;
   if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
   const path = url.pathname.slice(prefix.length).replace(/^\//, '');
@@ -603,18 +603,18 @@ export async function handleInbox(context) {
       if (result) send(200, result);
       return true;
     }
-    const run = async key => {
+    const run = async (key?: string): Promise<any> => {
       if (path === 'conversations/search') { supported(account, 'messages'); return searchConversations(api, accounts, account, url); }
       if (path === 'conversations/start') return startConversation(context, api, account, env, assertMapping, key);
       if (path === 'conversations/recipients') {
         supported(account, 'start');
         if (account.platform === 'slack') return { recipients: await slackMembers(api, account, url.searchParams.get('query') || '') };
-        if (['sms', 'whatsapp'].includes(account.platform)) return { recipients: (context.contacts?.list(project.id) || []).filter(contact => contact.consents?.[account.platform] === true && !contact.suppression?.[account.platform] && /^\+[1-9]\d{6,14}$/.test(contact.phone || '')).map(contact => ({ id: contact.id, name: contact.name || contact.phone, phone: contact.phone })) };
+        if (['sms', 'whatsapp'].includes(account.platform)) return { recipients: (context.contacts?.list(project.id) || []).filter((contact: any) => contact.consents?.[account.platform] === true && !contact.suppression?.[account.platform] && /^\+[1-9]\d{6,14}$/.test(contact.phone || '')).map((contact: any) => ({ id: contact.id, name: contact.name || contact.phone, phone: contact.phone })) };
         return { recipients: [] };
       }
       if (path === 'conversations') {
         supported(account, 'messages'); const result = await aggregate(api, accounts, account, 'conversations', query(url, 'conversations'));
-        return { conversations: result.rows.map(row => ({ ...pick(row, conversationFields), ...(conversationContact(context, row) ? { contact: conversationContact(context, row) } : {}) })), pagination: result.pagination, meta: result.meta };
+        return { conversations: result.rows.map((row: any) => ({ ...pick(row, conversationFields), ...(conversationContact(context, row) ? { contact: conversationContact(context, row) } : {}) })), pagination: result.pagination, meta: result.meta };
       }
       if (messageAction) {
         supported(account, 'messages'); const conversationId = decodedId(messageAction[1]), row = await conversation(api, accounts, account, conversationId);
@@ -624,11 +624,11 @@ export async function handleInbox(context) {
         supported(account, 'messages'); const conversationId = decodedId(route[1]), row = await conversation(api, accounts, account, conversationId);
         if (!route[2]) return { conversation: conversationView(account, row), contact: conversationContact(context, row) };
         if (route[2] === 'messages') {
-          const result = await history(api, account, conversationId, query(url, 'messages'), row.id), incoming = result.messages.some(message => message.direction === 'incoming' && message.senderId === row.participantId);
+          const result = await history(api, account, conversationId, query(url, 'messages'), row.id), incoming = result.messages.some((message: any) => message.direction === 'incoming' && message.senderId === row.participantId);
           let windowAge = Infinity;
-          if (['facebook', 'instagram'].includes(account.platform)) try { windowAge = incomingAge(await recentHistory(api, account, conversationId, row.id)); } catch (error) { assertMapping(); if (!(error instanceof IntegrationError) || error.code === 'INVALID_PROVIDER_SCOPE') throw error; /* History remains readable when reaction eligibility cannot be verified. */ }
+          if (['facebook', 'instagram'].includes(account.platform)) try { windowAge = incomingAge(await recentHistory(api, account, conversationId, row.id)); } catch (error: any) { assertMapping(); if (!(error instanceof IntegrationError) || error.code === 'INVALID_PROVIDER_SCOPE') throw error; /* History remains readable when reaction eligibility cannot be verified. */ }
           const latest = !url.searchParams.get('cursor') && result.sortOrderApplied === 'desc' ? result : await history(api, account, conversationId, {}, row.id);
-          return { ...result, messages: result.messages.map(message => ({ ...message, version: inboxMessageVersion(message, accountId), actions: messageActions(account, message, windowAge) })), conversation: { ...conversationView(account, row), deleteVersion: latest.sortOrderApplied === 'desc' ? deletionVersion(row, latest.messages) : null }, contact: conversationContact(context, row, incoming) };
+          return { ...result, messages: result.messages.map((message: any) => ({ ...message, version: inboxMessageVersion(message, accountId), actions: messageActions(account, message, windowAge) })), conversation: { ...conversationView(account, row), deleteVersion: latest.sortOrderApplied === 'desc' ? deletionVersion(row, latest.messages) : null }, contact: conversationContact(context, row, incoming) };
         }
         if (route[2] === 'delete') return deleteConversation(context, api, account, conversationId, row, key);
         if (route[2] === 'typing') {
@@ -651,18 +651,18 @@ export async function handleInbox(context) {
           if (result.success !== true || !Number.isSafeInteger(result.markedCount) || result.markedCount < 0) invalid(true); return { read: true, markedCount: result.markedCount };
         }
         fields(body, ['accountId', 'message', 'buttons', 'attachmentUrl', 'attachmentType', 'attachmentName', 'replyTo', 'messageTag', 'templateName', 'templateLanguage', 'templateComponents']);
-        const payload = { accountId };
+        const payload: ProviderRecord = { accountId };
         if (body.message !== undefined && body.message !== '') payload.message = str(body.message, 'message', inboxCapabilities(account.platform).messageLimit);
         if (body.buttons !== undefined) {
           fields(body, ['accountId', 'message', 'buttons']); supported(account, 'replyButtons');
           payload.message = str(body.message, 'WhatsApp button reply', 1024);
           if (Buffer.byteLength(payload.message, 'utf8') > 1024 || !Array.isArray(body.buttons) || body.buttons.length < 1 || body.buttons.length > 3) fail(400, 'INVALID_REPLY_BUTTONS', 'Use a shorter text message and one to three reply buttons.');
-          payload.buttons = body.buttons.map((button, index) => {
+          payload.buttons = body.buttons.map((button: any, index: any) => {
             fields(button, ['type', 'title', 'payload']); const title = str(button.title, 'reply button label', 20);
             if (button.type !== 'postback' || button.payload !== `reply_${index + 1}` || title !== title.trim() || /[\u0000-\u001f\u007f]/.test(title)) fail(400, 'INVALID_REPLY_BUTTONS', 'Use the generated reply IDs and short, single-line button labels without surrounding spaces.');
             return { type: 'postback', title, payload: button.payload };
           });
-          if (new Set(payload.buttons.map(button => button.title)).size !== payload.buttons.length) fail(400, 'INVALID_REPLY_BUTTONS', 'Use a different label for each reply button.');
+          if (new Set(payload.buttons.map((button: any) => button.title)).size !== payload.buttons.length) fail(400, 'INVALID_REPLY_BUTTONS', 'Use a different label for each reply button.');
         }
         if (body.attachmentUrl) {
           supported(account, 'attachments'); if (!['image', 'video', 'audio', 'file'].includes(body.attachmentType)) fail(400, 'INVALID_ATTACHMENT', 'Choose an image, video, audio file or document.');
@@ -672,7 +672,7 @@ export async function handleInbox(context) {
           if (payload.message && ['telegram', 'whatsapp'].includes(account.platform) && payload.message.length > 1024) fail(400, 'ATTACHMENT_CAPTION_TOO_LONG', 'Keep the attachment caption to 1024 characters.');
           if (['whatsapp', 'tiktok', 'sms', 'instagram', 'twitter'].includes(account.platform)) {
             let checked;
-            try { checked = await api('/tools/validate/media', {}, { url: payload.attachmentUrl }); } catch (error) { if (error instanceof IntegrationError) error.uncertain = false; throw error; }
+            try { checked = await api('/tools/validate/media', {}, { url: payload.attachmentUrl }); } catch (error: any) { if (error instanceof IntegrationError) error.uncertain = false; throw error; }
             if (checked.valid !== true || !Number.isSafeInteger(checked.size) || checked.size < 1 || typeof checked.contentType !== 'string') fail(409, 'ATTACHMENT_NOT_VERIFIED', 'The provider could not verify this attachment’s file type and size.');
             if (checked.url !== undefined) { let echoed; try { echoed = publicMediaUrl(checked.url); } catch { /* An unreadable echo cannot prove the requested file. */ } if (echoed !== payload.attachmentUrl) fail(409, 'ATTACHMENT_NOT_VERIFIED', 'The provider inspected a different attachment. Review its URL before sending.'); }
             const rule = REPLY_MEDIA[account.platform]?.[payload.attachmentType], mime = checked.contentType.split(';')[0].trim().toLowerCase(), limit = rule?.maxMB || (account.platform === 'tiktok' ? 3 : account.platform === 'sms' ? 1 : payload.attachmentType === 'image' ? 5 : payload.attachmentType === 'file' ? 100 : 16);
@@ -683,7 +683,7 @@ export async function handleInbox(context) {
         if (body.replyTo) { if (!['whatsapp', 'telegram', 'slack'].includes(account.platform)) fail(422, 'QUOTE_REPLY_UNSUPPORTED', 'This platform does not support quoted replies.'); payload.replyTo = id(body.replyTo); }
         if (body.templateName) {
           if (account.platform !== 'whatsapp' || payload.message || payload.attachmentUrl) fail(400, 'INVALID_TEMPLATE', 'Send a WhatsApp template by itself.');
-          const templates = await listWhatsAppTemplates({ env, project, accountId, assertMapping }), draft = { ...body, accountId }, approved = templates.templates.find(item => item.name === body.templateName && item.language === body.templateLanguage);
+          const templates = await listWhatsAppTemplates({ env, project, accountId, assertMapping }), draft = { ...body, accountId }, approved = templates.templates.find((item: any) => item.name === body.templateName && item.language === body.templateLanguage)!;
           payload.template = { elements: [validateWhatsAppTemplate(draft, approved)] };
         }
         if (!payload.message && !payload.attachmentUrl && !payload.template) fail(400, 'EMPTY_MESSAGE', 'Enter a message or choose an attachment or approved template.');
@@ -694,36 +694,36 @@ export async function handleInbox(context) {
         if (fresh.id !== row.id || fresh.participantId !== row.participantId || fresh.threadControl !== row.threadControl) fail(409, 'INBOX_CONVERSATION_CHANGED', 'The conversation recipient or reply control changed. Refresh before sending.');
         if (['facebook', 'instagram', 'whatsapp', 'tiktok'].includes(account.platform) && !payload.template) {
           const lastIncoming = incomingTime(messages), age = Date.now() - lastIncoming;
-          if (account.platform === 'tiktok' && (!(age >= 0 && age <= 2 * 86400000) || messages.filter(message => message.direction === 'outgoing' && Date.parse(message.createdAt) >= lastIncoming).length >= 10)) fail(409, 'MESSAGING_WINDOW_CLOSED', 'TikTok permits up to ten replies within 48 hours of the customer’s last message.');
+          if (account.platform === 'tiktok' && (!(age >= 0 && age <= 2 * 86400000) || messages.filter((message: any) => message.direction === 'outgoing' && Date.parse(message.createdAt) >= lastIncoming).length >= 10)) fail(409, 'MESSAGING_WINDOW_CLOSED', 'TikTok permits up to ten replies within 48 hours of the customer’s last message.');
           if (body.messageTag) {
             const tags = account.platform === 'instagram' ? ['HUMAN_AGENT'] : account.platform === 'facebook' ? ['CONFIRMED_EVENT_UPDATE', 'POST_PURCHASE_UPDATE', 'ACCOUNT_UPDATE', 'HUMAN_AGENT'] : [];
             if (!tags.includes(body.messageTag) || body.messageTag === 'HUMAN_AGENT' && !(age >= 0 && age <= 7 * 86400000)) fail(400, 'INVALID_MESSAGE_TAG', 'Choose a supported message tag within its permitted reply window.');
             payload.messagingType = 'MESSAGE_TAG'; payload.messageTag = body.messageTag;
           } else if (account.platform !== 'tiktok' && !(age >= 0 && age <= 86400000)) fail(409, 'MESSAGING_WINDOW_CLOSED', account.platform === 'whatsapp' ? 'Choose an approved WhatsApp template outside the 24-hour reply window.' : 'Choose a permitted non-promotional message tag outside the 24-hour reply window.');
         } else if (body.messageTag) fail(422, 'MESSAGE_TAG_UNSUPPORTED', 'Message tags are only available for Facebook and Instagram.');
-        if (payload.attachmentUrl && context.store?.list(project.id, 'assets').some(asset => asset.deliveryUrl === payload.attachmentUrl && assetDeliveryIssue(asset))) fail(409, 'ATTACHMENT_EXPIRED', 'This hosted delivery file has expired or has no verified expiry. Upload it again before sending.');
+        if (payload.attachmentUrl && context.store?.list(project.id, 'assets').some((asset: any) => asset.deliveryUrl === payload.attachmentUrl && assetDeliveryIssue(asset))) fail(409, 'ATTACHMENT_EXPIRED', 'This hosted delivery file has expired or has no verified expiry. Upload it again before sending.');
         const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/messages`, {}, payload, key);
         if (result.success !== true || !plain(result.data) || account.platform !== 'reddit' && !valid(result.data.messageId) || result.data.accountId !== undefined && result.data.accountId !== accountId || result.data.platform !== undefined && result.data.platform !== account.platform || result.data.conversationId !== undefined && !valid(result.data.conversationId) || !['facebook', 'instagram', 'bluesky', 'reddit'].includes(account.platform) && result.data.conversationId !== undefined && ![conversationId, row.id].includes(result.data.conversationId)) invalid(true);
         if (result.warnings != null && (!Array.isArray(result.warnings) || result.warnings.length > 100 || result.warnings.some(warning => typeof warning !== 'string' && (!plain(warning) || ['code', 'param', 'message'].some(field => warning[field] != null && typeof warning[field] !== 'string'))))) invalid(true);
         const combined = ['facebook', 'instagram'].includes(account.platform) && payload.attachmentUrl && payload.message, receipt = result.data, partial = receipt.partialFailure;
         if (combined && partial === undefined && receipt.messageIds === undefined) invalid(true);
-        if (receipt.messageIds !== undefined && (!combined || !Array.isArray(receipt.messageIds) || receipt.messageIds.length !== (partial ? 1 : 2) || receipt.messageIds.some(value => !valid(value)) || new Set(receipt.messageIds).size !== receipt.messageIds.length || receipt.messageIds[0] !== receipt.messageId)) invalid(true);
+        if (receipt.messageIds !== undefined && (!combined || !Array.isArray(receipt.messageIds) || receipt.messageIds.length !== (partial ? 1 : 2) || receipt.messageIds.some((value: any) => !valid(value)) || new Set(receipt.messageIds).size !== receipt.messageIds.length || receipt.messageIds[0] !== receipt.messageId)) invalid(true);
         if (partial !== undefined && (!combined || !plain(partial) || partial.part !== 'text' || typeof partial.error !== 'string' || !partial.error.trim() || partial.error.length > 4000 || partial.platformError !== undefined && (!plain(partial.platformError) || ['code', 'subcode'].some(name => partial.platformError[name] !== undefined && !Number.isSafeInteger(partial.platformError[name])) || ['fbtraceId', 'type'].some(name => partial.platformError[name] !== undefined && (typeof partial.platformError[name] !== 'string' || partial.platformError[name].length > 500))))) invalid(true);
-        if (receipt.attachments !== undefined && (!payload.attachmentUrl || !Array.isArray(receipt.attachments) || receipt.attachments.length > 1 || receipt.attachments.some(item => !plain(item) || item.type !== payload.attachmentType || typeof item.url !== 'string' || !(() => { try { return Boolean(publicMediaUrl(item.url)); } catch { return false; } })()))) invalid(true);
-        return { sent: true, accountId, platform: account.platform, ...pick(receipt, ['messageId', 'conversationId', 'messageIds']), ...(receipt.attachments ? { attachments: receipt.attachments.map(item => pick(item, ['type', 'url'])) } : {}), ...(partial ? { partialFailure: { ...pick(partial, ['part', 'error']), ...(partial.platformError ? { platformError: pick(partial.platformError, ['code', 'subcode', 'fbtraceId', 'type']) } : {}) } } : {}), warnings: (result.warnings || []).map(warning => typeof warning === 'string' ? warning : pick(warning, ['code', 'param', 'message'])) };
+        if (receipt.attachments !== undefined && (!payload.attachmentUrl || !Array.isArray(receipt.attachments) || receipt.attachments.length > 1 || receipt.attachments.some((item: any) => !plain(item) || item.type !== payload.attachmentType || typeof item.url !== 'string' || !(() => { try { return Boolean(publicMediaUrl(item.url)); } catch { return false; } })()))) invalid(true);
+        return { sent: true, accountId, platform: account.platform, ...pick(receipt, ['messageId', 'conversationId', 'messageIds']), ...(receipt.attachments ? { attachments: receipt.attachments.map((item: any) => pick(item, ['type', 'url'])) } : {}), ...(partial ? { partialFailure: { ...pick(partial, ['part', 'error']), ...(partial.platformError ? { platformError: pick(partial.platformError, ['code', 'subcode', 'fbtraceId', 'type']) } : {}) } } : {}), warnings: (result.warnings || []).map((warning: any) => typeof warning === 'string' ? warning : pick(warning, ['code', 'param', 'message'])) };
       }
-      if (path === 'mentions') { supported(account, 'mentions'); const result = await aggregate(api, accounts, account, 'mentions', query(url, 'mentions')); return { mentions: result.rows.map(row => pick(row, mentionFields)), pagination: result.pagination, meta: result.meta }; }
-      if (path === 'comments') { supported(account, 'comments'); const result = await aggregate(api, accounts, account, 'comments', query(url, 'comments')); return { posts: result.rows.map(row => pick(row, postFields)), pagination: result.pagination, meta: result.meta }; }
+      if (path === 'mentions') { supported(account, 'mentions'); const result = await aggregate(api, accounts, account, 'mentions', query(url, 'mentions')); return { mentions: result.rows.map((row: any) => pick(row, mentionFields)), pagination: result.pagination, meta: result.meta }; }
+      if (path === 'comments') { supported(account, 'comments'); const result = await aggregate(api, accounts, account, 'comments', query(url, 'comments')); return { posts: result.rows.map((row: any) => pick(row, postFields)), pagination: result.pagination, meta: result.meta }; }
       if (path === 'comments/thread' || action?.[1] === 'comments') {
         supported(account, 'comments'); const postId = id(req.method === 'GET' ? url.searchParams.get('postId') : body.postId), post = await findRow(api, accounts, account, 'comments', postId);
-        const verb = action?.[2]; let target = null;
+        const verb = action?.[2]; let target: any = null;
         if (req.method === 'GET') return privateReplyThread(context, accounts, account, post, await thread(api, accounts, account, post, { ...query(url, 'comments'), ...(url.searchParams.get('commentId') ? { commentId: id(url.searchParams.get('commentId')) } : {}) }));
         fields(body, verb === 'edit' ? ['accountId', 'postId', 'commentId', 'content', 'expectedCommentVersion', 'confirmEdit'] : verb === 'private-reply' ? ['accountId', 'postId', 'commentId', 'message', 'expectedCommentVersion', 'confirmSend', 'buttons', 'quickReplies'] : ['accountId', 'postId', 'commentId', 'message', 'moderationStatus', 'banAuthor', ...(verb === 'like' ? ['reactionType'] : [])]);
         if (body.reactionType !== undefined && (account.platform !== 'linkedin' || !LINKEDIN_REACTIONS.has(body.reactionType))) fail(400, 'INVALID_COMMENT_REACTION', 'Choose one of the six supported LinkedIn reactions. Reaction types are only available for LinkedIn likes.');
         if (body.commentId) {
           const commentId = id(body.commentId);
           try { target = await findComment(api, accounts, account, post, commentId); }
-          catch (error) { if (verb !== 'unhide' || error.code !== 'COMMENT_OUTSIDE_POST' || !(target = priorHiddenComment(context, account, post, commentId))) throw error; }
+          catch (error: any) { if (verb !== 'unhide' || error.code !== 'COMMENT_OUTSIDE_POST' || !(target = priorHiddenComment(context, account, post, commentId))) throw error; }
         }
         if (verb !== 'reply' && !target) fail(400, 'COMMENT_REQUIRED', 'Choose a comment first.');
         let moderationAccount = account, moderationPostId = post.id;
@@ -732,7 +732,7 @@ export async function handleInbox(context) {
           moderationAccount = requireAccount(accounts, id(bridgeId)); moderationPostId = id(meta.effectiveStoryId);
           if (moderationAccount.platform !== meta.platform) fail(403, 'INBOX_ITEM_OUTSIDE_PROJECT', 'The ad’s moderation account is not connected to this project.');
         }
-        const platform = moderationAccount.platform, endpoint = `/inbox/comments/${encodeURIComponent(moderationPostId)}`, commentEndpoint = target ? `${endpoint}/${encodeURIComponent(target.row.id)}` : endpoint, payload = { accountId: moderationAccount._id };
+        const platform = moderationAccount.platform, endpoint = `/inbox/comments/${encodeURIComponent(moderationPostId)}`, commentEndpoint = target ? `${endpoint}/${encodeURIComponent(target.row.id)}` : endpoint, payload: ProviderRecord = { accountId: moderationAccount._id };
         if (verb === 'private-reply') return privateCommentReply(context, api, account, post, target, moderationAccount, moderationPostId, key);
         if (verb === 'edit') {
           supported(account, 'commentEdit');
@@ -748,7 +748,7 @@ export async function handleInbox(context) {
           if (receipt.status !== 'success' || receipt.commentId !== target.row.id || receipt.platform !== 'reddit') invalid(true);
           let fresh;
           try { fresh = await findComment(api, freshAccounts, freshAccount, post, target.row.id); }
-          catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+          catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
           if (fresh.row.message !== content || fresh.row.from?.isOwner !== true || fresh.row.from?.id !== target.row.from?.id) fail(502, 'COMMENT_EDIT_NOT_CONFIRMED', 'The latest thread has not confirmed this exact edit. Check the comment before another change.', true);
           return { edited: true, accountId, postId: post.id, commentId: target.row.id, platform: 'reddit', content, comment: { ...fresh.row, editVersion: editableCommentVersion(freshAccount, post.id, fresh.row) } };
         }
@@ -773,7 +773,7 @@ export async function handleInbox(context) {
           let result;
           claimCommentReaction(context, freshModeration, moderationPostId, target.row.id, verb, payload.reactionType);
           try { result = await api(`${commentEndpoint}/like`, verb === 'unlike' ? payload : {}, verb === 'like' ? payload : undefined, key, verb === 'like' ? 'POST' : 'DELETE'); }
-          catch (error) {
+          catch (error: any) {
             if (platform === 'linkedin' && error.providerStatus === 403) fail(403, 'LINKEDIN_REACTION_PERMISSION_REQUIRED', 'LinkedIn could not authorize this reaction. Check inbox access and reconnect the account with social-feed permissions.');
             if (platform === 'linkedin' && verb === 'like' && error.providerStatus === 409) fail(409, 'LINKEDIN_REACTION_CONFLICT', 'LinkedIn already has a different or unreadable reaction. Refresh and explicitly remove it before adding a different reaction.');
             throw error;
@@ -807,7 +807,7 @@ export async function handleInbox(context) {
     if (url.searchParams.has('check')) {
       if (route?.[2] !== 'reply' || body.buttons === undefined || url.searchParams.getAll('check').length !== 1 || url.searchParams.get('check') !== '1' || [...url.searchParams.keys()].some(name => name !== 'check')) fail(400, 'INVALID_INBOX_FILTER', 'Use the exact retained reply outcome check.');
     }
-    if (mutation) { const result = await operation(context, run, messageAction || route ? ['inbox', accountId, decodedId((messageAction || route)[1])] : action?.[1] === 'comments' && ['edit', 'like', 'unlike'].includes(action[2]) ? ['inbox-comment', accountId, id(body.postId), id(body.commentId)] : undefined); send(result.status, result.data); } else send(200, await run());
-  } catch (error) { if (!(error instanceof IntegrationError)) throw error; if (path === 'mentions' && error.providerStatus === 403) { send(403, { error: { code: 'MENTIONS_ACCESS_REQUIRED', message: 'LinkedIn organization mentions require the Zernio Inbox add-on and access to this connected account. Check its subscription and permissions.' } }); } else send(error.status, { error: { code: error.code, message: error.message } }); }
+    if (mutation) { const result = await operation(context as OperationContext, run, messageAction || route ? ['inbox', accountId, decodedId((messageAction || route)[1])] : action?.[1] === 'comments' && ['edit', 'like', 'unlike'].includes(action[2]) ? ['inbox-comment', accountId, id(body.postId), id(body.commentId)] : undefined); send(result.status, result.data); } else send(200, await run());
+  } catch (error: any) { if (!(error instanceof IntegrationError)) throw error; if (path === 'mentions' && error.providerStatus === 403) { send(403, { error: { code: 'MENTIONS_ACCESS_REQUIRED', message: 'LinkedIn organization mentions require the Zernio Inbox add-on and access to this connected account. Check its subscription and permissions.' } }); } else send(error.status, { error: { code: error.code, message: error.message } }); }
   return true;
 }

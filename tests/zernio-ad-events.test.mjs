@@ -9,7 +9,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { transformWithOxc } from 'vite';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createWebhookService } from '../server/webhooks.mjs';
+import { createWebhookService } from '../server/webhooks.ts';
 import { createContacts } from '../server/contacts.ts';
 import { handleZernioAdEvents } from '../server/zernio-ad-events.ts';
 import { IntegrationError } from '../server/provider-core.ts';

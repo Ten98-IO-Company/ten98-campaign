@@ -1,10 +1,11 @@
+import type { DatabaseSync } from 'node:sqlite';
 import { createCipheriv, createDecipheriv, createPrivateKey, hkdfSync, randomBytes } from 'node:crypto';
 import { openRouterFetch, readResponseText } from '@ten98/runtime';
-import { googleToken, providerRequest, IntegrationError } from './provider-core.ts';
+import { fail, googleToken, providerRequest, reportObject as plain } from './provider-core.ts';
 import { testNativeGoogleAds } from './native-google-ads.ts';
 import { testMicrosoftAds } from './native-microsoft-ads.ts';
 
-const groups = {
+const groups: Record<string, Record<string, string>> = {
   zernio: { apiKey: 'ZERNIO_API_KEY', webhookSecret: 'ZERNIO_WEBHOOK_SECRET' },
   openrouter: { apiKey: 'OPENROUTER_API_KEY', model: 'OPENROUTER_MODEL', maxTokens: 'OPENROUTER_MAX_TOKENS', maxSteps: 'OPENROUTER_MAX_STEPS' },
   google: { serviceAccountEmail: 'GOOGLE_SERVICE_ACCOUNT_EMAIL', privateKey: 'GOOGLE_PRIVATE_KEY' },
@@ -15,14 +16,12 @@ const groups = {
   twilio: { accountSid: 'TWILIO_ACCOUNT_SID', authToken: 'TWILIO_AUTH_TOKEN', fromNumber: 'TWILIO_FROM_NUMBER', messagingServiceSid: 'TWILIO_MESSAGING_SERVICE_SID' },
   cloudflareEmail: { accountId: 'CLOUDFLARE_ACCOUNT_ID', apiKey: 'CLOUDFLARE_EMAIL_API_TOKEN', zoneId: 'CLOUDFLARE_ZONE_ID', fromAddress: 'CLOUDFLARE_EMAIL_FROM_ADDRESS', fromName: 'CLOUDFLARE_EMAIL_FROM_NAME', replyToAddress: 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS' },
 };
-const providers = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', googleAdsNative: 'Google Shopping', microsoftAds: 'Microsoft Advertising', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email' };
+const providers: Record<string, string> = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', googleAdsNative: 'Google Shopping', microsoftAds: 'Microsoft Advertising', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email' };
 const secretFields = new Set(['apiKey', 'authToken', 'webhookSecret', 'privateKey', 'browserApiKey', 'clientSecret', 'refreshToken', 'developerToken']);
-const defaults = { maxTokens: '2048', maxSteps: '4', environment: 'sandbox' };
-const groupFor = provider => ['googleDrive', 'googleCalendar'].includes(provider) ? 'google' : provider;
-const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
-const plain = value => value && typeof value === 'object' && !Array.isArray(value);
+const defaults: Record<string, string> = { maxTokens: '2048', maxSteps: '4', environment: 'sandbox' };
+const groupFor = (provider: string) => ['googleDrive', 'googleCalendar'].includes(provider) ? 'google' : provider;
 
-function validate(field, input) {
+function validate(field: string, input: any) {
   if (input === null) return '';
   if (['maxTokens', 'maxSteps'].includes(field)) {
     const number = typeof input === 'string' && /^\d+$/.test(input) ? Number(input) : input;
@@ -35,7 +34,7 @@ function validate(field, input) {
   if (field === 'privateKey') {
     try {
       const key = createPrivateKey(value.replace(/\\n/g, '\n'));
-      if (key.asymmetricKeyType !== 'rsa' || key.asymmetricKeyDetails?.modulusLength < 2048) throw new Error();
+      if (key.asymmetricKeyType !== 'rsa' || (key.asymmetricKeyDetails?.modulusLength as number) < 2048) throw new Error();
     } catch { fail(400, 'INVALID_GOOGLE_PRIVATE_KEY', 'Use the RSA private key from your Google service account JSON file.'); }
     return value.replace(/\\n/g, '\n');
   }
@@ -56,8 +55,8 @@ function validate(field, input) {
 }
 
 // This helper is limited to fixed, read-only endpoints; provider error bodies never enter responses.
-async function readProvider(url, authorization, label, send = fetch) {
-  let response; const signal = AbortSignal.timeout(20000);
+async function readProvider(url: string | URL, authorization: string, label: string, send: (url: any, options: any) => Promise<Response> = fetch) {
+  let response: Response; const signal = AbortSignal.timeout(20000);
   try { response = await send(url, { method: 'GET', headers: { Authorization: authorization, Accept: 'application/json' }, redirect: 'error', credentials: 'omit', signal }); }
   catch { fail(502, 'CONNECTION_UNAVAILABLE', `${label} could not be reached. Check the connection and try again.`); }
   if (!response.ok) { await response.body?.cancel().catch(() => {}); fail(response.status === 429 ? 429 : response.status >= 500 ? 502 : 400, 'CONNECTION_REJECTED', `${label} rejected the connection test. Check the saved credentials and provider permissions.`); }
@@ -66,13 +65,13 @@ async function readProvider(url, authorization, label, send = fetch) {
   } catch { fail(502, 'INVALID_PROVIDER_RESPONSE', `${label} returned an unreadable response.`); }
 }
 
-export function createIntegrationSettings({ db, env, secret }) {
+export function createIntegrationSettings({ db, env, secret }: { db: DatabaseSync; env: Record<string, string | undefined>; secret: unknown }) {
   if (typeof secret !== 'string' || secret.length < 32) throw new Error('Integration settings require the instance session secret.');
-  const key = hkdfSync('sha256', secret, 'ten98-campaign', 'integration-settings-v1', 32);
+  const key: any = hkdfSync('sha256', secret, 'ten98-campaign', 'integration-settings-v1', 32);
   const fallback = Object.fromEntries(Object.values(groups).flatMap(fields => Object.values(fields)).map(name => [name, env[name]]));
-  const saved = new Map(); let revision = 0;
+  const saved = new Map<string, any>(); let revision = 0;
   db.exec('CREATE TABLE IF NOT EXISTS integration_settings(provider TEXT PRIMARY KEY,nonce BLOB NOT NULL,ciphertext BLOB NOT NULL,tag BLOB NOT NULL,updated_at TEXT NOT NULL)');
-  function decode(row) {
+  function decode(row: any) {
     try {
       const decipher = createDecipheriv('aes-256-gcm', key, row.nonce); decipher.setAAD(Buffer.from(`integration-settings-v1:${row.provider}`)); decipher.setAuthTag(row.tag);
       const fields = JSON.parse(Buffer.concat([decipher.update(row.ciphertext), decipher.final()]).toString('utf8'));
@@ -80,20 +79,20 @@ export function createIntegrationSettings({ db, env, secret }) {
       return fields;
     } catch { throw new Error('Saved integration settings could not be decrypted. Restore the matching session secret and database backup.'); }
   }
-  for (const row of db.prepare('SELECT * FROM integration_settings').all()) {
+  for (const row of db.prepare('SELECT * FROM integration_settings').all() as any[]) {
     if (!Object.hasOwn(groups, row.provider)) throw new Error('Saved integration settings contain an unsupported provider.');
     saved.set(row.provider, { fields: decode(row), updatedAt: row.updated_at });
   }
-  function apply(group) {
+  function apply(group: string) {
     for (const [field, name] of Object.entries(groups[group])) {
       const value = Object.hasOwn(saved.get(group)?.fields || {}, field) ? saved.get(group).fields[field] : fallback[name];
       if (value === undefined) delete env[name]; else env[name] = value;
     }
   }
   for (const group of Object.keys(groups)) apply(group);
-  const requireProvider = provider => { if (!Object.hasOwn(providers, provider)) fail(404, 'UNKNOWN_INTEGRATION', 'This integration is not available.'); return groupFor(provider); };
-  function describeProvider(provider) {
-    const group = requireProvider(provider), row = saved.get(group), fields = {}, secrets = {}, sources = new Set();
+  const requireProvider = (provider: string) => { if (!Object.hasOwn(providers, provider)) fail(404, 'UNKNOWN_INTEGRATION', 'This integration is not available.'); return groupFor(provider); };
+  function describeProvider(provider: string) {
+    const group = requireProvider(provider), row = saved.get(group), fields: Record<string, any> = {}, secrets: Record<string, any> = {}, sources = new Set();
     for (const [field, name] of Object.entries(groups[group])) {
       const overridden = Object.hasOwn(row?.fields || {}, field), value = env[name] || '';
       const source = overridden ? 'saved' : value ? 'environment' : 'unconfigured';
@@ -108,7 +107,7 @@ export function createIntegrationSettings({ db, env, secret }) {
   return {
     get revision() { return revision; },
     describe,
-    save(provider, fields, { tokenRotation = false } = {}) {
+    save(provider: string, fields: any, { tokenRotation = false }: { tokenRotation?: boolean } = {}) {
       const group = requireProvider(provider);
       if (!plain(fields) || Object.keys(fields).length === 0 || Object.keys(fields).some(field => !Object.hasOwn(groups[group], field))) fail(400, 'INVALID_SETTING', 'Use only the settings shown for this integration.');
       const values = { ...(saved.get(group)?.fields || {}) }, before = JSON.stringify(Object.values(groups[group]).map(name => env[name]));
@@ -123,20 +122,20 @@ export function createIntegrationSettings({ db, env, secret }) {
       if (!tokenRotation && before !== JSON.stringify(Object.values(groups[group]).map(name => env[name]))) revision++;
       return describe();
     },
-    reset(provider) {
+    reset(provider: string) {
       const group = requireProvider(provider), before = JSON.stringify(Object.values(groups[group]).map(name => env[name]));
       db.prepare('DELETE FROM integration_settings WHERE provider=?').run(group); saved.delete(group); apply(group);
       if (before !== JSON.stringify(Object.values(groups[group]).map(name => env[name]))) revision++;
       return describe();
     },
-    async test(provider, context = {}) {
+    async test(provider: string, context: any = {}) {
       requireProvider(provider);
-      const currentRevision = revision; const current = { ...env }, ready = describeProvider(provider);
+      const currentRevision = revision; const current: any = { ...env }, ready = describeProvider(provider);
       if (!ready.configured) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Save the required credentials before testing this integration.');
-      const result = { ok: true, status: 'connected', checkedAt: new Date().toISOString(), readOnly: true };
+      const result: any = { ok: true, status: 'connected', checkedAt: new Date().toISOString(), readOnly: true };
       if (['googleAdsNative', 'microsoftAds'].includes(provider)) {
         const assertCurrent = () => { if (currentRevision !== revision) fail(409, 'CONNECTION_CHANGED', 'Integration credentials changed during the connection test.'); };
-        const persistRefresh = (expected, next) => { assertCurrent(); const name = provider === 'microsoftAds' ? 'MICROSOFT_ADS_REFRESH_TOKEN' : 'GOOGLE_ADS_REFRESH_TOKEN'; if (env[name] === expected) this.save(provider, { refreshToken: next }, { tokenRotation: true }); current[name] = env[name]; };
+        const persistRefresh = (expected: any, next: any) => { assertCurrent(); const name = provider === 'microsoftAds' ? 'MICROSOFT_ADS_REFRESH_TOKEN' : 'GOOGLE_ADS_REFRESH_TOKEN'; if (env[name] === expected) this.save(provider, { refreshToken: next }, { tokenRotation: true }); current[name] = env[name]; };
         Object.assign(result, await (provider === 'googleAdsNative' ? testNativeGoogleAds : testMicrosoftAds)(current, assertCurrent, persistRefresh));
       } else if (provider === 'zernio') {
         const data = await providerRequest('https://zernio.com/api/v1/profiles', { method: 'GET', headers: { Authorization: `Bearer ${current.ZERNIO_API_KEY}` } }, 'Zernio');
@@ -186,12 +185,12 @@ export function createIntegrationSettings({ db, env, secret }) {
       } else if (provider === 'cloudflareEmail') {
         if (!/^[a-fA-F0-9]{32}$/.test(current.CLOUDFLARE_ACCOUNT_ID || '') || !/^[a-fA-F0-9]{32}$/.test(current.CLOUDFLARE_ZONE_ID || '') || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(current.CLOUDFLARE_EMAIL_FROM_ADDRESS || '')) fail(409, 'INVALID_SETTING', 'Configure valid Cloudflare account, zone, and sender details to test the sending domain.');
         const data = await readProvider(`https://api.cloudflare.com/client/v4/zones/${current.CLOUDFLARE_ZONE_ID}/email/sending/subdomains`, `Bearer ${current.CLOUDFLARE_EMAIL_API_TOKEN}`, 'Cloudflare Email Sending');
-        if (data.success !== true || !Array.isArray(data.result) || data.result.some(row => !plain(row) || typeof row.name !== 'string' || typeof row.enabled !== 'boolean')) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Cloudflare did not return sending domain information.');
+        if (data.success !== true || !Array.isArray(data.result) || data.result.some((row: any) => !plain(row) || typeof row.name !== 'string' || typeof row.enabled !== 'boolean')) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Cloudflare did not return sending domain information.');
         const domain = current.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase();
-        if (!data.result.some(row => row.enabled && (row.name.toLowerCase() === domain || row.name.startsWith('*.') && domain.endsWith(row.name.slice(1).toLowerCase())))) fail(409, 'EMAIL_SENDER_NOT_ENABLED', 'The sender domain is not enabled for Cloudflare Email Sending in this zone.');
+        if (!data.result.some((row: any) => row.enabled && (row.name.toLowerCase() === domain || row.name.startsWith('*.') && domain.endsWith(row.name.slice(1).toLowerCase())))) fail(409, 'EMAIL_SENDER_NOT_ENABLED', 'The sender domain is not enabled for Cloudflare Email Sending in this zone.');
         result.message = 'Cloudflare confirmed an enabled sender domain. No email was sent; send permissions and delivery were not tested. Transactional email only.';
       } else {
-        const base = { sandbox: 'https://direct-sandbox.broadsign.com', production: 'https://direct.broadsign.com' }[current.BROADSIGN_ENVIRONMENT || 'sandbox'];
+        const base = ({ sandbox: 'https://direct-sandbox.broadsign.com', production: 'https://direct.broadsign.com' } as Record<string, string>)[current.BROADSIGN_ENVIRONMENT || 'sandbox'];
         if (!base) fail(409, 'INVALID_SETTING', 'Choose the Broadsign sandbox or production environment.');
         const data = await readProvider(`${base}/api/v1/user/current_user`, `Broadsign ${current.BROADSIGN_API_KEY}`, 'Broadsign'), user = data.user || data;
         if (!Number.isSafeInteger(Number(user.domain_id)) || Number(user.domain_id) < 1) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Broadsign did not return the current account domain.');
