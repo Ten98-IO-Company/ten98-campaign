@@ -15,14 +15,15 @@
     "check:architecture": "node node_modules/@ten98/runtime/check.mjs ."
   },
   "dependencies": {
+    "@ten98/runtime": "file:vendor/ten98-runtime-0.1.8.tgz",
     "@ten98/ui": "file:vendor/ten98-ui-0.3.22.tgz",
     "openid-client": "6.8.8",
     "qrcode-generator": "2.0.4",
     "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "@ten98/runtime": "file:vendor/ten98-runtime-0.1.7.tgz"
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@types/node": "24.10.1",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
     "typescript": "7.0.2",

@@ -1,0 +1,200 @@
+{
+  "src/AcceptInvitation.tsx": {
+    "element": 29,
+    "styling": 13
+  },
+  "src/AccountSettings.tsx": {
+    "element": 36,
+    "styling": 13
+  },
+  "src/AdCampaignDiscovery.tsx": {
+    "element": 41,
+    "styling": 13
+  },
+  "src/AdComposer.tsx": {
+    "element": 174,
+    "styling": 66
+  },
+  "src/AdDetails.tsx": {
+    "element": 186,
+    "styling": 64
+  },
+  "src/CampaignAgent.tsx": {
+    "element": 50,
+    "styling": 26
+  },
+  "src/CampaignLinks.tsx": {
+    "stylesheet": 1,
+    "element": 197,
+    "styling": 79
+  },
+  "src/ContentApprovals.tsx": {
+    "element": 84,
+    "styling": 44
+  },
+  "src/DirectCampaigns.tsx": {
+    "stylesheet": 1,
+    "element": 301,
+    "styling": 124
+  },
+  "src/GoogleAdsTools.tsx": {
+    "element": 227,
+    "styling": 71
+  },
+  "src/GoogleCalendar.tsx": {
+    "element": 83,
+    "styling": 34
+  },
+  "src/GoogleConversions.tsx": {
+    "element": 120,
+    "styling": 34
+  },
+  "src/InstagramPublishingTools.tsx": {
+    "element": 41,
+    "styling": 21
+  },
+  "src/IntegrationSettings.tsx": {
+    "element": 94,
+    "styling": 50
+  },
+  "src/MicrosoftAds.tsx": {
+    "element": 105,
+    "styling": 43
+  },
+  "src/NativeGoogleAds.tsx": {
+    "element": 135,
+    "styling": 47
+  },
+  "src/OohMap.tsx": {
+    "element": 16,
+    "styling": 9
+  },
+  "src/OohProviders.tsx": {
+    "element": 109,
+    "styling": 38
+  },
+  "src/OpenAIConnection.tsx": {
+    "element": 12,
+    "styling": 5
+  },
+  "src/OperationRecovery.tsx": {
+    "element": 62,
+    "styling": 18
+  },
+  "src/PostComposer.tsx": {
+    "stylesheet": 1,
+    "element": 368,
+    "styling": 158
+  },
+  "src/PostManagement.tsx": {
+    "element": 74,
+    "styling": 29
+  },
+  "src/PublishingAgenda.tsx": {
+    "stylesheet": 1,
+    "element": 7,
+    "styling": 5
+  },
+  "src/SocialAnalytics.tsx": {
+    "element": 87,
+    "styling": 24
+  },
+  "src/TeamPanel.tsx": {
+    "element": 35,
+    "styling": 11
+  },
+  "src/TikTokPublishingTools.tsx": {
+    "element": 45,
+    "styling": 23
+  },
+  "src/UnifiedInbox.tsx": {
+    "stylesheet": 1,
+    "element": 531,
+    "styling": 250
+  },
+  "src/WhatsAppTemplate.tsx": {
+    "element": 19,
+    "styling": 6
+  },
+  "src/WorkspaceInvitations.tsx": {
+    "element": 40,
+    "styling": 13
+  },
+  "src/ZernioAccounts.tsx": {
+    "element": 246,
+    "styling": 74
+  },
+  "src/ZernioAdEvents.tsx": {
+    "element": 48,
+    "styling": 14
+  },
+  "src/ZernioAdmin.tsx": {
+    "element": 64,
+    "styling": 22
+  },
+  "src/ZernioBlogDrafts.tsx": {
+    "element": 120,
+    "styling": 51
+  },
+  "src/ZernioConnection.tsx": {
+    "element": 59,
+    "styling": 18
+  },
+  "src/ZernioContacts.tsx": {
+    "element": 218,
+    "styling": 51
+  },
+  "src/ZernioDestinations.tsx": {
+    "element": 55,
+    "styling": 20
+  },
+  "src/ZernioInsights.tsx": {
+    "element": 259,
+    "styling": 39
+  },
+  "src/ZernioLeads.tsx": {
+    "element": 153,
+    "styling": 57
+  },
+  "src/ZernioMeasurement.tsx": {
+    "element": 101,
+    "styling": 26
+  },
+  "src/ZernioMediaUpload.tsx": {
+    "element": 30,
+    "styling": 17
+  },
+  "src/ZernioPostLibrary.tsx": {
+    "element": 72,
+    "styling": 29
+  },
+  "src/ZernioProducts.tsx": {
+    "element": 379,
+    "styling": 141
+  },
+  "src/ZernioQueues.tsx": {
+    "element": 79,
+    "styling": 33
+  },
+  "src/ZernioRecycling.tsx": {
+    "element": 91,
+    "styling": 28
+  },
+  "src/ZernioTeam.tsx": {
+    "element": 35,
+    "styling": 11
+  },
+  "src/ZernioWebhooks.tsx": {
+    "element": 66,
+    "styling": 30
+  },
+  "src/ZernioWhatsAppTemplates.tsx": {
+    "element": 160,
+    "styling": 47
+  },
+  "src/main.tsx": {
+    "stylesheet": 1,
+    "element": 535,
+    "styling": 264
+  }
+}
