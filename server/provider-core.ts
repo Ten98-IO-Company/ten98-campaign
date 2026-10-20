@@ -22,7 +22,7 @@ export class IntegrationError extends Error {
     super(message); Object.assign(this, { status, code, uncertain });
   }
 }
-export function fail(status: number, code: string, message: string): never { throw new IntegrationError(status, code, message); }
+export function fail(status: number, code: string, message: string, uncertain: unknown = false): never { throw new IntegrationError(status, code, message, uncertain); }
 const secretField = /token|secret|password|authorization|api.?key|credentials|private.?key/i;
 export function redact(value: any): any {
   if (Array.isArray(value)) return value.map(redact);
