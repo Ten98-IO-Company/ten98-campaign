@@ -10,6 +10,7 @@ export function openDatabase(dataDir) {
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
     CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT UNIQUE NOT NULL,password TEXT);
     CREATE TABLE IF NOT EXISTS instance_operators(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS instance_operator_audit(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,action TEXT NOT NULL CHECK(action IN ('bootstrap','grant','revoke')),source TEXT NOT NULL CHECK(source IN ('bootstrap','host')),created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY,name TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS memberships(workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,role TEXT NOT NULL CHECK(role IN ('owner','admin','editor','viewer')),PRIMARY KEY(workspace_id,user_id));

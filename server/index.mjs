@@ -6,6 +6,7 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import { oidcEndpoint, workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
 import { openDatabase, createStore, collections, transaction } from './database.mjs';
 import { createAuth, sessionSecret, bootstrapToken, hashPassword, HttpError, publicUser } from './auth.mjs';
+import { setInstanceOperator } from './instance-operators.ts';
 import { seedSample } from './seed.ts';
 import { handleIntegration, IntegrationError, mediaUrl } from './integrations.mjs';
 import { createIntegrationSettings } from './integration-settings.mjs';
@@ -168,7 +169,7 @@ export function createApp(options = {}) {
           transaction(db, () => {
             if (db.prepare('SELECT claimed FROM installation WHERE id=1').get().claimed) throw new HttpError(409, 'Setup is already complete.');
             db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(id, name, mail, hash);
-            db.prepare('INSERT INTO instance_operators VALUES(?)').run(id);
+            setInstanceOperator(db, id, true, 'bootstrap');
             db.prepare('INSERT INTO workspaces VALUES(?,?)').run(workspaceId, 'ten98 studio'); db.prepare("INSERT INTO memberships VALUES(?,?,'owner')").run(workspaceId, id);
             db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run(projectId, workspaceId, 'Brand launch');
             if (body.sample) seedSample(store, projectId);

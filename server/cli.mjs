@@ -2,12 +2,13 @@ import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { openDatabase, transaction } from './database.mjs';
 import { hashPassword } from './auth.mjs';
+import { setInstanceOperator } from './instance-operators.ts';
 
 // Read JSON from stdin so passwords never appear in process arguments or output.
 let db;
 try {
   const command = process.argv[2];
-  if (!['create-user', 'grant-operator', 'reset-password'].includes(command) || process.stdin.isTTY) throw new Error('Usage: pipe JSON account input to node server/cli.mjs create-user, reset-password, or {email} to grant-operator.');
+  if (!['create-user', 'grant-operator', 'revoke-operator', 'reset-password'].includes(command) || process.stdin.isTTY) throw new Error('Usage: pipe JSON account input to node server/cli.mjs create-user, reset-password, or {email} to grant-operator or revoke-operator.');
   let raw = '';
   for await (const chunk of process.stdin) { raw += chunk; if (Buffer.byteLength(raw) > 8192) throw new Error('Account input is too large.'); }
   let input; try { input = JSON.parse(raw); } catch { throw new Error('Supply valid JSON account input.'); }
@@ -16,10 +17,10 @@ try {
   db = openDatabase(resolve(process.env.DATA_DIR || 'data'));
   if (!db.prepare('SELECT id FROM users LIMIT 1').get()) throw new Error('Complete first-run setup in the app before provisioning other users.');
   const existing = db.prepare('SELECT id FROM users WHERE email=?').get(email);
-  if (command === 'grant-operator') {
+  if (command === 'grant-operator' || command === 'revoke-operator') {
     if (!existing) throw new Error('The account does not exist. Create it first.');
-    db.prepare('INSERT OR IGNORE INTO instance_operators VALUES(?)').run(existing.id);
-    console.log(`Granted instance operator authority to ${email}. Workspace membership is still required.`);
+    const enabled = command === 'grant-operator', changed = transaction(db, () => setInstanceOperator(db, existing.id, enabled, 'host'));
+    console.log(changed ? `${enabled ? 'Granted' : 'Revoked'} instance operator authority ${enabled ? 'to' : 'from'} ${email}. Workspace membership is still required.` : `Instance operator authority for ${email} is already ${enabled ? 'granted' : 'revoked'}.`);
   } else if (command === 'reset-password') {
     if (!existing || !db.prepare('SELECT password FROM users WHERE id=?').get(existing.id)?.password) throw new Error('A local password account was not found. Use your identity provider for SSO recovery.');
     if (typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) throw new Error('Use a password between 12 and 128 characters.');
