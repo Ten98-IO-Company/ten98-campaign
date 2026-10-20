@@ -25,6 +25,27 @@ test('native ad credentials stay encrypted, masked and independent from shared D
   } finally { db.close(); }
 });
 
+test('connection tests reject malformed UTF-8 and oversized bodies and cancel rejected provider responses', async () => {
+  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch;
+  const manager = createIntegrationSettings({ db, env: { OPENROUTER_API_KEY: 'fixture', OPENROUTER_MODEL: 'fixture/model' }, secret });
+  let response;
+  globalThis.fetch = async (_target, options) => { assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'error'); return response; };
+  try {
+    let oversizedCancelled = false;
+    const malformed = new Response(Buffer.concat([Buffer.from('{"data":{"label":"'), Buffer.from([0xc3, 0x28]), Buffer.from('"}}')]));
+    const oversized = new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(2 * 1024 * 1024 + 1)); }, cancel() { oversizedCancelled = true; } }));
+    for (response of [malformed, oversized, new Response('\ufeff{"data":{"label":"Valid JSON after BOM"}}')]) {
+      await assert.rejects(manager.test('openrouter'), error => error.status === 502 && error.code === 'INVALID_PROVIDER_RESPONSE');
+      assert.equal(response.body.locked, false);
+    }
+    assert.equal(oversizedCancelled, true);
+    let rejectedCancelled = false;
+    response = new Response(new ReadableStream({ cancel() { rejectedCancelled = true; } }), { status: 401 });
+    await assert.rejects(manager.test('openrouter'), error => error.status === 400 && error.code === 'CONNECTION_REJECTED');
+    assert.equal(rejectedCancelled, true);
+  } finally { globalThis.fetch = originalFetch; db.close(); }
+});
+
 test('integration settings encrypt credentials, mask reads, persist overrides, share Google credentials and restore environment values', () => {
   const db = new DatabaseSync(':memory:');
   const original = { ZERNIO_API_KEY: 'ENV_ZERNIO_KEY', ZERNIO_WEBHOOK_SECRET: 'ENV_WEBHOOK_SECRET_LONG', OPENROUTER_API_KEY: 'ENV_OPENROUTER_KEY', OPENROUTER_MODEL: 'vendor/model', GOOGLE_SERVICE_ACCOUNT_EMAIL: 'env-service@example.test', GOOGLE_PRIVATE_KEY: 'ENV_PRIVATE_KEY' }, env = { ...original };
@@ -80,7 +101,7 @@ test('connection tests use fixed read-only provider contracts, never inference o
     onFetch?.(); onFetch = undefined;
     if (rejectNext) { rejectNext = false; return new Response(JSON.stringify({ error: 'TEST_OPENROUTER_KEY must never be returned' }), { status: 401 }); }
     if (url.href === 'https://zernio.com/api/v1/profiles') { assert.equal(options.method, 'GET'); assert.equal(options.headers.Authorization, 'Bearer TEST_ZERNIO_KEY'); return Response.json({ profiles: [{ _id: 'private-id', name: 'PRIVATE_PROFILE_NAME' }] }); }
-    if (url.href === 'https://openrouter.ai/api/v1/key') { assert.equal(options.method, 'GET'); assert.equal(options.headers.Authorization, 'Bearer TEST_OPENROUTER_KEY'); return Response.json({ data: { label: 'PRIVATE_KEY_LABEL', limit_remaining: 5 } }); }
+    if (url.href === 'https://openrouter.ai/api/v1/key') { assert.equal(options.method || 'GET', 'GET'); assert.equal(options.headers.Authorization, 'Bearer TEST_OPENROUTER_KEY'); return Response.json({ data: { label: 'PRIVATE_KEY_LABEL', limit_remaining: 5 } }); }
     if (url.href === 'https://oauth2.googleapis.com/token') {
       assert.equal(options.method, 'POST'); const assertion = new URLSearchParams(options.body).get('assertion');
       const payload = JSON.parse(Buffer.from(assertion.split('.')[1], 'base64url').toString());

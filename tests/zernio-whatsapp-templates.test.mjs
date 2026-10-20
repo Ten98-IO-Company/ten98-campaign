@@ -140,7 +140,7 @@ test('lost or malformed acknowledgements and unreadable readbacks stay uncertain
     const { db, state, request } = setup();
     try {
       state[failure] = true; const body = createBody(), result = await request('templates/create', { body, key: 'uncertain-create-key' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
-      assert.equal((await request('templates/create', { body, key: 'uncertain-create-key' })).status, 409); assert.equal((await request('templates/create', { body, key: 'another-create-key' })).status, 409); assert.equal((await request('templates/create', { body: { ...body, name: 'changed_after_unknown' } })).data.error.code, 'TEMPLATE_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(state.writeCount, 1);
+      assert.equal((await request('templates/create', { body, key: 'uncertain-create-key' })).status, 409); assert.equal((await request('templates/create', { body, key: 'another-create-key' })).status, 409); const blocked = await request('templates/create', { body: { ...body, name: 'changed_after_unknown' } }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id); assert.equal(state.writeCount, 1);
       db.prepare("UPDATE integration_operations SET status='reviewed-not_applied' WHERE request_key=?").run('uncertain-create-key'); state[failure] = false; assert.equal((await request('templates/create', { body: { ...body, name: 'reviewed_new_template' } })).status, 200);
     } finally { db.close(); }
   }
@@ -241,7 +241,7 @@ test('authenticated HTTP template workflows enforce project routing, CSRF, owner
       const response = await originalFetch(origin + path, { method, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(csrf ? { Origin: 'https://templates.example.test' } : {}), ...(body ? { 'Content-Type': 'application/json', 'Idempotency-Key': key } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
       const next = response.headers.get('set-cookie'); if (next) cookie = next.split(';')[0]; return { status: response.status, data: await response.json() };
     };
-    const created = await request('/api/auth/setup', 'POST', { name: 'Template QA owner', email: 'templates-qa@example.test', password: 'Synthetic template passphrase 2026!', sample: false }); assert.equal(created.status, 201);
+    const created = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Template QA owner', email: 'templates-qa@example.test', password: 'Synthetic template passphrase 2026!', sample: false }); assert.equal(created.status, 201);
     const projectId = created.data.projectId; assert.equal((await request(`/api/projects/${projectId}`, 'PATCH', { zernioProfileId: profileId })).status, 200); const path = `/api/projects/${projectId}/integrations/whatsapp-templates`;
     assert.equal((await request(path + '/overview')).data.accounts[0].id, 'wa-a');
     assert.equal((await request(path + '/templates/create', 'POST', createBody(), 'csrf-template-key', false)).status, 403); assert.equal(upstream.state.writeCount, 0);
@@ -254,7 +254,7 @@ test('authenticated HTTP template workflows enforce project routing, CSRF, owner
     const otherProject = await request('/api/projects', 'POST', { workspaceId: app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id, name: 'Other template project' }); assert.equal(otherProject.status, 201);
     assert.equal((await request(`/api/projects/${otherProject.data.project.id}/integrations/whatsapp-templates/templates?accountId=wa-a`)).status, 409);
     upstream.state.malformed = true; const changed = { ...createBody(), name: 'uncertain_order' }; result = await request(path + '/templates/create', 'POST', changed, 'http-uncertain-template'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
-    assert.equal((await request(path + '/templates/create', 'POST', changed, 'http-uncertain-template-again')).status, 409); assert.equal((await request(path + '/templates/create', 'POST', { ...changed, name: 'changed_http_retry' })).data.error.code, 'TEMPLATE_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(upstream.state.writeCount, 4);
+    assert.equal((await request(path + '/templates/create', 'POST', changed, 'http-uncertain-template-again')).status, 409); const blocked = await request(path + '/templates/create', 'POST', { ...changed, name: 'changed_http_retry' }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id); assert.equal(upstream.state.writeCount, 4);
   } finally {
     globalThis.fetch = originalFetch; await app.close(); upstream.db.close(); assert.ok(resolve(dataDir).startsWith(resolve(tmpdir()) + sep)); await rm(dataDir, { recursive: true, force: true });
   }

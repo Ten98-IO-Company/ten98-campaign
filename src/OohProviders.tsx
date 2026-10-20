@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { ResourceCard, ReviewSummary } from '@ten98/ui';
 
-type Props = { projectId: string; role: string; isOperator: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onInventory?: (items: any[]) => void; onChanged?: () => void | Promise<void> };
+type Props = { projectId: string; role: string; isOperator: boolean; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onInventory?: (items: any[]) => void; onChanged?: () => void | Promise<void> };
 const statuses: Record<number, string> = { 1: 'Saved', 3: 'Processing', 4: 'Held', 5: 'Partially held', 9: 'Booked', 10: 'Submitted', 11: 'Live', 12: 'Cancelled', 14: 'Ended', 15: 'Cancelling' };
-export default function OohProviders({ projectId, role, isOperator, request, onInventory, onChanged }: Props) {
+export default function OohProviders({ projectId, role, isOperator, mode = 'workflow', onOpenIntegrations, request, onInventory, onChanged }: Props) {
   const [status, setStatus] = useState<any>(null), [inventory, setInventory] = useState<any[]>([]), [bookings, setBookings] = useState<any[]>([]);
   const [selected, setSelected] = useState<number[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [availability, setAvailability] = useState<Record<string, string>>({});
@@ -26,7 +27,7 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
   }
   async function load() {
     if (!active.current) throw new DOMException('The OOH view closed.', 'AbortError');
-    const [connection, screens, saved] = await Promise.all([request(`${path}/status`), request(`${path}/inventory`), request(`${path}/bookings`)]);
+    const [connection, screens, saved] = await Promise.all([request(`${path}/status`), mode === 'connection' ? Promise.resolve({ inventory: [] }) : request(`${path}/inventory`), request(`${path}/bookings`)]);
     if (!active.current) throw new DOMException('The OOH view closed.', 'AbortError');
     setStatus(connection); setInventory(screens.inventory); setBookings(saved.bookings); setSelected(previous => previous.filter(id => screens.inventory.some((screen: any) => screen.id === id))); inventoryCallback.current?.(screens.inventory);
   }
@@ -37,11 +38,11 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
   }
   useEffect(() => {
     active.current = true; let current = true; setStatus(null); setInventory([]); setBookings([]); setSelected([]); setError(''); setNotice(''); setAvailability({});
-    Promise.all([request(`${path}/status`), request(`${path}/inventory`), request(`${path}/bookings`)]).then(([connection, screens, saved]) => {
+    Promise.all([request(`${path}/status`), mode === 'connection' ? Promise.resolve({ inventory: [] }) : request(`${path}/inventory`), request(`${path}/bookings`)]).then(([connection, screens, saved]) => {
       if (current) { setStatus(connection); setInventory(screens.inventory); setBookings(saved.bookings); inventoryCallback.current?.(screens.inventory); }
     }).catch(err => { if (current) setError(err.message || 'The OOH connection could not be loaded.'); });
     return () => { current = false; active.current = false; };
-  }, [path, request]);
+  }, [path, request, mode]);
   async function action(run: () => Promise<void>) {
     if (busy || !active.current) return; setBusy(true); setError(''); setNotice('');
     try { await run(); } catch (err) { if (active.current) setError((err as Error).message || 'The OOH action could not be completed.'); }
@@ -80,13 +81,15 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
     });
   }
   return <section className="panel settings-panel">
-    <div className="section-heading"><div><h2>Broadsign OOH</h2><p>Sync approved screens and static faces, prepare proposals, and submit confirmed bookings.</p></div></div>
-    <p className="helper-note">Upload and schedule creative bundles in <a href="https://app.broadsign.com/campaigns" target="_blank" rel="noreferrer">Broadsign Guaranteed Campaigns</a> using the proposal ID below. Your provider account controls creative permissions and approvals.</p>
+    <div className="section-heading"><div><h2>{mode === 'connection' ? 'Broadsign project connection' : 'Broadsign OOH'}</h2><p>{mode === 'connection' ? 'Approve the client and inventory available to this project.' : 'Sync approved screens and static faces, prepare proposals, and submit confirmed bookings.'}</p></div></div>
+    {mode === 'workflow' && <p className="helper-note">Upload and schedule creative bundles in <a href="https://app.broadsign.com/campaigns" target="_blank" rel="noreferrer">Broadsign Guaranteed Campaigns</a> using the proposal ID below. Your provider account controls creative permissions and approvals.</p>}
     {error && <p className="alert" role="alert">{error}</p>}
     {notice && <p className="helper-note" role="status">{notice}</p>}
     {refreshRequired && <div className="alert" role="status"><span>Broadsign saved the action, but the latest details could not be loaded. Refresh provider details before making further changes.</span><button type="button" className="button" disabled={busy} onClick={refresh}>Refresh provider details</button></div>}
     <fieldset disabled={refreshRequired}>
-    {status && <p className="helper-note">{status.configured ? `Credentials configured · ${status.environment}` : 'Configure the Broadsign API key in Integrations to connect this provider.'}{status.connection ? ` · Domain ${status.connection.domainId} · ${status.connection.clientName}` : ' · Project mapping required'}</p>}
+    {mode === 'workflow' && status && <p className="helper-note">{status.connection ? `${status.connection.clientName} · ${status.environment}` : 'Connect this project’s Broadsign inventory in Integrations.'} {onOpenIntegrations && <button type="button" className="text-link" onClick={onOpenIntegrations}>Open integrations</button>}</p>}
+    {mode === 'connection' && status && <ResourceCard title="Broadsign connection" description={status.configured ? `Credentials configured · ${status.environment}` : 'Configure Broadsign credentials above to connect this provider.'} status={status.connection ? 'Project inventory mapped' : 'Project mapping required'}>
+    {status.connection && <p className="helper-note">Project {projectId} · Domain {status.connection.domainId} · {status.connection.clientName} · Client {status.connection.clientId}</p>}
     {canMap && status && <details><summary>Approve project inventory</summary>
       <p className="helper-note">Use the domain, client, and screen IDs supplied by your media provider. Each screen can belong to one project. Existing bookings lock this mapping.</p>
       <form onSubmit={saveMapping} key={`${projectId}-${JSON.stringify(status.connection)}`}><fieldset disabled={busy || !status.configured}>
@@ -97,7 +100,8 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
         <button className="button" disabled={Boolean(bookings.length)}>Approve inventory mapping</button>
       </fieldset></form>
     </details>}
-    {status?.connection && <>
+    </ResourceCard>}
+    {mode === 'workflow' && status?.connection && <>
       <p><button type="button" className="button" disabled={busy || !canWrite || !status.configured} onClick={() => action(async () => { const result = await request(`${path}/sync`, 'POST', {}); if (!active.current) return; setInventory(result.inventory); setSelected(previous => previous.filter(id => result.inventory.some((screen: any) => screen.id === id))); inventoryCallback.current?.(result.inventory); await onChanged?.(); setNotice(`Synced ${result.inventory.length} approved screens.`); })}>{busy ? 'Working…' : 'Sync provider inventory'}</button></p>
       {!inventory.length && <p className="helper-note">Sync the approved inventory to load locations and start a provider proposal.</p>}
       {inventory.length > 0 && <div className="table-scroll"><table><thead><tr><th>Select</th><th>Screen / face</th><th>Location</th><th>Resolution</th></tr></thead><tbody>{inventory.map(screen => <tr key={screen.id}>
@@ -117,7 +121,7 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
         </fieldset></form>
       </details>}
     </>}
-    {bookings.length > 0 && <><h3>Provider proposals</h3>{bookings.map(booking => <article className="panel" key={booking.id}>
+    {mode === 'workflow' && bookings.length > 0 && <><h3>Provider proposals</h3>{bookings.map(booking => <article className="panel" key={booking.id}>
       <h3>{booking.name}</h3><p>{booking.startDate} – {booking.endDate} · {booking.screenIds.length} screens · Quote {booking.price} in account currency</p>
       <p className="helper-note">Broadsign proposal {booking.proposalId || 'ID unconfirmed'} · {['creating', 'proposal-created'].includes(booking.stage) ? 'Incomplete draft: review in Broadsign before continuing.' : statuses[booking.providerStatus] || `Provider status ${booking.providerStatus}`}</p>
       {booking.stage === 'cancellation-requested' && <p className="helper-note" role="status">{booking.canRetryCancellation ? 'An operator reviewed this cancellation as not applied. This is a human review, not provider confirmation. You may explicitly request a fresh cancellation below; Broadsign’s current scope and status will be checked again.' : 'Cancellation requested; provider confirmation is pending. Delivery may continue. Refresh the delivery report before taking another action.'}</p>}
@@ -126,10 +130,18 @@ export default function OohProviders({ projectId, role, isOperator, request, onI
       {Number(booking.providerStatus) === 1 && availability[booking.id] && <p className="helper-note" role="status">{availability[booking.id]}</p>}
       {booking.report && <p>Actual impressions: {booking.report.actualImpressions ?? 'Not reported'} · Actual plays: {booking.report.actualPlays ?? 'Not reported'}{booking.report.updatedAt ? ` · Updated ${booking.report.updatedAt}` : ''}</p>}
       {canWrite && booking.stage === 'draft' && Number(booking.providerStatus) === 1 && <form onSubmit={event => submitBooking(event, booking)}><fieldset disabled={busy || !status?.configured}>
-        <label><input type="checkbox" required/> I approve submitting this paid booking at the provider quote.</label><p><button className="button primary">Submit for booking</button></p>
+        <ReviewSummary title="Review paid booking" scope={`Project ${projectId} · Broadsign ${status?.environment || 'environment unavailable'}`} resource={`${booking.name} · Booking ${booking.id} · Proposal ${booking.proposalId || 'ID unconfirmed'} · Line item ${booking.lineItemId || 'ID unconfirmed'}`}
+          description={`${booking.startDate} – ${booking.endDate} · ${booking.inventoryType} · ${booking.slotDuration} seconds · Screen IDs ${booking.screenIds.join(', ')} · Quote ${booking.price} in account currency`}
+          changes={[{ id: 'booking-request', label: 'Provider booking', before: statuses[booking.providerStatus] || `Provider status ${booking.providerStatus}`, after: 'Submit a paid booking request; final status comes from Broadsign' }]}
+          consequences={<p>Submits the provider quote for these screens and dates. Availability is checked again before booking. Creative trafficking remains in Broadsign.</p>}
+          actions={<><label><input type="checkbox" required/> I approve submitting this paid booking at the provider quote.</label><p><button className="button primary">Submit for booking</button></p></>}/>
       </fieldset></form>}
       {canWrite && booking.lineItemId && [3, 9, 10, 11].includes(Number(booking.providerStatus)) && (booking.canRetryCancellation || !['cancellation-requested', 'cancelling', 'cancelled'].includes(booking.stage)) && <form onSubmit={event => cancelBooking(event, booking)}><fieldset disabled={busy || !status?.configured}>
-        <label><input type="checkbox" required/> I approve cancelling this booking under the media provider’s terms.</label><p className="helper-note">Cancellation can incur charges and does not guarantee a refund. Booked or live delivery may continue until the provider confirms cancellation.</p><p><button className="button danger">{booking.canRetryCancellation ? 'Request fresh cancellation' : 'Request cancellation'}</button></p>
+        <ReviewSummary title="Review cancellation request" scope={`Project ${projectId} · Broadsign ${status?.environment || 'environment unavailable'}`} resource={`${booking.name} · Booking ${booking.id} · Proposal ${booking.proposalId || 'ID unconfirmed'} · Line item ${booking.lineItemId || 'ID unconfirmed'}`}
+          description={`${booking.startDate} – ${booking.endDate} · ${booking.inventoryType} · ${booking.slotDuration} seconds · Screen IDs ${booking.screenIds.join(', ')} · Quote ${booking.price} in account currency`}
+          changes={[{ id: 'cancellation-request', label: 'Provider booking', before: statuses[booking.providerStatus] || `Provider status ${booking.providerStatus}`, after: 'Request cancellation; provider confirmation is pending' }]}
+          consequences={<p className="helper-note">Cancellation can incur charges and does not guarantee a refund. Booked or live delivery may continue until the provider confirms cancellation.</p>}
+          actions={<><label><input type="checkbox" required/> I approve cancelling this booking under the media provider’s terms.</label><p><button className="button danger">{booking.canRetryCancellation ? 'Request fresh cancellation' : 'Request cancellation'}</button></p></>}/>
       </fieldset></form>}
     </article>)}<p className="helper-note">Verified provider bookings also update your shared OOH plan. Per-location costs remain unknown when the provider reports only a combined quote. Delivery totals come from Broadsign’s line-item performance fields. Raw proof-of-play logs require a separate Broadsign Control / POP integration.</p></>}
     </fieldset>

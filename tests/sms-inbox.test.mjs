@@ -107,7 +107,7 @@ test('SMS replies use one original sender, durable keys, authenticated status ca
     for (const body of [{ message: '' }, { message: 'x'.repeat(1601) }, { message: 'Valid', to: '+12025550999' }, { message: ['invalid'] }]) await assert.rejects(f.request(path, 'POST', body), error => error.status === 400);
     f.setHook(() => { throw new Error('Mock lost acknowledgement'); }); const body = { message: 'Unconfirmed reply' }, uncertainKey = randomUUID();
     const uncertain = await f.request(path, 'POST', body, uncertainKey); assert.equal(uncertain.status, 409); assert.equal(uncertain.data.operation.status, 'uncertain'); const calls = f.calls.length;
-    await assert.rejects(f.request(path, 'POST', body, uncertainKey), error => error.status === 409); await assert.rejects(f.request(path, 'POST', body), error => error.status === 409); assert.equal(f.calls.length, calls);
+    await assert.rejects(f.request(path, 'POST', body, uncertainKey), error => error.status === 409); const blocked = await f.request(path, 'POST', body); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.equal(f.calls.length, calls);
     assert.equal((await f.request(`sms-inbox/conversations/${row.id}/messages`)).data.messages[0].status, 'uncertain');
   } finally { f.close(); }
 });
@@ -222,7 +222,7 @@ test('actual HTTP campaign sends, signed replies and receipts survive restart wi
   try {
     await listen();
     async function request(path, method = 'GET', body, options = {}) { const result = await fetch(base + path, { method, headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...options.headers }, ...(body ? { body: JSON.stringify(body) } : {}) }); return { status: result.status, data: await result.json(), cookie: result.headers.get('set-cookie')?.split(';')[0] }; }
-    const setup = await request('/api/auth/setup', 'POST', { name: 'SMS owner', email: 'sms-owner@example.test', password: 'sms fixture long passphrase', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
+    const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'SMS owner', email: 'sms-owner@example.test', password: 'sms fixture long passphrase', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
     const projectId = setup.data.projectId, path = `/api/projects/${projectId}/sms-inbox`;
     assert.equal((await request(`/api/projects/${projectId}/direct/contacts`, 'POST', { name: 'SMS test recipient', phone: '+12025550123', consents: { sms: true }, consentSource: 'Isolated test opt-in' })).status, 201);
     const draft = await request(`/api/projects/${projectId}/direct/campaigns`, 'POST', { name: 'HTTP campaign', channel: 'sms', text: 'Your requested service update.' }); assert.equal(draft.status, 201);

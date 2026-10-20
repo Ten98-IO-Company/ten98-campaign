@@ -21,5 +21,9 @@ try {
   assert.equal(home.status, 200); assert.match(html, /<script nonce="[^"]+"[^>]+src="\/assets\//);
   const bundle = html.match(/src="(\/assets\/[^\"]+\.js)"/)[1];
   assert.equal((await fetch(base + bundle)).status, 200);
-  console.log('Container imports, non-root startup, database, auth boundary and frontend bundle passed.');
+  assert.match(html, /<script nonce="[^"]+" src="\/theme\.js"><\/script>/);
+  const appearance = await fetch(base + '/theme.js');
+  assert.equal(appearance.status, 200); assert.match(appearance.headers.get('content-type'), /^text\/javascript/);
+  assert.match(await appearance.text(), /ten98-campaign-theme/);
+  console.log('Container imports, non-root startup, database, auth boundary, frontend bundle and appearance bootstrap passed.');
 } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }

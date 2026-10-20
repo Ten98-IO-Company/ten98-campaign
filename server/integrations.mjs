@@ -1,5 +1,6 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
-import { PLATFORM_RULES, buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostVariants, normalizeAccountVariants, assertAccountSchedules, validPostInstant, resolveVariant, validatePostForPlatforms, wireMediaItems, assetDeliveryIssue, providerPostMediaUrls } from '../shared/social-posts.mjs';
+import { readResponseText } from '@ten98/runtime';
+import { PLATFORM_RULES, buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostVariants, normalizePostTags, normalizeAccountVariants, assertAccountSchedules, validPostInstant, resolveVariant, validatePostForPlatforms, wireMediaItems, assetDeliveryIssue, providerPostMediaUrls } from '../shared/social-posts.mjs';
 import { transaction } from './database.mjs';
 import { handleGoogleAds } from './google-ads.mjs';
 import { handleGoogleConversions } from './zernio-google-conversions.mjs';
@@ -17,6 +18,8 @@ import { handleZernioWhatsAppTemplates } from './zernio-whatsapp-templates.mjs';
 import { handleZernioRecycling, assertRecyclingSeedEditable } from './zernio-recycling.mjs';
 import { handleZernioQueues, applyQueueIntent, assertQueueReceipt } from './zernio-queues.mjs';
 import { handleZernioMedia } from './zernio-media.mjs';
+import { handleZernioBlogs } from './zernio-blogs.mjs';
+import { handleZernioProducts } from './zernio-products.mjs';
 
 const ZERNIO = 'https://zernio.com/api/v1';
 const GOOGLE = 'https://www.googleapis.com';
@@ -54,56 +57,56 @@ function canonical(value) {
 function checkMapping(check, uncertain = false) {
   try { check?.(); } catch (error) { if (!uncertain && [403, 404].includes(error.status)) throw new IntegrationError(error.status, 'PROJECT_ACCESS_CHANGED', 'Your project access changed. Refresh before continuing.'); throw new IntegrationError(409, 'PROJECT_CONNECTION_CHANGED', uncertain ? 'The project connection changed after the provider received this action. Reconcile the previous connection.' : 'The project connection changed. Reload this project before continuing.', uncertain); }
 }
-async function providerJson(response) {
-  const reader = response.body?.getReader(); const chunks = []; let length = 0;
-  if (!reader) throw new Error();
-  for (;;) {
-    const { done, value } = await reader.read(); if (done) break;
-    length += value.byteLength;
-    if (length > 8 * 1024 * 1024) { await reader.cancel(); throw new Error(); }
-    chunks.push(value);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+async function providerJson(response, signal, allowEmpty = false) {
+  const body = await readResponseText(response, { maxBytes: 8 * 1024 * 1024, signal, preserveBOM: true });
+  return allowEmpty && body.length === 0 ? {} : JSON.parse(body);
 }
-async function request(url, options = {}, provider = 'Zernio', assertMapping) {
+async function request(url, options = {}, provider = 'Zernio', assertMapping, observeReceipt) {
   const target = new URL(url);
   if (target.protocol !== 'https:' || !['zernio.com', 'www.googleapis.com', 'oauth2.googleapis.com', 'googleads.googleapis.com', 'login.microsoftonline.com', 'clientcenter.api.bingads.microsoft.com', 'campaign.api.bingads.microsoft.com', 'reporting.api.bingads.microsoft.com', 'api.twilio.com', 'api.cloudflare.com'].includes(target.hostname)) fail(500, 'INVALID_PROVIDER', 'The provider endpoint is invalid.');
   checkMapping(assertMapping);
+  const signal = AbortSignal.timeout(['/api/v1/ads/create', '/api/v1/ads/boost'].includes(target.pathname) ? 180000 : 20000);
   let response;
-  try { response = await fetch(target, { ...options, redirect: 'error', signal: AbortSignal.timeout(['/api/v1/ads/create', '/api/v1/ads/boost'].includes(target.pathname) ? 180000 : 20000) }); }
+  try { response = await fetch(target, { ...options, redirect: 'error', signal }); }
   catch { throw new IntegrationError(502, 'PROVIDER_UNAVAILABLE', `${provider} did not confirm the request.`, options.method && options.method !== 'GET'); }
   if (!response.ok) {
     const status = response.status === 429 ? 429 : response.status >= 500 ? 502 : 400;
     let providerCode; const privateReply = {};
+    if (target.hostname === 'zernio.com' && response.status === 404 && (options.method || 'GET') === 'GET' && /^\/api\/v1\/commerce\/products\/[^/]+$/.test(target.pathname)) {
+      try { const result = await providerJson(response, signal); if (result && typeof result === 'object' && !Array.isArray(result) && ['product_not_found', 'account_not_found'].includes(result.code)) providerCode = result.code; } catch { /* An unreadable or unrecognized absence never proves deletion. */ }
+      checkMapping(assertMapping);
+    }
     if (target.hostname === 'zernio.com' && /^\/api\/v1\/inbox\/comments\/[^/]+\/[^/]+\/private-reply$/.test(target.pathname)) {
       try {
-        const result = await providerJson(response), details = result?.details;
+        const result = await providerJson(response, signal), details = result?.details;
         if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error();
         if (typeof details?.privateReplyConsumed === 'boolean') privateReply.privateReplyConsumed = details.privateReplyConsumed;
         if (details?.privateReplyOutcome === 'unknown') privateReply.privateReplyOutcome = 'unknown';
       } catch { privateReply.privateReplyOutcome = 'unknown'; }
     }
-    if (target.hostname === 'api.twilio.com') { try { const result = await providerJson(response); if (Number.isSafeInteger(result?.code) && result.code >= 10000 && result.code <= 99999) providerCode = result.code; } catch { /* Preserve the sanitized rejection when the error body is unreadable. */ } }
+    if (target.hostname === 'api.twilio.com') { try { const result = await providerJson(response, signal); if (Number.isSafeInteger(result?.code) && result.code >= 10000 && result.code <= 99999) providerCode = result.code; } catch { /* Preserve the sanitized rejection when the error body is unreadable. */ } }
     throw Object.assign(new IntegrationError(status, response.status === 429 ? 'PROVIDER_RATE_LIMIT' : 'PROVIDER_REJECTED', `${provider} ${response.status === 429 ? 'rate limit reached. Try again later.' : 'could not complete this request. Check the connection and request details.'}`, (response.status >= 500 || [408, 409].includes(response.status)) && options.method && options.method !== 'GET'), { providerStatus: response.status, ...privateReply, ...(providerCode === undefined ? {} : { providerCode }) });
   }
   if (response.status === 204) { checkMapping(assertMapping, options.method && options.method !== 'GET'); return {}; }
   let result;
   try {
-    result = await providerJson(response);
+    result = await providerJson(response, signal, response.status === 200 && target.hostname === 'zernio.com' && ((/^\/api\/v1\/accounts\/[^/]+\/telegram-commands$/.test(target.pathname) && ['PUT', 'DELETE'].includes(options.method)) || (/^\/api\/v1\/accounts\/[^/]+\/slack-settings$/.test(target.pathname) && options.method === 'PATCH')));
     if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error();
   } catch { throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', `${provider} returned an unreadable response.`, options.method && options.method !== 'GET'); }
+  try { observeReceipt?.(result); }
+  catch { throw new IntegrationError(502, 'PROVIDER_REFERENCE_NOT_RECORDED', 'The provider response could not be recorded.', options.method && options.method !== 'GET'); }
   checkMapping(assertMapping, options.method && options.method !== 'GET');
   return result;
 }
 function zernioClient(key, assertMapping) {
-  return async (path, query = {}, body, idempotencyKey, method) => {
+  return async (path, query = {}, body, idempotencyKey, method, observeReceipt) => {
     const url = new URL(`${ZERNIO}${path}`);
     for (const [name, value] of Object.entries(query)) if (value !== undefined && value !== '') url.searchParams.set(name, String(value));
     return request(url, {
       method: method || (body === undefined ? 'GET' : 'POST'),
       headers: { Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey, ...(path === '/posts' ? { 'x-request-id': idempotencyKey } : {}) } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }, 'Zernio', assertMapping);
+    }, 'Zernio', assertMapping, observeReceipt);
   };
 }
 function dateQuery(url) {
@@ -184,6 +187,49 @@ export async function adAccounts(api, accountId) {
   if (!reportObject(result) || !Array.isArray(result.accounts) || result.stale !== undefined && typeof result.stale !== 'boolean' || result.cachedAt != null && !validPostInstant(result.cachedAt)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return valid advertising account access information.');
   if (result.stale === true) fail(503, 'AD_ACCOUNT_MEMBERSHIP_STALE', 'The provider returned an older advertising account list after its quota was exhausted. Wait for a current access check before continuing.');
   return result;
+}
+async function discoverMetaCampaigns(context, api, profileId, accountId, adAccountId) {
+  const invalid = () => fail(502, 'INVALID_PROVIDER_RESPONSE', 'The provider did not return a complete, readable Meta campaign list.');
+  async function selected() {
+    const accounts = await scopedAccounts(api, profileId);
+    if (accounts.filter(row => row._id === accountId).length !== 1) fail(403, 'ACCOUNT_OUTSIDE_PROJECT', 'Choose one Meta connection in this project.');
+    const account = requireAccount(accounts, accountId);
+    if (!CREATE_CONNECTIONS.facebook.includes(account.platform) || account.isActive !== true || account.needsReconnection === true) fail(409, 'ACCOUNT_UNAVAILABLE', 'This Meta connection is unavailable. Refresh or reconnect it before discovering campaigns.');
+    return account;
+  }
+  async function advertiser() {
+    const access = await adAccounts(api, accountId), seen = new Set();
+    for (const row of access.accounts) {
+      if (!reportObject(row) || !copyId(row.id) || row.selectable !== undefined && typeof row.selectable !== 'boolean' || seen.has(copyAdvertiser('facebook', row.id))) invalid();
+      seen.add(copyAdvertiser('facebook', row.id));
+    }
+    const row = access.accounts.find(row => copyAdvertiser('facebook', row.id) === copyAdvertiser('facebook', adAccountId));
+    if (!row || row.selectable === false) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'Choose an advertiser available through this Meta connection.');
+    for (const value of [access, row]) for (const [field, expected] of [['profileId', profileId], ['accountId', accountId], ['adAccountId', adAccountId], ['platformAdAccountId', adAccountId]]) if (Object.hasOwn(value, field) && (['adAccountId', 'platformAdAccountId'].includes(field) ? !copyId(adSetReference(value[field])) || copyAdvertiser('facebook', adSetReference(value[field])) !== copyAdvertiser('facebook', expected) : adSetReference(value[field]) !== expected)) fail(502, 'INVALID_PROVIDER_SCOPE', 'The provider returned a different advertiser scope.');
+  }
+  const account = await selected(); await advertiser();
+  const campaigns = [], seen = new Set(), readable = value => typeof value === 'string' && value.length <= 2000 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
+  let total, pages;
+  // ponytail: complete discovery is capped at 1,000 campaigns; use advertiser filters before increasing this bound.
+  for (let page = 1; page <= 10; page++) {
+    const result = await api('/ads/campaigns', { profileId, accountId, adAccountId, includeEmpty: true, source: 'all', page, limit: 100 }), pagination = result?.pagination;
+    if (!reportObject(result) || !Array.isArray(result.campaigns) || !reportObject(pagination) || result.error !== undefined || result.backfillPending === true || result.stale === true || !Number.isSafeInteger(pagination.total) || pagination.total < 0 || !Number.isSafeInteger(pagination.pages) || pagination.pages < 0 || pagination.pages !== Math.ceil(pagination.total / 100) && !(pagination.total === 0 && pagination.pages === 1) || pagination.page !== page || pagination.limit !== 100 || pagination.hasMore !== undefined && pagination.hasMore !== (page < pagination.pages) || pagination.totalPages !== undefined && pagination.totalPages !== pagination.pages || total !== undefined && (pagination.total !== total || pagination.pages !== pages) || result.campaigns.length !== Math.min(100, Math.max(0, pagination.total - (page - 1) * 100))) invalid();
+    for (const [field, expected] of [['profileId', profileId], ['accountId', accountId], ['adAccountId', adAccountId], ['platformAdAccountId', adAccountId]]) if (Object.hasOwn(result, field) && (['adAccountId', 'platformAdAccountId'].includes(field) ? !copyId(adSetReference(result[field])) || copyAdvertiser('facebook', adSetReference(result[field])) !== copyAdvertiser('facebook', expected) : adSetReference(result[field]) !== expected)) fail(502, 'INVALID_PROVIDER_SCOPE', 'The provider returned a different campaign discovery scope.');
+    total = pagination.total; pages = pagination.pages;
+    for (const row of result.campaigns) {
+      if (!reportObject(row) || !copyId(row.platformCampaignId) || !['facebook', 'instagram'].includes(row.platform) || adSetReference(row.profileId) !== profileId || adSetReference(row.accountId) !== accountId || !copyId(row.platformAdAccountId) || copyAdvertiser('facebook', row.platformAdAccountId) !== copyAdvertiser('facebook', adAccountId)) fail(502, 'INVALID_PROVIDER_SCOPE', 'The provider returned a campaign outside the selected project, connection or advertiser.');
+      if (seen.has(row.platformCampaignId) || ['campaignName', 'status', 'platformCampaignStatus'].some(field => row[field] != null && !readable(row[field])) || row.adCount != null && (!Number.isSafeInteger(row.adCount) || row.adCount < 0)) invalid();
+      seen.add(row.platformCampaignId);
+      campaigns.push({ platformCampaignId: row.platformCampaignId, platform: row.platform, campaignName: row.campaignName ?? null, status: row.status ?? null, platformCampaignStatus: row.platformCampaignStatus ?? null, adCount: row.adCount ?? null });
+    }
+    if (page >= pages) {
+      await advertiser(); const current = await selected();
+      if (['_id', 'platform', 'platformUserId', 'platformId', 'isActive', 'needsReconnection'].some(field => (current[field] ?? null) !== (account[field] ?? null))) fail(409, 'ACCOUNT_UNAVAILABLE', 'The Meta connection changed. Refresh before discovering campaigns again.');
+      checkMapping(() => context.assertProjectMapping?.(profileId));
+      return { accountId, adAccountId, campaigns, complete: true };
+    }
+  }
+  fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This advertiser exceeds the 1,000-campaign discovery limit. No partial list is shown.');
 }
 function fields(value, allowed, name = 'ad') {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !allowed.includes(key))) fail(400, 'UNSUPPORTED_AD_FIELD', `Use only supported ${name} fields.`);
@@ -402,6 +448,179 @@ async function scopedCampaign(api, profileId, id, platform, dates = {}) {
   if (campaign.profileId !== undefined && String(campaign.profileId?._id || campaign.profileId) !== profileId) fail(403, 'CAMPAIGN_OUTSIDE_PROJECT', 'This campaign is not in this project.');
   return campaign;
 }
+const adSetTerminal = value => ['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(String(value ?? '').toLowerCase());
+const adSetReference = value => typeof value === 'string' ? value : reportObject(value) && typeof value._id === 'string' ? value._id : undefined;
+async function campaignPreflight(context, api, profileId, campaignId, platform, expected) {
+  const campaign = await scopedCampaign(api, profileId, campaignId, platform);
+  if ([campaign.status, campaign.platformCampaignStatus].some(adSetTerminal)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot be edited.');
+  const accountId = adSetReference(campaign.accountId), adAccountId = adSetReference(campaign.platformAdAccountId);
+  if (!copyId(accountId) || !copyId(adAccountId)) fail(409, 'CAMPAIGN_SCOPE_UNAVAILABLE', 'The connected account and advertiser must be identified before changing this campaign.');
+  const account = requireAccount(await scopedAccounts(api, profileId), accountId);
+  if (!CREATE_CONNECTIONS[platform]?.includes(account.platform) || account.isActive !== true || account.needsReconnection === true) fail(409, 'ACCOUNT_UNAVAILABLE', 'Choose an active advertising connection before continuing.');
+  const access = await adAccounts(api, accountId), advertisers = access.accounts.filter(row => copyId(row?.id) && copyAdvertiser(platform, row.id) === copyAdvertiser(platform, adAccountId));
+  if (advertisers.length !== 1 || advertisers[0].selectable === false) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This advertiser is not available through the project connection.');
+  for (const row of [access, advertisers[0]]) for (const [field, value] of [['profileId', profileId], ['accountId', accountId], ['adAccountId', adAccountId], ['platformAdAccountId', adAccountId]]) if (Object.hasOwn(row, field) && (['adAccountId', 'platformAdAccountId'].includes(field) ? !copyId(adSetReference(row[field])) || copyAdvertiser(platform, adSetReference(row[field])) !== copyAdvertiser(platform, value) : adSetReference(row[field]) !== value)) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned access for another advertising account.');
+  // The final tree read follows account/access awaits, so a reassigned campaign cannot use an earlier scope.
+  const current = await scopedCampaign(api, profileId, campaignId, platform);
+  if ([current.status, current.platformCampaignStatus].some(adSetTerminal)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot be edited.');
+  const scope = { campaignId, platform, accountId, adAccountId }, same = value => value.accountId === accountId && value.adAccountId === adAccountId;
+  if (adSetReference(current.accountId) !== accountId || adSetReference(current.platformAdAccountId) !== adAccountId || expected && !same(expected)) fail(409, 'CAMPAIGN_SCOPE_CHANGED', 'The advertising account changed. Refresh before continuing.');
+  const freshAccount = requireAccount(await scopedAccounts(api, profileId), accountId);
+  if (!CREATE_CONNECTIONS[platform]?.includes(freshAccount.platform) || freshAccount.isActive !== true || freshAccount.needsReconnection === true || ['_id', 'platform', 'platformUserId', 'platformId', 'isActive', 'needsReconnection'].some(field => (freshAccount[field] ?? null) !== (account[field] ?? null))) fail(409, 'ACCOUNT_UNAVAILABLE', 'The advertising connection changed. Refresh before continuing.');
+  checkMapping(() => context.assertProjectMapping?.(profileId));
+  return { ...scope, campaign: current, account: freshAccount, advertiser: advertisers[0] };
+}
+async function adSetPreflight(context, api, profileId, campaignId, platform, adSetId, expected) {
+  const current = await campaignPreflight(context, api, profileId, campaignId, platform, expected), matches = Array.isArray(current.campaign.adSets) ? current.campaign.adSets.filter(row => row?.platformAdSetId === adSetId) : [];
+  if (matches.length !== 1) fail(403, 'AD_SET_OUTSIDE_PROJECT', 'This ad set cannot be uniquely identified in the selected project campaign.');
+  if ([matches[0].status, matches[0].platformAdSetStatus].some(adSetTerminal)) fail(409, 'TERMINAL_AD_STATUS', 'This ad set cannot be edited.');
+  return { ...current, adSetId, adSet: matches[0] };
+}
+const budgetReviewSecret = randomUUID(), budgetReviewAge = 5 * 60 * 1000;
+function budgetReviewVersion(snapshot, amount, expiresAt) {
+  return createHash('sha256').update(canonical([budgetReviewSecret, snapshot.version, amount, expiresAt])).digest('hex');
+}
+function claimAdSetBudget(context, snapshot, key) {
+  const { db, project } = context, resource = canonical(['meta-adset-budget', copyAdvertiser(snapshot.platform, snapshot.adAccountId), snapshot.adSetId]);
+  db.exec('CREATE TABLE IF NOT EXISTS zernio_adset_budget_claims(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
+  // The native advertiser/set is shared across Meta aliases, profile mappings and process restarts.
+  transaction(db, () => {
+    const previous = db.prepare('SELECT o.status FROM zernio_adset_budget_claims c LEFT JOIN integration_operations o ON o.project_id=c.project_id AND o.request_key=c.request_key WHERE c.resource=?').get(resource);
+    if (previous && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'AD_SET_BUDGET_PREVIOUS_OUTCOME_UNRESOLVED', 'This budget change was not sent. Review the earlier provider budget outcome before changing this ad set again.');
+    db.prepare('INSERT INTO zernio_adset_budget_claims(resource,project_id,request_key) VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, project.id, key);
+  });
+}
+async function liveMetaBudgets(api, before) {
+  const campaigns = [], adSets = [], seen = new Set();
+  let currency, readAt;
+  const cursorText = value => typeof value === 'string' && value.length > 0 && value.length <= 4000 && !/[\u0000-\u001f\u007f]/u.test(value);
+  async function page(query = {}) {
+    const result = await api('/ads/accounts/live', { accountId: before.accountId, adAccountId: before.adAccountId, limit: 500, ...query });
+    const time = validPostInstant(result?.readAt) ? Date.parse(result.readAt) : NaN;
+    if (!reportObject(result) || result.accountId !== before.accountId || !copyId(result.adAccountId) || copyAdvertiser(before.platform, result.adAccountId) !== copyAdvertiser(before.platform, before.adAccountId) || result.platform !== 'facebook' || !['AED', 'USD'].includes(result.currency) || currency && result.currency !== currency || !Number.isFinite(time) || time > Date.now() + 30000 || Date.now() - time > 60000 || result.paging != null && !reportObject(result.paging)) fail(502, 'INVALID_LIVE_BUDGET_SCOPE', 'A current live budget and currency could not be verified for this advertiser.');
+    currency = result.currency;
+    if (!readAt || time < Date.parse(readAt)) readAt = result.readAt;
+    for (const [level, rows] of [['campaigns', campaigns], ['adSets', adSets]]) {
+      if (query.level && query.level !== (level === 'campaigns' ? 'campaign' : 'adSet')) continue;
+      const values = result[level];
+      if (!Array.isArray(values) || values.length > 500 || values.some(row => !reportObject(row) || !copyId(row[level === 'campaigns' ? 'platformCampaignId' : 'platformAdSetId']))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned unreadable live advertising objects.');
+      rows.push(...values);
+    }
+    for (const level of ['campaigns', 'adSets']) if (result.paging?.[level] != null && (!reportObject(result.paging[level]) || result.paging[level].after != null && !cursorText(result.paging[level].after))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned unreadable live pagination.');
+    return result.paging;
+  }
+  const paging = await page();
+  for (const level of ['campaigns', 'adSets']) {
+    let cursor = paging?.[level]?.after;
+    // ponytail: cap live reads at 10,000 objects per level; larger advertisers must use the provider dashboard.
+    for (let count = 1; cursor != null; count++) {
+      if (!cursorText(cursor) || seen.has(level + ':' + cursor) || count >= 20) fail(503, 'INCOMPLETE_LIVE_BUDGET', 'The live budget list could not be read completely. Use the provider dashboard.');
+      seen.add(level + ':' + cursor);
+      const next = await page({ level: level === 'campaigns' ? 'campaign' : 'adSet', after: cursor }); cursor = next?.[level]?.after;
+    }
+  }
+  if (new Set(campaigns.map(row => row.platformCampaignId)).size !== campaigns.length || new Set(adSets.map(row => row.platformAdSetId)).size !== adSets.length) fail(502, 'AMBIGUOUS_LIVE_BUDGET', 'Zernio returned duplicate live advertising identities.');
+  return { campaigns, adSets, currency, readAt };
+}
+async function adSetBudgetSnapshot(context, api, profileId, campaignId, platform, adSetId, expected) {
+  if (!['facebook', 'instagram'].includes(platform)) fail(422, 'AD_SET_BUDGET_UNSUPPORTED', 'Reviewed daily ad set budgets are available for Meta in AED or USD.');
+  const before = await adSetPreflight(context, api, profileId, campaignId, platform, adSetId, expected), { campaigns, adSets, currency, readAt } = await liveMetaBudgets(api, before);
+  const parents = campaigns.filter(row => row.platformCampaignId === campaignId), sets = adSets.filter(row => row.platformAdSetId === adSetId), parent = parents[0], set = sets[0];
+  if (parents.length !== 1 || sets.length !== 1 || set.platformCampaignId !== campaignId) fail(403, 'AD_SET_OUTSIDE_PROJECT', 'The live ad set could not be identified under this campaign.');
+  if ([parent.status, parent.configuredStatus, parent.platformCampaignStatus, set.status, set.configuredStatus, set.platformAdSetStatus].some(adSetTerminal)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign or ad set cannot be edited.');
+  const absent = value => value === null || value === 0;
+  if (parent.budget !== null || !absent(parent.dailyBudget) || !absent(parent.lifetimeBudget) || !reportObject(set.budget) || set.budget.type !== 'daily' || set.budget.amount !== set.dailyBudget || !absent(set.lifetimeBudget) || typeof set.dailyBudget !== 'number' || !Number.isFinite(set.dailyBudget) || set.dailyBudget <= 0) fail(409, 'AD_SET_BUDGET_UNAVAILABLE', 'Only an existing ad set daily budget without a campaign or lifetime budget can be changed here.');
+  const current = await adSetPreflight(context, api, profileId, campaignId, platform, adSetId, before);
+  if (current.campaign.budgetLevel !== 'adset' || current.campaign.campaignBudget != null || current.campaign.currency !== currency || current.advertiser.currency !== currency || current.adSet.adSetBudget?.type === 'lifetime' || current.adSet.budget?.type === 'lifetime') fail(409, 'AD_SET_BUDGET_CHANGED', 'Budget ownership or currency changed. Review it again.');
+  if (Date.now() - Date.parse(readAt) > 60000 || Date.parse(readAt) > Date.now() + 30000) fail(409, 'LIVE_BUDGET_EXPIRED', 'The live budget read expired during its scope checks. Load a fresh review.');
+  const source = { campaignId, platform, adSetId, accountId: current.accountId, adAccountId: current.adAccountId, currency, currentAmount: set.dailyBudget, type: 'daily', budgetLevel: 'adset' };
+  const connection = ['_id', 'platform', 'platformUserId', 'platformId', 'isActive', 'needsReconnection'].map(field => current.account[field] ?? null);
+  const switches = [parent.configuredStatus, set.configuredStatus, parent.platformCampaignStatus, set.platformAdSetStatus].map(value => value ?? null);
+  const version = createHash('sha256').update(canonical([context.project.id, profileId, source, connection, switches])).digest('hex');
+  return { ...source, readAt, version };
+}
+async function campaignBudgetSnapshot(context, api, profileId, campaignId, platform, expected) {
+  if (!['facebook', 'instagram'].includes(platform)) fail(422, 'CAMPAIGN_BUDGET_UNSUPPORTED', 'Reviewed daily campaign budgets are available for Meta in AED or USD.');
+  const before = await campaignPreflight(context, api, profileId, campaignId, platform, expected), { campaigns, currency, readAt } = await liveMetaBudgets(api, before), matches = campaigns.filter(row => row.platformCampaignId === campaignId), parent = matches[0];
+  if (matches.length !== 1) fail(403, 'CAMPAIGN_OUTSIDE_PROJECT', 'The live campaign could not be uniquely identified for this advertiser.');
+  if ([parent.status, parent.configuredStatus, parent.platformCampaignStatus].some(adSetTerminal)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot be edited.');
+  if (!reportObject(parent.budget) || parent.budget.type !== 'daily' || parent.budget.amount !== parent.dailyBudget || typeof parent.dailyBudget !== 'number' || !Number.isFinite(parent.dailyBudget) || parent.dailyBudget <= 0 || parent.lifetimeBudget !== null && parent.lifetimeBudget !== 0) fail(409, 'CAMPAIGN_BUDGET_UNAVAILABLE', 'Only an existing campaign-owned daily budget without a lifetime budget can be changed here.');
+  const current = await campaignPreflight(context, api, profileId, campaignId, platform, before);
+  if (current.campaign.currency !== currency || current.advertiser.currency !== currency) fail(409, 'CAMPAIGN_BUDGET_CHANGED', 'The advertising currency changed. Review it again.');
+  if (Date.now() - Date.parse(readAt) > 60000 || Date.parse(readAt) > Date.now() + 30000) fail(409, 'LIVE_BUDGET_EXPIRED', 'The live budget read expired during its scope checks. Load a fresh review.');
+  const source = { campaignId, platform, adSetId: null, accountId: current.accountId, adAccountId: current.adAccountId, currency, currentAmount: parent.dailyBudget, type: 'daily', budgetLevel: 'campaign' };
+  const connection = ['_id', 'platform', 'platformUserId', 'platformId', 'isActive', 'needsReconnection'].map(field => current.account[field] ?? null);
+  const version = createHash('sha256').update(canonical([context.project.id, profileId, source, connection, parent.configuredStatus ?? null, parent.platformCampaignStatus ?? null])).digest('hex');
+  return { ...source, readAt, version };
+}
+function claimCampaignBudget(context, snapshot, key) {
+  const { db, project } = context, resource = canonical(['meta-campaign-budget', copyAdvertiser(snapshot.platform, snapshot.adAccountId), snapshot.campaignId]);
+  db.exec('CREATE TABLE IF NOT EXISTS zernio_campaign_budget_claims(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
+  transaction(db, () => {
+    const previous = db.prepare('SELECT o.status FROM zernio_campaign_budget_claims c LEFT JOIN integration_operations o ON o.project_id=c.project_id AND o.request_key=c.request_key WHERE c.resource=?').get(resource);
+    if (previous && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'CAMPAIGN_BUDGET_PREVIOUS_OUTCOME_UNRESOLVED', 'This budget change was not sent. Review the earlier provider campaign budget outcome before changing this campaign again.');
+    db.prepare('INSERT INTO zernio_campaign_budget_claims(resource,project_id,request_key) VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, project.id, key);
+  });
+}
+const copyPlatform = platform => ['facebook', 'instagram'].includes(platform) ? 'meta' : platform;
+const copyId = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !['.', '..'].includes(value) && !/[\s\u0000-\u001f\u007f-\u009f/?#]/u.test(value);
+const copyAdvertiser = (platform, value) => copyPlatform(platform) === 'meta' ? value.replace(/^act_(?=\d+$)/, '') : value;
+function copyTables(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS zernio_campaign_copy_claims(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS zernio_campaign_copy_receipts(project_id TEXT NOT NULL,request_key TEXT NOT NULL,profile_id TEXT NOT NULL,source_campaign_id TEXT NOT NULL,platform TEXT NOT NULL,account_id TEXT NOT NULL,native_advertiser_id TEXT NOT NULL,resource TEXT NOT NULL,copied_campaign_id TEXT,discovery TEXT,verification TEXT NOT NULL DEFAULT 'pending',status_read_at TEXT,PRIMARY KEY(project_id,request_key))`);
+}
+function copyReference(row) {
+  const paused = row.operation_status === 'complete' && row.verification === 'paused' && copyId(row.copied_campaign_id) && row.copied_campaign_id !== row.source_campaign_id && validPostInstant(row.status_read_at);
+  return { sourceCampaignId: row.source_campaign_id, platform: row.platform, copiedCampaignId: copyId(row.copied_campaign_id) && row.copied_campaign_id !== row.source_campaign_id ? row.copied_campaign_id : null, discovery: ['triggered', 'skipped', 'failed'].includes(row.discovery) ? row.discovery : null, requestedStatus: 'PAUSED', verification: paused ? 'paused' : 'pending', statusReadAt: paused ? row.status_read_at : null };
+}
+async function copySnapshot(context, api, profileId, campaignId, platform) {
+  if (!['facebook', 'instagram', 'tiktok', 'linkedin'].includes(platform)) fail(422, 'CAMPAIGN_COPY_UNSUPPORTED', 'Paused campaign copying is available for Meta, TikTok and LinkedIn.');
+  const campaign = await scopedCampaign(api, profileId, campaignId, platform), ref = value => value?._id || value;
+  if (campaign.platformCampaignId !== campaignId) fail(409, 'CAMPAIGN_COPY_SCOPE_UNAVAILABLE', 'The native campaign ID must be identified before copying.');
+  const accountId = ref(campaign.accountId), advertiserId = campaign.platformAdAccountId;
+  if (!copyId(accountId) || !copyId(advertiserId)) fail(409, 'CAMPAIGN_COPY_SCOPE_UNAVAILABLE', 'The campaign’s connected account and native advertiser must be identified before copying.');
+  const account = requireAccount(await scopedAccounts(api, profileId), accountId);
+  if (!CREATE_CONNECTIONS[platform].includes(account.platform) || account.isActive !== true || account.needsReconnection === true) fail(409, 'ACCOUNT_UNAVAILABLE', 'Choose an active advertising connection before copying this campaign.');
+  const access = await adAccounts(api, accountId), advertiser = access.accounts.filter(row => copyId(row?.id) && copyAdvertiser(platform, row.id) === copyAdvertiser(platform, advertiserId));
+  if (advertiser.length !== 1 || advertiser[0].selectable === false) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This campaign’s native advertising account is not available through this project connection.');
+  for (const row of [access, advertiser[0]]) for (const [field, expected] of [['profileId', profileId], ['accountId', accountId], ['adAccountId', advertiserId], ['platformAdAccountId', advertiserId]]) if (Object.hasOwn(row, field) && (['adAccountId', 'platformAdAccountId'].includes(field) ? typeof ref(row[field]) !== 'string' || copyAdvertiser(platform, ref(row[field])) !== copyAdvertiser(platform, expected) : ref(row[field]) !== expected)) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned advertising access for a different campaign account.');
+  const label = value => { if (value == null) return null; if (typeof value !== 'string' || value.length > 4000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned unreadable campaign review details.'); return value; };
+  const count = value => { if (value == null) return null; if (!Number.isSafeInteger(value) || value < 0) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned unreadable campaign counts.'); return value; };
+  const budget = campaign.campaignBudget;
+  if (budget != null && (!reportObject(budget) || typeof budget.amount !== 'number' || !Number.isFinite(budget.amount) || budget.amount < 0 || !['daily', 'lifetime'].includes(budget.type)) || campaign.budgetLevel != null && !['campaign', 'adset'].includes(campaign.budgetLevel) || campaign.currency != null && (typeof campaign.currency !== 'string' || !/^[A-Z]{3}$/.test(campaign.currency))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned unreadable campaign budget details.');
+  const source = { sourceCampaignId: campaignId, platform, accountId, adAccountId: advertiserId, name: label(campaign.campaignName ?? campaign.name), currency: campaign.currency ?? null, budgetLevel: campaign.budgetLevel ?? null, campaignBudget: budget == null ? null : { amount: budget.amount, type: budget.type }, adCount: count(campaign.adCount), adSetCount: count(campaign.adSetCount) };
+  const connection = ['_id', 'platform', 'platformUserId', 'platformId', 'username', 'isActive', 'needsReconnection'].map(field => account[field] ?? null);
+  const version = createHash('sha256').update(canonical([context.project.id, profileId, source, connection])).digest('hex');
+  return { source, version, resource: canonical([copyPlatform(platform), copyAdvertiser(platform, advertiserId), campaignId]), account };
+}
+function copyState(context, snapshot, profileId) {
+  const { db, project } = context;
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='integration_operations'").get()) return { previousCopy: null, unresolved: false, canCopy: true };
+  const claim = db.prepare('SELECT o.status,r.copied_campaign_id FROM zernio_campaign_copy_claims c LEFT JOIN integration_operations o ON o.project_id=c.project_id AND o.request_key=c.request_key LEFT JOIN zernio_campaign_copy_receipts r ON r.project_id=c.project_id AND r.request_key=c.request_key WHERE c.resource=?').get(snapshot.resource);
+  const unresolved = Boolean(claim && (!claim.status || ['pending', 'uncertain', 'reviewed-applied'].includes(claim.status)));
+  const previous = db.prepare("SELECT r.*,o.status AS operation_status FROM zernio_campaign_copy_receipts r LEFT JOIN integration_operations o ON o.project_id=r.project_id AND o.request_key=r.request_key WHERE r.project_id=? AND r.profile_id=? AND r.resource=? AND (r.copied_campaign_id IS NOT NULL OR o.status IN ('pending','uncertain','reviewed-applied') OR o.status IS NULL) ORDER BY r.rowid DESC LIMIT 1").get(project.id, profileId, snapshot.resource);
+  return { previousCopy: previous ? copyReference(previous) : null, unresolved, canCopy: !previous && !unresolved };
+}
+async function checkCampaignCopy(context, api, profileId, snapshot, row) {
+  const result = await api('/ads/campaigns', { profileId, accountId: snapshot.source.accountId, adAccountId: snapshot.source.adAccountId, campaignId: row.copied_campaign_id, platform: row.platform, source: 'all', live: true, limit: 20, page: 1, ...(copyPlatform(row.platform) === 'meta' ? { includeEmpty: true } : {}) });
+  if (!Array.isArray(result.campaigns) || result.campaigns.length > 1 || result.campaigns.some(row => !reportObject(row)) || result.pagination?.hasMore === true || result.pagination?.pages > 1 || result.pagination?.totalPages > 1) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return an unambiguous copied campaign.');
+  const copy = result.campaigns[0];
+  if (copy) {
+    const ref = value => value?._id || value;
+    if (copy.platformCampaignId !== row.copied_campaign_id || copyPlatform(copy.platform) !== copyPlatform(row.platform) || ref(copy.profileId) !== profileId || !copyId(copy.platformAdAccountId) || copyAdvertiser(row.platform, copy.platformAdAccountId) !== copyAdvertiser(row.platform, row.native_advertiser_id) || ref(copy.accountId) !== row.account_id) fail(502, 'INVALID_PROVIDER_SCOPE', 'The reported campaign could not be verified in the original advertising account.');
+    const account = requireAccount(await scopedAccounts(api, profileId), ref(copy.accountId));
+    if (!CREATE_CONNECTIONS[row.platform].includes(account.platform)) fail(502, 'INVALID_PROVIDER_SCOPE', 'The reported copy belongs to a different account platform.');
+    const access = await adAccounts(api, account._id);
+    if (access.accounts.filter(item => copyId(item?.id) && copyAdvertiser(row.platform, item.id) === copyAdvertiser(row.platform, row.native_advertiser_id) && item.selectable !== false).length !== 1) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'The reported copy’s advertiser is no longer available through this project.');
+    if (copy.statusReadAt != null && !validPostInstant(copy.statusReadAt) || copy.platformCampaignStatus != null && (typeof copy.platformCampaignStatus !== 'string' || copy.platformCampaignStatus.length > 200 || /[\u0000-\u001f\u007f]/u.test(copy.platformCampaignStatus))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned unreadable copied-campaign status details.');
+  }
+  const after = await copySnapshot(context, api, profileId, row.source_campaign_id, row.platform);
+  if (after.resource !== snapshot.resource || after.version !== snapshot.version) fail(409, 'CAMPAIGN_COPY_SCOPE_CHANGED', 'The source campaign or advertiser changed while checking this copy. Refresh its review.');
+  const operation = context.db.prepare('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?').get(context.project.id, row.request_key);
+  const paused = copy && operation?.status === 'complete' && row.platform !== 'linkedin' && validPostInstant(copy.statusReadAt) && copy.platformCampaignStatus === (row.platform === 'tiktok' ? 'DISABLE' : 'PAUSED');
+  context.db.prepare('UPDATE zernio_campaign_copy_receipts SET verification=?,status_read_at=? WHERE project_id=? AND request_key=?').run(paused ? 'paused' : 'pending', paused ? copy.statusReadAt : null, context.project.id, row.request_key);
+  return copyReference({ ...row, operation_status: operation?.status, verification: paused ? 'paused' : 'pending', status_read_at: paused ? copy.statusReadAt : null });
+}
 const rsaReviewAge = 5 * 60 * 1000;
 function rsaCreativeReview(result, ad, profileId, now = Date.now()) {
   const remote = result.ad, scopeId = value => String(value?._id || value?.id || value);
@@ -483,9 +702,12 @@ export async function operation(context, action, resourceKey) {
   const { db, project, req, url, body } = context;
   const key = req.headers['idempotency-key'];
   if (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{8,200}$/.test(key)) fail(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Send a unique Idempotency-Key header for this action.');
+  const receiptOnly = url.searchParams.has('check');
+  if (receiptOnly && (url.searchParams.getAll('check').length !== 1 || url.searchParams.get('check') !== '1' || [...url.searchParams.keys()].some(name => name !== 'check'))) fail(400, 'INVALID_OUTCOME_CHECK', 'Use the exact retained action to check its outcome.');
   db.exec(`CREATE TABLE IF NOT EXISTS integration_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_key TEXT NOT NULL, request_hash TEXT NOT NULL, status TEXT NOT NULL, response TEXT, http_status INTEGER, created_at TEXT NOT NULL, action_path TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', UNIQUE(project_id, request_key))`);
   const columns = new Set(db.prepare('PRAGMA table_info(integration_operations)').all().map(column => column.name));
-  for (const name of ['action_path', 'run_id']) if (!columns.has(name)) db.exec(`ALTER TABLE integration_operations ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
+  for (const name of ['action_path', 'run_id', 'resource_key']) if (!columns.has(name)) db.exec(`ALTER TABLE integration_operations ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
+  db.exec('CREATE INDEX IF NOT EXISTS integration_operations_resource ON integration_operations(project_id,resource_key,status)');
   operation.active ||= new WeakMap(); operation.runId ||= randomUUID();
   if (!operation.active.has(db)) operation.active.set(db, new Set());
   const active = operation.active.get(db);
@@ -497,14 +719,20 @@ export async function operation(context, action, resourceKey) {
     if (existing.status.startsWith('reviewed-')) return { status: 409, data: { operation: { id: existing.id, status: existing.status }, error: { code: 'OPERATION_REVIEWED', message: 'This action key is closed after an operator review. Reuse of this key cannot send another provider request.' } } };
     return { status: existing.http_status, data: JSON.parse(existing.response) };
   }
-  if (db.prepare("SELECT id FROM integration_operations WHERE project_id = ? AND request_hash = ? AND status IN ('pending', 'uncertain', 'reviewed-applied')").get(project.id, hash)) fail(409, 'OPERATION_UNCERTAIN', 'This action has an unresolved or externally applied provider outcome. Review its receipt before trying again.');
+  if (receiptOnly) fail(409, 'OPERATION_OUTCOME_UNAVAILABLE', 'No matching local receipt was found. The original action is retained. Review the provider before explicitly preparing a new action.');
+  const blockedHash = db.prepare("SELECT id FROM integration_operations WHERE project_id = ? AND request_hash = ? AND status IN ('pending', 'uncertain', 'reviewed-applied')").get(project.id, hash);
   // ponytail: one process owns this SQLite connection; use database resource locks before running multiple server processes.
   const resource = resourceKey ? canonical([project.id, resourceKey]) : null;
-  if (resource && active.has(resource)) fail(409, 'PROVIDER_RESOURCE_BUSY', 'Another change to this campaign is in progress. Wait for it to finish, refresh, then try again.');
+
   const id = randomUUID();
-  const known = new Set(['google-conversions', 'actions', 'goals', 'custom-goals', 'remove', 'contacts', 'fields', 'bulk', 'subscription', 'link', 'unlink', 'set', 'clear', 'recycling', 'posts', 'apply', 'stop', 'review', 'leads', 'forms', 'import', 'archive', 'test-leads', 'whatsapp-templates', 'templates', 'library', 'connections', 'credentials', 'code', 'react', 'unreact', 'thread-control', 'accept','queues', 'preview', 'accounts', 'health', 'reconnect', 'disconnect', 'measurement', 'tags', 'diagnostics', 'ad-accounts', 'admin', 'profile', 'groups','native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'update', 'cancel', 'retry', 'status', 'edit-published', 'unpublish', 'ads', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'private-reply', 'webhook-settings', 'redeliver', 'test', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
+  const known = new Set(['products', 'collections', 'rename', 'price', 'deactivate', 'activate', 'store', 'blogs', 'articles', 'create', 'google-conversions', 'actions', 'goals', 'custom-goals', 'remove', 'contacts', 'fields', 'bulk', 'subscription', 'link', 'unlink', 'set', 'clear', 'recycling', 'posts', 'apply', 'stop', 'review', 'leads', 'forms', 'import', 'archive', 'test-leads', 'whatsapp-templates', 'templates', 'library', 'connections', 'credentials', 'code', 'react', 'unreact', 'thread-control', 'accept','queues', 'preview', 'accounts', 'health', 'reconnect', 'disconnect', 'bluesky-settings', 'telegram-commands', 'slack-settings', 'discord-settings', 'webhook-subscription', 'measurement', 'tags', 'diagnostics', 'ad-accounts', 'admin', 'profile', 'groups','native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'schedule', 'cancel-schedule', 'update', 'cancel', 'retry', 'status', 'edit-published', 'update-metadata', 'unpublish', 'ads', 'copy', 'copy-review', 'copy-status', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'private-reply', 'webhook-settings', 'redeliver', 'test', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
   const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
-  db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, 'pending', new Date().toISOString(), actionPath, operation.runId);
+  const unresolved = resource && db.prepare("SELECT id,status FROM integration_operations WHERE project_id=? AND status IN ('pending','uncertain') AND (resource_key=? OR resource_key='')").get(project.id, resource);
+  const blocked = blockedHash || unresolved || resource && active.has(resource);
+  // A blocked key is terminal: a later outcome check must never turn into its first provider request.
+  const notSent = blocked ? { status: 409, data: { operation: { id, status: 'failed' }, error: { code: 'OPERATION_NOT_SENT', message: 'No provider request was sent. An earlier action needs review or is still running. Resolve its outcome, then refresh and explicitly review a new action.' } } } : null;
+  db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id, resource_key, response, http_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, notSent ? 'failed' : 'pending', new Date().toISOString(), actionPath, operation.runId, resource || canonical([project.id, null]), notSent ? JSON.stringify(notSent.data) : null, notSent?.status ?? null);
+  if (notSent) return notSent;
   active.add(id); if (resource) active.add(resource);
   try {
     let outcome;
@@ -538,6 +766,7 @@ async function postAssets(store, projectId, post) {
 }
 function normalizedVariants(post) {
   try {
+    normalizePostTags(post.tags);
     if (post.content !== undefined && typeof post.content !== 'string') throw new TypeError('The shared caption must be text.');
     if (post.mediaItems !== undefined && post.mediaItems !== null) normalizeMediaItems(post.mediaItems);
     if (post.assetId !== undefined && (typeof post.assetId !== 'string' || post.assetId.length > 200)) throw new TypeError('Choose a creative asset from this project.');
@@ -623,6 +852,7 @@ function publishBody(post, accounts, assets = [], { validate = true } = {}) {
   const unavailable = selected.find(account => !PLATFORM_RULES[account.platform]?.supported);
   if (unavailable) fail(422, 'POST_RESTRICTIONS', PLATFORM_RULES[unavailable.platform]?.notice || 'This platform is unavailable for social posting.');
   const result = { content, platforms: selected.map(account => buildPlatformEntry(post, account.platform, account._id, assets)) };
+  if (post.tags !== undefined && selected.some(account => account.platform === 'youtube')) result.tags = normalizePostTags(post.tags);
   if (post.mediaItems !== undefined || post.assetId) result.mediaItems = wireMediaItems(commonMedia(post, assets));
   const scheduledAt = post.scheduledAt || post.scheduledFor;
   if (scheduledAt && (typeof scheduledAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(scheduledAt) || Number.isNaN(Date.parse(scheduledAt)) || new Date(scheduledAt.slice(0, 10)).toISOString().slice(0, 10) !== scheduledAt.slice(0, 10))) fail(400, 'INVALID_DATE', 'Choose a valid scheduled time with a timezone.');
@@ -673,6 +903,7 @@ function assertPostResult(remote, profileId, { id, targets, uncertain = true } =
   };
   if (!reportObject(remote) || !validText(remote._id) || id && remote._id !== id || !validText(remote.status) || remote.content !== undefined && typeof remote.content !== 'string' || remote.profileId !== undefined && reference(remote.profileId) !== profileId) invalid();
   if (!optionalDate(remote.scheduledFor) || !optionalDate(remote.publishedAt) || remote.isDraft !== undefined && typeof remote.isDraft !== 'boolean') invalid();
+  if (Object.hasOwn(remote, 'tags')) try { normalizePostTags(remote.tags, { preserve: true }); } catch { invalid(); }
   media(remote.mediaItems);
   if (remote.platforms !== undefined) {
     if (!Array.isArray(remote.platforms) || !remote.platforms.length) invalid();
@@ -691,7 +922,7 @@ function assertPostResult(remote, profileId, { id, targets, uncertain = true } =
     }
   }
 }
-export async function scopedPost(api, profileId, post, activeOnly = false) {
+export async function scopedPost(api, profileId, post, activeOnly = false, activeAccountId) {
   if (!post?.externalId || post.zernioProfileId !== profileId) fail(404, 'POST_NOT_SUBMITTED', 'No submitted post was found for this project.');
   if (post.providerDeletedAt) fail(409, 'POST_CANCELLED', 'This provider record was removed. Create a new draft to publish again.');
   const result = await api(`/posts/${encodeURIComponent(post.externalId)}`), accounts = await scopedAccounts(api, profileId);
@@ -700,7 +931,7 @@ export async function scopedPost(api, profileId, post, activeOnly = false) {
   for (const item of result.post.platforms) {
     const account = requireAccount(accounts, String(item.accountId?._id || item.accountId));
     if (account.platform !== item.platform) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned a post with an inconsistent account platform.');
-    if (activeOnly && account.isActive === false) fail(409, 'ACCOUNT_UNAVAILABLE', 'A selected publishing account needs reconnection before this post can be submitted.');
+    if (activeOnly && (activeAccountId === undefined || account._id === activeAccountId) && account.isActive === false) fail(409, 'ACCOUNT_UNAVAILABLE', 'A selected publishing account needs reconnection before this post can be submitted.');
   }
   return result.post;
 }
@@ -753,9 +984,9 @@ export async function remotePostModel(store, projectId, post, remote) {
     try { if (previous) expected = targetConfiguration(buildPlatformEntry({ ...post, accountOverrides: {} }, platform, '', assets)); } catch {}
     platformOverrides[platform] = previous && canonical(expected) === canonical(first) ? previous : first;
   }
-  return { ...post, ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: providerMediaItems(remote.mediaItems) } : {}), platforms: [...new Set(remote.platforms.map(target => target.platform))], accounts: remote.platforms.map(reference), platformOverrides, ...(Object.keys(accountOverrides).length || Object.hasOwn(post, 'accountOverrides') ? { accountOverrides } : {}), providerResults: redact(remote.platforms), scheduledAt: remote.status === 'draft' || remote.isDraft === true ? '' : remote.scheduledFor || '' };
+  return { ...post, ...(Object.hasOwn(remote, 'tags') ? { tags: normalizePostTags(remote.tags, { preserve: true }) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(Array.isArray(remote.mediaItems) ? { mediaItems: providerMediaItems(remote.mediaItems) } : {}), platforms: [...new Set(remote.platforms.map(target => target.platform))], accounts: remote.platforms.map(reference), platformOverrides, ...(Object.keys(accountOverrides).length || Object.hasOwn(post, 'accountOverrides') ? { accountOverrides } : {}), providerResults: redact(remote.platforms), scheduledAt: remote.status === 'draft' || remote.isDraft === true ? '' : remote.scheduledFor || '' };
 }
-export function remoteRestrictionPayload(post, remote, { content = remote.content ?? post.content, mediaItems = remote.mediaItems ?? post.mediaItems, overrides, accountOverrides, assets = [] } = {}) {
+export function remoteRestrictionPayload(post, remote, { content = remote.content ?? post.content, tags = remote.tags ?? post.tags, mediaItems = remote.mediaItems ?? post.mediaItems, overrides, accountOverrides, assets = [] } = {}) {
   const platforms = remote.platforms.map(target => {
     const base = { platform: target.platform, accountId: String(target.accountId?._id || target.accountId) };
     if (overrides !== undefined || accountOverrides !== undefined) {
@@ -766,7 +997,7 @@ export function remoteRestrictionPayload(post, remote, { content = remote.conten
     const configuration = targetConfiguration(target);
     return { ...base, ...(typeof configuration.content === 'string' ? { customContent: configuration.content } : {}), ...(configuration.mediaItems ? { customMedia: wireMediaItems(configuration.mediaItems) } : {}), ...(configuration.options ? { platformSpecificData: configuration.options } : {}), ...(target.scheduledFor ? { scheduledFor: target.scheduledFor } : {}) };
   });
-  return { content: content || '', ...(mediaItems !== undefined ? { mediaItems: wireMediaItems(providerMediaItems(mediaItems)) } : {}), platforms };
+  return { content: content || '', ...(tags !== undefined ? { tags: normalizePostTags(tags, { preserve: true }) } : {}), ...(mediaItems !== undefined ? { mediaItems: wireMediaItems(providerMediaItems(mediaItems)) } : {}), platforms };
 }
 export function validateRemotePayload(payload, assets = [], post = {}, providerOwnedMediaUrls = new Set()) {
   for (const target of payload.platforms) {
@@ -775,7 +1006,7 @@ export function validateRemotePayload(payload, assets = [], post = {}, providerO
     const configuration = targetConfiguration(target);
     if (configuration.mediaItems) configuration.mediaItems = metadata(configuration.mediaItems);
     if (configuration.options?.threadItems) configuration.options = { ...configuration.options, threadItems: configuration.options.threadItems.map(item => ({ ...item, ...(item.mediaItems ? { mediaItems: metadata(item.mediaItems) } : {}) })) };
-    const single = { content: payload.content, mediaItems: metadata(payload.mediaItems || []), platformOverrides: { [target.platform]: configuration } };
+    const single = { content: payload.content, tags: payload.tags, mediaItems: metadata(payload.mediaItems || []), platformOverrides: { [target.platform]: configuration } };
     assertPostRestrictions(postRestrictions(single, [target.platform], assets, undefined, providerOwnedMediaUrls));
   }
 }
@@ -785,7 +1016,7 @@ export async function savePostSnapshot(store, projectId, post, remote, extra = {
   const model = source.externalId && Array.isArray(remote.platforms) && remote.platforms.every(target => target.platform && target.accountId) ? await remotePostModel(store, projectId, post, remote) : {};
   const current = store.get(projectId, 'posts', post.id);
   if (current && canonical(current) !== canonical(source)) throw new IntegrationError(409, 'POST_CHANGED', 'The post changed during the provider request. Refresh it before continuing and review any unconfirmed provider action.', true);
-  const updated = await store.update(projectId, 'posts', post.id, { ...model, status: localStatus(remote.status), providerStatus: remote.status, ...(Array.isArray(remote.platforms) ? { providerResults: redact(remote.platforms) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(remote.publishedAt ? { publishedAt: remote.publishedAt } : {}), ...extra });
+  const updated = await store.update(projectId, 'posts', post.id, { ...model, ...(Object.hasOwn(remote, 'tags') ? { tags: normalizePostTags(remote.tags, { preserve: true }) } : {}), status: localStatus(remote.status), providerStatus: remote.status, ...(Array.isArray(remote.platforms) ? { providerResults: redact(remote.platforms) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(remote.publishedAt ? { publishedAt: remote.publishedAt } : {}), ...extra });
   if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The local post was removed while the provider accepted this action. Reconcile the provider outcome.', true);
   return updated;
 }
@@ -828,7 +1059,7 @@ function saveDriveFiles(db, store, projectId, files, assertMapping) {
 }
 
 export async function handleIntegration(context) {
-  const { req, url, body = {}, project, role, send, store } = context;
+  const { req, url, body = {}, project, role, send, store, db } = context;
   const prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/`;
   if (!url.pathname.startsWith(prefix)) return false;
   const path = url.pathname.slice(prefix.length);
@@ -894,6 +1125,8 @@ export async function handleIntegration(context) {
     if ((path === 'ads/events' || path.startsWith('ads/events/')) && await handleZernioAdEvents(context, api, profileId, path.slice('ads/events'.length).replace(/^\//, ''))) return true;
     if (path.startsWith('google-conversions/') && await handleGoogleConversions(context, api, profileId, path.slice('google-conversions/'.length))) return true;
     if ((path === 'contacts' || path.startsWith('contacts/')) && await handleZernioContacts(context, api, profileId, path.slice('contacts'.length).replace(/^\//, ''))) return true;
+    if (path.startsWith('blogs/') && await handleZernioBlogs(context, api, profileId, path.slice('blogs/'.length))) return true;
+    if (path.startsWith('products/') && await handleZernioProducts(context, api, profileId, path.slice('products/'.length))) return true;
     if (path.startsWith('connections/') && await handleZernioConnections(context, api, profileId, path.slice('connections/'.length))) return true;
     if (path.startsWith('insights/') && await handleZernioInsights(context, api, profileId, path.slice('insights/'.length))) return true;
     if ((path === 'leads' || path.startsWith('leads/')) && await handleZernioLeads(context, api, profileId, path.slice('leads'.length).replace(/^\//, ''))) return true;
@@ -922,6 +1155,8 @@ export async function handleIntegration(context) {
       if (!['social', 'ads'].includes(kind)) fail(400, 'INVALID_CONNECTION_KIND', 'Choose a social or advertising connection.');
       if (platform === 'snapchat') fail(422, 'PLATFORM_UNAVAILABLE', PLATFORM_RULES.snapchat.notice);
       if (!(kind === 'ads' ? ADS_CONNECT : SOCIAL_CONNECT).has(platform)) fail(422, 'CONNECTION_REQUIRES_ZERNIO', 'This network uses a credential flow or is unavailable. Connect it in the Zernio dashboard, then refresh accounts.');
+      const loginMethod = url.searchParams.get('loginMethod');
+      if (url.searchParams.has('loginMethod') && (kind !== 'social' || platform !== 'instagram' || url.searchParams.getAll('loginMethod').length !== 1 || !['instagram_login', 'facebook_login'].includes(loginMethod))) fail(400, 'INVALID_INSTAGRAM_LOGIN_METHOD', 'Choose Instagram Login or Facebook Login for an Instagram social connection.');
       let accountId = url.searchParams.get('accountId');
       if (kind === 'ads' && platform === 'twitter') {
         const accounts = await scopedAccounts(api, profileId);
@@ -933,7 +1168,7 @@ export async function handleIntegration(context) {
       if (origin.username || origin.password || (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)))) fail(503, 'INVALID_CALLBACK', 'Configure a valid app origin before connecting providers.');
       const callback = new URL('/', origin); callback.search = new URLSearchParams({ view: 'integrations', project: project.id }).toString();
       const connectionPlatform = kind === 'ads' ? ({ google: 'googleads', reddit: 'redditads' }[platform] || platform) : platform;
-      const result = await api(`/connect/${connectionPlatform}${kind === 'ads' ? '/ads' : ''}`, { profileId, redirect_url: callback.href, ...(accountId ? { accountId } : {}) });
+      const result = await api(`/connect/${connectionPlatform}${kind === 'ads' ? '/ads' : ''}`, { profileId, redirect_url: callback.href, ...(accountId ? { accountId } : {}), ...(loginMethod ? { loginMethod } : {}) });
       if (result.alreadyConnected === true) {
         const expectedPlatform = kind === 'ads' ? CREATE_CONNECTIONS[platform]?.[0] : platform;
         const account = (await scopedAccounts(api, profileId)).find(item => item._id === result.accountId && item.platform === expectedPlatform && item.isActive !== false);
@@ -947,14 +1182,79 @@ export async function handleIntegration(context) {
     }
     if (req.method === 'GET' && path === 'accounts') {
       const accounts = await scopedAccounts(api, profileId);
-      send(200, { accounts: accounts.map(account => ({ _id: account._id, platform: account.platform, username: account.username, displayName: account.displayName, profileId, isActive: account.isActive, avatar: account.avatar })) }); return true;
+      send(200, { accounts: accounts.map(account => ({ _id: account._id, platform: account.platform, username: account.username, displayName: account.displayName, profileId, isActive: account.isActive, avatar: account.avatar, ...(account.platform === 'instagram' ? { metadata: { loginMethod: account.metadata?.loginMethod === 'facebook_login' ? 'facebook_login' : 'instagram_login' } } : {}) })) }); return true;
     }
     if (req.method === 'GET' && path === 'ads') { send(200, await campaignTree(api, profileId, dateQuery(url))); return true; }
+    if (req.method === 'GET' && path === 'ads/campaign-discovery') {
+      if ([...url.searchParams.keys()].some(field => !['accountId', 'adAccountId'].includes(field) || url.searchParams.getAll(field).length !== 1)) fail(400, 'INVALID_CAMPAIGN_DISCOVERY', 'Choose one project connection and advertiser.');
+      const accountId = identifier(url.searchParams.get('accountId'), 'account ID'), adAccountId = identifier(url.searchParams.get('adAccountId'), 'advertiser ID');
+      send(200, await discoverMetaCampaigns(context, api, profileId, accountId, adAccountId)); return true;
+    }
     if (req.method === 'GET' && path === 'ads/accounts') {
       const accountId = identifier(url.searchParams.get('accountId'), 'account ID');
       requireAccount(await scopedAccounts(api, profileId), accountId);
       const result = await adAccounts(api, accountId);
       send(200, { accounts: result.accounts.map(item => ({ id: item.id, name: item.name, currency: item.currency, status: item.status, selectable: item.selectable, minimumDailyBudget: item.minimumDailyBudget })), cachedAt: result.cachedAt, stale: Boolean(result.stale) }); return true;
+    }
+    if (req.method === 'GET' && ['ads/adset-budget-review', 'ads/campaign-budget-review'].includes(path)) {
+      const adSetReview = path === 'ads/adset-budget-review', allowed = ['campaignId', 'platform', 'amount', 'currency', ...(adSetReview ? ['adSetId'] : [])];
+      if ([...url.searchParams.keys()].some(field => !allowed.includes(field) || url.searchParams.getAll(field).length !== 1)) fail(400, 'INVALID_BUDGET_REVIEW', 'Review one ad set and proposed daily budget.');
+      const campaignId = identifier(url.searchParams.get('campaignId'), 'campaign ID'), adSetId = adSetReview ? identifier(url.searchParams.get('adSetId'), 'ad set ID') : null, platform = url.searchParams.get('platform'), currency = url.searchParams.get('currency');
+      const proposedAmount = adAmount(Number(url.searchParams.get('amount')), currency), snapshot = adSetReview ? await adSetBudgetSnapshot(context, api, profileId, campaignId, platform, adSetId) : await campaignBudgetSnapshot(context, api, profileId, campaignId, platform);
+      if (currency !== snapshot.currency) fail(409, 'CURRENCY_MISMATCH', 'Use the current advertising account currency.');
+      if (proposedAmount === snapshot.currentAmount) fail(400, 'EMPTY_AD_UPDATE', 'Choose a different daily budget.');
+      const expiresAt = new Date(Date.now() + budgetReviewAge).toISOString();
+      send(200, { budgetReview: { ...snapshot, proposedAmount, expiresAt, version: budgetReviewVersion(snapshot, proposedAmount, expiresAt) } }); return true;
+    }
+    if (['ads/copy-review', 'ads/copy-status'].includes(path) && req.method === 'GET') {
+      const status = path === 'ads/copy-status', allowed = ['campaignId', 'platform', ...(status ? ['copiedCampaignId'] : [])];
+      if ([...url.searchParams.keys()].some(field => !allowed.includes(field) || url.searchParams.getAll(field).length !== 1)) fail(400, 'INVALID_CAMPAIGN_COPY_FILTER', 'Choose one campaign and platform for this copy review.');
+      const campaignId = identifier(url.searchParams.get('campaignId'), 'campaign ID'), platform = url.searchParams.get('platform');
+      if (!copyId(campaignId)) fail(400, 'INVALID_INPUT', 'Choose a valid campaign ID.');
+      copyTables(db);
+      const snapshot = await copySnapshot(context, api, profileId, campaignId, platform);
+      if (status) {
+        const copiedId = url.searchParams.get('copiedCampaignId');
+        if (!copyId(copiedId) || copiedId === campaignId) fail(400, 'INVALID_INPUT', 'Choose a reported copied campaign ID.');
+        const row = db.prepare('SELECT r.* FROM zernio_campaign_copy_receipts r WHERE r.project_id=? AND r.profile_id=? AND r.resource=? AND r.source_campaign_id=? AND r.platform=? AND r.copied_campaign_id=? ORDER BY r.rowid DESC LIMIT 1').get(project.id, profileId, snapshot.resource, campaignId, platform, copiedId);
+        if (!row) fail(404, 'CAMPAIGN_COPY_NOT_REPORTED', 'This project has no reported copy with that campaign reference.');
+        send(200, { campaignCopy: await checkCampaignCopy(context, api, profileId, snapshot, row) }); return true;
+      }
+      const current = await copySnapshot(context, api, profileId, campaignId, platform);
+      if (current.version !== snapshot.version || current.resource !== snapshot.resource) fail(409, 'CAMPAIGN_COPY_REVIEW_CHANGED', 'The campaign changed while preparing its review. Refresh before copying.');
+      send(200, { source: current.source, version: current.version, ...copyState(context, current, profileId) }); return true;
+    }
+    if (req.method === 'POST' && path === 'ads/copy') {
+      fields(body, ['campaignId', 'platform', 'version', 'confirmDuplicate'], 'campaign copy');
+      if (url.search || body.confirmDuplicate !== true || typeof body.version !== 'string' || !/^[a-f0-9]{64}$/.test(body.version) || !copyId(body.campaignId)) fail(400, 'CAMPAIGN_COPY_REVIEW_REQUIRED', 'Review the current campaign and confirm its paused copy.');
+      copyTables(db);
+      const snapshot = await copySnapshot(context, api, profileId, body.campaignId, body.platform), requestKey = req.headers['idempotency-key'];
+      const prior = typeof requestKey === 'string' ? db.prepare('SELECT * FROM zernio_campaign_copy_receipts WHERE project_id=? AND request_key=?').get(project.id, requestKey) : null;
+      if (prior && (prior.profile_id !== profileId || prior.resource !== snapshot.resource || prior.platform !== body.platform || prior.source_campaign_id !== body.campaignId)) fail(409, 'CAMPAIGN_COPY_SCOPE_CHANGED', 'This action belongs to an earlier campaign connection. Check its provider outcome.');
+      const outcome = await operation(context, async key => {
+        const current = await copySnapshot(context, api, profileId, body.campaignId, body.platform);
+        if (current.version !== body.version || current.version !== snapshot.version || current.resource !== snapshot.resource) fail(409, 'CAMPAIGN_COPY_REVIEW_CHANGED', 'The campaign or advertising connection changed since your review. Refresh before copying.');
+        checkMapping(() => context.assertProjectMapping?.(profileId));
+        transaction(db, () => {
+          if (!copyState(context, current, profileId).canCopy) fail(409, 'CAMPAIGN_COPY_ALREADY_REPORTED', 'Check the previous copy or resolve its provider outcome before copying again.');
+          db.prepare('INSERT INTO zernio_campaign_copy_claims(resource,project_id,request_key) VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(current.resource, project.id, key);
+          db.prepare('INSERT INTO zernio_campaign_copy_receipts(project_id,request_key,profile_id,source_campaign_id,platform,account_id,native_advertiser_id,resource) VALUES(?,?,?,?,?,?,?,?)').run(project.id, key, profileId, body.campaignId, body.platform, current.source.accountId, current.source.adAccountId, current.resource);
+        });
+        // ponytail: one copy per source/project until an explicit per-copy intent can safely follow verified completion.
+        const observeReceipt = result => {
+          if (copyId(result?.copiedCampaignId) && result.copiedCampaignId !== body.campaignId) db.prepare('UPDATE zernio_campaign_copy_receipts SET copied_campaign_id=?,discovery=? WHERE project_id=? AND request_key=?').run(result.copiedCampaignId, ['triggered', 'skipped', 'failed'].includes(result.discovery) ? result.discovery : null, project.id, key);
+        };
+        try {
+          const result = await api(`/ads/campaigns/${encodeURIComponent(body.campaignId)}/duplicate`, {}, { platform: body.platform, deepCopy: true, statusOption: 'PAUSED', syncAfter: true }, key, 'POST', observeReceipt);
+          observeReceipt(result);
+          const ref = value => value?._id || value;
+          if (!copyId(result.copiedCampaignId) || result.copiedCampaignId === body.campaignId || !['triggered', 'skipped', 'failed'].includes(result.discovery) || ['sourceCampaignId', 'campaignId', 'profileId', 'accountId', 'platformAdAccountId', 'adAccountId', 'platform'].some(field => Object.hasOwn(result, field) && (field === 'platform' ? copyPlatform(result[field]) !== copyPlatform(body.platform) : ['platformAdAccountId', 'adAccountId'].includes(field) ? typeof ref(result[field]) !== 'string' || copyAdvertiser(body.platform, ref(result[field])) !== copyAdvertiser(body.platform, current.source.adAccountId) : ref(result[field]) !== ({ sourceCampaignId: body.campaignId, campaignId: body.campaignId, profileId, accountId: current.source.accountId })[field]))) throw new IntegrationError(502, 'CAMPAIGN_COPY_NOT_CONFIRMED', 'The provider did not return a safe copy reference.', true);
+          const after = await copySnapshot(context, api, profileId, body.campaignId, body.platform);
+          if (after.version !== current.version || after.resource !== current.resource) throw new IntegrationError(409, 'CAMPAIGN_COPY_SCOPE_CHANGED', 'The campaign connection changed after the provider received the copy request.', true);
+          return { campaignCopy: copyReference(db.prepare('SELECT * FROM zernio_campaign_copy_receipts WHERE project_id=? AND request_key=?').get(project.id, key)) };
+        } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+      }, ['ads', body.platform, body.campaignId]);
+      send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'GET' && path === 'ads/items') {
       const campaignId = identifier(url.searchParams.get('campaignId'), 'campaign ID'), platform = url.searchParams.get('platform');
@@ -969,13 +1269,95 @@ export async function handleIntegration(context) {
       const review = ad.platform === 'google' && String(ad.advertisingChannelType).toLowerCase() === 'search' ? rsaCreativeReview(result, ad, profileId) : null;
       send(200, { ...redact(result), creativeReview: review ? { version: review.version, observedAt: review.observedAt, expiresAt: review.expiresAt } : null }); return true;
     }
+    if (req.method === 'GET' && path === 'ads/review') {
+      if ([...url.searchParams.keys()].some(key => key !== 'adId' || url.searchParams.getAll(key).length !== 1)) fail(400, 'INVALID_AD_REVIEW_FILTER', 'Choose one ad for its current platform review.');
+      const ad = await scopedAd(api, profileId, identifier(url.searchParams.get('adId'), 'ad ID'));
+      if (!['facebook', 'instagram', 'google', 'tiktok'].includes(ad.platform)) fail(422, 'AD_REVIEW_UNSUPPORTED', 'Live review diagnostics are available for Meta, Google and TikTok ads.');
+      const reference = value => value?._id || value;
+      const identity = row => canonical(['_id', 'platform', 'profileId', 'accountId', 'platformAdAccountId', 'platformCampaignId', 'platformAdSetId', 'platformAdId'].map(field => reference(row[field])));
+      const result = await api(`/ads/${encodeURIComponent(ad._id)}/review`), current = await scopedAd(api, profileId, ad._id);
+      if (identity(current) !== identity(ad)) fail(409, 'AD_REVIEW_SCOPE_CHANGED', 'The selected ad changed while reading its review. Refresh its details before continuing.');
+      const invalid = () => fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return a readable review verdict for the selected ad.');
+      if (result.adId !== ad._id || result.platform !== ad.platform || Object.hasOwn(result, 'platformAdId') && (typeof result.platformAdId !== 'string' || !result.platformAdId || ad.platformAdId != null && result.platformAdId !== ad.platformAdId) || ['profileId', 'accountId', 'platformAdAccountId', 'platformCampaignId', 'platformAdSetId'].some(field => Object.hasOwn(result, field) && reference(result[field]) !== reference(ad[field])) || !reportObject(result.review)) invalid();
+      let nodes = 0, characters = 0;
+      const safeText = value => { if (typeof value !== 'string' || value.length > 20000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value) || (characters += value.length) > 200000) invalid(); return value; };
+      const nullableText = value => value == null ? null : safeText(value);
+      const list = (value, normalize) => { if (value === undefined) return []; if (!Array.isArray(value) || value.length > 100) invalid(); return value.map(normalize); };
+      const record = (value, normalize) => {
+        if (value === undefined) return {};
+        if (!reportObject(value) || Object.keys(value).length > 100) invalid();
+        return Object.fromEntries(Object.entries(value).map(([key, item]) => { if (['__proto__', 'constructor', 'prototype'].includes(key)) invalid(); return [safeText(key), normalize(item)]; }));
+      };
+      const json = (value, depth = 0) => {
+        if (++nodes > 5000 || depth > 8) invalid();
+        if (value === null || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)) return value;
+        if (typeof value === 'string') return safeText(value);
+        if (Array.isArray(value)) return list(value, item => json(item, depth + 1));
+        if (!reportObject(value)) invalid();
+        return record(value, item => json(item, depth + 1));
+      };
+      const objects = value => list(value, item => { if (!reportObject(item)) invalid(); return json(item); });
+      const strings = value => list(value, safeText), review = result.review;
+      if (review.approved !== undefined && review.approved !== null && typeof review.approved !== 'boolean' || Object.hasOwn(review, 'readAt') && !validPostInstant(review.readAt)) invalid();
+      const normalized = {
+        approved: review.approved ?? null, reviewStatus: nullableText(review.reviewStatus), approvalStatus: nullableText(review.approvalStatus), readAt: review.readAt ?? null,
+        ...Object.fromEntries(['forbiddenPlacements', 'forbiddenAges', 'forbiddenLocations', 'forbiddenOperatingSystems'].map(field => [field, strings(review[field])])),
+        rejections: list(review.rejections, row => {
+          if (!reportObject(row) || row.content != null && !reportObject(row.content)) invalid();
+          return { reasons: strings(row.reasons), suggestion: nullableText(row.suggestion), ...Object.fromEntries(['forbiddenPlacements', 'forbiddenAges', 'forbiddenLocations'].map(field => [field, strings(row[field])])), content: row.content == null ? null : Object.fromEntries(['type', 'text', 'imageId', 'videoId', 'musicId'].map(field => [field, nullableText(row.content[field])])) };
+        }),
+        policyTopics: list(review.policyTopics, row => { if (!reportObject(row)) invalid(); return { topic: nullableText(row.topic), type: nullableText(row.type), evidences: objects(row.evidences), constraints: objects(row.constraints) }; }),
+        reviewFeedback: {}, issues: objects(review.issues),
+      };
+      if (review.reviewFeedback !== undefined && !reportObject(review.reviewFeedback)) invalid();
+      normalized.reviewFeedback = { global: record(review.reviewFeedback?.global, safeText), placementSpecific: record(review.reviewFeedback?.placementSpecific, value => record(value, safeText)) };
+      send(200, { adId: ad._id, platform: ad.platform, platformAdId: result.platformAdId === undefined ? null : safeText(result.platformAdId), review: redact(normalized) }); return true;
+    }
     if (req.method === 'GET' && path === 'ads/targeting') {
-      const accountId = identifier(url.searchParams.get('accountId'), 'account ID'), account = requireAccount(await scopedAccounts(api, profileId), accountId);
+      const accountId = identifier(url.searchParams.get('accountId'), 'account ID'), accounts = await scopedAccounts(api, profileId), account = requireAccount(accounts, accountId);
       const platform = Object.keys(CREATE_CONNECTIONS).find(key => CREATE_CONNECTIONS[key].includes(account.platform));
       if (!platform || ['twitter', 'openai'].includes(platform)) fail(422, 'UNSUPPORTED_AD_TARGETING', 'Use country codes for this network.');
       const adAccountId = identifier(url.searchParams.get('adAccountId'), 'advertising account ID');
-      if (!(await adAccounts(api, accountId)).accounts.some(item => item.id === adAccountId)) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This advertising account is not in this project.');
       const dimension = url.searchParams.get('dimension') || 'geo';
+      if (platform === 'facebook' && dimension === 'interest') {
+        const allowed = ['accountId', 'adAccountId', 'dimension', 'q'];
+        if ([...url.searchParams.keys()].some(key => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1)) fail(400, 'INVALID_AUDIENCE', 'Use one account, advertising account, interest dimension and search query.');
+        const query = { accountId, adAccountId, dimension, q: text(url.searchParams.get('q'), 'audience search', 200), limit: 25 };
+        const invalid = () => fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return readable interest results.');
+        const validText = (value, max) => typeof value === 'string' && Boolean(value.trim()) && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
+        const assertScope = value => {
+          for (const [key, expected] of [['profileId', profileId], ['accountId', accountId], ['adAccountId', adAccountId], ['platformAdAccountId', adAccountId]]) if (Object.hasOwn(value, key) && (reportObject(value[key]) ? value[key]._id : value[key]) !== expected) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned targeting outside this project’s advertising account.');
+          if (value.dimension !== undefined && value.dimension !== dimension || value.platform !== undefined && !['facebook', 'instagram', 'meta', 'metaads'].includes(value.platform)) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned targeting for another platform or dimension.');
+        };
+        const identity = current => canonical({ platform: current.platform, username: current.username, platformId: current.platformId, platformUserId: current.platformUserId, externalId: current.externalId });
+        const assertConnection = currentAccounts => {
+          const current = requireAccount(currentAccounts, accountId);
+          if (currentAccounts.filter(item => item._id === accountId).length !== 1) invalid();
+          if (current.isActive === false) fail(409, 'ACCOUNT_UNAVAILABLE', 'This advertising connection needs reconnection.');
+          if (identity(current) !== identity(account)) fail(409, 'PROJECT_CONNECTION_CHANGED', 'The advertising connection changed. Refresh before searching again.');
+        };
+        const assertAdvertiser = async () => {
+          const access = await adAccounts(api, accountId); assertScope(access);
+          if (access.accounts.some(item => !reportObject(item) || !validText(item.id, 500) || /\s/.test(item.id))) invalid();
+          const selected = access.accounts.filter(item => item.id === adAccountId);
+          if (!selected.length || selected[0].selectable === false) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This advertising account is not available in this project.');
+          if (selected.length !== 1 || selected[0].selectable !== undefined && typeof selected[0].selectable !== 'boolean') invalid();
+          assertScope(selected[0]);
+        };
+        assertConnection(accounts); await assertAdvertiser();
+        const result = await api('/ads/targeting/search', query); assertScope(result);
+        if (!Array.isArray(result.results) || result.results.length > 25) invalid();
+        const ids = new Set(), results = result.results.map(row => {
+          if (!reportObject(row)) invalid();
+          assertScope(row);
+          if (!validText(row.id, 500) || /\s/.test(row.id) || ids.has(row.id) || !validText(row.name, 200) || row.type !== 'interest' || row.path !== undefined && (!Array.isArray(row.path) || row.path.length > 10 || row.path.some(item => !validText(item, 200))) || row.audienceSize !== undefined && row.audienceSize !== null && (!Number.isSafeInteger(row.audienceSize) || row.audienceSize < 0)) invalid();
+          ids.add(row.id);
+          return { id: row.id, name: row.name, type: 'interest', ...(row.path === undefined ? {} : { path: row.path }), ...(row.audienceSize === undefined ? {} : { audienceSize: row.audienceSize }) };
+        });
+        assertConnection(await scopedAccounts(api, profileId)); await assertAdvertiser(); assertConnection(await scopedAccounts(api, profileId));
+        send(200, { results }); return true;
+      }
+      if (!(await adAccounts(api, accountId)).accounts.some(item => item.id === adAccountId)) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This advertising account is not in this project.');
       if (!['geo', 'interest', ...(platform === 'reddit' ? ['community', 'conversationKeyword'] : [])].includes(dimension)) fail(400, 'INVALID_AUDIENCE', 'Choose locations or interests to search.');
       const query = { accountId, adAccountId, dimension, q: text(url.searchParams.get('q'), 'audience search', 200), limit: 25 };
       if (url.searchParams.has('countryCode')) { const code = url.searchParams.get('countryCode'); countries([code]); query.countryCode = code; }
@@ -1016,7 +1398,7 @@ export async function handleIntegration(context) {
       send(200, { valid: result.valid, ...(typeof result.error === 'string' ? { error: result.error.slice(0, 2000) } : {}), contentType: result.contentType || null, size: result.size ?? null }); return true;
     }
     if (req.method === 'POST' && path === 'social/validate') {
-      fields(body, ['content', 'platforms', 'accounts', 'mediaItems', 'assetId', 'platformOverrides', 'accountOverrides', 'status', 'scheduledAt', 'campaignId', 'queueId', 'queueVersion'], 'post validation');
+      fields(body, ['content', 'tags', 'platforms', 'accounts', 'mediaItems', 'assetId', 'platformOverrides', 'accountOverrides', 'status', 'scheduledAt', 'campaignId', 'queueId', 'queueVersion'], 'post validation');
       const assets = await postAssets(store, project.id, body), accounts = await scopedAccounts(api, profileId);
       const payload = publishBody(body, accounts, assets, { validate: false }), local = postRestrictions(body, [...new Set(payload.platforms.map(item => item.platform))], assets, payload.platforms);
       await applyQueueIntent(api, profileId, body, payload);
@@ -1044,9 +1426,17 @@ export async function handleIntegration(context) {
         if ([payload.scheduledFor, ...(payload.platforms || []).map(target => target.scheduledFor)].filter(Boolean).some(time => Date.parse(time) <= Date.now())) fail(409, 'SCHEDULE_PASSED', 'A scheduled time passed during the provider checks. Choose future times before submitting.');
         if (post.queueId) await applyQueueIntent(api, profileId, post, payload);
         validateRemotePayload(payload, await postAssets(store, project.id, post), post);
+        context.assertPublishingApproval?.(publishingPost);
         const result = await api('/posts', {}, payload, key);
         assertPostResult(result.post, profileId, { targets: payload.platforms });
         assertQueueReceipt(result.post, post, profileId);
+        if (payload.tags?.length) {
+          let confirmed;
+          try { confirmed = Object.hasOwn(result.post, 'tags') ? result.post : await scopedPost(api, profileId, { ...post, externalId: result.post._id, zernioProfileId: profileId }); }
+          catch { throw new IntegrationError(502, 'POST_RECONCILIATION_REQUIRED', 'The provider accepted this post, but its keyword tags could not be read. Check Zernio before repeating it.', true); }
+          if (!Object.hasOwn(confirmed, 'tags') || canonical(confirmed.tags) !== canonical(payload.tags)) throw new IntegrationError(502, 'POST_RECONCILIATION_REQUIRED', 'The provider accepted this post, but did not confirm the keyword tags. Check Zernio before repeating it.', true);
+          result.post = confirmed;
+        }
         const updated = await savePostSnapshot(store, project.id, { ...post, externalId: result.post._id, zernioProfileId: profileId }, result.post, { externalId: result.post._id, zernioProfileId: profileId, ...(post.queueId ? { scheduledAt: result.post.scheduledFor, queueId: '', queueVersion: '' } : {}) }, payload.platforms, post);
         await store.activity(project.id, 'Submitted a social post to Zernio.');
         return { post: updated, provider: { id: result.post._id, status: result.post.status, ...(post.queueId ? { queueId: post.queueId } : {}) } };
@@ -1060,13 +1450,13 @@ export async function handleIntegration(context) {
       const updated = await savePostSnapshot(store, project.id, post, remote);
       send(200, { post: updated, provider: { id: post.externalId, status: remote.status } }); return true;
     }
-    if (req.method === 'POST' && ['social/update', 'social/cancel', 'social/retry', 'social/edit-published', 'social/unpublish'].includes(path)) {
-      const allowed = path === 'social/update' ? ['postId', 'content', 'mediaItems', 'assetId', 'platformOverrides', 'accountOverrides', 'confirmReplaceVariants', 'mode', 'scheduledAt'] : path === 'social/retry' ? ['postId', 'confirmPublish'] : path === 'social/edit-published' ? ['postId', 'accountId', 'content', 'confirmEdit'] : path === 'social/unpublish' ? ['postId', 'accountId', 'confirmRemoval'] : ['postId', 'confirmCancellation'];
+    if (req.method === 'POST' && ['social/update', 'social/cancel', 'social/retry', 'social/edit-published', 'social/update-metadata', 'social/unpublish'].includes(path)) {
+      const allowed = path === 'social/update' ? ['postId', 'content', 'tags', 'mediaItems', 'assetId', 'platformOverrides', 'accountOverrides', 'confirmReplaceVariants', 'mode', 'scheduledAt'] : path === 'social/retry' ? ['postId', 'confirmPublish'] : path === 'social/edit-published' ? ['postId', 'accountId', 'content', 'confirmEdit'] : path === 'social/update-metadata' ? ['postId', 'accountId', 'videoId', 'title', 'tags', 'confirmEdit'] : path === 'social/unpublish' ? ['postId', 'accountId', 'confirmRemoval'] : ['postId', 'confirmCancellation'];
       fields(body, allowed, 'post action');
       const postId = identifier(body.postId, 'post ID');
       const outcome = await operation(context, async key => {
-        const post = await store.get(project.id, 'posts', postId), remote = await scopedPost(api, profileId, post, path === 'social/edit-published' || path === 'social/update' && body.mode === 'scheduled'), endpoint = `/posts/${encodeURIComponent(post.externalId)}`;
-        if (['social/update', 'social/edit-published'].includes(path)) assertRecyclingSeedEditable(remote, context);
+        const post = await store.get(project.id, 'posts', postId), remote = await scopedPost(api, profileId, post, ['social/edit-published', 'social/update-metadata'].includes(path) || path === 'social/update' && body.mode === 'scheduled', path === 'social/update-metadata' ? identifier(body.accountId, 'account ID') : undefined), endpoint = `/posts/${encodeURIComponent(post.externalId)}`;
+        if (['social/update', 'social/edit-published', 'social/update-metadata'].includes(path)) assertRecyclingSeedEditable(remote, context);
         if (sample(post)) fail(400, 'SAMPLE_RECORD', 'Sample posts cannot be sent to live providers.');
         if (path === 'social/cancel') {
           if (body.confirmCancellation !== true) fail(400, 'CANCELLATION_CONFIRMATION_REQUIRED', 'Confirm removal of this unpublished provider record.');
@@ -1091,8 +1481,9 @@ export async function handleIntegration(context) {
             Object.assign(payload, { scheduledFor: scheduledAt, timezone: 'UTC' });
           }
           const model = await remotePostModel(store, project.id, post, remote), replacingPlatforms = Object.hasOwn(body, 'platformOverrides'), replacingAccounts = Object.hasOwn(body, 'accountOverrides');
-          const changed = { ...model, content, scheduledAt, ...(Object.hasOwn(body, 'mediaItems') ? { mediaItems: body.mediaItems } : {}), ...(Object.hasOwn(body, 'assetId') ? { assetId: body.assetId } : {}), ...(replacingPlatforms ? { platformOverrides: body.platformOverrides, ...(!replacingAccounts ? { accountOverrides: {} } : {}) } : {}), ...(replacingAccounts ? { accountOverrides: body.accountOverrides } : {}) };
+          const changed = { ...model, content, scheduledAt, ...(Object.hasOwn(body, 'tags') ? { tags: body.tags } : {}), ...(Object.hasOwn(body, 'mediaItems') ? { mediaItems: body.mediaItems } : {}), ...(Object.hasOwn(body, 'assetId') ? { assetId: body.assetId } : {}), ...(replacingPlatforms ? { platformOverrides: body.platformOverrides, ...(!replacingAccounts ? { accountOverrides: {} } : {}) } : {}), ...(replacingAccounts ? { accountOverrides: body.accountOverrides } : {}) };
           normalizedVariants(changed);
+          if (Object.hasOwn(body, 'tags')) { changed.tags = normalizePostTags(body.tags); payload.tags = changed.tags; }
           for (const [id, variant] of Object.entries(normalizeAccountVariants(changed))) if (!remote.platforms.some(target => String(target.accountId?._id || target.accountId) === id && target.platform === variant.platform)) fail(400, 'ACCOUNT_VARIANT_MISMATCH', 'Every account customization must match an existing destination and platform on this post.');
           if (body.mode === 'scheduled') try { assertAccountSchedules(changed); } catch (error) { fail(400, 'ACCOUNT_SCHEDULE_INVALID', error.message); }
           const assets = await postAssets(store, project.id, changed), replacingVariants = replacingPlatforms || replacingAccounts, replacingMedia = Object.hasOwn(body, 'mediaItems') || Object.hasOwn(body, 'assetId');
@@ -1101,7 +1492,7 @@ export async function handleIntegration(context) {
           const covered = replacingAccounts && divergent.every(target => body.accountOverrides?.[String(target.accountId?._id || target.accountId)]?.platform === target.platform);
           if (replacingVariants && divergent.length && !covered && body.confirmReplaceVariants !== true) fail(409, 'PROVIDER_VARIANT_CONFIRMATION_REQUIRED', 'Accounts on the same platform have different provider captions, media, options or schedules. Review every account copy or confirm replacing those copies.');
           if (replacingVariants && new Set(remote.platforms.map(target => String(target.accountId?._id || target.accountId))).size !== remote.platforms.length) fail(409, 'AMBIGUOUS_POST_DESTINATIONS', 'This post has multiple destinations on one account. Manage these copies in Zernio until each destination can be edited separately here.');
-          const checkPayload = remoteRestrictionPayload(changed, remote, { content, mediaItems: replacingMedia ? commonMedia(changed, assets) : remote.mediaItems ?? model.mediaItems, ...(replacingVariants ? { overrides: changed.platformOverrides, ...(replacingAccounts ? { accountOverrides: changed.accountOverrides || {} } : {}) } : {}), assets });
+          const checkPayload = remoteRestrictionPayload(changed, remote, { content, tags: changed.tags, mediaItems: replacingMedia ? commonMedia(changed, assets) : remote.mediaItems ?? model.mediaItems, ...(replacingVariants ? { overrides: changed.platformOverrides, ...(replacingAccounts ? { accountOverrides: changed.accountOverrides || {} } : {}) } : {}), assets });
           const providerOwnedMediaUrls = providerPostMediaUrls(remote);
           if (replacingMedia && (!providerOwnedMediaUrls.size || canonical(checkPayload.mediaItems) !== canonical(wireMediaItems(providerMediaItems(remote.mediaItems || []))))) payload.mediaItems = checkPayload.mediaItems;
           const rescheduling = scheduledAt && Date.parse(scheduledAt) !== Date.parse(remote.scheduledFor);
@@ -1121,6 +1512,7 @@ export async function handleIntegration(context) {
           let confirmed;
           try { confirmed = await scopedPost(api, profileId, post); }
           catch { throw new IntegrationError(502, 'POST_RECONCILIATION_REQUIRED', 'The provider accepted this update, but its latest state could not be read. Check Zernio before repeating it.', true); }
+          if (Object.hasOwn(body, 'tags') && (!Object.hasOwn(confirmed, 'tags') || canonical(confirmed.tags) !== canonical(changed.tags))) throw new IntegrationError(502, 'POST_RECONCILIATION_REQUIRED', 'The provider accepted this update, but did not confirm the keyword tags. Check Zernio before repeating it.', true);
           const updated = await savePostSnapshot(store, project.id, changed, confirmed, { content: confirmed.content ?? content, scheduledAt }, remote.platforms, post);
           await store.activity(project.id, 'Updated an unpublished social post in Zernio.');
           return { post: updated, provider: { id: post.externalId, status: confirmed.status }, validationWarnings };
@@ -1129,14 +1521,26 @@ export async function handleIntegration(context) {
           if (body.confirmPublish !== true) fail(400, 'PUBLISH_CONFIRMATION_REQUIRED', 'Confirm that this failed post should publish immediately.');
           const failed = remote.platforms.filter(item => item.status === 'failed');
           if (!['failed', 'partial'].includes(remote.status) || !failed.length || (remote.status === 'partial') !== remote.platforms.some(item => item.status === 'published') || remote.platforms.some(item => !['failed', 'published', 'cancelled'].includes(item.status))) fail(409, 'POST_NOT_FAILED', 'Retry requires failed copies and a confirmed terminal outcome for every other account. Refresh provider status first.');
+          const assertTags = current => {
+            if (remote.platforms.some(item => item.platform === 'youtube') && (Object.hasOwn(post, 'tags') || Object.hasOwn(current, 'tags')) && (!Object.hasOwn(current, 'tags') || canonical(current.tags) !== canonical(post.tags || []))) fail(409, 'POST_TAGS_CHANGED', 'Zernio did not confirm the reviewed keyword tags. Refresh the provider status and review its keywords before retrying.');
+          };
+          assertTags(remote);
           const accounts = await scopedAccounts(api, profileId);
           if (failed.some(item => requireAccount(accounts, String(item.accountId?._id || item.accountId)).isActive === false)) fail(409, 'ACCOUNT_UNAVAILABLE', 'A failed publishing account needs reconnection before retrying.');
           const model = await remotePostModel(store, project.id, post, remote), assets = await postAssets(store, project.id, model), payload = remoteRestrictionPayload(model, { ...remote, platforms: failed });
           const providerOwnedMediaUrls = providerPostMediaUrls(remote);
           validateRemotePayload(payload, assets, model, providerOwnedMediaUrls); await assertTikTokCreatorRestrictions(api, payload, Object.values(postRestrictions(model, failed.map(item => item.platform), assets, failed, providerOwnedMediaUrls).variants).flatMap(variant => variant.mediaItems));
           const validation = await providerPostValidation(api, { ...payload, publishNow: true }, { assets, providerOwnedMediaUrls }); assertPostRestrictions(validation);
+          const currentAssets = await postAssets(store, project.id, model), latest = await scopedPost(api, profileId, post); assertTags(latest);
+          const retryState = snapshot => {
+            const publication = remoteRestrictionPayload({}, snapshot);
+            return canonical({ ...publication, present: ['content', 'mediaItems', 'tags'].filter(field => Object.hasOwn(snapshot, field)), status: snapshot.status, scheduledFor: snapshot.scheduledFor ? Date.parse(snapshot.scheduledFor) : null, platforms: publication.platforms.map((target, index) => ({ ...target, scheduledFor: target.scheduledFor ? Date.parse(target.scheduledFor) : null, status: snapshot.platforms[index].status })).sort((first, second) => canonical(first).localeCompare(canonical(second))) });
+          };
+          if (retryState(latest) !== retryState(remote)) fail(409, 'POST_CHANGED', 'The provider post changed during the retry checks. Refresh its status and review every account before retrying.');
+          const latestAccounts = await scopedAccounts(api, profileId);
+          if (failed.some(item => requireAccount(latestAccounts, String(item.accountId?._id || item.accountId)).isActive === false)) fail(409, 'ACCOUNT_UNAVAILABLE', 'A failed publishing account needs reconnection before retrying.');
           context.assertPublishingApproval?.(model);
-          validateRemotePayload(payload, await postAssets(store, project.id, model), model, providerPostMediaUrls(await scopedPost(api, profileId, post)));
+          validateRemotePayload(payload, currentAssets, model, providerPostMediaUrls(latest));
           const result = await api(endpoint + '/retry', {}, {}, key);
           assertPostResult(result.post, profileId, { id: post.externalId, targets: remote.platforms });
           // Minimal receipts may omit one identity. Resolve only an unambiguous original target, then keep omitted copies.
@@ -1156,6 +1560,40 @@ export async function handleIntegration(context) {
         const accountId = identifier(body.accountId, 'account ID'), matches = remote.platforms.filter(item => String(item.accountId?._id || item.accountId) === accountId), target = matches[0];
         if (matches.length > 1) fail(409, 'AMBIGUOUS_POST_DESTINATIONS', 'This account has multiple destinations on the post. Manage each copy in Zernio until it can be identified separately here.');
         if (!target || target.status !== 'published') fail(403, 'POST_ACCOUNT_NOT_PUBLISHED', 'Choose a published copy belonging to this project.');
+        if (path === 'social/update-metadata') {
+          context.assertProviderPostEdit?.();
+          if (target.platform !== 'youtube') fail(422, 'POST_ACTION_UNSUPPORTED', 'Published metadata changes are available for YouTube videos.');
+          if (body.confirmEdit !== true) fail(400, 'POST_ACTION_CONFIRMATION_REQUIRED', 'Review and confirm the selected YouTube metadata changes.');
+          const videoId = identifier(body.videoId, 'YouTube video ID'), metadata = {};
+          if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) fail(400, 'INVALID_VIDEO', 'Use the published copy’s 11-character YouTube video ID.');
+          if (Object.hasOwn(body, 'title')) {
+            metadata.title = text(body.title, 'YouTube title', 100);
+            if (/[\u0000-\u001f\u007f]/u.test(metadata.title)) fail(400, 'INVALID_INPUT', 'Use a YouTube title without control characters.');
+          }
+          if (Object.hasOwn(body, 'tags')) {
+            try { metadata.tags = normalizePostTags(body.tags, { preserve: true }); }
+            catch (error) { fail(400, 'INVALID_POST_TAGS', error.message); }
+          }
+          const requestedFields = Object.keys(metadata);
+          if (!requestedFields.length) fail(400, 'EMPTY_METADATA_UPDATE', 'Select a title or keyword-tag change.');
+          const assertCopy = (snapshot, uncertain = false) => {
+            const selected = snapshot.platforms.filter(copy => String(copy.accountId?._id || copy.accountId) === accountId);
+            if (!['published', 'partial'].includes(snapshot.status) || selected.length !== 1 || selected[0].platform !== 'youtube' || selected[0].status !== 'published' || selected[0].removedFromPlatformAt || selected[0].platformPostId !== videoId) throw new IntegrationError(409, 'YOUTUBE_COPY_CHANGED', 'The selected published YouTube video could not be confirmed. Refresh and review its identity before continuing.', uncertain);
+          };
+          assertCopy(remote);
+          const fresh = await scopedPost(api, profileId, post, true, accountId); assertCopy(fresh); assertRecyclingSeedEditable(fresh, context); context.assertProviderPostEdit?.();
+          if (canonical(store.get(project.id, 'posts', post.id)) !== canonical(post)) fail(409, 'POST_CHANGED', 'The local post changed. Refresh and review it before continuing.');
+          const result = await api(endpoint + '/update-metadata', {}, { platform: 'youtube', accountId, ...metadata }, key);
+          if (!reportObject(result) || result.success !== true || !Array.isArray(result.updatedFields) || result.updatedFields.length !== requestedFields.length || new Set(result.updatedFields).size !== requestedFields.length || requestedFields.some(field => !result.updatedFields.includes(field)) || [['platform', 'youtube'], ['accountId', accountId], ['postId', post.externalId], ['videoId', videoId]].some(([field, expected]) => Object.hasOwn(result, field) && result[field] !== expected)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the selected YouTube metadata fields and scope. Review the provider outcome before another attempt.', true);
+          let confirmed;
+          try { confirmed = await scopedPost(api, profileId, post, true, accountId); assertCopy(confirmed, true); }
+          catch { throw new IntegrationError(502, 'POST_RECONCILIATION_REQUIRED', 'Zernio accepted the metadata request, but the stored post identity and status could not be refreshed. Review the provider outcome before another attempt.', true); }
+          if (canonical(store.get(project.id, 'posts', post.id)) !== canonical(post)) throw new IntegrationError(409, 'POST_CHANGED', 'The local post changed after Zernio accepted the request. Review the provider outcome.', true);
+          const updated = await store.update(project.id, 'posts', post.id, { status: localStatus(confirmed.status), providerStatus: confirmed.status });
+          if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The local post was removed after Zernio accepted the request. Review the provider outcome.', true);
+          await store.activity(project.id, 'Zernio accepted selected YouTube metadata changes; live values remain unverified.');
+          return { post: updated, metadataAcceptance: { postId, accountId, videoId, requested: metadata, updatedFields: result.updatedFields, message: 'Accepted by Zernio; live values unverified.' }, provider: { id: post.externalId, status: confirmed.status, accountId, action: 'metadata-accepted' } };
+        }
         const editing = path === 'social/edit-published', supported = editing ? ['twitter', 'discord', 'facebook', 'reddit', 'linkedin', 'telegram', 'pinterest', 'googlebusiness', 'youtube', 'slack'] : ['threads', 'facebook', 'twitter', 'linkedin', 'youtube', 'pinterest', 'reddit', 'bluesky', 'googlebusiness', 'telegram'];
         if (editing) context.assertProviderPostEdit?.();
         if (!supported.includes(target.platform)) fail(422, 'POST_ACTION_UNSUPPORTED', 'This platform does not support this action through Zernio. Use its native dashboard.');
@@ -1176,7 +1614,7 @@ export async function handleIntegration(context) {
         await store.activity(project.id, editing ? 'Edited the text of a published social copy.' : 'Removed a published social copy through Zernio.');
         return { post: updated, provider: { id: post.externalId, status: confirmed.status, accountId, action: editing ? 'edited' : 'unpublished' }, validationWarnings };
       // ponytail: serialize seed edits with recycling per project; split into post/account locks if concurrent editing needs it.
-      }, ['social/update', 'social/edit-published'].includes(path) ? 'publishing-recycling' : undefined); send(outcome.status, outcome.data); return true;
+      }, ['social/update', 'social/edit-published', 'social/update-metadata'].includes(path) ? 'publishing-recycling' : undefined); send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && path === 'ads/status') {
       fields(body, ['campaignId', 'platform', 'status']);
@@ -1230,18 +1668,43 @@ export async function handleIntegration(context) {
       }, ['ads', ad.platform, ad.platformCampaignId || `ad:${ad._id}`]); send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && path === 'ads/adset') {
-      fields(body, ['campaignId', 'platform', 'adSetId', 'name', 'budget']);
-      const campaign = await scopedCampaign(api, profileId, identifier(body.campaignId, 'campaign ID'), body.platform);
-      if (['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(campaign.status)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot be edited.');
-      const adSetId = identifier(body.adSetId, 'ad set ID'), adSet = campaign.adSets?.find(item => item.platformAdSetId === adSetId);
-      if (!adSet) fail(403, 'AD_SET_OUTSIDE_PROJECT', 'This ad set was not found in the selected project campaign.');
-      const payload = { platform: body.platform };
-      if (body.name !== undefined) payload.name = text(body.name, 'ad set name', 255);
-      if (body.budget !== undefined) { fields(body.budget, ['amount', 'type'], 'budget'); if (body.budget.type !== 'daily') fail(400, 'UNSUPPORTED_BUDGET', 'This editor changes daily budgets.'); if (['google', 'openai'].includes(body.platform) || campaign.budgetLevel === 'campaign') fail(422, 'CAMPAIGN_BUDGET_REQUIRED', 'This budget belongs to the campaign. Use the campaign budget editor.'); if (adSet.budget?.type === 'lifetime' || adSet.adSetBudget?.type === 'lifetime') fail(400, 'UNSUPPORTED_BUDGET', 'Keep lifetime budgets in the provider dashboard.'); payload.budget = { amount: adAmount(body.budget.amount, campaign.currency, body.platform === 'tiktok' ? 20 : body.platform === 'pinterest' ? 5 : 0), type: 'daily' }; }
-      if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a name or daily budget to update.');
+      const budgetOnly = Object.hasOwn(body, 'budget'), statusOnly = Object.hasOwn(body, 'status');
+      fields(body, budgetOnly ? ['campaignId', 'platform', 'adSetId', 'budget', 'currency', 'version', 'reviewExpiresAt', 'confirmBudget'] : statusOnly ? ['campaignId', 'platform', 'adSetId', 'status'] : ['campaignId', 'platform', 'adSetId', 'name'], 'ad set update');
+      const campaignId = identifier(body.campaignId, 'campaign ID'), adSetId = identifier(body.adSetId, 'ad set ID'), payload = { platform: body.platform };
+      if (statusOnly) { if (!['active', 'paused'].includes(body.status)) fail(400, 'INVALID_AD_STATUS', 'Choose active or paused.'); payload.status = body.status; }
+      if (budgetOnly) {
+        if (['google', 'openai'].includes(body.platform)) fail(422, 'CAMPAIGN_BUDGET_REQUIRED', 'This platform uses a campaign budget. Change its budget in the campaign editor.');
+        fields(body.budget, ['amount', 'type'], 'daily budget');
+        if (body.budget.type !== 'daily' || body.confirmBudget !== true || typeof body.version !== 'string' || !/^[a-f0-9]{64}$/.test(body.version) || !validPostInstant(body.reviewExpiresAt)) fail(400, 'BUDGET_REVIEW_REQUIRED', 'Load and explicitly confirm a fresh budget-only review.');
+        payload.budget = { amount: adAmount(body.budget.amount, body.currency), type: 'daily' };
+      } else if (!statusOnly) payload.name = text(body.name, 'ad set name', 255);
+      const initial = await adSetPreflight(context, api, profileId, campaignId, body.platform, adSetId), campaign = initial.campaign;
       const outcome = await operation(context, async key => {
+        const current = await adSetPreflight(context, api, profileId, campaignId, body.platform, adSetId, initial);
+        const reference = adSetReference;
+        if (budgetOnly) {
+          if (Date.parse(body.reviewExpiresAt) <= Date.now() || Date.parse(body.reviewExpiresAt) > Date.now() + budgetReviewAge) fail(409, 'BUDGET_REVIEW_EXPIRED', 'Load a fresh budget review before confirming.');
+          const snapshot = await adSetBudgetSnapshot(context, api, profileId, campaignId, body.platform, adSetId, current);
+          if (snapshot.currency !== body.currency || body.version !== budgetReviewVersion(snapshot, payload.budget.amount, body.reviewExpiresAt)) fail(409, 'BUDGET_REVIEW_CHANGED', 'The proposal, budget or advertising connection changed. Load a fresh review.');
+          if (Date.parse(body.reviewExpiresAt) <= Date.now() || Date.now() - Date.parse(snapshot.readAt) > 60000 || Date.parse(snapshot.readAt) > Date.now() + 30000) fail(409, 'BUDGET_REVIEW_EXPIRED', 'The review expired during its final checks. Load a fresh review before confirming.');
+          claimAdSetBudget(context, snapshot, key);
+          const result = await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}`, {}, payload, key, 'PUT');
+          try {
+            if (result.budget?.amount !== payload.budget.amount || result.budget?.type !== 'daily' || result.budgetLevel !== 'adset') throw new Error('Unconfirmed budget acknowledgement.');
+            const observed = await adSetBudgetSnapshot(context, api, profileId, campaignId, body.platform, adSetId, current);
+            if (observed.currency !== body.currency || observed.currentAmount !== payload.budget.amount) throw new Error('The live budget differs.');
+            return { budgetAcceptance: { campaignId, platform: body.platform, adSetId, accountId: observed.accountId, adAccountId: observed.adAccountId, currency: observed.currency, requestedAmount: payload.budget.amount, acknowledgedAmount: result.budget.amount, observedAmount: observed.currentAmount, readAt: observed.readAt } };
+          } catch { throw new IntegrationError(502, 'AD_SET_BUDGET_NOT_CONFIRMED', 'The budget request may have applied, but its independent live budget could not be verified. Review the provider outcome before repeating it.', true); }
+        }
+        if (statusOnly) {
+          const result = await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}/status`, {}, payload, key, 'PUT');
+          const rawStatus = value => value == null || typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/u.test(value);
+          const reasons = Object.hasOwn(result, 'skippedReasons') ? result.skippedReasons : [];
+          const expectedScope = { platform: body.platform, profileId, campaignId: campaignKey(current.campaign), platformCampaignId: campaignKey(current.campaign), adSetId, platformAdSetId: adSetId, accountId: current.accountId, adAccountId: current.adAccountId, platformAdAccountId: current.adAccountId };
+          if (!['active', 'paused'].includes(result.status) || ![0, 1].includes(result.updated) || ![0, 1].includes(result.skipped) || result.updated + result.skipped !== 1 || !rawStatus(result.platformAdSetStatus) || !rawStatus(result.platformCampaignStatus) || result.statusReadAt != null && !validPostInstant(result.statusReadAt) || body.platform === 'twitter' && (result.platformAdSetStatus != null || result.statusReadAt != null) || !Array.isArray(reasons) || reasons.length > 100 || reasons.some(reason => typeof reason !== 'string' || reason.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(reason)) || Object.entries(expectedScope).some(([field, expected]) => Object.hasOwn(result, field) && (expected === undefined || (['profileId', 'accountId'].includes(field) ? reference(result[field]) : result[field]) !== expected))) throw new IntegrationError(502, 'AD_SET_STATUS_NOT_CONFIRMED', 'Zernio did not return a readable acknowledgement for this ad set switch. Check the provider before repeating it.', true);
+          return { statusAcceptance: { campaignId: campaignKey(current.campaign), platform: body.platform, adSetId, requestedStatus: body.status, deliveryStatus: result.status, platformAdSetStatus: result.platformAdSetStatus ?? null, platformCampaignStatus: result.platformCampaignStatus ?? null, statusReadAt: result.statusReadAt ?? null, updated: result.updated, skipped: result.skipped, skippedReasons: reasons } };
+        }
         const result = await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}`, {}, payload, key, 'PUT');
-        if (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== payload.budget.type)) throw new IntegrationError(502, 'AD_SET_UPDATE_NOT_CONFIRMED', 'Zernio did not acknowledge the ad set budget. Check the provider before repeating this change.', true);
         if (payload.name) {
           let refreshed;
           try { refreshed = await scopedCampaign(api, profileId, campaignKey(campaign), body.platform); }
@@ -1253,7 +1716,28 @@ export async function handleIntegration(context) {
       send(outcome.status, outcome.data); return true;
     }
     if (req.method === 'POST' && path === 'ads/campaign') {
-      fields(body, ['campaignId', 'platform', 'name', 'budget']);
+      const metaBudget = ['facebook', 'instagram'].includes(body.platform) && Object.hasOwn(body, 'budget');
+      fields(body, metaBudget ? ['campaignId', 'platform', 'budget', 'currency', 'version', 'reviewExpiresAt', 'confirmBudget'] : ['campaignId', 'platform', 'name', 'budget']);
+      if (metaBudget) {
+        fields(body.budget, ['amount', 'type'], 'daily campaign budget');
+        if (body.budget.type !== 'daily' || body.confirmBudget !== true || typeof body.version !== 'string' || !/^[a-f0-9]{64}$/.test(body.version) || !validPostInstant(body.reviewExpiresAt)) fail(400, 'BUDGET_REVIEW_REQUIRED', 'Load and explicitly confirm a fresh campaign budget-only review.');
+        const campaignId = identifier(body.campaignId, 'campaign ID'), amount = adAmount(body.budget.amount, body.currency), initial = await campaignPreflight(context, api, profileId, campaignId, body.platform);
+        const outcome = await operation(context, async key => {
+          const snapshot = await campaignBudgetSnapshot(context, api, profileId, campaignId, body.platform, initial);
+          if (body.currency !== snapshot.currency || body.version !== budgetReviewVersion(snapshot, amount, body.reviewExpiresAt)) fail(409, 'BUDGET_REVIEW_CHANGED', 'The proposal, campaign budget or advertising connection changed. Load a fresh review.');
+          if (Date.parse(body.reviewExpiresAt) <= Date.now() || Date.parse(body.reviewExpiresAt) > Date.now() + budgetReviewAge || Date.now() - Date.parse(snapshot.readAt) > 60000 || Date.parse(snapshot.readAt) > Date.now() + 30000) fail(409, 'BUDGET_REVIEW_EXPIRED', 'The campaign review expired during its final checks. Load a fresh review before confirming.');
+          claimCampaignBudget(context, snapshot, key);
+          const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, { platform: body.platform, budget: { amount, type: 'daily' } }, key, 'PUT');
+          try {
+            if (!Number.isSafeInteger(result.updated) || result.updated < 0 || result.budgetLevel !== 'campaign' || result.budget?.amount !== amount || result.budget?.type !== 'daily') throw new Error('Unconfirmed campaign budget acknowledgement.');
+            const observed = await campaignBudgetSnapshot(context, api, profileId, campaignId, body.platform, initial);
+            if (observed.currency !== body.currency || observed.currentAmount !== amount) throw new Error('The live campaign budget differs.');
+            saveCampaignSnapshot(context, profileId, body.platform, campaignId, { budget: observed.currentAmount, budgetType: 'daily' });
+            return { budgetAcceptance: { campaignId, platform: body.platform, adSetId: null, accountId: observed.accountId, adAccountId: observed.adAccountId, currency: observed.currency, requestedAmount: amount, acknowledgedAmount: result.budget.amount, observedAmount: observed.currentAmount, readAt: observed.readAt } };
+          } catch { throw new IntegrationError(502, 'CAMPAIGN_BUDGET_NOT_CONFIRMED', 'The campaign budget request may have applied, but its independent live budget could not be verified. Review the provider outcome before repeating it.', true); }
+        }, ['ads', body.platform, campaignId]);
+        send(outcome.status, outcome.data); return true;
+      }
       const campaignId = identifier(body.campaignId, 'campaign ID'), campaign = await scopedCampaign(api, profileId, campaignId, body.platform), payload = { platform: body.platform };
       if (['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(campaign.status)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot be edited.');
       if (body.name !== undefined) { if (!['facebook', 'instagram', 'reddit'].includes(body.platform)) fail(422, 'UNSUPPORTED_AD_FIELD', 'Rename this campaign in its provider dashboard.'); payload.name = text(body.name, 'campaign name', 255); }

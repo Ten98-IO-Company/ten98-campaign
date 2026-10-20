@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { transaction } from './database.mjs';
 import { HttpError } from './auth.mjs';
 import { publicMediaUrl } from '../shared/social-posts.mjs';
+import { openRouterFetch, readResponseText } from '@ten98/runtime';
 const initialized = new WeakSet();
 
 class AgentError extends Error { constructor(status, message, uncertain = false) { super(message); Object.assign(this, { status, uncertain }); } }
@@ -50,14 +51,12 @@ function publicRun(db, row) {
   return { id: row.id, status: row.status, message: row.message, model: row.model, content: row.response || '', usage: JSON.parse(row.usage), error: row.error, createdAt: row.created_at, actions: db.prepare('SELECT id,collection,data,status,record_id AS recordId FROM agent_actions WHERE run_id=?').all(row.id).map(action => ({ ...action, data: JSON.parse(action.data) })) };
 }
 async function completion(env, messages, availableTools) {
-  let response;
-  try { response = await fetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60000), headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, 'Content-Type': 'application/json', 'X-OpenRouter-Title': 'ten98 Campaign' }, body: JSON.stringify({ model: env.OPENROUTER_MODEL, messages, tools: availableTools, tool_choice: 'auto', parallel_tool_calls: false, max_tokens: Math.min(8192, Math.max(256, Number(env.OPENROUTER_MAX_TOKENS) || 2048)), stream: false }) }); }
+  let response; const signal = AbortSignal.timeout(60000);
+  try { response = await openRouterFetch('/chat/completions', { apiKey: env.OPENROUTER_API_KEY, title: 'ten98 Campaign', signal, body: { model: env.OPENROUTER_MODEL, messages, tools: availableTools, tool_choice: 'auto', parallel_tool_calls: false, max_tokens: Math.min(8192, Math.max(256, Number(env.OPENROUTER_MAX_TOKENS) || 2048)), stream: false } }); }
   catch { throw new AgentError(409, 'The model provider did not confirm this request. Review OpenRouter usage before trying again.', true); }
-  if (!response.ok) throw new AgentError(response.status === 429 ? 429 : response.status >= 500 ? 409 : 400, response.status >= 500 ? 'The model provider outcome needs review in OpenRouter.' : 'OpenRouter rejected the request. Check the model, account access, and available credits.', response.status >= 500);
+  if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new AgentError(response.status === 429 ? 429 : response.status >= 500 ? 409 : 400, response.status >= 500 ? 'The model provider outcome needs review in OpenRouter.' : 'OpenRouter rejected the request. Check the model, account access, and available credits.', response.status >= 500); }
   try {
-    const reader = response.body.getReader(); let total = 0; const chunks = [];
-    while (true) { const { value, done } = await reader.read(); if (done) break; total += value.length; if (total > 2 * 1024 * 1024) { await reader.cancel(); throw new Error(); } chunks.push(value); }
-    const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const result = JSON.parse(await readResponseText(response, { maxBytes: 2 * 1024 * 1024, signal, preserveBOM: true }));
     if (!result.choices?.[0]?.message || result.error) throw new Error();
     return result;
   } catch { throw new AgentError(409, 'OpenRouter did not return a readable result. Review its usage before retrying.', true); }

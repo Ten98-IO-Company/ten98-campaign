@@ -30,7 +30,7 @@ test('native ad connection tests persist rotated tokens, survive restart and rej
   };
   try {
     await start();
-    const setup = await request('/api/auth/setup', 'POST', { name: 'Native operator', email: 'native-settings@example.test', password: 'native connection fixture password', sample: false });
+    const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Native operator', email: 'native-settings@example.test', password: 'native connection fixture password', sample: false });
     assert.equal(setup.status, 201); cookie = setup.cookie;
     const projectId = (await request('/api/state')).data.projectId;
     for (const [provider, prefix] of [['googleAdsNative', 'GOOGLE_ADS'], ['microsoftAds', 'MICROSOFT_ADS']]) {
@@ -96,7 +96,7 @@ test('integration settings HTTP routes enforce operators, retain encrypted secre
   try {
     assert.equal((await request(route, { cookie: null })).status, 401);
     assert.equal((await save('zernio', { apiKey: 'anonymous-fixture-key' }, { cookie: null })).status, 401);
-    const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Settings operator', email: 'settings-operator@example.test', password: 'fixture settings password 2026', sample: false } });
+    const setup = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Settings operator', email: 'settings-operator@example.test', password: 'fixture settings password 2026', sample: false } });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const state = (await request('/api/state')).data, projectId = state.projectId, project = `/api/projects/${projectId}`, workspaceId = state.workspaces[0].id;
     const settings = await request(route); assert.equal(settings.status, 200); assert.equal(settings.data.providers.length, 10);

@@ -49,7 +49,7 @@ async function fixture() {
   };
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); const base = `http://127.0.0.1:${app.server.address().port}`;
   async function request(path, method = 'GET', body, key, auth = cookie) { const response = await originalFetch(base + path, { method, headers: { Origin: origin, ...(auth ? { Cookie: auth } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...(key ? { 'Idempotency-Key': key } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) }); return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] }; }
-  const setup = await request('/api/auth/setup', 'POST', { name: 'Native Microsoft operator', email: 'native-microsoft@example.test', password: 'isolated Microsoft fixture password', sample: false }); cookie = setup.cookie; const projectId = setup.data.projectId, prefix = `/api/projects/${projectId}/microsoft-ads`;
+  const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Native Microsoft operator', email: 'native-microsoft@example.test', password: 'isolated Microsoft fixture password', sample: false }); cookie = setup.cookie; const projectId = setup.data.projectId, prefix = `/api/projects/${projectId}/microsoft-ads`;
   return { app, env, calls, state, request, projectId, prefix, userId: setup.data.user.id, async map() { const result = await request(prefix + '/connection', 'POST', { customerId: '10', accountId: '100', confirmed: true }); assert.equal(result.status, 200, JSON.stringify(result.data)); }, async close() { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); } };
 }
 
@@ -145,11 +145,13 @@ test('native Microsoft serializes campaign status and budget changes through pro
     f.state.hook = async (url, body) => { if (url.pathname === '/CampaignManagement/v13/Campaigns' && body.Campaigns?.[0].Status === 'Active') { f.state.hook = null; reached(); await held; } };
     const key = randomUUID(); heldRequest = f.request(route, 'POST', { status: 'Active', confirmed: true }, key);
     await Promise.race([started, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Microsoft held update was not reached.')), 5000); })]); clearTimeout(timer);
-    const writes = () => f.calls.filter(row => row.method === 'PUT').length, before = writes();
+    const writes = () => f.calls.filter(row => row.method === 'PUT').length, before = writes(), blockedRequests = [];
     for (const body of [{ status: 'Paused', confirmed: true }, { dailyBudget: 30, confirmed: true }]) {
-      const blocked = await f.request(route, 'POST', body, randomUUID()); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'PROVIDER_RESOURCE_BUSY'); assert.equal(blocked.data.operation, undefined);
+      const key = randomUUID(), blocked = await f.request(route, 'POST', body, key); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); blockedRequests.push({ body, key, receipt: blocked.data });
     }
     assert.equal(writes(), before, 'Overlapping native changes cannot reach Microsoft.'); release(); assert.equal((await heldRequest).status, 200);
+    for (const blocked of blockedRequests) assert.deepEqual((await f.request(route, 'POST', blocked.body, blocked.key)).data, blocked.receipt);
+    assert.equal(writes(), before, 'Blocked keys cannot dispatch after the original action completes.');
     assert.equal((await f.request(route, 'POST', { status: 'Paused', confirmed: true }, randomUUID())).status, 200);
     assert.equal((await f.request(route, 'POST', { status: 'Active', confirmed: true }, key)).status, 200, 'A completed receipt can still replay.');
     assert.equal(f.state.campaigns[0].Status, 'Paused'); assert.equal(f.app.store.get(f.projectId, 'campaigns', created.data.campaign.id).status, 'paused');
@@ -178,7 +180,9 @@ test('Microsoft status-only controls work with shared and unknown budgets withou
     }
     f.state.mode = 'ignore-status-update'; const key = randomUUID(), body = { status: 'Paused', confirmed: true };
     const unconfirmed = await f.request(route, 'POST', body, key); assert.equal(unconfirmed.status, 409); assert.equal(unconfirmed.data.operation.status, 'uncertain'); assert.equal(f.app.store.get(f.projectId, 'campaigns', created.data.campaign.id).status, 'active');
-    before = writes().length; for (const retry of [key, randomUUID()]) assert.equal((await f.request(route, 'POST', body, retry)).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(writes().length, before);
+    before = writes().length;
+    assert.equal((await f.request(route, 'POST', body, key)).data.error.code, 'OPERATION_UNCERTAIN');
+    const blocked = await f.request(route, 'POST', body, randomUUID()); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, unconfirmed.data.operation.id); assert.equal(writes().length, before);
   } finally { await f.close(); }
 });
 
@@ -199,7 +203,8 @@ test('accepted Microsoft changes stay uncertain after rejected or revoked readba
       assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.operation.status, 'uncertain');
       assert.equal(f.app.store.get(f.projectId, 'campaigns', created.data.campaign.id).status, 'paused', 'Unconfirmed readback cannot advance the local receipt.');
       f.app.db.prepare("UPDATE memberships SET role='owner' WHERE user_id=?").run(f.userId); f.state.updateReadbackFailure = '';
-      for (const retryKey of [key, randomUUID()]) assert.equal((await f.request(route, 'POST', body, retryKey)).data.error.code, 'OPERATION_UNCERTAIN');
+      assert.equal((await f.request(route, 'POST', body, key)).data.error.code, 'OPERATION_UNCERTAIN');
+      const blocked = await f.request(route, 'POST', body, randomUUID()); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id);
       assert.equal(writes(), before + 1, 'Neither retry may repeat the accepted provider update.');
     } finally { await f.close(); }
   }

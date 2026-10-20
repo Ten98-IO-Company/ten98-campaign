@@ -29,8 +29,8 @@ function setup() {
       if (state.readFail && state.writes && path !== '/accounts') throw new IntegrationError(502, 'READ_FAILED', 'Readback failed');
       if (path === '/accounts') return { accounts: structuredClone(state.accounts) };
       if (path === '/contacts') {
-        const rows = state.rows.filter(row => query.accountId ? row.channels.some(channel => channel.accountId === query.accountId) : row.profileId === query.profileId).filter(row => !query.search || [row.name, row.email, row.company].some(value => value.toLowerCase().includes(query.search.toLowerCase()))), skip = Number(query.skip || 0), limit = Number(query.limit || 25);
-        return { success: true, contacts: rows.slice(skip, skip + limit).map(row => ({ ...structuredClone(row), ...(query.accountId ? { platformIdentifier: row.channels.find(channel => channel.accountId === query.accountId).platformIdentifier } : {}) })), pagination: { total: rows.length, limit, skip, hasMore: skip + limit < rows.length } };
+        const rows = state.rows.filter(row => query.accountId ? row.channels.some(channel => channel.accountId === query.accountId) : row.profileId === query.profileId).filter(row => (!query.search || [row.name, row.email, row.company].some(value => value.toLowerCase().includes(query.search.toLowerCase()))) && (!query.tag || row.tags.includes(query.tag)) && (!query.platform || row.channels.some(channel => channel.platform === query.platform)) && (!query.isSubscribed || row.isSubscribed === (query.isSubscribed === 'true'))), skip = Number(query.skip || 0), limit = Number(query.limit || 25);
+        return { success: true, contacts: rows.slice(skip, skip + limit).map(row => ({ ...structuredClone(row), ...(query.accountId ? { platformIdentifier: row.channels.find(channel => channel.accountId === query.accountId).platformIdentifier } : {}) })), filters: { tags: ['Foreign-secret-suggestion'] }, pagination: { total: rows.length, limit, skip, hasMore: skip + limit < rows.length } };
       }
       if (path === '/custom-fields') return { success: true, fields: structuredClone(state.fields.filter(row => row.profileId === query.profileId)) };
       const match = /^\/contacts\/([a-f0-9]{24})(\/channels)?$/.exec(path), row = match && state.rows.find(row => row.id === match[1]); if (!row) throw new IntegrationError(404, 'NOT_FOUND', 'Contact not found');
@@ -79,6 +79,92 @@ test('contact browsing proves profile/account origin, sanitizes foreign channels
     assert.equal((await request('contacts', { query: '?accountId=wa-foreign' })).status, 403); assert.equal((await request('contacts', { query: '?search=customer%201&limit=1' })).data.contacts.length, 1);
     const first = await request('contacts', { query: '?limit=1' }); assert.equal(first.data.pagination.hasMore, true); assert.equal((await request('contacts', { query: '?limit=1&skip=1' })).data.contacts[0].id, id(2));
     assert.ok(calls.filter(call => call.path === '/contacts').every(call => call.query.profileId === profileId));
+  } finally { db.close(); }
+});
+
+test('contact filters return only current visible matches and private counts without changing local permission', async () => {
+  const { db, contacts, state, request, calls } = setup();
+  try {
+    const before = contacts.list('project-a'); state.rows[0].tags = ['vip']; state.rows[0].isSubscribed = true;
+    state.rows.push({ ...structuredClone(state.rows[0]), id: id(6), name: 'Provider customer 6' });
+    const query = '?accountId=wa-a&search=Provider%20customer&platform=whatsapp&isSubscribed=true&tag=vip&limit=1';
+    let result = await request('contacts', { query, role: 'viewer' }); assert.equal(result.status, 200); assert.deepEqual(result.data.contacts.map(row => row.id), [id(1)]); assert.deepEqual(result.data.pagination, { total: 2, limit: 1, skip: 0, hasMore: true });
+    assert.equal(JSON.stringify(result.data).includes('Foreign-secret-suggestion'), false);
+    result = await request('contacts', { query: query + '&skip=1', role: 'viewer' }); assert.deepEqual(result.data.contacts.map(row => row.id), [id(6)]); assert.equal(result.data.pagination.hasMore, false);
+    for (const hiddenTags of [['vip'], ['different']]) {
+      state.rows[1].tags = hiddenTags; state.rows[2].tags = hiddenTags; state.rows[1].isSubscribed = true; state.rows[2].isSubscribed = true;
+      result = await request('contacts', { query, role: 'viewer' }); assert.equal(result.data.pagination.total, 2); assert.deepEqual(result.data.contacts.map(row => row.id), [id(1)]);
+    }
+    assert.ok(calls.filter(call => call.path === '/contacts').every(call => call.query.profileId === profileId && !['search', 'tag', 'platform', 'isSubscribed'].some(key => key in call.query)));
+    assert.ok(calls.some(call => call.path === '/contacts' && call.query.accountId === 'wa-a' && call.query.limit === 200));
+    state.rows[0].isSubscribed = undefined; state.rows[1].channels[1].platform = 'sms';
+    result = await request('contacts', { query: '?platform=sms', role: 'viewer' }); assert.equal(result.data.pagination.total, 0);
+    result = await request('contacts', { query: '?accountId=wa-a&isSubscribed=false', role: 'viewer' }); assert.equal(result.data.contacts.some(row => row.id === id(1)), false);
+    result = await request('contacts', { query: '?accountId=wa-a&tag=missing', role: 'viewer' }); assert.equal(result.data.pagination.total, 0);
+    assert.equal(state.writes, 0); assert.deepEqual(contacts.list('project-a'), before); assert.equal(db.prepare('SELECT count(*) AS total FROM zernio_contact_links').get().total, 0);
+  } finally { db.close(); }
+});
+
+test('contact filter validation rejects ambiguous values and account or mapping changes leave no result', async () => {
+  const { db, state, request, calls } = setup();
+  try {
+    for (const query of ['?platform=imessage', '?isSubscribed=False', '?tag=' + 'x'.repeat(201), '?search=x&search=y', '?platform=whatsapp&platform=sms', '?tags=vip', '?limit=0', '?skip=-1', '?tag=%00']) {
+      const start = calls.length, result = await request('contacts', { query }); assert.equal(result.status, 400, query); assert.ok(calls.slice(start).every(call => call.path !== '/contacts'));
+    }
+    assert.equal((await request('contacts', { query: '?accountId=wa-foreign&tag=vip' })).status, 403);
+    let reads = 0; state.onRead = path => { if (path === '/accounts' && ++reads === 2) state.accounts[0].profileId = 'moved-profile'; };
+    let result = await request('contacts', { query: '?isSubscribed=false' }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'CONTACT_SCOPE_CHANGED'); assert.equal(result.data.contacts, undefined);
+    state.accounts[0].profileId = profileId; let changed = false; state.onRead = path => { if (path.startsWith('/contacts/')) changed = true; };
+    result = await request('contacts', { query: '?isSubscribed=false', assertAccess: () => { if (changed) throw new IntegrationError(403, 'ROLE_CHANGED', 'Role changed'); } }); assert.equal(result.status, 403); assert.equal(result.data.contacts, undefined);
+  } finally { db.close(); }
+});
+
+test('contact filtering hydrates the actual 10,000-contact scope once before matching and rejects 10,001 before details', async () => {
+  const { db, state, request, calls } = setup();
+  try {
+    const template = { ...state.rows[0], channels: [], tags: [] };
+    state.rows = Array.from({ length: 10000 }, (_, index) => ({ ...template, id: id(index + 10000), name: 'Contact ' + index, tags: index === 0 ? ['vip'] : [] }));
+    let result = await request('contacts', { query: '?tag=vip' }); assert.equal(result.status, 200); assert.equal(result.data.pagination.total, 1);
+    assert.equal(calls.filter(call => call.path === '/contacts').length, 100); assert.ok(calls.every(call => !call.query.tag)); const details = calls.filter(call => /^\/contacts\//.test(call.path)); assert.equal(details.length, 10000); assert.equal(new Set(details.map(call => call.path)).size, 10000);
+    state.rows.push({ ...template, id: id(20000) });
+    for (const tag of ['vip', 'absent']) {
+      const start = calls.length; result = await request('contacts', { query: '?tag=' + tag }); assert.equal(result.status, 503); assert.equal(result.data.error.code, 'CONTACT_WINDOW_INCOMPLETE'); assert.equal(result.data.contacts, undefined); assert.equal(result.data.pagination, undefined);
+      const run = calls.slice(start); assert.equal(run.filter(call => call.path === '/contacts').length, 50); assert.ok(run.every(call => !call.query.tag && !/^\/contacts\//.test(call.path)));
+    }
+  } finally { db.close(); }
+});
+
+test('contact scans recheck origin membership after hydration and reject duplicate base pages', async () => {
+  const { db, state, request } = setup();
+  try {
+    state.onRead = path => { if (path === '/contacts/' + id(1)) { state.rows[0].profileId = 'different-origin'; state.onRead = null; } };
+    let result = await request('contacts', { query: '?tag=new' }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'CONTACT_SCOPE_CHANGED'); assert.equal(result.data.contacts, undefined);
+    const template = state.rows[0]; state.rows = Array.from({ length: 201 }, (_, index) => ({ ...structuredClone(template), profileId, id: id(index + 1000) }));
+    state.onRead = (path, query) => { if (path === '/contacts' && query.skip === 200) state.rows[200].id = state.rows[0].id; };
+    result = await request('contacts', { query: '?isSubscribed=false' }); assert.equal(result.status, 502); assert.equal(result.data.error.code, 'INVALID_CONTACT_RESPONSE'); assert.equal(result.data.pagination, undefined);
+  } finally { db.close(); }
+});
+
+test('hidden metadata cannot select provider requests or turn shared detail failures into a tag oracle', async () => {
+  const { db, state, request, calls } = setup();
+  try {
+    state.rows[1].tags = ['secret']; state.onRead = path => { if (path === '/contacts/' + id(2)) throw new IntegrationError(502, 'SHARED_DETAIL_UNAVAILABLE', 'Contact details are unavailable.'); };
+    let sequence, unavailable;
+    for (const query of ['?tag=secret', '?tag=absent', '']) {
+      const start = calls.length, result = await request('contacts', { query, role: 'viewer' }), run = calls.slice(start);
+      assert.equal(result.status, 502); assert.equal(result.data.contacts, undefined); assert.equal(result.data.pagination, undefined);
+      if (sequence) { assert.deepEqual(run, sequence); assert.deepEqual(result, unavailable); } else { sequence = run; unavailable = result; }
+    }
+    state.onRead = null; sequence = undefined;
+    for (const tags of [['secret'], ['absent'], []]) {
+      state.rows[1].tags = tags; state.rows[1].name = tags.join(' '); state.rows[1].company = tags.join(' ');
+      for (const query of ['?tag=secret', '?tag=absent', '?search=secret', '?platform=whatsapp', '?isSubscribed=false', '']) {
+        const start = calls.length, result = await request('contacts', { query, role: 'viewer' }), run = calls.slice(start); assert.equal(result.status, 200);
+        if (sequence) assert.deepEqual(run, sequence); else sequence = run;
+        if (query.startsWith('?tag=') || query.startsWith('?search=')) assert.equal(result.data.pagination.total, 0);
+      }
+    }
+    assert.equal(state.writes, 0);
   } finally { db.close(); }
 });
 
@@ -158,7 +244,7 @@ test('unknown receipts fence changed-body retries, and deleted provider contacts
   const { db, state, contacts, request, read, change } = setup();
   try {
     const current = await read(); state.malformed = true; const body = change(current, { changes: { company: 'Unconfirmed' } }), result = await request(`contacts/${current.id}/update`, { body, key: 'unknown-update-contact' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
-    const count = state.writes; assert.equal((await request(`contacts/${current.id}/update`, { body: change(current, { changes: { company: 'Different request body' } }) })).data.error.code, 'CONTACT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(state.writes, count);
+    const count = state.writes, blocked = await request(`contacts/${current.id}/update`, { body: change(current, { changes: { company: 'Different request body' } }) }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id); assert.equal(state.writes, count);
     db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE request_key=?").run('unknown-update-contact'); state.malformed = false;
     const fresh = await read(); const deleted = await request(`contacts/${fresh.id}/delete`, { body: change(fresh, { confirmContactId: fresh.id }) }); assert.equal(deleted.status, 200); assert.equal(deleted.data.localContactsKept, true); assert.equal(contacts.list('project-a').length, 2); assert.equal(state.rows.some(row => row.id === fresh.id), false);
   } finally { db.close(); }
@@ -205,10 +291,10 @@ test('malformed channel scope and create/bulk acknowledgements fail closed witho
     try {
       const selected = (await overview()).localContacts.find(row => row.id === local.id), body = task === 'create' ? { accountId: 'wa-a', localContactId: local.id, expectedLocalVersion: selected.version, confirmed: true } : { accountId: 'wa-a', contacts: [{ localContactId: local.id, expectedLocalVersion: selected.version }], confirmed: true };
       state.rows[0].channels[0].platformIdentifier = '12025550888'; state.malformed = true;
-      let result = await request(`contacts/${task}`, { body, key: 'unknown-contact-' + task }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(state.writes, 1);
+      let result = await request(`contacts/${task}`, { body, key: 'unknown-contact-' + task }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(state.writes, 1); const originalOperation = result.data.operation;
       result = await request(`contacts/${task}`, { body, key: 'unknown-contact-' + task }); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(state.writes, 1);
       const changedBody = task === 'create' ? { ...body, expectedLocalVersion: 'different-version' } : { ...body, contacts: [{ ...body.contacts[0], expectedLocalVersion: 'different-version' }] };
-      result = await request(`contacts/${task}`, { body: changedBody }); assert.equal(result.data.error.code, 'CONTACT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(state.writes, 1);
+      result = await request(`contacts/${task}`, { body: changedBody }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(result.data.operation.status, 'failed'); assert.notEqual(result.data.operation.id, originalOperation.id); assert.equal(state.writes, 1);
     } finally { db.close(); }
   }
   const ambiguous = setup();
@@ -257,8 +343,9 @@ test('contact UI retains action identities, rejects malformed receipts and never
   response = { operation: { status: 'complete' }, contact: { id: id(999), version: 'wrong-contact' }, updated: true }; await assert.rejects(write(task, body), /receipt/); assert.equal(keys.current.size, 1);
   failure = { status: 400, code: 'INVALID_CONTACT_FIELDS' }; await assert.rejects(write(task, body)); assert.equal(keys.current.size, 0); failure = null; active = false; await assert.rejects(write(task, body), { name: 'AbortError' });
   const identitySource = stripTypeScriptTypes(source.slice(source.indexOf('  const path ='), source.indexOf('  const account ='))).replace('  const scope = useRef({ identity });', '  const scope = state;');
-  const identify = (projectId, canManage, state) => new Function('projectId', 'accountId', 'search', 'canManage', 'canWrite', 'isOperator', 'state', 'mounted', `${identitySource}; return current;`)(projectId, 'wa-a', '', canManage, false, true, state, { current: true });
+  const identify = (projectId, canManage, state, filters = { platform: '', isSubscribed: '', tag: '' }) => new Function('projectId', 'accountId', 'search', 'filters', 'canManage', 'canWrite', 'isOperator', 'state', 'mounted', `${identitySource}; return current;`)(projectId, 'wa-a', '', filters, canManage, false, true, state, { current: true });
   const state = { current: { identity: '' } }, first = identify('a', true, state), second = identify('b', true, state), third = identify('a', true, state), viewer = identify('a', false, state), owner = identify('a', true, state); assert.equal(first(), false); assert.equal(second(), false); assert.equal(third(), false); assert.equal(viewer(), false); assert.equal(owner(), true);
+  for (const filters of [{ platform: 'whatsapp', isSubscribed: '', tag: '' }, { platform: '', isSubscribed: 'false', tag: '' }, { platform: '', isSubscribed: '', tag: 'vip' }]) { const before = identify('a', true, state), filtered = identify('a', true, state, filters), restored = identify('a', true, state); assert.equal(before(), false); assert.equal(filtered(), false); assert.equal(restored(), true); }
   const { code } = await transformWithOxc(source.replace("import React, { useEffect, useRef, useState } from 'react';", '').replace('export default function', 'function'), 'Contacts.tsx', { jsx: { runtime: 'classic' } });
   const component = new Function('React', 'useEffect', 'useRef', 'useState', `${code}; return ZernioContacts;`)(React, React.useEffect, React.useRef, React.useState), html = renderToStaticMarkup(React.createElement(component, { projectId: 'a', canManage: true, isOperator: true, request: async () => ({}) }));
   assert.match(html, /Connected contacts/); assert.match(html, /Create from a local contact/); assert.match(html, /Custom field definitions/); assert.doesNotMatch(source, /window\.confirm|JSON\.parse\(|dangerouslySetInnerHTML/);
@@ -266,10 +353,54 @@ test('contact UI retains action identities, rejects malformed receipts and never
 
 test('refreshing contact and field snapshots invalidates dependent create, link, bulk and value reviews', async () => {
   const source = await readFile(new URL('../src/ZernioContacts.tsx', import.meta.url), 'utf8'), code = stripTypeScriptTypes(source.slice(source.indexOf('  async function load('), source.indexOf('  async function write('))), review = { reviewed: true, bulkReviewed: true, valueReviewed: true, fieldReviewed: true, fieldScopeReviewed: true, sharedReviewed: true, deleteReviewed: true, fieldDeleteReviewed: true, subscriptionReviewed: true };
-  const context = { current: () => true, reads: { current: 0 }, path: '/projects/a/integrations/contacts', query: '', requester: { current: async path => path.endsWith('/overview') ? { localContacts: [{ id: 'local', version: 'new-local', name: 'New unreviewed details' }], accounts: [], profileId } : path.endsWith('/fields') ? { fields: [{ id: id(801), version: 'new-field' }] } : { contacts: [], pagination: {} } }, setLocalContacts() {}, setAccounts() {}, setProfileId() {}, setContacts() {}, setPagination() {}, setFields() {}, setError() {}, ...Object.fromEntries(Object.keys(review).map(key => ['set' + key.charAt(0).toUpperCase() + key.slice(1), value => { review[key] = value; }])) };
+  const context = { current: () => true, contactPage: () => true, reads: { current: 0 }, path: '/projects/a/integrations/contacts', query: '', requester: { current: async path => path.endsWith('/overview') ? { localContacts: [{ id: 'local', version: 'new-local', name: 'New unreviewed details' }], accounts: [], profileId } : path.endsWith('/fields') ? { fields: [{ id: id(801), version: 'new-field' }] } : { contacts: [], pagination: {} } }, setLocalContacts() {}, setAccounts() {}, setProfileId() {}, setContacts() {}, setPagination() {}, setFields() {}, setError() {}, ...Object.fromEntries(Object.keys(review).map(key => ['set' + key.charAt(0).toUpperCase() + key.slice(1), value => { review[key] = value; }])) };
   await new Function(...Object.keys(context), `return (${code});`)(...Object.values(context))(); assert.ok(Object.values(review).every(value => value === false));
   const createCode = stripTypeScriptTypes(source.slice(source.indexOf('  async function createContact('), source.indexOf('  async function linkContact('))); let dispatched = 0;
   const create = new Function('canManage', 'local', 'reviewed', 'action', `return (${createCode});`)(true, { id: 'local', version: 'new-local' }, review.reviewed, () => { dispatched++; }); await create({ preventDefault() {} }); assert.equal(dispatched, 0);
+});
+
+test('contact filter layout keeps its form full width and row actions compact with complete accessible names', async () => {
+  const source = await readFile(new URL('../src/ZernioContacts.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('    <label className="field"><span>Contact scope</span>'), end = source.indexOf('    <p className="helper-note">Only this project', start), table = source.indexOf('    {contacts.length ?'), tableEnd = source.indexOf('    {pagination?.hasMore', table);
+  assert.ok(start > 0 && end > start && table > end && tableEnd > table);
+  const { code } = await transformWithOxc(`const render = () => (<>${source.slice(start, end)}${source.slice(table, tableEnd)}</>);`, 'ContactFilterLayout.tsx', { jsx: { runtime: 'classic' } });
+  const contact = { id: 'contact-one', name: 'Long contact identity for the connected project', channels: [], isSubscribed: false }, draft = { platform: 'whatsapp', isSubscribed: 'false', tag: ' vip ' };
+  const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
+  for (const busy of [false, true]) {
+    let inspected, scope, search, filters, prevented = false;
+    const context = { React, busy, accountId: '', accounts: [{ id: 'wa', name: 'Project number', platform: 'whatsapp', isActive: true }], contacts: [contact], pagination: null, searchDraft: '  Reviewed search  ', filterDraft: draft, label: row => row.name, setAccountId: value => { scope = value; }, setSearch: value => { search = value; }, setFilters: value => { filters = value; }, setSearchDraft() {}, setFilterDraft() {}, inspect: row => { inspected = row; } };
+    const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context)), children = React.Children.toArray(tree.props.children).filter(React.isValidElement), form = children[1], formChildren = React.Children.toArray(form.props.children), grid = formChildren[0];
+    assert.equal(children[0].type, 'label'); assert.equal(form.type, 'form'); assert.equal(grid.props.className, 'form-grid');
+    assert.equal(React.Children.toArray(grid.props.children).length, 4); assert.ok(React.Children.toArray(grid.props.children).every(node => node.type === 'label'));
+    assert.equal(formChildren[1].props.children, 'Apply contact filters'); assert.equal(formChildren[1].props.disabled, busy);
+    assert.equal(search, undefined); assert.equal(filters, undefined);
+    form.props.onSubmit({ preventDefault() { prevented = true; } }); assert.equal(prevented, true); assert.equal(search, 'Reviewed search'); assert.deepEqual(filters, { ...draft, tag: 'vip' });
+    nodes(children[0]).find(node => node.type === 'select').props.onChange({ target: { value: 'wa' } }); assert.equal(scope, 'wa');
+    const inspect = nodes(tree).find(node => node.type === 'button' && node.props['aria-label'] === 'Inspect ' + contact.name);
+    assert.ok(inspect); assert.equal(inspect.props.children, 'Inspect'); assert.equal(inspect.props.disabled, busy);
+    if (!busy) { inspect.props.onClick(); assert.equal(inspected, contact); }
+    assert.ok(nodes(tree).some(node => node.type === 'div' && node.props.className === 'table-scroll'));
+  }
+});
+
+test('contact filter UI keeps failed or late results unknown and validates pagination before showing empty', async () => {
+  const source = await readFile(new URL('../src/ZernioContacts.tsx', import.meta.url), 'utf8'), helper = stripTypeScriptTypes(source.slice(source.indexOf('const contactPage ='), source.indexOf('\n\nexport default'))), contactPage = new Function(`${helper}; return contactPage;`)();
+  const valid = { contacts: [{ id: id(1), channels: [] }], pagination: { total: 1, limit: 25, skip: 0, hasMore: false } };
+  assert.equal(contactPage(valid), true); assert.equal(contactPage({ contacts: [], pagination: {} }), false); assert.equal(contactPage({ contacts: [], pagination: { total: 0, limit: 25, skip: 0, hasMore: true } }), false);
+  let active = true, release; const pending = new Promise(resolve => { release = resolve; }), values = { contacts: valid.contacts, pagination: valid.pagination, error: '' };
+  const context = { current: () => active, contactPage, reads: { current: 0 }, path: '/projects/a/integrations/contacts', query: '?tag=vip', requester: { current: async path => path.endsWith('/overview') ? { accounts: [], localContacts: [], profileId } : path.endsWith('/fields') ? { fields: [] } : pending }, setContacts(value) { values.contacts = value; }, setPagination(value) { values.pagination = value; }, setError(value) { values.error = value; }, ...Object.fromEntries(['LocalContacts', 'Accounts', 'ProfileId', 'Fields', 'Reviewed', 'BulkReviewed', 'ValueReviewed', 'FieldReviewed', 'FieldScopeReviewed', 'SharedReviewed', 'DeleteReviewed', 'FieldDeleteReviewed', 'SubscriptionReviewed'].map(key => ['set' + key, () => {}])) };
+  const loadSource = stripTypeScriptTypes(source.slice(source.indexOf('  async function load('), source.indexOf('  async function write('))), load = new Function(...Object.keys(context), `return (${loadSource});`)(...Object.values(context));
+  const loading = load(); assert.deepEqual(values.contacts, []); assert.equal(values.pagination, null); active = false; release(valid); await loading; assert.deepEqual(values.contacts, []); assert.equal(values.pagination, null);
+  active = true;
+  for (const response of [{ contacts: [], pagination: {} }, new Error('Choose a smaller account scope.')]) {
+    values.contacts = valid.contacts; values.pagination = valid.pagination;
+    context.requester.current = async path => path.endsWith('/overview') ? { accounts: [], localContacts: [], profileId } : path.endsWith('/fields') ? { fields: [] } : response instanceof Error ? Promise.reject(response) : response;
+    await load(); assert.deepEqual(values.contacts, []); assert.equal(values.pagination, null); assert.match(values.error, /scope|verified/);
+  }
+  const { code } = await transformWithOxc(source.replace("import React, { useEffect, useRef, useState } from 'react';", '').replace('export default function', 'function'), 'Contacts.tsx', { jsx: { runtime: 'classic' } });
+  const render = pagination => { let index = 0; const component = new Function('React', 'useEffect', 'useRef', 'useState', `${code}; return ZernioContacts;`)(React, () => {}, value => ({ current: value }), initial => [index++ === 7 ? pagination : initial, () => {}]); return renderToStaticMarkup(React.createElement(component, { projectId: 'a', canManage: false, isOperator: false, request: async () => ({}) })); };
+  let html = render(null); assert.match(html, /Contact results are unavailable/); assert.doesNotMatch(html, /No connected contacts matched|Load more contacts/); assert.match(html, /Exact tag/); assert.match(html, /Provider subscription/);
+  html = render({ total: 0, limit: 25, skip: 0, hasMore: false }); assert.match(html, /No connected contacts matched/);
 });
 
 test('authenticated contact HTTP workflows use all contacts endpoints, empty receipts and safe retry reconciliation', async () => {
@@ -288,7 +419,7 @@ test('authenticated contact HTTP workflows use all contacts endpoints, empty rec
       const response = await originalFetch(origin + path, { method, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(csrf ? { Origin: 'https://contacts.example.test' } : {}), ...(body ? { 'Content-Type': 'application/json', 'Idempotency-Key': key } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
       const next = response.headers.get('set-cookie'); if (next) cookie = next.split(';')[0]; return { status: response.status, data: await response.json() };
     };
-    const setupResponse = await request('/api/auth/setup', 'POST', { name: 'Contact QA owner', email: 'contacts-qa@example.test', password: 'Synthetic contacts passphrase 2026!', sample: false }); assert.equal(setupResponse.status, 201);
+    const setupResponse = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Contact QA owner', email: 'contacts-qa@example.test', password: 'Synthetic contacts passphrase 2026!', sample: false }); assert.equal(setupResponse.status, 201);
     const projectId = setupResponse.data.projectId; assert.equal((await request(`/api/projects/${projectId}`, 'PATCH', { zernioProfileId: profileId })).status, 200); const path = `/api/projects/${projectId}/integrations/contacts`;
     const local = app.direct.contacts.save(projectId, { name: 'HTTP local contact', phone: '+12025550102', consents: { whatsapp: true }, consentSource: 'Synthetic HTTP opt-in' });
     let overview = (await request(path + '/overview')).data, localRow = overview.localContacts.find(row => row.id === local.id), body = { accountId: 'wa-a', localContactId: local.id, expectedLocalVersion: localRow.version, confirmed: true };
@@ -309,7 +440,7 @@ test('authenticated contact HTTP workflows use all contacts endpoints, empty rec
     result = await request(path + '/contacts/bulk', 'POST', { accountId: 'wa-a', contacts: [{ localContactId: bulkLocal.id, expectedLocalVersion: localRow.version }], confirmed: true }); assert.equal(result.status, 200); assert.equal(result.data.results[0].status, 'linked');
     const otherProject = await request('/api/projects', 'POST', { workspaceId: app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id, name: 'Other contacts project' }); assert.equal(otherProject.status, 201); assert.equal((await request(`/api/projects/${otherProject.data.project.id}/integrations/contacts/contacts?accountId=wa-a`)).status, 409);
     contact = (await request(path + `/contacts/${id(1)}?accountId=wa-a`)).data.contact; upstream.state.malformed = true; const uncertain = { accountId: 'wa-a', expectedVersion: contact.version, changes: { company: 'Unknown HTTP update' }, confirmed: true }; result = await request(path + `/contacts/${contact.id}/update`, 'POST', uncertain, 'http-unknown-contact'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); const writes = upstream.state.writes;
-    assert.equal((await request(path + `/contacts/${contact.id}/update`, 'POST', uncertain, 'http-unknown-contact')).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal((await request(path + `/contacts/${contact.id}/update`, 'POST', { ...uncertain, changes: { company: 'Changed after unknown' } })).data.error.code, 'CONTACT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(upstream.state.writes, writes);
+    assert.equal((await request(path + `/contacts/${contact.id}/update`, 'POST', uncertain, 'http-unknown-contact')).data.error.code, 'OPERATION_UNCERTAIN'); const blocked = await request(path + `/contacts/${contact.id}/update`, 'POST', { ...uncertain, changes: { company: 'Changed after unknown' } }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id); assert.equal(upstream.state.writes, writes);
     for (const [method, route] of [['GET', '/contacts'], ['POST', '/contacts'], ['GET', '/contacts/' + contact.id], ['GET', '/contacts/' + contact.id + '/channels'], ['PATCH', '/contacts/' + contact.id], ['DELETE', '/contacts/' + result.data.contact?.id], ['POST', '/contacts/bulk']]) { if (method === 'DELETE') assert.ok(upstream.calls.some(call => call.method === 'DELETE' && /^\/contacts\/[a-f0-9]{24}$/.test(call.path))); else assert.ok(upstream.calls.some(call => call.method === method && call.path === route), `${method} ${route}`); }
   } finally {
     globalThis.fetch = originalFetch; await app.close(); upstream.db.close(); assert.ok(resolve(dataDir).startsWith(resolve(tmpdir()) + sep)); await rm(dataDir, { recursive: true, force: true });

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { IntegrationError, operation } from './integrations.mjs';
 import { transaction } from './database.mjs';
+import { validPostInstant } from '../shared/social-posts.mjs';
 
 const initialized = new WeakSet(), fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
 function initialize(db) {
@@ -21,7 +22,12 @@ function eligibility(db, row) {
 const reviewView = row => row ? { resolution: row.resolution, note: row.note, reference: row.reference, reviewerId: row.reviewer_id, reviewedAt: row.reviewed_at } : null;
 function safeAction(value) { return typeof value === 'string' && /^(POST|PUT|PATCH|DELETE|GET) \/[a-zA-Z/:_-]{1,250}$/.test(value) ? value : 'Earlier provider action'; }
 function view(db, row) {
-  return { id: row.id, action: safeAction(row.action_path), status: row.status, createdAt: row.created_at, ...eligibility(db, row), error: ['pending', 'uncertain'].includes(row.status) ? { code: 'OPERATION_UNCERTAIN', message: 'The provider outcome has not been confirmed.' } : null, review: reviewView(db.prepare('SELECT * FROM integration_operation_reviews WHERE operation_id=? AND project_id=?').get(row.id, row.project_id)) };
+  const creation = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zernio_product_create_receipts'").get() && db.prepare('SELECT account_id,native_product_id FROM zernio_product_create_receipts WHERE project_id=? AND request_key=?').get(row.project_id, row.request_key);
+  const safeId = value => typeof value === 'string' && value.length > 0 && value.length <= 500 && !['.', '..'].includes(value) && !/[\s\u0000-\u001f\u007f-\u009f/?#]/.test(value);
+  const copy = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zernio_campaign_copy_receipts'").get() && db.prepare('SELECT source_campaign_id,platform,copied_campaign_id,discovery,verification,status_read_at FROM zernio_campaign_copy_receipts WHERE project_id=? AND request_key=?').get(row.project_id, row.request_key);
+  const copiedCampaignId = copy && safeId(copy.copied_campaign_id) && copy.copied_campaign_id !== copy.source_campaign_id ? copy.copied_campaign_id : null;
+  const paused = row.status === 'complete' && copiedCampaignId && copy.platform !== 'linkedin' && copy.verification === 'paused' && validPostInstant(copy.status_read_at);
+  return { id: row.id, action: safeAction(row.action_path), status: row.status, createdAt: row.created_at, ...eligibility(db, row), ...(creation && safeId(creation.account_id) ? { productCreation: { accountId: creation.account_id, productId: safeId(creation.native_product_id) ? creation.native_product_id : null } } : {}), ...(copy && safeId(copy.source_campaign_id) && ['facebook', 'instagram', 'tiktok', 'linkedin'].includes(copy.platform) ? { campaignCopy: { sourceCampaignId: copy.source_campaign_id, platform: copy.platform, copiedCampaignId, discovery: ['triggered', 'skipped', 'failed'].includes(copy.discovery) ? copy.discovery : null, requestedStatus: 'PAUSED', verification: paused ? 'paused' : 'pending', statusReadAt: paused ? copy.status_read_at : null } } : {}), error: ['pending', 'uncertain'].includes(row.status) ? { code: 'OPERATION_UNCERTAIN', message: 'The provider outcome has not been confirmed.' } : null, review: reviewView(db.prepare('SELECT * FROM integration_operation_reviews WHERE operation_id=? AND project_id=?').get(row.id, row.project_id)) };
 }
 
 export async function handleOperationRecovery(context) {

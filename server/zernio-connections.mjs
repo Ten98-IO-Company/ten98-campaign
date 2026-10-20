@@ -23,7 +23,7 @@ async function confirmed(api, profileId, platform, response, expectedUsername) {
   const receipt = response.account;
   if (receipt != null && (!object(receipt) || receipt.platform !== platform || receipt.profileId != null && String(receipt.profileId?._id || receipt.profileId) !== profileId)) fail(502, 'CONNECTION_NOT_CONFIRMED', 'The returned connection belongs to another account or profile.', true);
   const receiptId = response.accountId || receipt?._id || receipt?.accountId;
-  const rows = (await scopedAccounts(api, profileId)).filter(row => row.platform === platform && row.isActive !== false);
+  const rows = (await scopedAccounts(api, profileId)).filter(row => row.platform === platform && row.isActive === true);
   const matches = receiptId ? rows.filter(row => row._id === receiptId) : typeof receipt?.username === 'string' && receipt.username ? rows.filter(row => row.username === receipt.username) : [];
   if (matches.length !== 1 || receiptId != null && !token(receiptId)) fail(502, 'CONNECTION_NOT_CONFIRMED', 'The new connection could not be confirmed in this project. Refresh connections before retrying.', true);
   const account = matches[0];

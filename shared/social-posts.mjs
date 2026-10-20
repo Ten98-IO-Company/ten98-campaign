@@ -120,6 +120,14 @@ export function normalizePlatformOptions(platform, options, { required = false }
   return JSON.parse(JSON.stringify(normalized));
 }
 
+export function normalizePostTags(tags = [], { preserve = false } = {}) {
+  if (!Array.isArray(tags) || tags.length > 500 || tags.some(tag => typeof tag !== 'string')) fail('YouTube keyword tags must be a list of text values.');
+  const result = preserve ? [...tags] : [...new Set(tags.flatMap(tag => tag.split(',')).map(tag => tag.trim().replace(/^#/, '').trim()).filter(Boolean))];
+  if (result.some(tag => tag.length > 100 || /[\u0000-\u001f\u007f]/u.test(tag))) fail('Each YouTube keyword tag must use at most 100 characters without control characters.');
+  if (result.reduce((total, tag) => total + tag.length, 0) > 500) fail('YouTube keyword tags must use at most 500 characters combined.');
+  return result;
+}
+
 export function normalizePostVariants(post, { strict = true } = {}) {
   const overrides = post?.platformOverrides;
   if (overrides === undefined) return {};
@@ -244,6 +252,7 @@ export function captionLimitForVariant(variant) {
 export function validatePostForPlatforms(post, platforms, { assets = [], requireMediaMetadata = false, accountId, now = Date.now(), providerOwnedMediaUrls = new Set() } = {}) {
   const errors = [], warnings = [], variants = {};
   const issue = (list, platform, field, message) => list.push({ platform, field, message });
+  try { normalizePostTags(post.tags); } catch (error) { issue(errors, 'youtube', 'tags', error.message); }
   try { normalizePostVariants(post); normalizeAccountVariants(post); } catch (error) { issue(errors, '', 'platformOverrides', error.message); }
   if (!Array.isArray(platforms) || !platforms.length) issue(errors, '', 'platforms', 'Select at least one publishing platform.');
   for (const platform of new Set(platforms || [])) {

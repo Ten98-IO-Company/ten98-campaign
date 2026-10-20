@@ -16,7 +16,7 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
   }
   const token = result => new URL(result.data.url).searchParams.get('invite');
   try {
-    const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Workspace owner', email: 'collaboration-owner@example.test', password: ownerPassword, sample: false } });
+    const setup = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Workspace owner', email: 'collaboration-owner@example.test', password: ownerPassword, sample: false } });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const ownerState = (await request('/api/state')).data, workspaceId = ownerState.workspaces[0].id, projectId = ownerState.projectId, team = `/api/workspaces/${workspaceId}`;
     assert.equal((await request(team + '/invitations', { cookie: null })).status, 401);
@@ -51,7 +51,7 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     assert.equal((await request('/api/settings/integrations', { cookie: colleagueCookie })).status, 403);
     assert.equal((await request(invitation, { cookie: null })).status, 410);
     assert.equal((await request(invitation, { method: 'POST', body: signup, cookie: null })).status, 410);
-    assert.equal((await request('/api/auth/setup', { method: 'POST', body: { name: 'Uninvited', email: 'uninvited@example.test', password: newPassword }, cookie: null })).status, 409, 'Open signup remains closed after instance setup.');
+    assert.equal((await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Uninvited', email: 'uninvited@example.test', password: newPassword }, cookie: null })).status, 409, 'Open signup remains closed after instance setup.');
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: colleague.email, password: ownerPassword }, cookie: null })).status, 401);
     const ownLogin = await request('/api/auth/login', { method: 'POST', body: { email: colleague.email, password: newPassword }, cookie: null }); assert.equal(ownLogin.status, 200); assert.equal(ownLogin.data.user.id, colleagueId);
     assert.equal(app.db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(workspaceId, ownerState.user.id).role, 'owner');

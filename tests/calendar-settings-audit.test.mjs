@@ -47,32 +47,13 @@ test('Calendar listing accepts a genuine empty collection and honors browser-loc
 
 test('Calendar UI sends local month boundaries across daylight saving', async () => {
   const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
-  const loadSource = stripTypeScriptTypes(source.slice(source.indexOf('async function load()'), source.indexOf('  async function mapCalendar(')));
+  const loadSource = stripTypeScriptTypes(source.slice(source.indexOf('async function load()'), source.indexOf('  async function save(')));
   const previousTZ = process.env.TZ; process.env.TZ = 'America/New_York';
   try {
     const requests = [], load = new Function('request', 'path', 'from', 'to', 'active', 'scope', 'view', 'updateEvents', 'setLoaded', `return (${loadSource});`)(async path => { requests.push(path); return { events: [] }; }, '/calendar', '2026-11-01', '2026-11-30', { current: true }, { current: 'november' }, 'november', () => {}, () => {});
     await load(); const query = new URL('http://localhost' + requests[0]).searchParams;
     assert.equal(query.get('timeMin'), '2026-11-01T04:00:00.000Z'); assert.equal(query.get('timeMax'), '2026-12-01T05:00:00.000Z', 'Month endpoints use their own UTC offsets across DST.');
   } finally { if (previousTZ === undefined) delete process.env.TZ; else process.env.TZ = previousTZ; }
-});
-
-test('Calendar mapping callbacks preserve newer month drafts and use the confirmed mapping without another fallible read', async () => {
-  const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
-  const handler = stripTypeScriptTypes(source.slice(source.indexOf('async function mapCalendar('), source.indexOf('  async function save(')));
-  const writeHandler = stripTypeScriptTypes(source.slice(source.indexOf('async function write('), source.indexOf('  async function load(')));
-  for (const stale of ['current', 'during-write', 'unmounted']) {
-    const active = { current: true }, scope = { current: 'october' }, changes = [], calls = []; let finish;
-    const request = async path => { calls.push(path); if (calls.length > 1) throw new Error('A following status read is offline.'); return new Promise(resolve => { finish = resolve; }); };
-    const write = new Function('path', 'keys', 'request', 'active', 'scope', 'view', `return (${writeHandler});`)('/calendar', { current: new Map() }, request, active, scope, 'october');
-    const dependencies = { FormData: class { get() { return 'shared@example.test'; } }, action: run => run(), request, path: '/calendar', active, scope, view: 'october', write, status: { configured: true, mapped: false }, setStatus: value => changes.push(value), updateEvents() {}, setLoaded() {}, setEditing: value => changes.push(value), setReview: value => changes.push({ review: value }), setDeleting: value => changes.push({ deleting: value }), setDraft: value => changes.push(value), blank: { summary: 'A new draft' }, setNotice() {} };
-    const mapCalendar = new Function(...Object.keys(dependencies), `return (${handler});`)(...Object.values(dependencies));
-    const pending = mapCalendar({ preventDefault() {}, currentTarget: {} });
-    if (stale === 'unmounted') active.current = false; else if (stale !== 'current') scope.current = 'november';
-    finish({ calendarId: 'shared@example.test', mapped: true });
-    await pending.catch(error => { if (error.name !== 'AbortError') throw error; });
-    assert.equal(changes.length, stale === 'current' ? 5 : 0, 'A mapping response must not reset a newer month’s event draft or review.');
-    assert.equal(calls.length, 1); if (stale === 'current') assert.deepEqual(changes[0], { configured: true, mapped: true, calendarId: 'shared@example.test' });
-  }
 });
 
 test('Calendar sync uses current server plan identity, retains uncertain keys and ignores closed views', async () => {
@@ -111,7 +92,7 @@ test('Calendar sync uses current server plan identity, retains uncertain keys an
   }
 });
 
-test('Drive and Calendar credential forms edit one shared draft without discarding either card’s input', async () => {
+test('the shared Google credential editor preserves Google and unrelated provider drafts', async () => {
   const source = await readFile(new URL('../src/IntegrationSettings.tsx', import.meta.url), 'utf8');
   const changeSource = stripTypeScriptTypes(source.slice(source.indexOf('function change('), source.indexOf('  function dirty(')));
   const saveSource = stripTypeScriptTypes(source.slice(source.indexOf('async function save('), source.indexOf('  async function reset(')));
@@ -119,9 +100,9 @@ test('Drive and Calendar credential forms edit one shared draft without discardi
   const setDrafts = update => { drafts = update(drafts); }, change = new Function('setDrafts', `return (${changeSource});`)(setDrafts);
   change('openrouter', 'model', 'other/unsaved-model');
   change('googleDrive', 'privateKey', 'new-unsaved-private-key');
-  change('googleCalendar', 'serviceAccountEmail', 'replacement-service@example.test');
+  change('googleDrive', 'serviceAccountEmail', 'replacement-service@example.test');
   assert.deepEqual(drafts.googleDrive, { privateKey: 'new-unsaved-private-key', serviceAccountEmail: 'replacement-service@example.test' });
-  assert.deepEqual(drafts.googleCalendar, drafts.googleDrive, 'Both cards configure the same service account and must reflect the same pending edits.');
+  assert.deepEqual(drafts.googleCalendar, drafts.googleDrive, 'Both connection tests must reflect pending edits to the shared service account.');
   const dependencies = { action: (_provider, run) => run(), drafts, request: async (...args) => { requests.push(args); }, refresh: async () => {}, active: { current: true }, setDrafts, setResults() {}, mapsTested: { current: false }, cancelMapProbe: { current: null }, setMapsReload() {}, setNotice() {}, onChanged: undefined };
   const save = new Function(...Object.keys(dependencies), `return (${saveSource});`)(...Object.values(dependencies));
   await save({ id: 'googleDrive', label: 'Google Drive', secretFields: { privateKey: {} } }, { preventDefault() {} });

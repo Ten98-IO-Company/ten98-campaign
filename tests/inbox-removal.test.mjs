@@ -21,7 +21,7 @@ test('legacy inbox routes and sample records stay private while campaign agent a
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   try {
-    const setup = await request('/api/auth/setup', 'POST', { name: 'Removal fixture', email: 'removal@example.test', password: 'a sufficiently long fixture password', sample: true });
+    const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Removal fixture', email: 'removal@example.test', password: 'a sufficiently long fixture password', sample: true });
     assert.equal(setup.status, 201); cookie = setup.cookie;
     const initial = (await request('/api/state')).data, projectId = initial.projectId, project = `/api/projects/${projectId}`;
     assert.equal(Object.hasOwn(initial, 'conversations'), false);

@@ -57,7 +57,7 @@ test('Drive HTTP sync and upload preserve publishing metadata, validate complete
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   try {
-    const setup = await request('/api/auth/setup', 'POST', { name: 'DAM fixture', email: 'dam@example.test', password: 'a sufficiently long fixture password', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
+    const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'DAM fixture', email: 'dam@example.test', password: 'a sufficiently long fixture password', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
     const state = (await request('/api/state')).data, project = `/api/projects/${state.projectId}`, path = project + '/integrations/drive';
     assert.equal((await request(project, 'PATCH', { driveFolderId: 'folder-fixture', zernioProfileId: 'profile-dam' })).status, 200);
     const results = await Promise.all([request(path + '/sync', 'POST', {}), request(path + '/sync', 'POST', {})]);

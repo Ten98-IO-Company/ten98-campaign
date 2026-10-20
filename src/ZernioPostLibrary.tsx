@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 type Row = Record<string, any>;
 type Props = { projectId: string; canWrite: boolean; campaigns?: Row[]; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any> };

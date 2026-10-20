@@ -27,6 +27,7 @@ const REPLY_MEDIA = {
 const COMMENTS = new Set(['facebook', 'instagram', 'twitter', 'bluesky', 'threads', 'youtube', 'linkedin', 'reddit', 'tiktok', 'metaads']);
 const HIDE = new Set(['facebook', 'instagram', 'threads', 'twitter', 'tiktok']);
 const LIKE = new Set(['facebook', 'twitter', 'bluesky', 'reddit', 'linkedin']);
+const LINKEDIN_REACTIONS = new Set(['LIKE', 'PRAISE', 'EMPATHY', 'INTEREST', 'APPRECIATION', 'ENTERTAINMENT']);
 const REVIEWS = new Set(['facebook', 'googlebusiness']);
 const WRITERS = new Set(['owner', 'admin', 'editor']);
 const START = new Set(['twitter', 'bluesky', 'reddit', 'slack', 'whatsapp', 'sms']);
@@ -43,6 +44,7 @@ const messageFields = ['id', 'conversationId', 'accountId', 'platform', 'message
 const postFields = ['id', 'platform', 'accountId', 'accountUsername', 'content', 'picture', 'permalink', 'createdTime', 'commentCount', 'likeCount', 'cid', 'subreddit', 'isAd', 'adId', 'placement'];
 const commentFields = ['id', 'message', 'createdTime', 'from', 'likeCount', 'replyCount', 'platform', 'url', 'repliesHasMore', 'canReply', 'canDelete', 'canHide', 'canLike', 'isHidden', 'isLiked', 'likeUri', 'cid', 'parentId', 'rootUri', 'rootCid'];
 const reviewFields = ['id', 'platform', 'accountId', 'accountUsername', 'locationId', 'locationName', 'reviewer', 'rating', 'recommendationType', 'text', 'created', 'hasReply', 'hasPhotos', 'photoCount', 'photos', 'reply', 'reviewUrl'];
+const mentionFields = ['id', 'platform', 'accountId', 'accountUsername', 'content', 'permalink', 'authorUrn', 'authorName', 'authorUsername', 'authorPicture', 'organizationalEntity', 'publishedAt', 'createdAt'];
 
 function renderFields(row, strings = [], numbers = [], booleans = []) {
   if (!plain(row) || strings.some(key => row[key] != null && typeof row[key] !== 'string') || numbers.some(key => row[key] != null && (typeof row[key] !== 'number' || !Number.isFinite(row[key]) || row[key] < 0)) || booleans.some(key => row[key] != null && typeof row[key] !== 'boolean')) invalid();
@@ -59,8 +61,8 @@ function validateReview(row) {
   if (row.photos != null) { if (!Array.isArray(row.photos)) invalid(); row.photos.forEach(photo => renderFields(photo, ['url'])); }
 }
 
-export function inboxCapabilities(platform) {
-  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), reply: DM.has(platform), start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), typing: TYPING.has(platform), deleteStoredConversation: DM.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'twitter', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : ['sms', 'twitter'].includes(platform) ? ['image', 'video'] : ['image', 'video', 'audio', 'file'], ...(REPLY_MEDIA[platform] ? { attachmentRules: REPLY_MEDIA[platform] } : {}), archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentPrivateReply: ['facebook', 'instagram', 'metaads'].includes(platform), commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
+export function inboxCapabilities(platform, active = true) {
+  return { messages: DM.has(platform), comments: COMMENTS.has(platform), reviews: REVIEWS.has(platform), mentions: platform === 'linkedin' && active, reply: DM.has(platform), replyButtons: platform === 'whatsapp' && active, start: START.has(platform), search: DM.has(platform), messageEdit: EDIT_MESSAGE.has(platform), messageDelete: DELETE_MESSAGE.has(platform), messageReact: REACT_MESSAGE.has(platform), typing: TYPING.has(platform), deleteStoredConversation: DM.has(platform), threadControl: ['facebook', 'instagram', 'whatsapp'].includes(platform), acceptRequest: ['facebook', 'instagram'].includes(platform), messageLimit: MESSAGE_LIMITS[platform] || 10000, attachments: ['facebook', 'instagram', 'twitter', 'telegram', 'whatsapp', 'imessage', 'tiktok', 'sms'].includes(platform), attachmentTypes: platform === 'tiktok' ? ['image'] : ['sms', 'twitter'].includes(platform) ? ['image', 'video'] : ['image', 'video', 'audio', 'file'], ...(REPLY_MEDIA[platform] ? { attachmentRules: REPLY_MEDIA[platform] } : {}), archive: DM.has(platform), read: DM.has(platform), commentReply: COMMENTS.has(platform), commentPrivateReply: ['facebook', 'instagram', 'metaads'].includes(platform), commentEdit: platform === 'reddit', commentHide: HIDE.has(platform), commentLike: LIKE.has(platform), commentDelete: COMMENTS.has(platform), commentModerate: platform === 'youtube', reviewReply: REVIEWS.has(platform), reviewDeleteReply: platform === 'googlebusiness' };
 }
 function supported(account, feature) { if (!inboxCapabilities(account.platform)[feature] || account.isActive === false) fail(422, 'INBOX_FEATURE_UNSUPPORTED', 'This account does not support this inbox action. Reconnect the account if its permissions changed.'); }
 function scoped(row, accounts, expectedAccount) {
@@ -76,13 +78,15 @@ function pagination(value, comment = false, allowCursorless = false) {
   return { hasMore: value.hasMore, nextCursor: cursor, ...(comment ? { cursor } : {}) };
 }
 function query(url, type) {
-  const result = { limit: type === 'reviews' ? 25 : 50 }, rules = { status: ['active', 'archived'], folder: ['inbox', 'requests'], sortOrder: ['asc', 'desc'] };
-  for (const name of ['cursor', 'status', 'folder', 'sortOrder']) {
+  const result = { limit: type === 'reviews' ? 25 : 50 }, rules = { status: ['active', 'archived'], folder: ['inbox', 'requests'], sortOrder: ['asc', 'desc'], sortBy: ['date', 'rating'], hasReply: ['true', 'false'] };
+  for (const name of ['cursor', 'status', 'folder', 'sortOrder', ...(type === 'reviews' ? ['minRating', 'maxRating', 'hasReply', 'sortBy'] : [])]) {
     const value = url.searchParams.get(name); if (value === null || value === '') continue;
-    if (value.length > 8192 || /[\u0000-\u001f]/.test(value) || rules[name] && !rules[name].includes(value)) fail(400, 'INVALID_INBOX_FILTER', 'Choose valid inbox filters.'); result[name] = value;
+    if (value.length > 8192 || /[\u0000-\u001f]/.test(value) || rules[name] && !rules[name].includes(value) || ['minRating', 'maxRating'].includes(name) && !/^[1-5]$/.test(value)) fail(400, 'INVALID_INBOX_FILTER', 'Choose valid inbox filters.');
+    result[name] = ['minRating', 'maxRating'].includes(name) ? Number(value) : name === 'hasReply' ? value === 'true' : value;
   }
+  if (result.minRating > result.maxRating) fail(400, 'INVALID_INBOX_FILTER', 'The minimum review rating cannot exceed the maximum.');
   if (url.searchParams.has('limit')) { const value = Number(url.searchParams.get('limit')); if (!Number.isInteger(value) || value < 1 || value > (type === 'reviews' ? 50 : 100)) fail(400, 'INVALID_INBOX_FILTER', 'Choose a valid inbox page size.'); result.limit = value; }
-  if (type !== 'conversations') { delete result.status; delete result.folder; if (type !== 'messages') delete result.sortOrder; }
+  if (type !== 'conversations') { delete result.status; delete result.folder; if (!['messages', 'reviews', 'mentions'].includes(type)) delete result.sortOrder; }
   return result;
 }
 function metadata(value, accounts) {
@@ -201,8 +205,12 @@ async function history(api, account, conversationId, params = {}, resolvedId = c
       row.editHistory = row.editHistory.map(entry => { renderFields(entry, ['text', 'editedAt']); if (!Array.isArray(entry.attachments) || entry.attachments.length > 100) invalid(); entry.attachments.forEach(item => renderFields(item, ['type', 'url'])); return { ...pick(entry, ['text', 'editedAt']), attachments: entry.attachments.map(item => pick(item, ['type', 'url'])) }; });
     }
     if (row.storyReply != null) renderFields(row.storyReply, ['storyId', 'storyUrl']);
+    if (account.platform === 'whatsapp' && row.direction === 'incoming' && row.metadata != null) {
+      renderFields(row.metadata, ['interactiveType', 'interactiveId']);
+      if (row.metadata.interactiveType === 'button_reply' && (typeof row.metadata.interactiveId !== 'string' || !row.metadata.interactiveId.trim() || row.metadata.interactiveId.length > 2000 || /[\u0000-\u001f\u007f]/.test(row.metadata.interactiveId))) invalid();
+    }
   }
-  return { messages: result.messages.map(row => pick(row, messageFields)), pagination: pagination(result.pagination), sortOrderApplied: result.sortOrderApplied || 'desc' };
+  return { messages: result.messages.map(row => ({ ...pick(row, messageFields), ...(account.platform === 'whatsapp' && row.direction === 'incoming' && row.metadata?.interactiveType === 'button_reply' ? { metadata: pick(row.metadata, ['interactiveType', 'interactiveId']) } : {}) })), pagination: pagination(result.pagination), sortOrderApplied: result.sortOrderApplied || 'desc' };
 }
 async function recentHistory(api, account, conversationId, resolvedId) {
   const result = await history(api, account, conversationId, {}, resolvedId), seen = new Set();
@@ -396,9 +404,21 @@ async function aggregate(api, accounts, account, kind, params) {
     scoped(row, accounts, account._id);
     if (kind === 'conversations') validateConversation(row);
     else if (kind === 'reviews') validateReview(row);
+    else if (kind === 'mentions') {
+      renderFields(row, mentionFields);
+      if (!valid(row.organizationalEntity) || ['publishedAt', 'createdAt'].some(key => row[key] != null && !Number.isFinite(Date.parse(row[key])))) invalid();
+    }
     else renderFields(row, postFields.filter(key => !['commentCount', 'likeCount', 'isAd'].includes(key)), ['commentCount', 'likeCount'], ['isAd']);
   });
-  return { rows: result.data, pagination: pagination(result.pagination, false, kind === 'conversations' && params.folder === 'requests'), meta: metadata(result.meta, accounts), ...(result.summary ? { summary: pick(result.summary, ['totalReviews', 'averageRating']) } : {}) };
+  const page = pagination(kind === 'mentions' ? { hasMore: result.pagination?.hasMore, cursor: result.pagination?.cursor } : result.pagination, false, kind === 'conversations' && params.folder === 'requests');
+  if (kind === 'mentions') {
+    if (result.data.length > params.limit || new Set(result.data.map(row => row.id)).size !== result.data.length || page.hasMore && (!result.data.length || page.nextCursor === params.cursor)) invalid();
+    if (result.meta != null) {
+      renderFields(result.meta, ['sortOrder'], ['total']);
+      if (result.meta.total != null && !Number.isSafeInteger(result.meta.total) || result.meta.sortOrder != null && result.meta.sortOrder !== (params.sortOrder || 'desc')) invalid();
+    }
+  }
+  return { rows: result.data, pagination: page, meta: kind === 'mentions' ? pick(result.meta, ['total', 'sortOrder']) : metadata(result.meta, accounts), ...(result.summary ? { summary: pick(result.summary, ['totalReviews', 'averageRating']) } : {}) };
 }
 async function findRow(api, accounts, account, kind, resourceId) {
   let cursor; const seen = new Set();
@@ -459,6 +479,7 @@ function priorHiddenComment(context, account, post, commentId) {
   return null;
 }
 const privateCommentVersion = row => createHash('sha256').update(JSON.stringify([row.id, row.platform, row.createdTime, row.from?.id, row.from?.isOwner, row.message])).digest('hex');
+const editableCommentVersion = (account, postId, row) => createHash('sha256').update(JSON.stringify([account._id, account.platform, account.platformUserId ?? null, postId, row.id, row.message ?? null, row.from?.id ?? null, row.from?.isOwner ?? null])).digest('hex');
 function privateCommentEligible(row) {
   const age = Date.now() - Date.parse(row.createdTime);
   return ['facebook', 'instagram'].includes(row.platform) && valid(row.from?.id) && row.from?.isOwner === false && row.canReply !== false && age >= 0 && age < 7 * 86400000;
@@ -466,13 +487,38 @@ function privateCommentEligible(row) {
 function privateReplyTable(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS inbox_private_replies(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,post_id TEXT NOT NULL,comment_id TEXT NOT NULL,status TEXT NOT NULL,operation_id TEXT NOT NULL,PRIMARY KEY(project_id,profile_id,account_id,post_id,comment_id))`);
 }
+function claimCommentReaction(context, account, postId, commentId, action, reactionType = '') {
+  const { db, project, req } = context, nativeId = account.platformUserId ?? '';
+  if (account.platformUserId != null && !valid(nativeId)) invalid();
+  db.exec(`CREATE TABLE IF NOT EXISTS inbox_comment_reactions(operation_id TEXT PRIMARY KEY,platform TEXT NOT NULL,account_id TEXT NOT NULL,native_account_id TEXT NOT NULL,post_id TEXT NOT NULL,comment_id TEXT NOT NULL,action TEXT NOT NULL,reaction_type TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS inbox_comment_reactions_target ON inbox_comment_reactions(platform,post_id,comment_id);`);
+  const operationId = db.prepare('SELECT id FROM integration_operations WHERE project_id=? AND request_key=?').get(project.id, req.headers['idempotency-key']).id;
+  // ponytail: missing native IDs conservatively fence the same platform target across aliases; record native IDs to separate accounts.
+  const previous = db.prepare(`SELECT r.operation_id FROM inbox_comment_reactions r LEFT JOIN integration_operations o ON o.id=r.operation_id
+    WHERE r.platform=? AND r.post_id=? AND r.comment_id=? AND (r.account_id=? OR r.native_account_id='' OR ?='' OR r.native_account_id=?)
+    AND (o.status IS NULL OR o.status NOT IN ('complete','failed','reviewed-not-applied','reviewed-applied') OR o.status='reviewed-applied' AND r.action=? AND r.reaction_type=?) LIMIT 1`).get(account.platform, postId, commentId, account._id, nativeId, nativeId, action, reactionType);
+  if (previous) fail(409, 'COMMENT_REACTION_UNCERTAIN', 'An earlier change on this native comment needs reconciliation before another edit, reaction or removal.');
+  // Earlier releases recorded project-scoped resources only. Preserve exact legacy uncertainty across project/account handoffs too.
+  const legacy = db.prepare(`SELECT o.resource_key,o.action_path,o.status FROM integration_operations o WHERE o.id<>? AND o.status IN ('pending','uncertain','reviewed-applied')
+    AND NOT EXISTS(SELECT 1 FROM inbox_comment_reactions r WHERE r.operation_id=o.id)
+    AND (o.action_path IN ('POST /integrations/inbox/comments/like','POST /integrations/inbox/comments/unlike','POST /integrations/inbox/comments/edit') OR o.action_path='' OR o.resource_key LIKE '%"inbox-comment"%')`).all(operationId);
+  for (const row of legacy) {
+    if (row.status === 'reviewed-applied' && row.action_path && row.action_path !== 'POST /integrations/inbox/comments/' + action) continue;
+    let resource; try { resource = JSON.parse(row.resource_key || 'null')?.[1]; } catch { /* An unreadable legacy identity cannot establish a different target. */ }
+    if (Array.isArray(resource) && resource[0] === 'inbox-comment' && (resource[2] !== postId || resource[3] !== commentId)) continue;
+    if (Array.isArray(resource) && resource[0] !== 'inbox-comment' && row.action_path === '') continue;
+    fail(409, 'COMMENT_REACTION_UNCERTAIN', 'An earlier comment change needs reconciliation before this native target can be changed.');
+  }
+  // No await between the shared durable lookup and claim, or between this claim and provider dispatch.
+  db.prepare('INSERT INTO inbox_comment_reactions VALUES(?,?,?,?,?,?,?,?)').run(operationId, account.platform, account._id, nativeId, postId, commentId, action, reactionType);
+}
 function privateReplyThread(context, accounts, account, post, result) {
   const accountId = post.isAd ? result.meta.platform === 'instagram' ? result.meta.instagramAccountId : result.meta.facebookAccountId : account._id, postId = post.isAd ? result.meta.effectiveStoryId : post.id;
   const connected = accounts.some(row => row._id === accountId && row.isActive !== false && row.platform === result.meta.platform), exists = context.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_private_replies'").get();
   const receipts = exists && context.db.prepare('SELECT r.status,o.status AS operationStatus FROM inbox_private_replies r LEFT JOIN integration_operations o ON r.operation_id=o.id AND r.project_id=o.project_id WHERE r.project_id=? AND r.profile_id=? AND r.account_id=? AND r.post_id=? AND r.comment_id=?');
   const decorate = row => {
     const receipt = receipts && receipts.get(context.project.id, context.project.zernioProfileId, accountId || '', postId || '', row.id), prior = receipt && !(receipt.operationStatus === 'reviewed-not-applied' && ['pending', 'uncertain'].includes(receipt.status)) ? receipt : null;
-    return { ...row, ...(['facebook', 'instagram'].includes(row.platform) ? { privateReplyVersion: privateCommentVersion(row), privateReplyEligible: connected && valid(postId) && !prior && privateCommentEligible(row), ...(prior ? { privateReplyStatus: prior.status } : {}) } : {}), ...(row.replies ? { replies: row.replies.map(decorate) } : {}) };
+    return { ...row, ...(row.platform === 'reddit' ? { editVersion: editableCommentVersion(account, post.id, row) } : {}), ...(['facebook', 'instagram'].includes(row.platform) ? { privateReplyVersion: privateCommentVersion(row), privateReplyEligible: connected && valid(postId) && !prior && privateCommentEligible(row), ...(prior ? { privateReplyStatus: prior.status } : {}) } : {}), ...(row.replies ? { replies: row.replies.map(decorate) } : {}) };
   };
   return { ...result, comments: result.comments.map(decorate), ...(result.parent ? { parent: decorate(result.parent) } : {}) };
 }
@@ -530,8 +576,8 @@ export async function handleInbox(context) {
   const { req, url, project, role, send, body = {} } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/inbox`;
   if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
   const path = url.pathname.slice(prefix.length).replace(/^\//, '');
-  const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status|thread-control|accept|typing|delete))?$/), messageAction = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/(edit|delete|react|unreact)$/), media = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/attachments\/(0|[1-9]\d?)$/), action = path.match(/^(comments|reviews)\/(reply|private-reply|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
-  if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews'].includes(path) && !route && !messageAction && !media && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
+  const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status|thread-control|accept|typing|delete))?$/), messageAction = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/(edit|delete|react|unreact)$/), media = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/attachments\/(0|[1-9]\d?)$/), action = path.match(/^(comments|reviews)\/(reply|private-reply|edit|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
+  if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews', 'mentions'].includes(path) && !route && !messageAction && !media && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
   try {
     if (!['GET', 'POST'].includes(req.method)) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available inbox controls.');
     const mutation = Boolean(path === 'conversations/start' || route && ['reply', 'read', 'status', 'thread-control', 'accept', 'typing', 'delete'].includes(route[2]) || messageAction || action);
@@ -548,7 +594,7 @@ export async function handleInbox(context) {
     if (!valid(profileId)) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
     const api = zernioClient(env.ZERNIO_API_KEY, assertMapping), accounts = await scopedAccounts(api, profileId);
     accounts.forEach(account => renderFields(account, ['_id', 'platform', 'displayName', 'username', 'name'], [], ['isActive']));
-    if (['status', 'accounts'].includes(path)) { send(200, { configured: true, mapped: true, webhookConfigured: Boolean(env.ZERNIO_WEBHOOK_SECRET), accounts: accounts.filter(account => { const c = inboxCapabilities(account.platform); return c.messages || c.comments || c.reviews; }).map(account => ({ id: account._id, platform: account.platform, name: account.displayName || account.username || account.name || account.platform, capabilities: inboxCapabilities(account.platform) })) }); return true; }
+    if (['status', 'accounts'].includes(path)) { send(200, { configured: true, mapped: true, webhookConfigured: Boolean(env.ZERNIO_WEBHOOK_SECRET), accounts: accounts.filter(account => { const c = inboxCapabilities(account.platform); return c.messages || c.comments || c.reviews; }).map(account => ({ id: account._id, platform: account.platform, name: account.displayName || account.username || account.name || account.platform, capabilities: inboxCapabilities(account.platform, account.isActive !== false) })) }); return true; }
     const accountId = id(req.method === 'GET' ? url.searchParams.get('accountId') : body.accountId), account = requireAccount(accounts, accountId);
     if (media) {
       supported(account, 'messages');
@@ -604,9 +650,20 @@ export async function handleInbox(context) {
           fields(body, ['accountId']); const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/read`, {}, { accountId }, key);
           if (result.success !== true || !Number.isSafeInteger(result.markedCount) || result.markedCount < 0) invalid(true); return { read: true, markedCount: result.markedCount };
         }
-        fields(body, ['accountId', 'message', 'attachmentUrl', 'attachmentType', 'attachmentName', 'replyTo', 'messageTag', 'templateName', 'templateLanguage', 'templateComponents']);
+        fields(body, ['accountId', 'message', 'buttons', 'attachmentUrl', 'attachmentType', 'attachmentName', 'replyTo', 'messageTag', 'templateName', 'templateLanguage', 'templateComponents']);
         const payload = { accountId };
         if (body.message !== undefined && body.message !== '') payload.message = str(body.message, 'message', inboxCapabilities(account.platform).messageLimit);
+        if (body.buttons !== undefined) {
+          fields(body, ['accountId', 'message', 'buttons']); supported(account, 'replyButtons');
+          payload.message = str(body.message, 'WhatsApp button reply', 1024);
+          if (Buffer.byteLength(payload.message, 'utf8') > 1024 || !Array.isArray(body.buttons) || body.buttons.length < 1 || body.buttons.length > 3) fail(400, 'INVALID_REPLY_BUTTONS', 'Use a shorter text message and one to three reply buttons.');
+          payload.buttons = body.buttons.map((button, index) => {
+            fields(button, ['type', 'title', 'payload']); const title = str(button.title, 'reply button label', 20);
+            if (button.type !== 'postback' || button.payload !== `reply_${index + 1}` || title !== title.trim() || /[\u0000-\u001f\u007f]/.test(title)) fail(400, 'INVALID_REPLY_BUTTONS', 'Use the generated reply IDs and short, single-line button labels without surrounding spaces.');
+            return { type: 'postback', title, payload: button.payload };
+          });
+          if (new Set(payload.buttons.map(button => button.title)).size !== payload.buttons.length) fail(400, 'INVALID_REPLY_BUTTONS', 'Use a different label for each reply button.');
+        }
         if (body.attachmentUrl) {
           supported(account, 'attachments'); if (!['image', 'video', 'audio', 'file'].includes(body.attachmentType)) fail(400, 'INVALID_ATTACHMENT', 'Choose an image, video, audio file or document.');
           try { payload.attachmentUrl = publicMediaUrl(body.attachmentUrl); } catch { fail(400, 'INVALID_ATTACHMENT', 'Use a public HTTPS media file URL.'); }
@@ -630,14 +687,13 @@ export async function handleInbox(context) {
           payload.template = { elements: [validateWhatsAppTemplate(draft, approved)] };
         }
         if (!payload.message && !payload.attachmentUrl && !payload.template) fail(400, 'EMPTY_MESSAGE', 'Enter a message or choose an attachment or approved template.');
-        if (payload.attachmentUrl) {
-          const freshAccounts = await scopedAccounts(api, profileId), freshAccount = requireAccount(freshAccounts, accountId);
-          supported(freshAccount, 'attachments'); if (freshAccount.platform !== account.platform) fail(409, 'INBOX_ACCOUNT_CHANGED', 'This account changed while checking the attachment. Refresh before sending.');
-          const fresh = await conversation(api, freshAccounts, freshAccount, conversationId);
-          if (fresh.id !== row.id || fresh.participantId !== row.participantId) fail(409, 'INBOX_CONVERSATION_CHANGED', 'The conversation recipient changed while checking the attachment. Refresh before sending.');
-        }
+        const messages = ['facebook', 'instagram', 'whatsapp', 'tiktok'].includes(account.platform) && !payload.template ? await recentHistory(api, account, conversationId, row.id) : null;
+        const fresh = await conversation(api, accounts, account, conversationId), freshAccounts = await scopedAccounts(api, profileId), freshAccount = requireAccount(freshAccounts, accountId);
+        supported(freshAccount, 'messages');
+        if (freshAccount.needsReconnection === true || ['_id', 'platform', 'platformUserId', 'username'].some(field => freshAccount[field] !== account[field])) fail(409, 'INBOX_ACCOUNT_CHANGED', 'This account changed while checking the reply. Refresh before sending.');
+        if (fresh.id !== row.id || fresh.participantId !== row.participantId || fresh.threadControl !== row.threadControl) fail(409, 'INBOX_CONVERSATION_CHANGED', 'The conversation recipient or reply control changed. Refresh before sending.');
         if (['facebook', 'instagram', 'whatsapp', 'tiktok'].includes(account.platform) && !payload.template) {
-          const messages = await recentHistory(api, account, conversationId, row.id), lastIncoming = incomingTime(messages), age = Date.now() - lastIncoming;
+          const lastIncoming = incomingTime(messages), age = Date.now() - lastIncoming;
           if (account.platform === 'tiktok' && (!(age >= 0 && age <= 2 * 86400000) || messages.filter(message => message.direction === 'outgoing' && Date.parse(message.createdAt) >= lastIncoming).length >= 10)) fail(409, 'MESSAGING_WINDOW_CLOSED', 'TikTok permits up to ten replies within 48 hours of the customer’s last message.');
           if (body.messageTag) {
             const tags = account.platform === 'instagram' ? ['HUMAN_AGENT'] : account.platform === 'facebook' ? ['CONFIRMED_EVENT_UPDATE', 'POST_PURCHASE_UPDATE', 'ACCOUNT_UPDATE', 'HUMAN_AGENT'] : [];
@@ -656,12 +712,14 @@ export async function handleInbox(context) {
         if (receipt.attachments !== undefined && (!payload.attachmentUrl || !Array.isArray(receipt.attachments) || receipt.attachments.length > 1 || receipt.attachments.some(item => !plain(item) || item.type !== payload.attachmentType || typeof item.url !== 'string' || !(() => { try { return Boolean(publicMediaUrl(item.url)); } catch { return false; } })()))) invalid(true);
         return { sent: true, accountId, platform: account.platform, ...pick(receipt, ['messageId', 'conversationId', 'messageIds']), ...(receipt.attachments ? { attachments: receipt.attachments.map(item => pick(item, ['type', 'url'])) } : {}), ...(partial ? { partialFailure: { ...pick(partial, ['part', 'error']), ...(partial.platformError ? { platformError: pick(partial.platformError, ['code', 'subcode', 'fbtraceId', 'type']) } : {}) } } : {}), warnings: (result.warnings || []).map(warning => typeof warning === 'string' ? warning : pick(warning, ['code', 'param', 'message'])) };
       }
+      if (path === 'mentions') { supported(account, 'mentions'); const result = await aggregate(api, accounts, account, 'mentions', query(url, 'mentions')); return { mentions: result.rows.map(row => pick(row, mentionFields)), pagination: result.pagination, meta: result.meta }; }
       if (path === 'comments') { supported(account, 'comments'); const result = await aggregate(api, accounts, account, 'comments', query(url, 'comments')); return { posts: result.rows.map(row => pick(row, postFields)), pagination: result.pagination, meta: result.meta }; }
       if (path === 'comments/thread' || action?.[1] === 'comments') {
         supported(account, 'comments'); const postId = id(req.method === 'GET' ? url.searchParams.get('postId') : body.postId), post = await findRow(api, accounts, account, 'comments', postId);
         const verb = action?.[2]; let target = null;
         if (req.method === 'GET') return privateReplyThread(context, accounts, account, post, await thread(api, accounts, account, post, { ...query(url, 'comments'), ...(url.searchParams.get('commentId') ? { commentId: id(url.searchParams.get('commentId')) } : {}) }));
-        fields(body, verb === 'private-reply' ? ['accountId', 'postId', 'commentId', 'message', 'expectedCommentVersion', 'confirmSend', 'buttons', 'quickReplies'] : ['accountId', 'postId', 'commentId', 'message', 'moderationStatus', 'banAuthor']);
+        fields(body, verb === 'edit' ? ['accountId', 'postId', 'commentId', 'content', 'expectedCommentVersion', 'confirmEdit'] : verb === 'private-reply' ? ['accountId', 'postId', 'commentId', 'message', 'expectedCommentVersion', 'confirmSend', 'buttons', 'quickReplies'] : ['accountId', 'postId', 'commentId', 'message', 'moderationStatus', 'banAuthor', ...(verb === 'like' ? ['reactionType'] : [])]);
+        if (body.reactionType !== undefined && (account.platform !== 'linkedin' || !LINKEDIN_REACTIONS.has(body.reactionType))) fail(400, 'INVALID_COMMENT_REACTION', 'Choose one of the six supported LinkedIn reactions. Reaction types are only available for LinkedIn likes.');
         if (body.commentId) {
           const commentId = id(body.commentId);
           try { target = await findComment(api, accounts, account, post, commentId); }
@@ -676,6 +734,24 @@ export async function handleInbox(context) {
         }
         const platform = moderationAccount.platform, endpoint = `/inbox/comments/${encodeURIComponent(moderationPostId)}`, commentEndpoint = target ? `${endpoint}/${encodeURIComponent(target.row.id)}` : endpoint, payload = { accountId: moderationAccount._id };
         if (verb === 'private-reply') return privateCommentReply(context, api, account, post, target, moderationAccount, moderationPostId, key);
+        if (verb === 'edit') {
+          supported(account, 'commentEdit');
+          if (post.isAd || target.row.platform !== 'reddit' || target.row.from?.isOwner !== true) fail(422, 'COMMENT_EDIT_UNSUPPORTED', 'Only this connected account’s own Reddit comments can be edited.');
+          const content = str(body.content, 'comment text');
+          if (body.confirmEdit !== true || body.expectedCommentVersion !== editableCommentVersion(account, post.id, target.row)) fail(409, 'COMMENT_EDIT_REVIEW_REQUIRED', 'Refresh this comment and review its account and current text before editing.');
+          const freshAccounts = await scopedAccounts(api, profileId), freshAccount = requireAccount(freshAccounts, accountId);
+          supported(freshAccount, 'commentEdit');
+          if (freshAccount.platform !== account.platform || (freshAccount.platformUserId ?? null) !== (account.platformUserId ?? null)) fail(409, 'INBOX_ACCOUNT_CHANGED', 'This connected account changed. Refresh before editing its comment.');
+          assertMapping();
+          claimCommentReaction(context, freshAccount, post.id, target.row.id, 'edit');
+          const receipt = await api(commentEndpoint, {}, { accountId, platform: 'reddit', content }, key, 'PATCH');
+          if (receipt.status !== 'success' || receipt.commentId !== target.row.id || receipt.platform !== 'reddit') invalid(true);
+          let fresh;
+          try { fresh = await findComment(api, freshAccounts, freshAccount, post, target.row.id); }
+          catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
+          if (fresh.row.message !== content || fresh.row.from?.isOwner !== true || fresh.row.from?.id !== target.row.from?.id) fail(502, 'COMMENT_EDIT_NOT_CONFIRMED', 'The latest thread has not confirmed this exact edit. Check the comment before another change.', true);
+          return { edited: true, accountId, postId: post.id, commentId: target.row.id, platform: 'reddit', content, comment: { ...fresh.row, editVersion: editableCommentVersion(freshAccount, post.id, fresh.row) } };
+        }
         if (verb === 'reply') {
           if (target?.row.canReply === false) fail(422, 'COMMENT_ACTION_UNSUPPORTED', 'This comment cannot be replied to through the provider.');
           payload.message = str(body.message, 'comment reply'); if (target) payload.commentId = target.row.id;
@@ -690,9 +766,20 @@ export async function handleInbox(context) {
         }
         if (['like', 'unlike'].includes(verb)) {
           if (!LIKE.has(platform) || target.row.canLike === false) fail(422, 'COMMENT_ACTION_UNSUPPORTED', 'This comment cannot be liked through the provider.');
+          const freshAccounts = await scopedAccounts(api, profileId), freshAccount = requireAccount(freshAccounts, accountId), freshModeration = requireAccount(freshAccounts, moderationAccount._id);
+          if (freshAccount.platform !== account.platform || freshAccount.isActive === false || freshModeration.platform !== platform || freshModeration.isActive === false || moderationAccount.platformUserId != null && freshModeration.platformUserId !== moderationAccount.platformUserId) fail(409, 'INBOX_ACCOUNT_CHANGED', 'This account changed. Refresh before changing a comment reaction.');
+          if (platform === 'linkedin' && verb === 'like') payload.reactionType = body.reactionType || 'LIKE';
           if (platform === 'bluesky') { if (!valid(verb === 'like' ? target.row.cid : target.row.likeUri)) fail(409, 'COMMENT_REFERENCE_REQUIRED', 'Refresh this Bluesky comment before changing its like.'); if (verb === 'like') payload.cid = target.row.cid; else payload.likeUri = target.row.likeUri; }
-          const result = await api(`${commentEndpoint}/like`, verb === 'unlike' ? payload : {}, verb === 'like' ? payload : undefined, key, verb === 'like' ? 'POST' : 'DELETE');
-          if (result.status !== 'success' || result.commentId !== target.row.id || result.platform !== platform || result.liked !== (verb === 'like')) invalid(true); return { commentId: target.row.id, liked: result.liked, ...pick(result, ['likeUri', 'alreadyReacted']) };
+          let result;
+          claimCommentReaction(context, freshModeration, moderationPostId, target.row.id, verb, payload.reactionType);
+          try { result = await api(`${commentEndpoint}/like`, verb === 'unlike' ? payload : {}, verb === 'like' ? payload : undefined, key, verb === 'like' ? 'POST' : 'DELETE'); }
+          catch (error) {
+            if (platform === 'linkedin' && error.providerStatus === 403) fail(403, 'LINKEDIN_REACTION_PERMISSION_REQUIRED', 'LinkedIn could not authorize this reaction. Check inbox access and reconnect the account with social-feed permissions.');
+            if (platform === 'linkedin' && verb === 'like' && error.providerStatus === 409) fail(409, 'LINKEDIN_REACTION_CONFLICT', 'LinkedIn already has a different or unreadable reaction. Refresh and explicitly remove it before adding a different reaction.');
+            throw error;
+          }
+          if (result.status !== 'success' || result.commentId !== target.row.id || result.platform !== platform || result.liked !== (verb === 'like') || result.accountId !== undefined && result.accountId !== moderationAccount._id || result.postId !== undefined && result.postId !== moderationPostId || result.alreadyReacted !== undefined && (platform !== 'linkedin' || verb !== 'like' || typeof result.alreadyReacted !== 'boolean') || platform === 'linkedin' && verb === 'like' && result.reactionType !== payload.reactionType || result.reactionType !== undefined && (platform !== 'linkedin' || verb !== 'like' || !LINKEDIN_REACTIONS.has(result.reactionType)) || result.likeUri !== undefined && !valid(result.likeUri)) invalid(true);
+          return { accountId, postId: post.id, platform, commentId: target.row.id, liked: result.liked, ...pick(result, ['likeUri', 'alreadyReacted', 'reactionType']) };
         }
         if (verb === 'delete') {
           if (target.row.canDelete !== true) fail(422, 'COMMENT_ACTION_UNSUPPORTED', 'The provider did not grant permission to delete this comment.');
@@ -717,7 +804,10 @@ export async function handleInbox(context) {
       }
       fail(404, 'INBOX_ROUTE_NOT_FOUND', 'This inbox action was not found.');
     };
-    if (mutation) { const result = await operation(context, run, messageAction || route ? ['inbox', accountId, decodedId((messageAction || route)[1])] : undefined); send(result.status, result.data); } else send(200, await run());
-  } catch (error) { if (!(error instanceof IntegrationError)) throw error; send(error.status, { error: { code: error.code, message: error.message } }); }
+    if (url.searchParams.has('check')) {
+      if (route?.[2] !== 'reply' || body.buttons === undefined || url.searchParams.getAll('check').length !== 1 || url.searchParams.get('check') !== '1' || [...url.searchParams.keys()].some(name => name !== 'check')) fail(400, 'INVALID_INBOX_FILTER', 'Use the exact retained reply outcome check.');
+    }
+    if (mutation) { const result = await operation(context, run, messageAction || route ? ['inbox', accountId, decodedId((messageAction || route)[1])] : action?.[1] === 'comments' && ['edit', 'like', 'unlike'].includes(action[2]) ? ['inbox-comment', accountId, id(body.postId), id(body.commentId)] : undefined); send(result.status, result.data); } else send(200, await run());
+  } catch (error) { if (!(error instanceof IntegrationError)) throw error; if (path === 'mentions' && error.providerStatus === 403) { send(403, { error: { code: 'MENTIONS_ACCESS_REQUIRED', message: 'LinkedIn organization mentions require the Zernio Inbox add-on and access to this connected account. Check its subscription and permissions.' } }); } else send(error.status, { error: { code: error.code, message: error.message } }); }
   return true;
 }

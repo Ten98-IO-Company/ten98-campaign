@@ -69,6 +69,28 @@ test('workspace invitations use hashed single-use links, enforce current authori
     assert.equal((await read(elevated)).status, 410); assert.equal((await accept(elevated)).status, 410);
     db.prepare("UPDATE memberships SET role='owner' WHERE workspace_id='workspace-a' AND user_id='owner'").run();
     assert.equal((await request('/workspaces/workspace-a/invitations/' + elevated.data.invitation.id, { method: 'DELETE', user: users.admin })).status, 403);
+    for (const granted of ['owner', 'admin']) {
+      const mail = `replace-${granted}@example.test`, protectedInvite = await create(mail, granted);
+      for (const requested of ['editor', 'viewer']) {
+        const before = db.prepare('SELECT count(*) AS count FROM workspace_invitations').get().count;
+        assert.equal((await create(mail, requested, { user: users.admin })).status, 403, 'Replacing an invitation must require authority over its previous role.');
+        assert.equal(db.prepare('SELECT count(*) AS count FROM workspace_invitations').get().count, before);
+        assert.equal(db.prepare('SELECT revoked_at FROM workspace_invitations WHERE id=?').get(protectedInvite.data.invitation.id).revoked_at, null);
+        assert.equal((await read(protectedInvite)).status, 200, 'A denied replacement must preserve the original invitation token.');
+      }
+      const replacement = await create(mail, 'viewer');
+      assert.equal(replacement.status, 201); assert.equal((await read(protectedInvite)).status, 410); assert.equal((await read(replacement)).status, 200);
+      const expiredMail = `expired-${granted}@example.test`, expiredInvite = await create(expiredMail, granted);
+      db.prepare('UPDATE workspace_invitations SET expires_at=0 WHERE id=?').run(expiredInvite.data.invitation.id);
+      assert.equal((await create(expiredMail, 'editor', { user: users.admin })).status, 403, 'Expired invitations still require authority before their pending rows can be revoked.');
+      assert.equal(db.prepare('SELECT revoked_at FROM workspace_invitations WHERE id=?').get(expiredInvite.data.invitation.id).revoked_at, null);
+      assert.equal((await create(expiredMail, 'editor')).status, 201);
+    }
+    for (const granted of ['editor', 'viewer']) {
+      const mail = `replace-${granted}@example.test`, first = await create(mail, granted);
+      const replacement = await create(mail, granted === 'editor' ? 'viewer' : 'editor', { user: users.admin });
+      assert.equal(replacement.status, 201); assert.equal((await read(first)).status, 410); assert.equal((await read(replacement)).status, 200);
+    }
     const low = await create('low@example.test', 'viewer', { user: users.admin });
     db.prepare("UPDATE memberships SET role='editor' WHERE workspace_id='workspace-a' AND user_id='admin'").run();
     assert.equal((await accept(low)).status, 410);

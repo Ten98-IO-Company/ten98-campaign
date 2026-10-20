@@ -10,7 +10,7 @@ import { hashPassword } from '../server/auth.mjs';
 
 test('failed no-project refresh and workspace readback remain visible through the actual app handlers', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), context = {
-    state: { projectId: null, projects: [] }, navigationRef: { current: {} }, writeNavigation() {}, loadVersion: { current: 0 }, activeProject: { current: '' }, pendingWork: { current: 0 },
+    state: { projectId: null, projects: [] }, navigationRef: { current: {} }, writeNavigation() {}, loadVersion: { current: 0 }, activeProject: { current: '' }, pendingWork: { current: 0 }, inboxDraft: { current: { dirty: false, revision: 0 } },
     setLoading() {}, setState() {}, setBusy() {}, setNotice() {}, errors: [], FormData: class { get() { return 'My campaign team'; } },
   };
   let failRead = false, creates = 0;
@@ -45,7 +45,7 @@ test('an account without project access can create its workspace through the act
       cookie = response.headers.get('set-cookie')?.split(';')[0] || cookie;
       const result = await response.json(); assert.ok(response.ok, JSON.stringify(result)); return result;
     }
-    await api('/auth/setup', 'POST', { name: 'Existing owner', email: 'owner@example.test', password: 'existing owner fixture password', sample: false });
+    await api('/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Existing owner', email: 'owner@example.test', password: 'existing owner fixture password', sample: false });
     const existing = await api('/state'), userId = randomUUID();
     app.db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(userId, 'New member', 'new-member@example.test', await hashPassword('new member fixture password'));
     await api('/auth/login', 'POST', { email: 'new-member@example.test', password: 'new member fixture password' });

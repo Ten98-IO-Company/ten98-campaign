@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Progress } from '@ten98/ui';
 
 type Format = { contentType: string; extensions: string[]; kind: 'image' | 'video' | 'document' };
 type Options = { maxSize: number; formats: Format[]; asset?: { id: string; name?: string; url?: string }; assetVersion?: string; attempts?: Attempt[] };
@@ -124,7 +125,7 @@ export default function ZernioMediaUpload({ projectId, configured, disabled = fa
       <button type="button" className="button" disabled={Boolean(busy)} onClick={() => setRefresh(value => value + 1)}>Reload upload settings</button>
       {options && <><label className="field"><span>Delivery file · up to {(options.maxSize / 1_000_000_000).toLocaleString()} GB</span><input type="file" accept={options.formats.flatMap(format => format.extensions.map(extension => '.' + extension.replace(/^\./, ''))).join(',')} disabled={disabled || !canChoose} onChange={event => choose(event.target.files?.[0] || null)}/></label>{file && <p className="field-help">{file.name} · {file.size.toLocaleString()} bytes</p>}</>}
       {attempt && <p role="status">{labels[attempt.status]}{attempt.expiresAt ? ` · Temporary file expires ${new Date(attempt.expiresAt).toLocaleString()}` : ''}</p>}
-      {['upload', 'retry'].includes(busy) && <div><progress max={100} {...(progress === null ? {} : { value: progress })} aria-label="File transfer progress"/><p className="field-help">{progress === 100 ? 'File sent; waiting for the server to confirm receipt.' : progress === null ? 'Transferring file…' : `${progress}% transferred`}</p></div>}
+      {['upload', 'retry'].includes(busy) && <div>{progress === null ? <progress max={100} aria-label="File transfer progress"/> : <Progress value={progress} label="File transfer progress"/>}<p className="field-help">{progress === 100 ? 'File sent; waiting for the server to confirm receipt.' : progress === null ? 'Transferring file…' : `${progress}% transferred`}</p></div>}
       <div className="button-row">
         {!attempt && <button type="button" className="button" disabled={disabled || Boolean(busy) || !file || !options} onClick={upload}>{knownAttempt.current ? 'Retry upload preparation' : 'Upload file'}</button>}
         {knownAttempt.current && attempt?.status !== 'completed' && <button type="button" className="button" disabled={disabled || Boolean(busy)} onClick={() => act('check', check)}>Check upload status</button>}

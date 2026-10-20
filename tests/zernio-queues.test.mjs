@@ -47,7 +47,7 @@ async function fixture() {
   };
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); const base = `http://127.0.0.1:${app.server.address().port}`; let cookie;
   async function request(path, method = 'GET', body, key = randomUUID()) { const response = await originalFetch(base + '/api' + path, { method, headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json', 'Idempotency-Key': key } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }); return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] }; }
-  const setup = await request('/auth/setup', 'POST', { name: 'Queue owner', email: 'queue@example.test', password: 'a synthetic queue acceptance passphrase', sample: false }); cookie = setup.cookie; const project = '/projects/' + setup.data.projectId;
+  const setup = await request('/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Queue owner', email: 'queue@example.test', password: 'a synthetic queue acceptance passphrase', sample: false }); cookie = setup.cookie; const project = '/projects/' + setup.data.projectId;
   await request(project, 'PATCH', { zernioProfileId: 'queue-profile' }); const path = project + '/integrations/queues';
   const list = async () => (await request(path)).data;
   const create = async name => { const current = await list(); return request(path + '/create', 'POST', { name, timezone: 'America/New_York', slots: [{ dayOfWeek: 1, time: '09:00' }], active: true, expectedListVersion: current.version }); };
@@ -79,9 +79,9 @@ test('queue creation protects ambiguous writes and accepted responses followed b
     const list = await f.list(), body = { name: 'Unknown creation', timezone: 'UTC', slots: [{ dayOfWeek: 0, time: '10:00' }], active: true, expectedListVersion: list.version }, key = randomUUID();
     f.setHook((url, options) => url.pathname.endsWith('/queue/slots') && options.method === 'POST' ? Response.json({ success: true, schedule: { _id: 'ambiguous', profileId: 'foreign-profile' } }) : undefined);
     const uncertain = await f.request(`${f.path}/create`, 'POST', body, key); assert.equal(uncertain.data.operation.status, 'uncertain'); const count = f.writes().length;
-    assert.equal((await f.request(`${f.path}/create`, 'POST', body, key)).status, 409); const nextBody = { ...body, name: 'Another creation' }, blocked = await f.request(`${f.path}/create`, 'POST', nextBody); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'QUEUE_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(blocked.data.operation.status, 'failed'); assert.equal(f.writes().length, count);
+    assert.equal((await f.request(`${f.path}/create`, 'POST', body, key)).status, 409); const nextBody = { ...body, name: 'Another creation' }, blockedKey = randomUUID(), blocked = await f.request(`${f.path}/create`, 'POST', nextBody, blockedKey); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, uncertain.data.operation.id); assert.equal(f.writes().length, count);
     const operationId = uncertain.data.operation.id; await f.request(`${f.project}/operations/${operationId}/review`, 'POST', { resolution: 'not_applied', confirmChecked: true, note: 'Synthetic provider did not persist this invalid receipt.', reference: 'queue-fixture-check' });
-    f.setHook(undefined); const good = await f.request(`${f.path}/create`, 'POST', nextBody); assert.equal(good.status, 200, JSON.stringify(good.data));
+    f.setHook(undefined); const closed = await f.request(`${f.path}/create`, 'POST', nextBody, blockedKey); assert.equal(closed.data.error.code, 'OPERATION_NOT_SENT'); assert.deepEqual(closed.data.operation, blocked.data.operation); assert.equal(f.writes().length, count); const good = await f.request(`${f.path}/create`, 'POST', nextBody); assert.equal(good.status, 200, JSON.stringify(good.data));
     const before = f.writes().length, current = good.data.queue; let sent = false;
     f.setHook((url, options) => { if (!url.pathname.endsWith('/queue/slots')) return; if (options.method === 'PUT') { sent = true; return Response.json({ success: true, schedule: { ...f.queues[0], name: 'Changed' } }); } if (sent && options.method === 'GET') throw new Error('Synthetic read-back unavailable'); });
     const changed = await f.request(`${f.path}/${current._id}/update`, 'POST', { name: 'Changed', timezone: current.timezone, slots: current.slots, active: true, expectedVersion: current.version, setAsDefault: false, reshuffleExisting: false }); assert.equal(changed.data.operation.status, 'uncertain'); assert.equal(f.writes().length, before + 1);
@@ -104,6 +104,35 @@ test('approved local posts enqueue through the shared publisher with a locked pr
     const sent = f.writes().length; assert.equal((await publish(key)).status, 200); assert.equal((await f.request(`${f.project}/integrations/social/publish`, 'POST', { postId: post.id, queueId: queue._id }, key)).status, 200); assert.equal(f.writes().length, sent); assert.equal(f.calls.some(row => row.url.pathname.endsWith('/queue/next-slot')), false);
     const bad = await f.request(`${f.project}/posts`, 'POST', { content: 'Conflicting timing', platforms: ['facebook'], queueId: queue._id, queueVersion: queue.version, scheduledAt: '2070-01-01T09:00:00Z' }); assert.equal(bad.status, 400);
     for (const malformed of [{ queueId: false }, { queueId: queue._id, queueVersion: 'fake' }, { queueVersion: queue.version }]) assert.equal((await f.request(`${f.project}/posts`, 'POST', { content: 'Bad intent', platforms: ['facebook'], ...malformed })).status, 400);
+  } finally { await f.close(); }
+});
+
+test('required approval and explicit recipients are rechecked after the final queue read', async () => {
+  const f = await fixture();
+  try {
+    const queue = (await f.create('Policy race')).data.queue;
+    for (const action of ['request', 'review', 'publish']) {
+      f.setHook(undefined);
+      await f.request(`${f.project}/approvals/policy`, 'POST', { requireApproval: false });
+      const post = (await f.request(`${f.project}/posts`, 'POST', { content: `Implicit queued ${action}`, platforms: ['facebook'], queueId: queue._id, queueVersion: queue.version, status: 'draft' })).data.record;
+      const pending = action === 'review' ? await f.request(`${f.project}/approvals/posts/${post.id}/request`, 'POST', {}) : null;
+      const before = f.writes().length; let queueReads = 0, changed = false;
+      f.setHook(async (url, options) => {
+        if (url.pathname.endsWith('/queue/slots') && (!options.method || options.method === 'GET') && ++queueReads === (action === 'publish' ? 2 : 1)) {
+          changed = true;
+          assert.equal((await f.request(`${f.project}/approvals/policy`, 'POST', { requireApproval: true })).status, 200);
+        }
+      });
+      const path = action === 'publish' ? '/integrations/social/publish' : `/approvals/posts/${post.id}/${action}`;
+      const body = action === 'publish' ? { postId: post.id } : action === 'review' ? { reviewId: pending.data.item.review.id, decision: 'approved' } : {};
+      const result = await f.request(f.project + path, 'POST', body);
+      assert.equal(changed, true, 'The policy changes during the final provider queue read.');
+      assert.equal(result.status, 409, JSON.stringify(result.data));
+      assert.equal(result.data.error.code, 'APPROVAL_ACCOUNTS_REQUIRED');
+      assert.equal(f.writes().length, before, 'No provider post is created after approval becomes required.');
+      const review = f.app.db.prepare('SELECT status FROM post_approval_reviews WHERE post_id=? ORDER BY rowid DESC LIMIT 1').get(post.id);
+      assert.equal(review?.status, action === 'review' ? 'pending' : undefined, 'The race cannot create or approve a review.');
+    }
   } finally { await f.close(); }
 });
 
@@ -188,12 +217,13 @@ test('queue enqueue requires inline review of the exact saved post and queue sna
   const start = source.indexOf('    <div className="settings-panel"><h3>Saved posts ready for queues'), end = source.indexOf('\n  </section>;', start);
   const { code } = await transformWithOxc(`const render = () => (${source.slice(start, end).trim()});`, 'QueueEnqueueReview.tsx', { jsx: { runtime: 'classic' } });
   const review = value => { enqueueReviews = typeof value === 'function' ? value(enqueueReviews) : value; };
-  function render() { const context = { React, localPosts: [item], queues: [queue], approvalRequired, enqueueReviewKey, enqueueReviews, setEnqueueReviews: review, canWrite: true, busy: false, onOpenApprovals: null, onEditPost: null, enqueue() {} }; return new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)); }
+  function render(loaded = true, localPosts = [item]) { const context = { React, loaded, localPosts, queues: [queue], approvalRequired, enqueueReviewKey, enqueueReviews, setEnqueueReviews: review, canWrite: true, busy: false, onOpenApprovals: null, onEditPost: null, enqueue() {} }; return new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)); }
   const all = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(all)];
   const submit = async () => {
     const context = { canWrite: true, queues: [queue], approvalRequired, enqueueReviews, enqueueReviewKey, projectPath, action: async run => run(), write: async () => { calls++; return { post: { scheduledAt: '2070-01-01T09:00:00Z' } }; }, current: () => true, setPosts() {}, setNotice() {}, setError() {}, onChanged: null, load: async () => {} };
     return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(enqueueStart, enqueueEnd))});`)(...Object.values(context))(item);
   };
+  assert.doesNotMatch(renderToStaticMarkup(render(false, [])), /No unsent local posts/); assert.match(renderToStaticMarkup(render(true, [])), /No unsent local posts/);
   let markup = renderToStaticMarkup(render()); assert.match(markup, /reserves its next free slot and publishes the post/); assert.match(markup, /disabled=""[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 0);
   all(render()).find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange({ target: { checked: true } });
   markup = renderToStaticMarkup(render()); assert.match(markup, /checked=""/); assert.doesNotMatch(markup, /disabled=""[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 1);

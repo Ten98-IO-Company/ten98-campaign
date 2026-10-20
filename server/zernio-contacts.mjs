@@ -36,7 +36,7 @@ function channels(value) {
   if (new Set(rows.map(row => row.id)).size !== rows.length) invalid(); return rows;
 }
 async function page(api, profileId, accountId = '', options = {}) {
-  const limit = options.limit || 25, skip = options.skip || 0, response = await api('/contacts', { profileId, ...(accountId ? { accountId } : {}), limit, skip, ...(options.search ? { search: options.search } : {}) });
+  const limit = options.limit || 25, skip = options.skip || 0, response = await api('/contacts', { profileId, ...(accountId ? { accountId } : {}), limit, skip });
   if (response.success !== true || !Array.isArray(response.contacts) || response.contacts.length > limit || !object(response.pagination) || !Number.isSafeInteger(response.pagination.total) || response.pagination.total < 0 || response.pagination.limit !== limit || response.pagination.skip !== skip || typeof response.pagination.hasMore !== 'boolean' || response.pagination.hasMore && response.contacts.length === 0) invalid();
   const rows = response.contacts.map(row => ({ ...normalizeContact(row), ...(token(row.platformIdentifier) ? { lookupIdentifier: row.platformIdentifier } : {}) })); if (new Set(rows.map(row => row.id)).size !== rows.length) invalid();
   return { rows, pagination: { total: response.pagination.total, limit, skip, hasMore: response.pagination.hasMore } };
@@ -47,7 +47,8 @@ async function membership(api, profileId, accountId, wanted) {
   // ponytail: verify at most 10,000 contacts per selection; narrow the provider audience above this ceiling.
   for (let skip = 0; skip < 10000; skip += 200) {
     const result = await page(api, profileId, accountId, { limit: 200, skip });
-    for (const row of result.rows) if (!wanted || wanted.has(row.id)) found.add(row.id);
+    for (const row of result.rows) { if (!wanted && found.has(row.id)) invalid(); if (!wanted || wanted.has(row.id)) found.add(row.id); }
+    if (!wanted && !result.pagination.hasMore && result.pagination.total !== found.size) invalid();
     if (wanted && found.size === wanted.size || !result.pagination.hasMore) return found;
   }
   fail(503, 'CONTACT_WINDOW_INCOMPLETE', 'This contact is beyond the verified contact window. Narrow the selection in Zernio.');
@@ -149,22 +150,21 @@ export async function handleZernioContacts(context, api, profileId, action) {
   if (!mutation) {
     if (action === 'fields') { const rows = await definitions(api, profileId); assertAccess(); send(200, { fields: rows }); return true; }
     if (action === 'contacts') {
-      if ([...url.searchParams.keys()].some(key => !['accountId', 'search', 'limit', 'skip'].includes(key))) fail(400, 'INVALID_CONTACT_FILTER', 'Use account, search and pagination controls only.');
-      const limit = Number(url.searchParams.get('limit') || 25), skip = Number(url.searchParams.get('skip') || 0), search = url.searchParams.get('search') || '';
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(skip) || skip < 0 || skip > 10000 || !text(search, 200, true)) fail(400, 'INVALID_CONTACT_FILTER', 'Choose valid contact filters and a page size of at most 100.');
-      if (search) {
-        const visible = [];
-        // ponytail: search verifies at most 10,000 provider matches so hidden shared metadata cannot leak through counts or pagination.
-        for (let offset = 0; offset < 10000; offset += 200) {
-          const result = await page(api, profileId, accountId, { limit: 200, skip: offset, search }), origin = accountId ? await membership(api, profileId, '', new Set(result.rows.map(row => row.id))) : new Set(result.rows.map(row => row.id));
-          for (const row of result.rows) { const safe = view(scoped(await readContact(api, row.id), origin.has(row.id))); if (!safe.metadataMasked && ['name', 'email', 'company'].some(key => String(safe[key] || '').toLowerCase().includes(search.toLowerCase()))) visible.push(safe); }
-          if (!result.pagination.hasMore) { assertAccess(); send(200, { contacts: visible.slice(skip, skip + limit), pagination: { total: visible.length, limit, skip, hasMore: skip + limit < visible.length } }); return true; }
-        }
-        fail(503, 'CONTACT_WINDOW_INCOMPLETE', 'Narrow this contact search to fewer than 10,000 provider matches.');
+      const keys = [...url.searchParams.keys()];
+      if (new Set(keys).size !== keys.length || keys.some(key => !['accountId', 'search', 'platform', 'isSubscribed', 'tag', 'limit', 'skip'].includes(key))) fail(400, 'INVALID_CONTACT_FILTER', 'Use each contact filter once.');
+      const limit = Number(url.searchParams.get('limit') || 25), skip = Number(url.searchParams.get('skip') || 0), search = url.searchParams.get('search') || '', platform = url.searchParams.get('platform') || '', isSubscribed = url.searchParams.get('isSubscribed') || '', tag = url.searchParams.get('tag') || '';
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(skip) || skip < 0 || skip > 10000 || !text(search, 200, true) || !text(tag, 200, true) || platform && !platforms.has(platform) || isSubscribed && !['true', 'false'].includes(isSubscribed)) fail(400, 'INVALID_CONTACT_FILTER', 'Choose valid contact filters and a page size of at most 100.');
+      // ponytail: hydrate the complete scope, at most 10,000 contacts, for every filter so hidden metadata cannot choose which provider reads fail; narrow the account scope above this ceiling.
+      const base = await membership(api, profileId, accountId), origin = accountId ? await inProfile([...base]) : base, hydrated = [], visible = [];
+      for (const id of base) hydrated.push(await readContact(api, id));
+      const freshOrigin = await inProfile([...base]), fresh = (await scopedAccounts(api, profileId)).filter(account => platforms.has(account.platform));
+      if (digest([...origin].sort()) !== digest([...freshOrigin].sort()) || digest(accounts.map(account => [account._id, account.platform]).sort()) !== digest(fresh.map(account => [account._id, account.platform]).sort())) fail(409, 'CONTACT_SCOPE_CHANGED', 'The contact or connected account scope changed. Reload contacts.');
+      for (const contact of hydrated) {
+        const safe = view(scoped(contact, origin.has(contact.id)));
+        if ((search || tag) && safe.metadataMasked || search && !['name', 'email', 'company'].some(key => String(safe[key] || '').toLowerCase().includes(search.toLowerCase())) || tag && !safe.tags?.includes(tag) || platform && !safe.channels.some(channel => channel.platform === platform) || isSubscribed && safe.isSubscribed !== (isSubscribed === 'true')) continue;
+        visible.push(safe);
       }
-      const result = await page(api, profileId, accountId, { limit, skip, search }), origin = accountId ? await inProfile(result.rows.map(row => row.id)) : new Set(result.rows.map(row => row.id)), rows = [];
-      for (const row of result.rows) rows.push(view(scoped(await readContact(api, row.id), origin.has(row.id))));
-      assertAccess(); send(200, { contacts: rows, pagination: result.pagination }); return true;
+      assertAccess(); send(200, { contacts: visible.slice(skip, skip + limit), pagination: { total: visible.length, limit, skip, hasMore: skip + limit < visible.length } }); return true;
     }
     const contact = await verified(contactRoute[1]); const channelResponse = await api(`/contacts/${contact.id}/channels`);
     if (channelResponse.success !== true || digest(channels(channelResponse.channels)) !== digest(contact.channels)) invalid();

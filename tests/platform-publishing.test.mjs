@@ -57,7 +57,7 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
   }
   const post = (path, body, options = {}) => request(path, { ...options, method: 'POST', body });
   try {
-    const setup = await post('/api/auth/setup', { name: 'Platform QA', email: 'platform-qa@example.test', password: 'platform fixture password that is long enough', sample: false });
+    const setup = await post('/api/auth/setup', { token: app.config.bootstrapToken, name: 'Platform QA', email: 'platform-qa@example.test', password: 'platform fixture password that is long enough', sample: false });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const state = (await request('/api/state')).data, projectId = state.projectId, project = `/api/projects/${projectId}`, integrations = `${project}/integrations/social`;
     assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);

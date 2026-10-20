@@ -5,6 +5,9 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { stripTypeScriptTypes } from 'node:module';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { transformWithOxc } from 'vite';
 
 const source = () => readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
 
@@ -51,6 +54,69 @@ test('post labels show a platform caption when shared content is empty and ident
   assert.equal(label({ content: '', platforms: ['instagram', 'twitter'], platformOverrides: { twitter: { content: 'Custom caption' } } }), 'Custom caption');
   assert.equal(label({ content: '', platforms: ['instagram'], platformOverrides: { instagram: { mediaItems: [] } } }), 'Media post');
   assert.equal(label({ content: '', platforms: ['facebook'], accountOverrides: { page: { platform: 'facebook', content: 'Account-only caption' } } }), 'Account-only caption');
+});
+
+test('post cards name only saved recipient IDs using current project names and matching provider metadata', async () => {
+  const appSource = source(), composer = readFileSync(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');
+  const declarations = [composer.match(/^const accountId = .+;$/m)?.[0], composer.match(/^export const accountLabel = .+;$/m)?.[0]?.replace('export ', '')];
+  assert.ok(declarations.every(Boolean));
+  const start = appSource.indexOf('function postRecipients('), end = appSource.indexOf('function calendarOverlayEvents(', start);
+  assert.ok(start > 0 && end > start);
+  assert.match(appSource, /import PostComposer, \{ accountLabel \} from '\.\/PostComposer'/);
+  const recipients = runInNewContext(stripTypeScriptTypes(declarations.join('\n') + '\n' + appSource.slice(start, end)) + '; postRecipients');
+  const accounts = [{ _id: 'one', displayName: 'Current page', platform: 'facebook' }, { _id: 'two', username: '@second', platform: 'facebook' }, { id: 'three', name: 'Named account' }];
+  const post = { accounts: ['two', 'one', 'reported', 'missing'], platforms: ['facebook'], accountOverrides: { unselected: { platform: 'facebook' } }, providerResults: [{ accountId: { _id: 'one', displayName: 'Old page name' } }, { accountId: 'reported' }, { accountId: { _id: 'reported', displayName: 'Reported page' } }, { accountId: { _id: 'foreign', displayName: 'Unselected page' } }] };
+  const before = structuredClone({ post, accounts });
+  assert.equal(recipients(post, accounts), '@second (two), Current page (one), Reported page (reported), missing');
+  assert.equal(recipients({ accounts: ['one', 'two'] }, [{ _id: 'one', displayName: 'Same page', platform: 'facebook' }, { _id: 'two', displayName: 'Same page', platform: 'facebook' }]), 'Same page (one), Same page (two)', 'Same-platform recipients retain distinct identities.');
+  assert.equal(recipients({ accounts: ['three'] }, accounts), 'Named account (three)');
+  assert.equal(recipients({ accounts: ['raw'] }, [{ _id: 'raw' }]), 'raw');
+  assert.equal(recipients({ accounts: ['id-only'], providerResults: [{ accountId: { id: 'id-only', username: '@reported' } }] }), '@reported (id-only)');
+  assert.equal(recipients(post), 'two, Old page name (one), Reported page (reported), missing', 'Unloaded names do not invent current directory data.');
+  assert.equal(recipients({ ...post, accounts: [] }, accounts), 'No accounts selected');
+  assert.equal(recipients({ platforms: ['facebook'], providerResults: post.providerResults, accountOverrides: post.accountOverrides }, accounts), 'Choose connected accounts');
+  assert.deepEqual({ post, accounts }, before, 'Display resolution does not change saved identities or loaded accounts.');
+  const markup = appSource.match(/<p className="post-meta"><span>Recipients: \{postRecipients\(p, remote\.accounts\?\.accounts \|\| \[\]\)\}<\/span><\/p>/)?.[0];
+  assert.ok(markup, 'Cards render recipient identities visibly.');
+  const { code } = await transformWithOxc('const render = (p, remote) => ' + markup, 'PostRecipients.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', 'postRecipients', code + '; return render;')(React, recipients);
+  const html = renderToStaticMarkup(render({ accounts: ['<unknown>'] }, {}));
+  assert.match(html, /Recipients: &lt;unknown&gt;/); assert.doesNotMatch(html, /<unknown>/);
+});
+
+test('post status buttons remain a subordinate pressed group with their actual local filter callbacks', async () => {
+  const appSource = source(), start = appSource.indexOf('<div className="button-wrap" role="group" aria-label="Post status">'), end = appSource.indexOf('</div>', start) + 6;
+  assert.ok(start > 0 && end > start);
+  const { code } = await transformWithOxc('const render = (tab, setTab) => ' + appSource.slice(start, end), 'PostStatus.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', 'title', code + '; return render;')(React, value => value[0].toUpperCase() + value.slice(1));
+  const statuses = ['all', 'draft', 'scheduled', 'published', 'failed', 'cancelled']; let selected = 'all';
+  for (const status of statuses) {
+    const group = render(selected, value => { selected = value; }), buttons = React.Children.toArray(group.props.children);
+    assert.equal(group.props.role, 'group'); assert.equal(group.props['aria-label'], 'Post status'); assert.equal(group.props.className, 'button-wrap');
+    assert.equal(buttons.length, statuses.length);
+    assert.equal(buttons.filter(button => button.props['aria-pressed']).length, 1);
+    for (const [index, button] of buttons.entries()) { assert.equal(button.props.type, 'button'); assert.equal(button.props['aria-pressed'], statuses[index] === selected); assert.equal(button.props.className, 'button' + (statuses[index] === selected ? ' primary' : '')); }
+    buttons[statuses.indexOf(status)].props.onClick(); assert.equal(selected, status);
+  }
+  const declaration = appSource.match(/^  const visiblePosts = .+;$/m)?.[0]; assert.ok(declaration);
+  const filter = new Function('state', 'tab', 'filtered', declaration + '; return visiblePosts;');
+  const posts = statuses.slice(1).map(status => ({ id: status, status }));
+  for (const status of statuses) assert.deepEqual(filter({ posts }, status, rows => rows).map(post => post.id), status === 'all' ? statuses.slice(1) : [status]);
+  assert.match(appSource, /<nav className="tabs" aria-label="Publishing sections">/, 'Publishing route navigation stays separate.');
+});
+
+test('Overview campaign totals and channel counts use singular only for one campaign', async () => {
+  const appSource = source();
+  const active = appSource.match(/<span><span className="status-dot green"\/>\{activeCampaigns\}[^\r\n]+?across your project<\/span><\/span>/)?.[0]; assert.ok(active);
+  const start = appSource.indexOf('<div className="channel-breakdown">'), end = appSource.indexOf('</div><button className="text-link"', start) + 6;
+  assert.ok(start > 0 && end > start);
+  const { code } = await transformWithOxc('const active = activeCampaigns => ' + active + '; const renderChannels = state => ' + appSource.slice(start, end), 'CampaignCounts.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', 'channels', code + '; return { active, channels: renderChannels };')(React, { social: 'Social media' });
+  for (const count of [0, 1, 2]) {
+    const word = count === 1 ? 'campaign' : 'campaigns';
+    assert.match(renderToStaticMarkup(render.active(count)), new RegExp(count + ' active ' + word + ' '));
+    assert.ok(renderToStaticMarkup(render.channels({ campaigns: Array.from({ length: count }, () => ({ channel: 'social' })) })).includes('<strong>' + count + ' <small>' + word + '</small></strong>'));
+  }
 });
 
 test('local campaign results distinguish missing metrics from zero and never display NaN rates', () => {
@@ -138,4 +204,36 @@ test('asset previews select safe actual media and fall back after a thumbnail fa
     assert.equal(choose({ ...image, thumbnailUrl: unsafe }), deliveryUrl, `An unsafe thumbnail must not hide safe delivery media: ${unsafe}`);
   }
   for (const publicUrl of ['https://172.15.0.1/a.jpg', 'https://172.32.0.1/a.jpg']) assert.equal(choose({ kind: 'image', url: publicUrl }), publicUrl, 'The 172.16/12 block must not cover neighboring public addresses.');
+});
+
+
+test('Settings keeps its two existing columns and renders scoped receipt recovery afterward at full width', async () => {
+  const appSource = source(), start = appSource.indexOf("{page === 'Settings' && "), end = appSource.indexOf('\n', start);
+  assert.ok(start > 0 && end > start);
+  const expression = appSource.slice(start + 1, end - 1);
+  const { code } = await transformWithOxc('const render = () => (' + expression + ');', 'SettingsComposition.tsx', { jsx: { runtime: 'classic' } });
+  const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
+  const AccountSettings = () => React.createElement('section', { 'data-account-settings': true });
+  const OperationRecovery = ({ projectId }) => React.createElement('section', { 'data-provider-recovery': projectId });
+  const TeamPanel = () => React.createElement('section', { 'data-team-panel': true });
+  const WorkspaceInvitations = () => React.createElement('section', { 'data-workspace-invitations': true });
+  const api = () => assert.fail('Rendering Settings must not submit an operation');
+  const activeProject = { current: 'project-a' }, pendingKeys = { current: new Map([['retained', 'key']]) };
+  const context = { React, page: 'Settings', project: { id: 'project-a', name: 'Campaign project' }, state: { projectId: 'project-a', user: { id: 'viewer-a', isOperator: true } }, workspace: { id: 'workspace-a', role: 'admin', name: 'Workspace' }, session: { oidcEnabled: false }, canAdmin: true, sample: false, busy: false, activeProject, pendingKeys, api,
+    Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, AccountSettings, OperationRecovery, TeamPanel, WorkspaceInvitations, title: value => value,
+    run: () => assert.fail('Rendering must not run an action'), reload: () => assert.fail('Rendering must not reload'), setPage: () => {}, setModal: () => {}, clearSampleData: () => {} };
+  const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context));
+  assert.equal(tree.type, React.Fragment);
+  const children = React.Children.toArray(tree.props.children), [grid, recovery] = children;
+  assert.equal(children.length, 2); assert.equal(grid.props.className, 'settings-grid'); assert.equal(recovery.type, OperationRecovery);
+  assert.equal(React.Children.toArray(grid.props.children).length, 2, 'Project/account and workspace/access retain their columns.');
+  assert.equal(nodes(grid).filter(node => node.type === AccountSettings).length, 1);
+  assert.equal(nodes(grid).filter(node => node.type === TeamPanel).length, 1); assert.equal(nodes(grid).filter(node => node.type === WorkspaceInvitations).length, 1);
+  assert.equal(nodes(grid).filter(node => node.type === OperationRecovery).length, 0, 'The receipt table is outside either half-width column.');
+  assert.equal(tree.props.children[1].key, 'receipts:project-a', 'The existing recovery instance key is unchanged before React.Children escapes it.');
+  assert.equal(recovery.props.projectId, 'project-a'); assert.equal(recovery.props.role, 'admin'); assert.equal(recovery.props.isOperator, true); assert.equal(recovery.props.request, api);
+  recovery.props.onReviewed('applied'); assert.equal(pendingKeys.current.size, 1);
+  activeProject.current = 'another-project'; recovery.props.onReviewed('not_applied'); assert.equal(pendingKeys.current.size, 1, 'An old recovery callback cannot clear another project action keys.');
+  activeProject.current = 'project-a'; recovery.props.onReviewed('not_applied'); assert.equal(pendingKeys.current.size, 0);
+  const html = renderToStaticMarkup(tree); assert.match(html, /Project settings/); assert.match(html, /Workspace &amp; access/); assert.ok(html.indexOf('data-provider-recovery') > html.indexOf('data-workspace-invitations'));
 });

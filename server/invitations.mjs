@@ -1,8 +1,9 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
 import { hashPassword, HttpError, publicUser } from './auth.mjs';
 import { transaction } from './database.mjs';
 
-const initialized = new WeakSet(), roles = ['owner', 'admin', 'editor', 'viewer'];
+const initialized = new WeakSet();
 const fail = (status, message) => { throw new HttpError(status, message); };
 const digest = token => createHash('sha256').update(token).digest('hex');
 function initialize(db) {
@@ -19,7 +20,7 @@ function find(db, token) {
   const row = db.prepare('SELECT i.*,w.name AS workspace_name FROM workspace_invitations i JOIN workspaces w ON w.id=i.workspace_id WHERE token_hash=?').get(digest(token));
   if (!row || row.accepted_at || row.revoked_at || row.expires_at <= Date.now()) fail(410, 'This invitation has expired, was used, or was revoked. Ask for a new invitation.');
   const inviter = db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(row.workspace_id, row.inviter_id);
-  if (!inviter || !['owner', 'admin'].includes(inviter.role) || (inviter.role === 'admin' && ['owner', 'admin'].includes(row.role))) fail(410, 'The person who invited you can no longer grant this access. Ask a workspace owner for a new invitation.');
+  if (!mayGrantWorkspaceRole(inviter?.role, row.role)) fail(410, 'The person who invited you can no longer grant this access. Ask a workspace owner for a new invitation.');
   return row;
 }
 function object(body, allowed) {
@@ -81,11 +82,13 @@ export async function handleInvitations(context) {
     auth.limit('invitation-create:' + workspaceId + ':' + user.id, 30); object(body, ['email', 'role']);
     const mail = email(body.email), requested = body.role === undefined ? 'editor' : body.role;
     if (!roles.includes(requested)) fail(400, 'Choose an available workspace role.');
-    if (role === 'admin' && ['owner', 'admin'].includes(requested)) fail(403, 'Only a workspace owner can invite owners or administrators.');
+    if (!mayGrantWorkspaceRole(role, requested)) fail(403, 'Only a workspace owner can invite owners or administrators.');
     const token = randomBytes(32).toString('base64url'), now = Date.now();
     const invite = transaction(db, () => {
       const target = account(db, mail);
       if (target && db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(workspaceId, target.id)) fail(409, 'This person already belongs to the workspace. Change their access in Team access.');
+      const pending = db.prepare('SELECT role FROM workspace_invitations WHERE workspace_id=? AND email=? AND accepted_at IS NULL AND revoked_at IS NULL').all(workspaceId, mail);
+      if (pending.some(invitation => !mayGrantWorkspaceRole(role, invitation.role))) fail(403, 'Only an owner can replace invitations for owners and administrators.');
       db.prepare('UPDATE workspace_invitations SET revoked_at=? WHERE workspace_id=? AND email=? AND accepted_at IS NULL AND revoked_at IS NULL').run(now, workspaceId, mail);
       if (db.prepare('SELECT count(*) AS count FROM workspace_invitations WHERE workspace_id=? AND expires_at>? AND accepted_at IS NULL AND revoked_at IS NULL').get(workspaceId, now).count >= 100) fail(409, 'This workspace has 100 pending invitations. Revoke unused invitations before creating more.');
       const id = randomUUID(), expires = now + 7 * 86400000;
@@ -97,7 +100,7 @@ export async function handleInvitations(context) {
   if (req.method === 'DELETE' && teamRoute[2]) {
     const invite = db.prepare('SELECT * FROM workspace_invitations WHERE workspace_id=? AND id=?').get(workspaceId, teamRoute[2]);
     if (!invite) fail(404, 'Workspace invitation not found.');
-    if (role === 'admin' && ['owner', 'admin'].includes(invite.role)) fail(403, 'Only an owner can revoke invitations for owners and administrators.');
+    if (!mayGrantWorkspaceRole(role, invite.role)) fail(403, 'Only an owner can revoke invitations for owners and administrators.');
     if (invite.accepted_at) fail(409, 'This invitation was already accepted. Manage the person in Team access.');
     db.prepare('UPDATE workspace_invitations SET revoked_at=COALESCE(revoked_at,?) WHERE id=?').run(Date.now(), invite.id);
     send(200, { ok: true }); return true;

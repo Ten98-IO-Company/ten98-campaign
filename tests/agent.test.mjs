@@ -109,3 +109,32 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
     assert.equal(db.prepare('SELECT count(*) AS count FROM agent_actions WHERE run_id=?').get(stopped.id).count, 0);
   } finally { globalThis.fetch = originalFetch; db.close(); }
 });
+
+test('unreadable paid model responses stay uncertain, release streams and cannot be silently retried', async () => {
+  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch;
+  db.exec("CREATE TABLE users(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY); INSERT INTO users VALUES('user'); INSERT INTO projects VALUES('project');");
+  let response, calls = 0;
+  globalThis.fetch = async (_target, options) => { calls++; assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'error'); return response; };
+  const invoke = async (key, message) => {
+    let result;
+    await handleAgent({ req: { method: 'POST', headers: { 'idempotency-key': key } }, url: new URL('http://localhost/api/projects/project/agent/run'), project: { id: 'project', name: 'Fixture' }, user: { id: 'user' }, role: 'editor', body: { message }, db, store: {}, config: { env: { OPENROUTER_API_KEY: 'fixture', OPENROUTER_MODEL: 'fixture/model' } }, send(status, data) { result = { status, data }; } });
+    return result;
+  };
+  try {
+    const prefix = Buffer.from('{"choices":[{"message":{"role":"assistant","content":"'), suffix = Buffer.from('"}}]}');
+    const malformed = new Response(Buffer.concat([prefix, Buffer.from([0xc3, 0x28]), suffix]));
+    let cancelled = false;
+    const oversized = new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(2 * 1024 * 1024 + 1)); }, cancel() { cancelled = true; } }));
+    for (const [index, invalid] of [malformed, oversized, new Response('\ufeff{"choices":[{"message":{"role":"assistant","content":"Valid JSON after BOM"}}]}'), Response.json({ choices: [{ message: { role: 'assistant', content: 'Private text' } }], error: { message: 'PRIVATE_PROVIDER_ERROR' } })].entries()) {
+      response = invalid; const key = 'invalid-paid-response-' + index, message = 'Request ' + index;
+      const result = await invoke(key, message);
+      assert.equal(result.status, 409); assert.equal(result.data.run.status, 'uncertain'); assert.equal(result.data.run.usage.cost, null); assert.equal(JSON.stringify(result).includes('PRIVATE_PROVIDER_ERROR'), false); assert.equal(invalid.body.locked, false);
+      const beforeRetry = calls; assert.equal((await invoke(key, message)).status, 409); assert.equal(calls, beforeRetry);
+    }
+    assert.equal(cancelled, true, 'Oversized unfinished provider bodies must be cancelled.');
+    let rejectedCancelled = false;
+    response = new Response(new ReadableStream({ cancel() { rejectedCancelled = true; } }), { status: 503 });
+    const rejected = await invoke('invalid-paid-response-503', 'Failed provider');
+    assert.equal(rejected.status, 409); assert.equal(rejected.data.run.status, 'uncertain'); assert.equal(rejectedCancelled, true);
+  } finally { globalThis.fetch = originalFetch; db.close(); }
+});

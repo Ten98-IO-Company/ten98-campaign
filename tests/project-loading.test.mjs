@@ -28,7 +28,7 @@ test('project loading marks the requested project immediately and ignores supers
   const reloadSource = source.slice(source.indexOf('async function reload('), source.indexOf('\n  function leaveEditor('));
   const pending = [], accepted = [], loadVersion = { current: 0 }, activeProject = { current: 'a' };
   const api = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
-  const reload = new Function('api', 'state', 'loadVersion', 'activeProject', 'setLoading', 'setState', 'navigationRef', 'writeNavigation', `return (${stripTypeScriptTypes(reloadSource)});`)(api, { projectId: 'a', projects: ['a', 'b', 'c'].map(id => ({ id })) }, loadVersion, activeProject, () => {}, value => accepted.push(value), { current: {} }, () => {});
+  const reload = new Function('api', 'state', 'loadVersion', 'activeProject', 'setLoading', 'setState', 'navigationRef', 'writeNavigation', 'inboxDraft', `return (${stripTypeScriptTypes(reloadSource)});`)(api, { projectId: 'a', projects: ['a', 'b', 'c'].map(id => ({ id })) }, loadVersion, activeProject, () => {}, value => accepted.push(value), { current: {} }, () => {}, { current: { dirty: false, revision: 0 } });
   const first = reload('a'), second = reload('b');
   assert.equal(activeProject.current, 'b', 'Callbacks from project A must become stale as soon as project B is requested.');
   pending[1].resolve({ projectId: 'b', projects: [{ id: 'b' }] }); await second;

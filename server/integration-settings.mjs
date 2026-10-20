@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createPrivateKey, hkdfSync, randomBytes } from 'node:crypto';
+import { openRouterFetch, readResponseText } from '@ten98/runtime';
 import { googleToken, providerRequest, IntegrationError } from './integrations.mjs';
 import { testNativeGoogleAds } from './native-google-ads.mjs';
 import { testMicrosoftAds } from './native-microsoft-ads.mjs';
@@ -55,15 +56,13 @@ function validate(field, input) {
 }
 
 // This helper is limited to fixed, read-only endpoints; provider error bodies never enter responses.
-async function readProvider(url, authorization, label) {
-  let response;
-  try { response = await fetch(url, { method: 'GET', headers: { Authorization: authorization, Accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(20000) }); }
+async function readProvider(url, authorization, label, send = fetch) {
+  let response; const signal = AbortSignal.timeout(20000);
+  try { response = await send(url, { method: 'GET', headers: { Authorization: authorization, Accept: 'application/json' }, redirect: 'error', credentials: 'omit', signal }); }
   catch { fail(502, 'CONNECTION_UNAVAILABLE', `${label} could not be reached. Check the connection and try again.`); }
-  if (!response.ok) fail(response.status === 429 ? 429 : response.status >= 500 ? 502 : 400, 'CONNECTION_REJECTED', `${label} rejected the connection test. Check the saved credentials and provider permissions.`);
+  if (!response.ok) { await response.body?.cancel().catch(() => {}); fail(response.status === 429 ? 429 : response.status >= 500 ? 502 : 400, 'CONNECTION_REJECTED', `${label} rejected the connection test. Check the saved credentials and provider permissions.`); }
   try {
-    const reader = response.body.getReader(), chunks = []; let size = 0;
-    for (;;) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > 2 * 1024 * 1024) { await reader.cancel(); throw new Error(); } chunks.push(value); }
-    const data = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (!plain(data)) throw new Error(); return data;
+    const data = JSON.parse(await readResponseText(response, { maxBytes: 2 * 1024 * 1024, signal, preserveBOM: true })); if (!plain(data)) throw new Error(); return data;
   } catch { fail(502, 'INVALID_PROVIDER_RESPONSE', `${label} returned an unreadable response.`); }
 }
 
@@ -144,7 +143,7 @@ export function createIntegrationSettings({ db, env, secret }) {
         if (!Array.isArray(data.profiles)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return the expected profile list.');
         result.message = `Zernio accepted the key and returned ${data.profiles.length} accessible profile${data.profiles.length === 1 ? '' : 's'}. Webhook delivery must be tested from Zernio.`;
       } else if (provider === 'openrouter') {
-        const data = await readProvider('https://openrouter.ai/api/v1/key', `Bearer ${current.OPENROUTER_API_KEY}`, 'OpenRouter');
+        const data = await readProvider('/key', `Bearer ${current.OPENROUTER_API_KEY}`, 'OpenRouter', (path, options) => openRouterFetch(path, { apiKey: current.OPENROUTER_API_KEY, signal: options.signal }));
         if (!plain(data.data)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'OpenRouter did not return API key information.');
         result.message = 'OpenRouter accepted the API key. No model request was sent; model availability and inference were not tested.';
       } else if (provider === 'googleDrive') {

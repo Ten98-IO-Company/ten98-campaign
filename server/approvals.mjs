@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { IntegrationError, targetConfiguration, zernioClient } from './integrations.mjs';
-import { buildPlatformEntry, normalizeAccountVariants, resolveVariant } from '../shared/social-posts.mjs';
+import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.mjs';
 import { queueList, reviewedQueue } from './zernio-queues.mjs';
 
 const initialized = new WeakSet(), administrators = new Set(['owner', 'admin']);
@@ -41,7 +41,7 @@ function postSnapshot(context, post) {
     const scheduledFor = typeof target.scheduledFor === 'string' && Date.parse(target.scheduledFor) !== Date.parse(accountOverrides[id]?.scheduledAt || post.scheduledAt || post.scheduledFor) ? target.scheduledFor : '';
     return JSON.stringify(actual) === JSON.stringify(expected) && !scheduledFor ? [] : [{ platform: target.platform, accountId: String(target.accountId?._id || target.accountId), ...actual, ...(scheduledFor ? { scheduledFor } : {}) }];
   });
-  return { ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), ...(Object.keys(accountVariants).length ? { accountOverrides: accountVariants } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null };
+  return { tags: normalizePostTags(post.tags, { preserve: true }), ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), ...(Object.keys(accountVariants).length ? { accountOverrides: accountVariants } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null };
 }
 const fingerprint = snapshot => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
 const latest = (db, projectId, postId) => db.prepare('SELECT * FROM post_approval_reviews WHERE project_id=? AND post_id=? ORDER BY rowid DESC LIMIT 1').get(projectId, postId);
@@ -56,6 +56,9 @@ function localPost(context, id) {
 function assetApproved(snapshot) {
   if (snapshot.assets.some(asset => asset.missing || asset.approval !== 'approved')) fail(409, 'APPROVAL_ASSET_REQUIRED', 'Approve every referenced creative asset before approving or publishing this post.');
 }
+function approvalAccounts(post) {
+  if (!Array.isArray(post.accounts) || !post.accounts.length) fail(409, 'APPROVAL_ACCOUNTS_REQUIRED', 'Edit this post, select its connected publishing accounts, and save it before requesting approval or publishing.');
+}
 function publicReview(db, row) {
   if (!row) return null;
   const actor = id => id ? db.prepare('SELECT id,name FROM users WHERE id=?').get(id) || { id, name: 'Former team member' } : null;
@@ -67,7 +70,7 @@ function fields(body, allowed) {
 function queueItem(context, post, queue = null) {
   const snapshot = postSnapshot(context, post), review = latest(context.db, context.project.id, post.id);
   const status = submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
-  return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: snapshot.queueId || '', queueVersion: snapshot.queueVersion || '', content: snapshot.content, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, ...(snapshot.accountOverrides ? { accountOverrides: snapshot.accountOverrides } : {}), providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
+  return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: snapshot.queueId || '', queueVersion: snapshot.queueVersion || '', content: snapshot.content, tags: snapshot.tags, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, ...(snapshot.accountOverrides ? { accountOverrides: snapshot.accountOverrides } : {}), providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: publicReview(context.db, review) };
 }
 async function publishingQueues(context) {
   const env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) }, profileId = String(context.project.zernioProfileId || '');
@@ -87,6 +90,7 @@ export function assertPublishingApproval(context, post) {
   const snapshot = postSnapshot(context, current), currentFingerprint = fingerprint(snapshot);
   if (fingerprint(postSnapshot(context, post)) !== currentFingerprint) fail(409, 'APPROVAL_POST_CHANGED', 'The post or creative changed while publishing was being prepared. Refresh it before publishing.');
   if (!policy(context.db, context.project.id).requireApproval) return;
+  approvalAccounts(current);
   assetApproved(snapshot);
   const review = latest(context.db, context.project.id, current.id);
   if (!review || review.status !== 'approved') fail(403, 'PUBLISHING_APPROVAL_REQUIRED', 'An owner or administrator must approve this post before it can be sent to a provider.');
@@ -123,9 +127,11 @@ export async function handleApprovals(context) {
     const post = localPost(context, match[1]), snapshot = postSnapshot(context, post), hash = fingerprint(snapshot), review = latest(db, project.id, post.id);
     if (match[2] === 'request') {
       fields(body, []);
+      if (policy(db, project.id).requireApproval) approvalAccounts(post);
       const queue = post.queueId ? reviewedQueue(post, await publishingQueues(context)) : null;
       const currentReview = latest(db, project.id, post.id);
       if (fingerprint(postSnapshot(context, localPost(context, post.id))) !== hash || currentReview?.id !== review?.id || currentReview?.status !== review?.status) fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before requesting review.');
+      if (policy(db, project.id).requireApproval) approvalAccounts(post);
       if (!review || review.fingerprint !== hash || review.status === 'rejected') {
         db.prepare("INSERT INTO post_approval_reviews(id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES(?,?,?,?,?,'pending',?,?)").run(randomUUID(), project.id, post.id, hash, JSON.stringify(snapshot), user.id, new Date().toISOString());
         store.activity(project.id, `Content review requested by ${user.name || user.id}.`);
@@ -139,9 +145,11 @@ export async function handleApprovals(context) {
     if (!review || review.id !== body.reviewId || review.status !== 'pending' || review.fingerprint !== hash) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
     let queue = null;
     if (body.decision === 'approved') {
+      if (policy(db, project.id).requireApproval) approvalAccounts(post);
       if (post.queueId) queue = reviewedQueue(post, await publishingQueues(context));
       const currentReview = latest(db, project.id, post.id);
       if (fingerprint(postSnapshot(context, localPost(context, post.id))) !== hash || currentReview?.id !== review.id || currentReview?.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before approving it.');
+      if (policy(db, project.id).requireApproval) approvalAccounts(post);
       assetApproved(snapshot);
     }
     db.prepare('UPDATE post_approval_reviews SET status=?,reviewed_by=?,reviewed_at=?,note=? WHERE id=?').run(body.decision, user.id, new Date().toISOString(), note.trim(), review.id);

@@ -16,7 +16,7 @@ Writes use the shared durable operation ledger. A lost or malformed acknowledgem
 
 ## Twilio SMS conversations
 
-Configure Twilio's Account SID, Auth Token and sender number or Messaging Service in Integrations. Open **SMS replies**, copy its project-specific incoming webhook URL, and configure Twilio to POST there:
+Configure Twilio's Account SID, Auth Token and sender number or Messaging Service in **Integrations**. Copy the current project's incoming webhook URL there and configure Twilio to POST to it:
 
 ```text
 https://your-app.example/api/webhooks/twilio/inbound/PROJECT_ID

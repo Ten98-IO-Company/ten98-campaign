@@ -354,7 +354,7 @@ test('Calendar plan identity cannot bypass unconfirmed legacy receipts without a
   try {
     let response;
     await handleCalendar({ req: { method: 'POST', headers: { 'idempotency-key': 'legacy-plan-fresh-key' } }, url: new URL('http://localhost' + path), body: {}, project: { id: 'legacy-plan' }, role: 'owner', user: { isOperator: true }, db, store: { list(_project, collection) { return collection === 'posts' ? [{ id: 'one', content: 'New plan', scheduledAt: '2070-01-01T10:00:00Z' }] : []; }, activity() {} }, config: { env: { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'qa@example.test', GOOGLE_PRIVATE_KEY: privateKey } }, send(status, data) { response = { status, data }; } });
-    assert.equal(response.status, 409); assert.equal(response.data.operation.status, 'failed'); assert.equal(db.prepare('SELECT status FROM integration_operations WHERE id=?').get('legacy-operation').status, 'uncertain');
+    assert.equal(response.status, 409); assert.equal(response.data.operation.status, 'failed'); assert.equal(response.data.error.code, 'OPERATION_NOT_SENT'); assert.notEqual(response.data.operation.id, 'legacy-operation'); assert.equal(db.prepare('SELECT status FROM integration_operations WHERE id=?').get('legacy-operation').status, 'uncertain');
   } finally { globalThis.fetch = originalFetch; db.close(); }
 });
 
@@ -433,6 +433,7 @@ test('Google Calendar mapping, managed event boundaries, stable writes, sync dat
     assert.equal(malformed.status, 409); assert.equal(malformed.data.operation.status, 'uncertain');
     await invoke('events', { method: 'POST', body: malformedBody, key: 'malformed-event-retry' });
     assert.equal(eventWrites().length, beforeMalformed + 1, 'Unreadable event details after a successful write must not authorize another create.');
+    db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?").run(malformed.data.operation.id);
     store.create('project-a', 'campaigns', { name: 'Launch', startDate: '2026-10-18', endDate: '2026-10-20' });
     store.create('project-a', 'placements', { name: 'Sample booking', startDate: '2026-10-18', sample: true });
     store.create('project-a', 'posts', { content: 'Publish later', scheduledAt: '2026-10-19T09:00:00Z' });
@@ -446,6 +447,7 @@ test('Google Calendar mapping, managed event boundaries, stable writes, sync dat
     const invalidSync = await invoke('sync', { method: 'POST', key: 'sync-invalid-0001' }); assert.equal(invalidSync.data.error.code, 'OPERATION_UNCERTAIN');
     await invoke('sync', { method: 'POST', key: 'sync-invalid-0002' });
     assert.equal(eventWrites().length, beforeInvalidSync + 1, 'A plan write without confirmation of its expected event must stop and block automatic retries.');
+    db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?").run(invalidSync.data.operation.id);
     loseResponse = true; const uncertainBody = { ...body, summary: 'Check uncertain event' }, before = eventWrites().length;
     const uncertain = await invoke('events', { method: 'POST', body: uncertainBody, key: 'uncertain-create-001' }); assert.equal(uncertain.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(JSON.stringify(uncertain).includes('private upstream'), false);
     await invoke('events', { method: 'POST', body: uncertainBody, key: 'uncertain-create-001' }); await invoke('events', { method: 'POST', body: uncertainBody, key: 'uncertain-create-002' });

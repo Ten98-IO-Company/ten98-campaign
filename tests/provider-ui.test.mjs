@@ -5,7 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 
 test('the Calendar UI ignores stale month and unmounted responses and reloads after saving', async () => {
   const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
-  const loadSource = source.slice(source.indexOf('async function load()'), source.indexOf('  async function mapCalendar('));
+  const loadSource = source.slice(source.indexOf('async function load()'), source.indexOf('  async function save('));
   const pending = [], accepted = [], loaded = [], scope = { current: 'october' }, active = { current: true };
   function calendar(view, from, to) {
     return new Function('request', 'path', 'from', 'to', 'active', 'scope', 'view', 'updateEvents', 'setLoaded', `return (${loadSource});`)(() => new Promise((resolve, reject) => pending.push({ resolve, reject })), '/projects/a/calendar', from, to, active, scope, view, value => accepted.push(value), value => loaded.push(value));

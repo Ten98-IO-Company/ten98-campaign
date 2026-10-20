@@ -39,8 +39,36 @@ function expectedGroup(value, current) {
 }
 function uncertain(error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
 
+function providerTeam(value) {
+  if (!object(value) || !validId(value.currentUserId) || !Array.isArray(value.users) || !value.users.length || value.users.length > 10000) fail(502, 'INVALID_PROVIDER_TEAM', 'Zernio did not return a readable provider team.');
+  const users = value.users.map(row => {
+    if (!object(row) || !validId(row._id) || !plain(row.name, 200) || !plain(row.email, 320) || !plain(row.role, 100) || row.isRoot != null && typeof row.isRoot !== 'boolean') fail(502, 'INVALID_PROVIDER_TEAM', 'Zernio returned an unreadable provider member.');
+    if (row.profileAccess != null && (!Array.isArray(row.profileAccess) || row.profileAccess.length > 1000 || row.profileAccess.some(id => !validId(id)) || new Set(row.profileAccess).size !== row.profileAccess.length || row.profileAccess.includes('all') && row.profileAccess.length !== 1)) fail(502, 'INVALID_PROVIDER_TEAM', 'Zernio returned unreadable provider profile access.');
+    for (const key of ['createdAt', 'lastLoginAt']) if (row[key] != null && (!plain(row[key], 100) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(row[key]) || !Number.isFinite(Date.parse(row[key])))) fail(502, 'INVALID_PROVIDER_TEAM', 'Zernio returned an unreadable provider member date.');
+    return { _id: row._id, name: row.name, email: row.email, role: row.role, isRoot: row.isRoot ?? null, profileAccess: row.profileAccess ?? null, createdAt: row.createdAt ?? null, lastLoginAt: row.lastLoginAt ?? null };
+  });
+  if (new Set(users.map(row => row._id)).size !== users.length || users.filter(row => row._id === value.currentUserId).length !== 1) fail(502, 'INVALID_PROVIDER_TEAM', 'Zernio did not identify one distinct provider caller.');
+  return { currentUserId: value.currentUserId, users };
+}
+
 export async function handleZernioAdmin(context, api, profileId, action) {
   const { req, body, role, send } = context;
+  if (action === 'team') {
+    if (req.method !== 'GET') fail(405, 'METHOD_NOT_ALLOWED', 'Provider team members can only be read here.');
+    const assertAccess = () => {
+      if (!context.user?.id || !context.user.isOperator || !['owner', 'admin'].includes(role) || !context.db.prepare('SELECT 1 FROM instance_operators WHERE user_id=?').get(context.user.id)) fail(403, 'OPERATOR_REQUIRED', 'An app administrator who manages this workspace must read provider team members.');
+      try { context.assertProjectMapping(profileId); }
+      catch (error) { fail([403, 404].includes(error.status) ? 403 : 409, 'PROVIDER_TEAM_ACCESS_CHANGED', 'Your access or provider connection changed. Refresh before reading provider team members.'); }
+    };
+    assertAccess();
+    let result;
+    try { result = await api('/users'); }
+    catch (error) {
+      if (error instanceof IntegrationError && error.providerStatus === 403) fail(403, 'PROVIDER_TEAM_FORBIDDEN', 'Zernio did not allow this credential to read provider team members. Check access in Zernio.');
+      throw error;
+    } finally { assertAccess(); }
+    send(200, providerTeam(result)); return true;
+  }
   if (action === 'overview' && req.method === 'GET') {
     const accounts = await scopedAccounts(api, profileId), current = profile((await api(`/profiles/${encodeURIComponent(profileId)}`)).profile, profileId), rows = await groups(api, accounts);
     send(200, { profile: current, groups: rows, accounts: accounts.map(row => ({ _id: row._id, platform: row.platform, displayName: row.displayName, username: row.username, isActive: row.isActive })) }); return true;

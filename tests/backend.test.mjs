@@ -24,7 +24,7 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     const home = await fetch(base + '/'); assert.match(home.headers.get('content-type'), /text\/html/); assert.match(home.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     assert.equal((await fetch(base + '/%2e%2e%2fsecret.txt')).status, 403);
     assert.equal((await request('/api/state')).status, 401);
-    const setup = { name: 'Owner', email: 'owner@example.com', password: ' a long password ', sample: true };
+    const setup = { token: app.config.bootstrapToken, name: 'Owner', email: 'owner@example.com', password: ' a long password ', sample: true };
     assert.equal((await request('/api/auth/setup', { method: 'POST', body: setup, headers: { Origin: '' } })).status, 403);
     assert.equal((await request('/api/auth/setup', { method: 'POST', body: setup, headers: { Origin: 'https://attacker.example' } })).status, 403);
     const created = await request('/api/auth/setup', { method: 'POST', body: setup });

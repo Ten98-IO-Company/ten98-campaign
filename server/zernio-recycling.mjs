@@ -90,7 +90,7 @@ async function checkPlan(context, api, profileId, read, config) {
   }
 }
 function unresolved(context) {
-  if (context.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operations'").get() && context.db.prepare("SELECT id FROM integration_operations WHERE project_id=? AND request_key<>? AND status IN ('pending','uncertain') AND (action_path LIKE 'POST /integrations/recycling/%' OR action_path IN ('POST /integrations/social/update','POST /integrations/social/edit-published'))").get(context.project.id, context.req.headers['idempotency-key'])) fail(409, 'RECYCLING_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous recycling or post-content change before applying another plan. This new change has not been sent.');
+  if (context.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operations'").get() && context.db.prepare("SELECT id FROM integration_operations WHERE project_id=? AND request_key<>? AND status IN ('pending','uncertain') AND (action_path LIKE 'POST /integrations/recycling/%' OR action_path IN ('POST /integrations/social/update','POST /integrations/social/edit-published','POST /integrations/social/update-metadata'))").get(context.project.id, context.req.headers['idempotency-key'])) fail(409, 'RECYCLING_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous recycling or post-content change before applying another plan. This new change has not been sent.');
 }
 function reviewedConfiguration(config) {
   if (!config.enabled) fail(400, 'RECYCLING_STOP_REQUIRED', 'Use Stop recycling to disable a cycle.');

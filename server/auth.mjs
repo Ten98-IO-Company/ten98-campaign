@@ -8,16 +8,22 @@ const derive = promisify(scrypt);
 const maxAge = 7 * 86400;
 export class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 export const publicUser = user => user ? { id: user.id, name: user.name, email: user.email, isOperator: Boolean(user.isOperator) } : null;
-export function sessionSecret(dataDir, provided) {
-  if (provided) { if (provided.length < 32) throw new Error('SESSION_SECRET must contain at least 32 characters.'); return provided; }
-  const path = join(dataDir, 'session-secret');
-  try { const value = readFileSync(path, 'utf8').trim(); if (value.length < 32) throw new Error('The saved session secret is invalid.'); return value; }
+function storedSecret(dataDir, provided, filename, label) {
+  if (provided) { if (provided.length < 32) throw new Error(`${label} must contain at least 32 characters.`); return provided; }
+  const path = join(dataDir, filename);
+  try { const value = readFileSync(path, 'utf8').trim(); if (value.length < 32) throw new Error(`The saved ${filename} is invalid.`); return value; }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
     const value = randomBytes(48).toString('base64url');
     try { writeFileSync(path, value, { flag: 'wx', mode: 0o600 }); return value; }
-    catch (race) { if (race.code === 'EEXIST') return sessionSecret(dataDir); throw race; }
+    catch (race) { if (race.code === 'EEXIST') return storedSecret(dataDir, undefined, filename, label); throw race; }
   }
+}
+export const sessionSecret = (dataDir, provided) => storedSecret(dataDir, provided, 'session-secret', 'SESSION_SECRET');
+export function bootstrapToken(dataDir, provided) {
+  const token = storedSecret(dataDir, provided, 'bootstrap-token', 'BOOTSTRAP_TOKEN');
+  if (token.length > 512 || /\s/.test(token)) throw new Error('BOOTSTRAP_TOKEN must contain 32 to 512 non-whitespace characters.');
+  return token;
 }
 export async function hashPassword(password) {
   const salt = randomBytes(16).toString('hex');
@@ -80,6 +86,9 @@ export function createAuth(db, config) {
   }
   return {
     user, establish, limit,
+    requireSetupProof(token) {
+      if (typeof token !== 'string' || !token.length || token.length > 512 || !config.bootstrapToken || !timingSafeEqual(Buffer.from(digest(token)), Buffer.from(digest(config.bootstrapToken)))) throw new HttpError(403, 'The setup token is not valid. Obtain it from the application host.');
+    },
     account(userId) { return { localPassword: Boolean(db.prepare('SELECT password FROM users WHERE id=?').get(userId)?.password), activeSessions: db.prepare('SELECT count(*) AS count FROM sessions WHERE user_id=? AND expires_at>?').get(userId, Date.now()).count }; },
     revokeOtherSessions(req, userId) { return db.prepare('DELETE FROM sessions WHERE user_id=? AND token<>?').run(userId, digest(sessionToken(req) || '')).changes; },
     async changePassword(req, res, userId, currentPassword, newPassword) {

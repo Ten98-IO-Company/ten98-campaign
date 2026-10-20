@@ -134,7 +134,7 @@ test('ChatGPT HTTP flow connects, validates, creates paused and confirms campaig
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); const base = `http://127.0.0.1:${app.server.address().port}`;
   async function request(path, method = 'GET', body, key, auth = cookie) { const response = await originalFetch(base + path, { method, headers: { Origin: origin, ...(auth ? { Cookie: auth } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...(key ? { 'Idempotency-Key': key } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) }); return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] }; }
   try {
-    const setup = await request('/api/auth/setup', 'POST', { name: 'OpenAI HTTP owner', email: 'openai-http@example.test', password: 'isolated OpenAI HTTP password', sample: false }); cookie = setup.cookie;
+    const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'OpenAI HTTP owner', email: 'openai-http@example.test', password: 'isolated OpenAI HTTP password', sample: false }); cookie = setup.cookie;
     const projectId = setup.data.projectId, route = `/api/projects/${projectId}/integrations/`;
     assert.equal((await request(`/api/projects/${projectId}`, 'PATCH', { zernioProfileId: profileId })).status, 200);
     const connected = await request(route + 'connect/openai-ads', 'POST', { apiKey: 'PRIVATE_ADS_PROVIDER_KEY' }, randomUUID()); assert.equal(connected.status, 200); assert.doesNotMatch(JSON.stringify(connected), /PRIVATE_/);
@@ -154,13 +154,15 @@ test('ChatGPT HTTP flow connects, validates, creates paused and confirms campaig
     const reached = new Promise(resolve => { statusReached = resolve; }); statusHold = new Promise(resolve => { releaseStatus = resolve; });
     const heldKey = randomUUID(); heldRequest = request(route + 'ads/status', 'POST', { campaignId: campaign.platformCampaignId, platform: 'openai', status: 'active' }, heldKey);
     let deadline; try { await Promise.race([reached, new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('The held provider receipt was not reached.')), 5000); })]); } finally { clearTimeout(deadline); }
-    const pendingWrites = writes.length;
+    const pendingWrites = writes.length, blockedRequests = [];
     for (const [path, payload] of [['ads/status', { status: 'paused' }], ['ads/campaign', { budget: { amount: 80, type: 'daily' } }]]) {
-      const blocked = await request(route + path, 'POST', { campaignId: campaign.platformCampaignId, platform: 'openai', ...payload }, randomUUID());
-      assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'PROVIDER_RESOURCE_BUSY'); assert.equal(blocked.data.operation, undefined);
+      const body = { campaignId: campaign.platformCampaignId, platform: 'openai', ...payload }, key = randomUUID(), blocked = await request(route + path, 'POST', body, key);
+      assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); blockedRequests.push({ path, body, key, receipt: blocked.data });
     }
     assert.equal(writes.length, pendingWrites, 'A second change cannot overtake the first campaign receipt.');
     releaseStatus(); assert.equal((await heldRequest).status, 200); statusHold = null;
+    for (const blocked of blockedRequests) assert.deepEqual((await request(route + blocked.path, 'POST', blocked.body, blocked.key)).data, blocked.receipt);
+    assert.equal(writes.length, pendingWrites, 'A previously blocked key cannot dispatch after the earlier action completes.');
     assert.equal((await request(route + 'ads/status', 'POST', { campaignId: campaign.platformCampaignId, platform: 'openai', status: 'paused' }, randomUUID())).status, 200);
     assert.equal(app.store.get(projectId, 'campaigns', created.data.campaign.id).status, 'paused');
     assert.equal((await request(route + 'ads/status', 'POST', { campaignId: campaign.platformCampaignId, platform: 'openai', status: 'active' }, heldKey)).status, 200);
@@ -169,9 +171,12 @@ test('ChatGPT HTTP flow connects, validates, creates paused and confirms campaig
     confirmStatus = false;
     const unconfirmed = await request(route + 'ads/status', 'POST', { campaignId: campaign.platformCampaignId, platform: 'openai', status: 'paused' }, randomUUID()); assert.equal(unconfirmed.status, 409); assert.equal(unconfirmed.data.operation.status, 'uncertain');
     assert.equal(app.store.get(projectId, 'campaigns', created.data.campaign.id).status, 'active', 'An unconfirmed write cannot replace the last confirmed switch.');
+    const beforeBlockedBudget = writes.length, blockedBudget = await request(route + 'ads/campaign', 'POST', { campaignId: campaign.platformCampaignId, platform: 'openai', budget: { amount: 90, type: 'daily' } }, randomUUID());
+    assert.equal(blockedBudget.status, 409); assert.equal(blockedBudget.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blockedBudget.data.operation.status, 'failed'); assert.equal(writes.length, beforeBlockedBudget, 'An unresolved switch must block changed campaign requests until reviewed.');
+    app.db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?").run(unconfirmed.data.operation.id);
     confirmBudget = false;
     const missingBudget = await request(route + 'ads/campaign', 'POST', { campaignId: campaign.platformCampaignId, platform: 'openai', budget: { amount: 90, type: 'daily' } }, randomUUID());
-    assert.equal(missingBudget.status, 409); assert.equal(missingBudget.data.operation.status, 'uncertain', 'A failed status verification must release the resource lock for another action.');
+    assert.equal(missingBudget.status, 409); assert.equal(missingBudget.data.operation.status, 'uncertain', 'After review, the next independent unverified action retains its own uncertainty fence.');
     assert.equal(app.store.get(projectId, 'campaigns', created.data.campaign.id).budget, 75, 'An unconfirmed budget cannot become local delivery evidence.');
     campaign.platform = 'pinterest';
     const acknowledged = app.store.create(projectId, 'campaigns', { name: 'Acknowledged-only switch', status: 'paused', externalId: 'pinterest-ad', platform: 'pinterest', platformCampaignId: campaign.platformCampaignId, zernioProfileId: profileId });

@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 type Row = Record<string, any>;
-type Props = { projectId: string; role: string; isOperator: boolean; request: (path: string, method?: string, body?: any, key?: string) => Promise<any>; onChanged?: () => void | Promise<void> };
+type Props = { projectId: string; role: string; isOperator: boolean; request: (path: string, method?: string, body?: any, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void };
 const lines = (value: FormDataEntryValue | null) => String(value || '').split('\n').map(row => row.trim()).filter(Boolean);
 const today = () => new Date().toISOString().slice(0, 10);
 
-export default function MicrosoftAds({ projectId, role, isOperator, request, onChanged }: Props) {
+export default function MicrosoftAds({ projectId, role, isOperator, request, onChanged, mode = 'workflow', onOpenIntegrations }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/microsoft-ads`, active = useRef(true), readVersion = useRef(0), pending = useRef(false), keys = useRef(new Map<string, string>()), requester = useRef(request); requester.current = request;
   const [status, setStatus] = useState<Row | null>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [report, setReport] = useState<Row | null>(null);
   const canWrite = ['owner', 'admin', 'editor'].includes(role), canMap = isOperator && ['owner', 'admin'].includes(role);
@@ -13,11 +13,12 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
     if (!active.current) return;
     const read = ++readVersion.current;
     try {
-      const result = await requester.current(path + '/status'); if (!active.current || read !== readVersion.current) return; setStatus(result); setReport(previous => previous || result.latestReport || null);
-      if (result.configured && result.mapping) { const listed = await requester.current(path + '/campaigns'); if (active.current && read === readVersion.current) setCampaigns(listed.campaigns); }
+      const result = await requester.current(path + '/status'); if (!active.current || read !== readVersion.current) return; setStatus(result);
+      if (mode === 'workflow') setReport(previous => previous || result.latestReport || null);
+      if (mode === 'workflow' && result.configured && result.mapping) { const listed = await requester.current(path + '/campaigns'); if (active.current && read === readVersion.current) setCampaigns(listed.campaigns); }
     } catch (failure) { if (active.current && read === readVersion.current) throw failure; }
   }
-  useEffect(() => { active.current = true; const loading = load(), read = readVersion.current; loading.catch(failure => { if (active.current && read === readVersion.current) setError(failure.message); }); return () => { active.current = false; }; }, [projectId]);
+  useEffect(() => { active.current = true; const loading = load(), read = readVersion.current; loading.catch(failure => { if (active.current && read === readVersion.current) setError(failure.message); }); return () => { active.current = false; }; }, [projectId, mode]);
   async function action(run: () => Promise<void>) {
     if (pending.current || !active.current) return; readVersion.current++; pending.current = true; setBusy(true); setError(''); setNotice('');
     try { await run(); } catch (failure) { if (active.current) setError((failure as Error).message || 'Microsoft Advertising could not complete this action.'); }
@@ -56,15 +57,16 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
   }
   async function refreshReport() { if (!report) return; await action(async () => { const result = await requester.current(path + '/reports/' + encodeURIComponent(report.id)); if (active.current) setReport(result.report); }); }
   return <section className="panel ad-tools-panel">
-    <div className="panel-heading"><div><h2>Microsoft Advertising</h2><p>Search campaigns, budgets and performance exports.</p></div><button type="button" className="button" disabled={busy} onClick={() => action(load)}>Refresh Microsoft account</button></div>
-    <p className="helper-note">Campaigns start paused, in English, with a CPC cap. Copilot placement depends on Microsoft eligibility. Advanced targeting is available in <a href="https://ads.microsoft.com/" target="_blank" rel="noreferrer">Microsoft Advertising</a>.</p>
+    <div className="panel-heading"><div><h2>{mode === 'connection' ? 'Microsoft Advertising connection' : 'Microsoft Advertising'}</h2><p>{mode === 'connection' ? 'Choose the advertising account used by this project.' : 'Search campaigns, budgets and performance exports.'}</p></div><button type="button" className="button" disabled={busy} onClick={() => action(load)}>Refresh Microsoft account</button></div>
+    {mode === 'workflow' && <p className="helper-note">Campaigns start paused, in English, with a CPC cap. Copilot placement depends on Microsoft eligibility. Advanced targeting is available in <a href="https://ads.microsoft.com/" target="_blank" rel="noreferrer">Microsoft Advertising</a>.</p>}
     {error && <p className="alert" role="alert">{error}</p>}{notice && <p className="helper-note" role="status">{notice}</p>}{busy && <p role="status">Checking Microsoft Advertising…</p>}
-    {status && <p className="helper-note">{status.configured ? 'Credentials configured.' : 'Configure Microsoft Advertising in Integrations first.'} {status.mapping ? `${status.mapping.name} · ${status.mapping.accountId} · ${status.mapping.currency}` : 'Approve an account mapping to continue.'}</p>}
-    {canMap && status && !status.mapping && <details><summary>Approve Microsoft account mapping</summary><form onSubmit={mapAccount}><fieldset disabled={busy || !status.configured}>
+    {status && <p className="helper-note">{status.configured ? 'Credentials configured.' : 'Microsoft Advertising credentials are not configured.'} {status.mapping ? `${status.mapping.name} · ${status.mapping.accountId} · ${status.mapping.currency}` : 'No advertising account is mapped to this project.'}</p>}
+    {mode === 'workflow' && onOpenIntegrations && <button className="button" type="button" disabled={busy} onClick={onOpenIntegrations}>Open integrations</button>}
+    {mode === 'connection' && canMap && status && !status.mapping && <details><summary>Approve Microsoft account mapping</summary><form onSubmit={mapAccount}><fieldset disabled={busy || !status.configured}>
       <label className="field"><span>Owning customer ID *</span><input name="customerId" inputMode="numeric" pattern="[1-9][0-9]{0,18}" required/></label><label className="field"><span>Advertising account ID *</span><input name="accountId" inputMode="numeric" pattern="[1-9][0-9]{0,18}" required/></label>
       <p className="helper-note">Use numeric IDs from Microsoft Advertising, not its alphanumeric account number. Microsoft must confirm the account’s owning customer. Each account belongs to one project and its mapping is fixed.</p><label className="checkbox-label"><input type="checkbox" required/>I approve assigning this Microsoft account to this project.</label><button className="button">Verify and approve account</button>
     </fieldset></form></details>}
-    {status?.mapping && status.configured && <>
+    {mode === 'workflow' && status?.mapping && status.configured && <>
       {canWrite && <details><summary>Create paused Microsoft search campaign</summary><form onSubmit={create}><fieldset disabled={busy}>
         <div className="form-grid"><label className="field"><span>Campaign name *</span><input name="name" required maxLength={128}/></label><label className="field"><span>Daily budget ({status.mapping.currency}) *</span><input name="dailyBudget" type="number" required min="0.01" max="1000000" step="0.01"/></label><label className="field"><span>Maximum CPC ({status.mapping.currency}) *</span><input name="maxCpc" type="number" required min="0.01" max="1000000" step="0.01"/></label><label className="field"><span>Landing page URL *</span><input name="finalUrl" type="url" pattern="https://.+" required maxLength={2048}/></label></div>
         <label className="field"><span>Microsoft location target IDs *</span><input name="locationIds" required placeholder="Numeric IDs, separated by commas" pattern="[0-9,\s]+"/></label><p className="helper-note">Use Microsoft’s <a href="https://learn.microsoft.com/en-us/advertising/guides/geographical-location-codes" target="_blank" rel="noreferrer">location target IDs</a>. Standard Microsoft location-interest matching applies; review presence and other targeting in Microsoft before activation.</p>

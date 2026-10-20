@@ -40,7 +40,7 @@ test('HTTP feature wiring preserves signed bytes, project boundaries, protected 
     assert.equal((await webhook(testEvent, '0'.repeat(64))).status, 401);
     assert.equal((await webhook('x'.repeat(1024 * 1024 + 1))).status, 413);
     assert.equal((await request('/api/projects/unknown/maps/config', { cookie: null })).status, 401);
-    const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Owner', email: 'owner-http@example.test', password: 'a sufficiently long fixture password', sample: false } });
+    const setup = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Owner', email: 'owner-http@example.test', password: 'a sufficiently long fixture password', sample: false } });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const initialState = (await request('/api/state')).data, workspaceId = initialState.workspaces[0].id;
     const created = await request('/api/projects', { method: 'POST', body: { workspaceId, name: 'Live features', zernioProfileId: 'profile-http-a' } });

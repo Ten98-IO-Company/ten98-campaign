@@ -11,6 +11,7 @@ export function publicMediaUrl(value: string): string;
 export function normalizeMediaItems(items: unknown): MediaItem[];
 export function wireMediaItems(items: unknown): MediaItem[];
 export function normalizePlatformOptions(platform: string, options: unknown, config?: { required?: boolean }): Record<string, any>;
+export function normalizePostTags(tags?: unknown, config?: { preserve?: boolean }): string[];
 export function normalizePostVariants(post: SocialPost, config?: { strict?: boolean }): Record<string, PlatformVariant>;
 export function normalizeAccountVariants(post: SocialPost): Record<string, AccountVariant>;
 export function validPostInstant(value: unknown): boolean;

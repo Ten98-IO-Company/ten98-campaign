@@ -31,7 +31,7 @@ test('HTTP OOH inventory, proposals, booking, delivery and cancellation preserve
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   try {
-    const setup = await request('/api/auth/setup', 'POST', { name: 'OOH fixture', email: 'ooh@example.test', password: 'a sufficiently long fixture password', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
+    const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'OOH fixture', email: 'ooh@example.test', password: 'a sufficiently long fixture password', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
     const state = (await request('/api/state')).data, project = `/api/projects/${state.projectId}`, path = project + '/ooh';
     const connection = { domainId: 7, clientId: 'brand', clientName: 'Fixture brand', screenIds: [101, 102] };
     assert.equal((await request(path + '/connection', 'POST', connection)).status, 200);

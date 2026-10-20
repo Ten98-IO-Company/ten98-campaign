@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount } from './integrations.mjs';
+import { IntegrationError, operation, scopedAccounts, requireAccount, mediaUrl } from './integrations.mjs';
 
 const fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -34,7 +34,7 @@ function projectLookup(response, accountId, profileId, resource, subreddit, rich
     if (!token(row.id)) invalid();
     if (field === 'boards') { if (typeof row.name !== 'string' || !row.name || !text(row.name) || !text(row.description) || !text(row.privacy)) invalid(); return { id: row.id, name: row.name, description: row.description || '', privacy: row.privacy || '' }; }
     if (field === 'playlists') { if (typeof row.title !== 'string' || !row.title || !text(row.title) || !text(row.description) || row.privacy != null && !['public', 'private', 'unlisted'].includes(row.privacy) || row.itemCount != null && (!Number.isSafeInteger(row.itemCount) || row.itemCount < 0)) invalid(); return { id: row.id, title: row.title, privacy: row.privacy || '', ...(rich ? { description: row.description ?? null } : {}), ...(row.itemCount == null ? {} : { itemCount: row.itemCount }) }; }
-    if (field === 'subreddits') { if (typeof row.name !== 'string' || !/^[A-Za-z0-9_]{1,21}$/.test(row.name) || !text(row.title) || row.over18 != null && typeof row.over18 !== 'boolean') invalid(); return { id: row.id, name: row.name, title: row.title || '', over18: row.over18 ?? null }; }
+    if (field === 'subreddits') { if (typeof row.name !== 'string' || !/^[A-Za-z0-9_]{1,21}$/.test(row.name) || !text(row.title) || rich && !text(row.url) || row.over18 != null && typeof row.over18 !== 'boolean') invalid(); return { id: row.id, name: row.name, title: row.title || '', over18: row.over18 ?? null, ...(rich ? { url: row.url ?? null } : {}) }; }
     if (typeof row.text !== 'string' || !text(row.text)) invalid(); return { id: row.id, text: row.text };
   });
   if (field !== 'rules' && new Set(result.map(row => row.id)).size !== result.length) invalid();
@@ -51,6 +51,8 @@ function projectLookup(response, accountId, profileId, resource, subreddit, rich
 }
 
 export async function handleZernioPublishing(context, api, profileId, action) {
+  const tools = /^accounts\/([^/]+)\/(gmb-locations|instagram-publishing-limit|instagram-audio|instagram-audio-lookup|tiktok-commercial-music|tiktok-locations)$/.exec(action);
+  if (tools) return publishingTools(context, api, profileId, tools);
   const library = /^accounts\/([^/]+)\/(posts|external-posts|external-import|external-references|external-remove)$/.exec(action);
   if (library) return postLibrary(context, api, profileId, library);
   const match = /^accounts\/([^/]+)\/([^/]+)(?:\/(create|default|manage))?$/.exec(action);
@@ -67,6 +69,95 @@ export async function handleZernioPublishing(context, api, profileId, action) {
   if (['reddit-rules', 'reddit-flairs'].includes(match[2])) { subreddit = params.get('subreddit'); if (typeof subreddit !== 'string' || !/^[A-Za-z0-9_]{1,21}$/.test(subreddit)) fail(400, 'INVALID_SUBREDDIT', 'Choose a subreddit name without the r/ prefix.'); }
   const response = await api(`/accounts/${encodeURIComponent(accountId)}/${match[2] === 'reddit-rules' ? `reddit-subreddits/${encodeURIComponent(subreddit)}/rules` : match[2]}`, match[2] === 'reddit-flairs' ? { subreddit } : {});
   context.send(200, projectLookup(response, accountId, profileId, match[2], subreddit)); return true;
+}
+
+function publishingToolsAccess(context, profileId) {
+  try { context.assertProjectMapping?.(profileId); context.assertIntegrationSettings?.(); }
+  catch (error) { fail([403, 404].includes(error.status) ? 403 : 409, 'PUBLISHING_ACCESS_CHANGED', 'Your project access or connection changed. Refresh the publishing choices.'); }
+}
+function publishingToolsIdentity(account, platform) {
+  if (account.needsReconnection != null && typeof account.needsReconnection !== 'boolean') invalid();
+  if (account.needsReconnection === true) fail(409, 'PUBLISHING_RECONNECTION_REQUIRED', 'Reconnect this account before loading publishing choices.');
+  let loginMethod;
+  if (platform === 'instagram') {
+    if (account.metadata != null && !object(account.metadata) || account.metadata?.loginMethod != null && !['facebook_login', 'instagram_login'].includes(account.metadata.loginMethod)) invalid();
+    loginMethod = account.metadata?.loginMethod ?? 'instagram_login';
+  }
+  return { loginMethod, identity: JSON.stringify([account._id, account.platform, account.platformUserId ?? null, account.username ?? null, account.isActive ?? null, account.needsReconnection ?? null, loginMethod]) };
+}
+function instagramAudio(row) {
+  if (!object(row) || typeof row.audioId !== 'string' || !/^\d{1,30}$/.test(row.audioId)) invalid();
+  const result = { audioId: row.audioId };
+  for (const key of ['title', 'displayArtist', 'igUsername']) { if (!text(row[key])) invalid(); result[key] = row[key] ?? null; }
+  if (row.audioType != null && !['music', 'original_sound'].includes(row.audioType) || row.durationInMs != null && (!Number.isSafeInteger(row.durationInMs) || row.durationInMs < 0) || row.isAdsEligible != null && typeof row.isAdsEligible !== 'boolean') invalid();
+  Object.assign(result, { audioType: row.audioType ?? null, durationInMs: row.durationInMs ?? null, isAdsEligible: row.isAdsEligible ?? null });
+  for (const key of ['downloadUrl', 'onPlatformAudioPreviewLink']) {
+    if (row[key] == null) result[key] = null;
+    else { if (typeof row[key] !== 'string' || row[key].length > 4000) invalid(); try { result[key] = mediaUrl(row[key]); } catch { invalid(); } }
+  }
+  return result;
+}
+function tiktokTrack(row) {
+  if (!object(row) || !token(row.id) || row.commercialMusicId != null && !token(row.commercialMusicId)) invalid();
+  const track = { id: row.id, commercialMusicId: row.commercialMusicId ?? null };
+  for (const key of ['name', 'artist', 'previewUrl', 'thumbnailUrl']) { if (!text(row[key])) invalid(); track[key] = row[key] ?? null; }
+  for (const key of ['durationSec', 'rank']) { if (row[key] != null && (!Number.isSafeInteger(row[key]) || row[key] < (key === 'rank' ? 1 : 0))) invalid(); track[key] = row[key] ?? null; }
+  if (row.genres != null && (!Array.isArray(row.genres) || row.genres.length > 100 || row.genres.some(genre => typeof genre !== 'string' || !text(genre)))) invalid();
+  track.genres = row.genres ?? null;
+  if (row.clip != null && (!object(row.clip) || !token(row.clip.id) || row.clip.durationSec != null && (!Number.isSafeInteger(row.clip.durationSec) || row.clip.durationSec < 0) || !text(row.clip.previewUrl))) invalid();
+  track.clip = row.clip == null ? null : { id: row.clip.id, durationSec: row.clip.durationSec ?? null, previewUrl: row.clip.previewUrl ?? null };
+  return track;
+}
+async function publishingTools(context, api, profileId, match) {
+  if (context.req.method !== 'GET') fail(405, 'METHOD_NOT_ALLOWED', 'Publishing choices are read only.');
+  let accountId; try { accountId = decodeURIComponent(match[1]); } catch { fail(400, 'INVALID_ACCOUNT', 'Choose a valid connected publishing account.'); }
+  if (!token(accountId)) fail(400, 'INVALID_ACCOUNT', 'Choose a valid connected publishing account.');
+  const resource = match[2], platform = resource === 'gmb-locations' ? 'googlebusiness' : resource.startsWith('tiktok-') ? 'tiktok' : 'instagram', params = context.url.searchParams;
+  const allowed = resource === 'gmb-locations' ? ['search'] : resource === 'instagram-audio' ? ['audioType', 'q'] : resource === 'instagram-audio-lookup' ? ['audioId'] : resource === 'tiktok-commercial-music' ? ['countryCode'] : resource === 'tiktok-locations' ? ['query'] : [];
+  if ([...params.keys()].some(key => !allowed.includes(key) || params.getAll(key).length !== 1)) fail(400, 'INVALID_PUBLISHING_FILTER', 'Use only the publishing filters shown in this form.');
+  const query = resource === 'gmb-locations' ? { limit: 100 } : {};
+  for (const key of ['search', 'q']) if (params.has(key)) { const value = params.get(key); if (!value.trim() || value.length > 200 || /[\u0000-\u001f\u007f]/.test(value)) fail(400, 'INVALID_PUBLISHING_SEARCH', 'Enter a search of 1 to 200 characters.'); query[key] = value; }
+  if (resource === 'instagram-audio') { if (!['music', 'original_sound'].includes(params.get('audioType'))) fail(400, 'INVALID_INSTAGRAM_AUDIO_TYPE', 'Choose music or original sounds.'); query.audioType = params.get('audioType'); }
+  const audioId = params.get('audioId');
+  if (resource === 'instagram-audio-lookup' && !/^\d{1,30}$/.test(audioId || '')) fail(400, 'INVALID_INSTAGRAM_AUDIO_ID', 'Enter a numeric audio ID of up to 30 digits.');
+  if (resource === 'tiktok-commercial-music' && params.has('countryCode')) { if (!/^[A-Za-z]{2}$/.test(params.get('countryCode'))) fail(400, 'INVALID_TIKTOK_COUNTRY', 'Enter a two-letter country code or leave it empty for the global chart.'); query.countryCode = params.get('countryCode').toUpperCase(); }
+  if (resource === 'tiktok-locations') { const value = params.get('query'); if (!value?.trim() || value.length > 100 || /[\u0000-\u001f\u007f]/.test(value)) fail(400, 'INVALID_TIKTOK_LOCATION_QUERY', 'Enter a place search of 1 to 100 characters.'); query.query = value; }
+  publishingToolsAccess(context, profileId);
+  const account = await publishingAccount(api, profileId, accountId, platform); publishingToolsAccess(context, profileId);
+  const before = publishingToolsIdentity(account, platform);
+  if (resource.startsWith('instagram-audio') && before.loginMethod !== 'facebook_login') fail(422, 'INSTAGRAM_AUDIO_REQUIRES_FACEBOOK_LOGIN', 'Reconnect Instagram using Facebook Login to load its audio catalog.');
+  const endpoint = resource === 'gmb-locations' ? resource : platform === 'tiktok' ? `tiktok/${resource.slice('tiktok-'.length)}` : resource === 'instagram-audio-lookup' ? `instagram/audio/${audioId}` : `instagram/${resource.slice('instagram-'.length)}`;
+  const response = await api(`/accounts/${encodeURIComponent(accountId)}/${endpoint}`, query); publishingToolsAccess(context, profileId);
+  const fresh = await publishingAccount(api, profileId, accountId, platform); publishingToolsAccess(context, profileId);
+  if (publishingToolsIdentity(fresh, platform).identity !== before.identity) fail(409, 'PUBLISHING_ACCOUNT_CHANGED', 'The connected account changed. Reload its publishing choices.');
+  if (!object(response)) invalid(); lookupScope(response, accountId, profileId, platform);
+  const result = { accountId, platform, ...(platform === 'instagram' ? { loginMethod: before.loginMethod } : {}) };
+  if (resource === 'gmb-locations') {
+    if (!Array.isArray(response.locations) || response.locations.length > 100 || response.hasMore != null && typeof response.hasMore !== 'boolean' || response.cached != null && typeof response.cached !== 'boolean' || response.selectedLocationId != null && !token(response.selectedLocationId)) invalid();
+    result.locations = response.locations.map(row => {
+      if (!object(row) || !token(row.id) || typeof row.name !== 'string' || !text(row.name) || row.accountId != null && !token(row.accountId)) invalid();
+      const location = { id: row.id, name: row.name, accountId: row.accountId ?? null };
+      for (const key of ['accountName', 'address', 'category', 'storeCode']) { if (!text(row[key])) invalid(); location[key] = row[key] ?? null; }
+      return location;
+    });
+    if (new Set(result.locations.map(row => row.id)).size !== result.locations.length) invalid();
+    Object.assign(result, { selectedLocationId: response.selectedLocationId ?? null, hasMore: response.hasMore ?? null, cached: response.cached ?? null });
+  } else if (resource === 'tiktok-commercial-music') {
+    if (!Array.isArray(response.tracks) || response.tracks.length > 100) invalid();
+    result.tracks = response.tracks.map(tiktokTrack);
+    if (new Set(result.tracks.map(row => row.id)).size !== result.tracks.length) invalid();
+  } else if (resource === 'tiktok-locations') {
+    if (!Array.isArray(response.locations) || response.locations.length > 20) invalid();
+    result.locations = response.locations.map(row => { if (!object(row) || !token(row.id) || typeof row.name !== 'string' || !row.name.trim() || !text(row.name) || !text(row.address)) invalid(); return { id: row.id, name: row.name, address: row.address ?? null }; });
+    if (new Set(result.locations.map(row => row.id)).size !== result.locations.length) invalid();
+  } else if (resource === 'instagram-publishing-limit') {
+    for (const key of ['quotaUsage', 'quotaTotal', 'quotaDurationSeconds']) { if (!Number.isSafeInteger(response[key]) || response[key] < (key === 'quotaDurationSeconds' ? 1 : 0)) invalid(); result[key] = response[key]; }
+  } else if (resource === 'instagram-audio') {
+    if (!Array.isArray(response.audio) || response.audio.length > 100) invalid();
+    result.audio = response.audio.map(instagramAudio);
+    if (new Set(result.audio.map(row => row.audioId)).size !== result.audio.length || result.audio.some(row => row.audioType !== null && row.audioType !== query.audioType)) invalid();
+  } else { result.audio = instagramAudio(response.audio); if (result.audio.audioId !== audioId) invalid(); }
+  context.send(200, result); return true;
 }
 
 const externalPlatforms = ['instagram', 'facebook', 'tiktok', 'youtube', 'twitter', 'threads', 'pinterest', 'reddit', 'bluesky', 'googlebusiness', 'linkedin'];
@@ -162,12 +253,20 @@ async function postLibrary(context, api, profileId, match) {
   }, ['external-post', accountId, locator.postId || locator.url]); context.send(outcome.status, outcome.data); return true;
 }
 
-async function managementSnapshot(api, profileId, accountId, resource) {
-  const [platform, field] = resources[resource], account = await publishingAccount(api, profileId, accountId, platform), response = await api(`/accounts/${encodeURIComponent(accountId)}/${resource}`);
+async function managementSnapshot(context, api, profileId, accountId, resource) {
+  const [platform, field] = resources[resource];
+  publishingToolsAccess(context, profileId);
+  const account = await publishingAccount(api, profileId, accountId, platform);
+  const accountVersion = digest([profileId, publishingToolsIdentity(account, platform).identity]);
+  if (platform === 'reddit' && account.isActive !== true) fail(409, 'DESTINATION_ACCOUNT_UNAVAILABLE', 'Choose an active Reddit account before changing its default.');
+  const response = await api(`/accounts/${encodeURIComponent(accountId)}/${resource}`);
   if (response.hasMore === true || response.pagination?.hasMore === true) fail(503, 'DESTINATION_CENSUS_INCOMPLETE', 'A complete destination list could not be verified. Use the provider dashboard.');
   const result = projectLookup(response, accountId, profileId, resource, undefined, true), rows = [...result[field]].sort((a, b) => a.id.localeCompare(b.id));
-  const output = { accountId, platform, [field]: rows, ...(platform === 'youtube' ? { defaultPlaylistId: result.defaultPlaylistId, defaultReported: Object.hasOwn(response, 'defaultPlaylistId') } : { defaultBoardId: null, defaultReported: false }), accountName: account.displayName || account.username || platform };
-  return { ...output, version: digest({ profileId, accountId, platform, platformUserId: account.platformUserId ?? null, rows, defaultPlaylistId: output.defaultPlaylistId ?? null, defaultReported: output.defaultReported }), nativeAccountId: account.platformUserId ?? null };
+  const fresh = await publishingAccount(api, profileId, accountId, platform);
+  publishingToolsAccess(context, profileId);
+  if (digest([profileId, publishingToolsIdentity(fresh, platform).identity]) !== accountVersion) fail(409, 'DESTINATION_ACCOUNT_CHANGED', 'The connected publishing account changed. Reload its destinations.');
+  const output = { accountId, platform, accountVersion, [field]: rows, ...(platform === 'youtube' ? { defaultPlaylistId: result.defaultPlaylistId, defaultReported: Object.hasOwn(response, 'defaultPlaylistId') } : platform === 'reddit' ? { defaultSubreddit: result.defaultSubreddit, defaultReported: typeof response.defaultSubreddit === 'string' } : { defaultBoardId: null, defaultReported: false }), accountName: account.displayName || account.username || platform };
+  return { ...output, version: digest({ profileId, accountId, platform, accountVersion, platformUserId: account.platformUserId ?? null, rows, defaultPlaylistId: output.defaultPlaylistId ?? null, ...(platform === 'reddit' ? { defaultSubreddit: output.defaultSubreddit, defaultPresent: Object.hasOwn(response, 'defaultSubreddit') } : {}), defaultReported: output.defaultReported }), nativeAccountId: account.platformUserId ?? null };
 }
 async function destinationMutation(context, resource, run) {
   const db = context.db;
@@ -182,19 +281,20 @@ async function destinationMutation(context, resource, run) {
 }
 async function manageDestinations(context, api, profileId, match) {
   const resource = match[2], task = match[3], [platform, field] = resources[resource];
-  if (!['pinterest', 'youtube'].includes(platform)) return false;
+  if (!['pinterest', 'youtube', 'reddit'].includes(platform) || platform === 'reddit' && resource !== 'reddit-subreddits') return false;
+  if (platform === 'reddit' && task === 'create') fail(422, 'DESTINATION_CREATE_UNSUPPORTED', 'Subreddit creation is unavailable. Choose an existing subreddit for this account.');
   if (context.req.method !== (task === 'manage' ? 'GET' : 'POST')) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available destination management controls.');
   let accountId; try { accountId = decodeURIComponent(match[1]); } catch { fail(400, 'INVALID_ACCOUNT', 'Choose a valid connected publishing account.'); }
   if (!token(accountId) || [...context.url.searchParams].length) fail(400, 'INVALID_DESTINATION_FIELDS', 'Choose an account without additional provider filters.');
-  if (task === 'manage') { const result = await managementSnapshot(api, profileId, accountId, resource); context.send(200, result); return true; }
+  if (task === 'manage') { const result = await managementSnapshot(context, api, profileId, accountId, resource); context.send(200, result); return true; }
   if (!['owner', 'admin'].includes(context.role)) fail(403, 'DESTINATION_ADMIN_REQUIRED', 'A workspace owner or administrator must create destinations or change shared account defaults.');
   const body = context.body || {}; fields(body, ['expectedVersion', 'confirmed', ...(task === 'create' ? ['settings'] : ['destinationId'])]);
   if (body.confirmed !== true) fail(400, 'DESTINATION_REVIEW_REQUIRED', 'Review the selected account and exact destination settings first.');
   // ponytail: serialize all destination writes per provider across projects; verified native IDs plus alias fencing can separate channels if throughput requires it.
   const connected = await publishingAccount(api, profileId, accountId, platform), lock = platform;
   const outcome = await destinationMutation(context, lock, async key => {
-  const before = await managementSnapshot(api, profileId, accountId, resource);
-  if (before.nativeAccountId !== (connected.platformUserId ?? null)) fail(409, 'DESTINATION_ACCOUNT_CHANGED', 'The connected channel changed. Reload its destinations before continuing.');
+  const before = await managementSnapshot(context, api, profileId, accountId, resource);
+  if (before.nativeAccountId !== (connected.platformUserId ?? null) || before.accountVersion !== digest([profileId, publishingToolsIdentity(connected, platform).identity])) fail(409, 'DESTINATION_ACCOUNT_CHANGED', 'The connected channel changed. Reload its destinations before continuing.');
   if (body.expectedVersion !== before.version) fail(409, 'DESTINATION_REVIEW_CHANGED', 'The destination list or saved default changed. Reload and review it again.');
   let payload, chosen;
   if (task === 'create') {
@@ -203,17 +303,18 @@ async function manageDestinations(context, api, profileId, match) {
     if (!(platform === 'youtube' ? ['private', 'unlisted', 'public'] : ['PUBLIC', 'PROTECTED', 'SECRET']).includes(privacy)) fail(400, 'INVALID_DESTINATION_PRIVACY', 'Choose an explicit destination privacy setting.');
     payload = { [title]: label(body.settings[title], platform === 'youtube' ? 150 : 180), description: label(body.settings.description ?? '', 5000, true), privacy };
   } else {
-    if (!token(body.destinationId)) fail(400, 'INVALID_DESTINATION_ID', 'Choose an existing board or playlist. Clearing a YouTube default is not supported.');
+    if (!token(body.destinationId)) fail(400, 'INVALID_DESTINATION_ID', 'Choose an existing board, playlist or subreddit. Clearing YouTube and Reddit defaults is not supported.');
     chosen = before[field].find(row => row.id === body.destinationId); if (!chosen) fail(403, 'DESTINATION_OUTSIDE_ACCOUNT', 'Choose a destination from this account’s verified list.');
-    payload = platform === 'youtube' ? { defaultPlaylistId: chosen.id, defaultPlaylistName: chosen.title } : { defaultBoardId: chosen.id, defaultBoardName: chosen.name };
+    payload = platform === 'youtube' ? { defaultPlaylistId: chosen.id, defaultPlaylistName: chosen.title } : platform === 'reddit' ? { defaultSubreddit: chosen.name } : { defaultBoardId: chosen.id, defaultBoardName: chosen.name };
   }
-    const current = await managementSnapshot(api, profileId, accountId, resource);
+    const current = await managementSnapshot(context, api, profileId, accountId, resource);
     if (current.version !== before.version) fail(409, 'DESTINATION_REVIEW_CHANGED', 'The account or destination settings changed while preparing this action. Reload and review them again.');
-    const account = await publishingAccount(api, profileId, accountId, platform); if ((account.platformUserId ?? null) !== before.nativeAccountId) fail(409, 'DESTINATION_ACCOUNT_CHANGED', 'The connected channel changed. Reload its destinations before continuing.');
+    const account = await publishingAccount(api, profileId, accountId, platform); if ((account.platformUserId ?? null) !== before.nativeAccountId || before.accountVersion !== digest([profileId, publishingToolsIdentity(account, platform).identity])) fail(409, 'DESTINATION_ACCOUNT_CHANGED', 'The connected channel changed. Reload its destinations before continuing.');
+    publishingToolsAccess(context, profileId);
     const response = await api(`/accounts/${encodeURIComponent(accountId)}/${resource}`, {}, payload, key, task === 'create' ? 'POST' : 'PUT');
     try {
       lookupScope(response, accountId, profileId, platform);
-      const after = await managementSnapshot(api, profileId, accountId, resource); if (after.nativeAccountId !== before.nativeAccountId) invalid(true);
+      const after = await managementSnapshot(context, api, profileId, accountId, resource); if (after.nativeAccountId !== before.nativeAccountId || after.accountVersion !== before.accountVersion) invalid(true);
       if (task === 'create') {
         if (platform === 'youtube' && (after.defaultReported !== before.defaultReported || after.defaultPlaylistId !== before.defaultPlaylistId)) invalid(true);
         const raw = response[platform === 'youtube' ? 'playlist' : 'board'];
@@ -223,6 +324,7 @@ async function manageDestinations(context, api, profileId, match) {
         return { destination: found, snapshot: after, created: true };
       }
       if (platform === 'youtube') { if (response.success !== true || !after.defaultReported || after.defaultPlaylistId !== chosen.id) invalid(true); return { defaultId: chosen.id, accepted: true, readback: true, snapshot: after }; }
+      if (platform === 'reddit') { if (response.success !== true || !after.defaultReported || after.defaultSubreddit !== chosen.name || !after[field].some(row => row.id === chosen.id && row.name === chosen.name)) invalid(true); return { defaultId: chosen.id, accepted: true, readback: true, snapshot: after }; }
       const saved = response.account;
       if (!object(saved) || saved._id !== accountId || saved.platform !== platform || saved.profileId !== undefined && String(saved.profileId?._id || saved.profileId) !== profileId || saved.isActive !== true || saved.platformUserId !== undefined && saved.platformUserId !== before.nativeAccountId || !after[field].some(row => row.id === chosen.id && row.name === chosen.name)) invalid(true);
       return { defaultId: chosen.id, accepted: true, readback: false, snapshot: after };

@@ -7,9 +7,11 @@ import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { createApp } from '../server/index.mjs';
 
+const linkedInReactionTypes = ['LIKE', 'PRAISE', 'EMPATHY', 'INTEREST', 'APPRECIATION', 'ENTERTAINMENT'];
+
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-inbox-')), originalFetch = globalThis.fetch, calls = [], env = { ZERNIO_API_KEY: 'inbox-fixture-key', ZERNIO_WEBHOOK_SECRET: 'inbox-fixture-signing-secret' };
-  const app = createApp({ dataDir, env, appUrl: 'https://campaign.example.test', directScheduler: false });
+  let app = createApp({ dataDir, env, appUrl: 'https://campaign.example.test', directScheduler: false });
   const accounts = [['fb', 'facebook'], ['ig', 'instagram'], ['yt', 'youtube'], ['gb', 'googlebusiness'], ['bs', 'bluesky'], ['ads', 'metaads'], ['tt', 'tiktok'], ['sl', 'slack'], ['rc', 'rcs'], ['sm', 'sms'], ['wa', 'whatsapp'], ['xx', 'twitter'], ['rd', 'reddit']].map(([_id, platform]) => ({ _id, platform, profileId: 'inbox-profile', username: `${platform}-account`, isActive: true }));
   const review = { id: 'review-1', accountId: 'gb', platform: 'googlebusiness', rating: 5, reviewer: { name: 'Alex' }, text: 'Good service', hasReply: false, reply: null }, comments = [{ id: 'comment-1', platform: 'facebook', message: 'Question', from: { id: 'participant-a', name: 'Alex', isOwner: false }, canReply: true, canHide: true, canLike: true, canDelete: true, isHidden: false, isLiked: false }];
   let base, cookie, projectId, hook, lastIncoming = Date.now(), sourceForeign = false, malformedHistory = false;
@@ -57,9 +59,9 @@ async function fixture() {
     const response = await fetch(base + path, { method, headers: { Origin: 'https://campaign.example.test', ...(cookie ? { Cookie: cookie } : {}), ...(method !== 'GET' ? { 'Content-Type': 'application/json', 'Idempotency-Key': key } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, data: response.headers.get('content-type')?.startsWith('application/json') ? await response.json() : Buffer.from(await response.arrayBuffer()), headers: response.headers, cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
-  const setup = await request('/api/auth/setup', 'POST', { name: 'Inbox owner', email: 'inbox-owner@example.test', password: 'inbox fixture passphrase long enough', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
+  const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Inbox owner', email: 'inbox-owner@example.test', password: 'inbox fixture passphrase long enough', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
   await request(`/api/projects/${projectId}`, 'PATCH', { zernioProfileId: 'inbox-profile' }); const path = `/api/projects/${projectId}/integrations/inbox`;
-  return { app, projectId, path, calls, comments, review, accounts, request, writes: () => calls.filter(call => call.options.method !== 'GET' && !call.url.pathname.includes('/tools/validate/')), setHook(value) { hook = value; }, setForeign(value) { sourceForeign = value; }, setMalformedHistory(value) { malformedHistory = value; }, setIncoming(value) { lastIncoming = value; }, async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
+  return { get app() { return app; }, projectId, path, calls, comments, review, accounts, request, writes: () => calls.filter(call => call.options.method !== 'GET' && !call.url.pathname.includes('/tools/validate/')), setHook(value) { hook = value; }, setForeign(value) { sourceForeign = value; }, setMalformedHistory(value) { malformedHistory = value; }, setIncoming(value) { lastIncoming = value; }, async reopen() { await app.close(); app = createApp({ dataDir, env, appUrl: 'https://campaign.example.test', directScheduler: false }); await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`; return app; }, async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
 }
 
 async function actionFixture(platform = 'telegram') {
@@ -100,6 +102,230 @@ async function actionFixture(platform = 'telegram') {
   const write = (message, verb, extra = {}, key = randomUUID()) => f.request(`${f.path}/conversations/thread-1/messages/${encodeURIComponent(message.id)}/${verb}`, 'POST', { accountId: account._id, expectedMessageVersion: message.version, ...extra }, key);
   return { ...f, state, account, thread, write };
 }
+
+async function commentReactionFixture() {
+  const f = await fixture();
+  f.accounts.push({ _id: 'li', platform: 'linkedin', profileId: 'inbox-profile', isActive: true });
+  f.comments[0].id = 'urn:li:comment:(urn:li:activity:42,7)';
+  const body = { accountId: 'li', postId: 'post-1', commentId: f.comments[0].id }, state = { response: null, before: null, alreadyReacted: false };
+  f.setHook(async (url, options) => {
+    const intercepted = await state.before?.(url, options); if (intercepted !== undefined) return intercepted;
+    if (!url.pathname.endsWith('/like')) return;
+    if (state.response) return state.response(url, options);
+    const liked = options.method === 'POST', payload = options.body ? JSON.parse(options.body) : {};
+    f.comments[0].isLiked = liked;
+    return Response.json({ status: 'success', platform: 'linkedin', commentId: body.commentId, liked, ...(liked ? { reactionType: payload.reactionType, alreadyReacted: state.alreadyReacted } : {}) });
+  });
+  return { ...f, body, state, react: (extra = {}, key = randomUUID(), kind = 'like') => f.request(f.path + '/comments/' + kind, 'POST', { ...body, ...extra }, key) };
+}
+
+async function commentEditFixture() {
+  const f = await fixture(), account = f.accounts.find(row => row._id === 'rd'); account.platformUserId = 'reddit-native';
+  f.comments[0] = { id: 't1_own', message: 'Original comment', from: { id: 'reddit-native', isOwner: true }, canLike: true };
+  const state = { before: null, receipt: null, unchanged: false, wrote: false, badReadback: false };
+  f.setHook(async (url, options) => {
+    const intercepted = await state.before?.(url, options); if (intercepted !== undefined) return intercepted;
+    if (options.method === 'GET' && url.pathname.endsWith('/inbox/comments/post-1') && state.wrote && state.badReadback) return Response.json({ comments: [{ ...f.comments[0], id: 'foreign', platform: 'reddit' }], pagination: { hasMore: false }, meta: { accountId: url.searchParams.get('accountId'), postId: 'post-1', platform: 'reddit' } });
+    if (!url.pathname.endsWith('/inbox/comments/post-1/t1_own') || options.method !== 'PATCH') return;
+    state.wrote = true; if (!state.unchanged) (f.comments[0].replies?.[0] || f.comments[0]).message = JSON.parse(options.body).content;
+    if (state.receipt) return state.receipt(url, options);
+    return Response.json({ status: 'success', commentId: 't1_own', platform: 'reddit' });
+  });
+  const thread = (accountId = 'rd') => f.request(f.path + '/comments/thread?accountId=' + accountId + '&postId=post-1');
+  const draft = async (accountId = 'rd') => { const result = await thread(accountId); assert.equal(result.status, 200); const row = result.data.comments[0].replies?.[0] || result.data.comments[0]; return { accountId, postId: 'post-1', commentId: row.id, content: 'Corrected comment', expectedCommentVersion: row.editVersion, confirmEdit: true }; };
+  return { ...f, state, account, thread, draft, edit: (body, key = randomUUID(), path = f.path) => f.request(path + '/comments/edit', 'POST', body, key) };
+}
+
+test('Reddit own comment edits PATCH the exact reviewed target and confirm same-ID nested readback', async () => {
+  const f = await commentEditFixture();
+  try {
+    f.comments[0] = { id: 'parent', message: 'Parent', replies: [f.comments[0]] };
+    const body = await f.draft(); assert.match(body.expectedCommentVersion || '', /^[a-f0-9]{64}$/);
+    const key = randomUUID(), result = await f.edit(body, key); assert.equal(result.status, 200, JSON.stringify(result.data));
+    assert.equal(result.data.edited, true); assert.equal(result.data.content, body.content); assert.equal(result.data.commentId, body.commentId); assert.notEqual(result.data.comment.editVersion, body.expectedCommentVersion);
+    assert.equal(f.writes().length, 1); assert.equal(f.writes()[0].options.method, 'PATCH'); assert.deepEqual(f.writes()[0].body, { accountId: 'rd', platform: 'reddit', content: body.content });
+    assert.equal((await f.edit(body, key)).status, 200); assert.equal(f.writes().length, 1);
+  } finally { await f.close(); }
+});
+
+test('Reddit comment edits reject stale reviews, nonowners, foreign scope, empty content and revoked permission', async () => {
+  const f = await commentEditFixture();
+  try {
+    const body = await f.draft();
+    for (const changes of [{ content: ' ' }, { content: '' }, { confirmEdit: false }, { expectedCommentVersion: 'stale' }, { accountId: 'fb' }, { extra: true }]) assert.ok((await f.edit({ ...body, ...changes })).status >= 400);
+    for (const owner of [false, undefined]) { f.comments[0].from.isOwner = owner; assert.equal((await f.edit(body)).status, 422); }
+    f.comments[0].from.isOwner = true; f.comments[0].message = 'Externally changed'; assert.equal((await f.edit(body)).status, 409); f.comments[0].message = 'Original comment';
+    f.account.platformUserId = 'another-native'; assert.equal((await f.edit(body)).status, 409); f.account.platformUserId = 'reddit-native';
+    f.setForeign(true); assert.equal((await f.edit(body)).status, 502); f.setForeign(false);
+    f.state.before = (url, options) => { if (url.pathname.endsWith('/inbox/comments/post-1') && options.method === 'GET') f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); };
+    assert.ok((await f.edit(body)).status >= 400); assert.equal(f.writes().length, 0);
+  } finally { await f.close(); }
+});
+
+test('unknown Reddit edits retain durable receipts and fence reactions and edits across aliases and reopen', async () => {
+  for (const outcome of ['wrong-receipt', 'lost', 'unchanged', 'wrong-readback']) {
+    const f = await commentEditFixture();
+    try {
+      f.accounts.push({ ...f.account, _id: 'reddit-alias' });
+      const body = await f.draft();
+      if (outcome === 'wrong-receipt') f.state.receipt = () => Response.json({ status: 'success', commentId: 'foreign', platform: 'reddit' });
+      if (outcome === 'lost') f.state.receipt = () => { throw new TypeError('Lost receipt'); };
+      f.state.unchanged = outcome === 'unchanged'; f.state.badReadback = outcome === 'wrong-readback';
+      const result = await f.edit(body); assert.equal(result.status, 409, outcome); assert.equal(result.data.operation.status, 'uncertain');
+      await f.reopen(); f.state.badReadback = false;
+      const alias = await f.draft('reddit-alias'); assert.equal((await f.edit(alias)).status, 409);
+      for (const action of ['like', 'unlike']) assert.equal((await f.request(f.path + '/comments/' + action, 'POST', { accountId: 'reddit-alias', postId: body.postId, commentId: body.commentId })).status, 409);
+      assert.equal(f.writes().length, 1);
+    } finally { await f.close(); }
+  }
+});
+
+test('the final awaited Reddit edit preflight cannot race a native alias reaction', async () => {
+  const f = await commentEditFixture(); let reads = 0, release, reached;
+  const hold = new Promise(resolve => { release = resolve; }), ready = new Promise(resolve => { reached = resolve; });
+  try {
+    const body = await f.draft(); f.accounts.push({ ...f.account, _id: 'reddit-alias' });
+    f.state.before = async (url, options) => {
+      if (url.pathname.endsWith('/accounts') && ++reads === 2) { reached(); await hold; }
+    };
+    f.state.receipt = () => { throw new TypeError('Lost native edit acknowledgment'); };
+    const pendingEdit = f.edit(body); await ready;
+    const reaction = await f.request(f.path + '/comments/like', 'POST', { accountId: 'reddit-alias', postId: body.postId, commentId: body.commentId }); assert.equal(reaction.status, 409); assert.equal(reaction.data.error.code, 'COMMENT_REACTION_UNCERTAIN'); assert.equal(f.writes().length, 0);
+    release(); assert.equal((await pendingEdit).status, 409); assert.equal(f.writes().length, 1); assert.equal(f.writes()[0].options.method, 'PATCH');
+  } finally { release?.(); await f.close(); }
+});
+
+test('uncertain Reddit reactions fence comment edits after native-account project handoff', async () => {
+  const f = await commentEditFixture();
+  try {
+    const body = await f.draft(); f.accounts.push({ ...f.account, _id: 'reddit-alias' });
+    f.state.before = (url, options) => { if (url.pathname.endsWith('/like')) throw new TypeError('Lost reaction acknowledgment'); };
+    const reaction = await f.request(f.path + '/comments/like', 'POST', { accountId: 'rd', postId: body.postId, commentId: body.commentId }); assert.equal(reaction.data.operation.status, 'uncertain');
+    const reopened = await f.reopen(), workspaceId = reopened.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(f.projectId).workspace_id;
+    const created = await f.request('/api/projects', 'POST', { name: 'Reddit handoff', workspaceId }); assert.equal(created.status, 201);
+    const nextId = created.data.project.id; await f.request('/api/projects/' + f.projectId, 'PATCH', { zernioProfileId: '' }); await f.request('/api/projects/' + nextId, 'PATCH', { zernioProfileId: 'inbox-profile' });
+    const nextPath = '/api/projects/' + nextId + '/integrations/inbox', thread = await f.request(nextPath + '/comments/thread?accountId=reddit-alias&postId=post-1'); assert.equal(thread.status, 200);
+    const edit = await f.edit({ ...body, accountId: 'reddit-alias', expectedCommentVersion: thread.data.comments[0].editVersion }, randomUUID(), nextPath); assert.equal(edit.status, 409); assert.equal(edit.data.error.code, 'COMMENT_REACTION_UNCERTAIN'); assert.equal(f.writes().length, 1);
+  } finally { await f.close(); }
+});
+
+test('LinkedIn comment reactions forward all six explicit types and validate already-reacted receipts without inventing GET types', async () => {
+  const f = await commentReactionFixture();
+  try {
+    for (const alreadyReacted of [false, true]) for (const reactionType of linkedInReactionTypes) {
+      f.state.alreadyReacted = alreadyReacted;
+      const key = randomUUID(), result = await f.react({ reactionType }, key);
+      assert.equal(result.status, 200, JSON.stringify(result.data));
+      assert.equal(result.data.reactionType, reactionType); assert.equal(result.data.alreadyReacted, alreadyReacted);
+      assert.equal(result.data.accountId, 'li'); assert.equal(result.data.postId, 'post-1'); assert.equal(result.data.platform, 'linkedin'); assert.equal(result.data.commentId, f.body.commentId);
+      assert.deepEqual(f.writes().at(-1).body, { accountId: 'li', reactionType }); assert.ok(f.writes().at(-1).url.pathname.endsWith('/' + encodeURIComponent(f.body.commentId) + '/like'));
+      const count = f.writes().length; assert.deepEqual((await f.react({ reactionType }, key)).data, result.data); assert.equal(f.writes().length, count);
+    }
+    const defaultLike = await f.react(); assert.equal(defaultLike.status, 200); assert.equal(defaultLike.data.reactionType, 'LIKE');
+    const thread = await f.request(f.path + '/comments/thread?accountId=li&postId=post-1'); assert.equal(thread.data.comments[0].isLiked, true); assert.equal(Object.hasOwn(thread.data.comments[0], 'reactionType'), false);
+    const removed = await f.react({}, randomUUID(), 'unlike'); assert.equal(removed.status, 200); assert.equal(removed.data.liked, false); assert.equal(Object.hasOwn(removed.data, 'reactionType'), false);
+    const deletion = f.writes().at(-1); assert.equal(deletion.options.method, 'DELETE'); assert.equal(deletion.url.searchParams.get('accountId'), 'li'); assert.equal(deletion.body, undefined);
+  } finally { await f.close(); }
+});
+
+test('comment reaction types are rejected outside LinkedIn likes and Bluesky retains its native references', async () => {
+  const f = await fixture();
+  f.accounts.push({ _id: 'li', platform: 'linkedin', profileId: 'inbox-profile', isActive: true });
+  const body = { accountId: 'li', postId: 'post-1', commentId: 'comment-1' };
+  try {
+    for (const reactionType of ['like', 'UNKNOWN', '', null, 3, {}, ['LIKE']]) assert.equal((await f.request(f.path + '/comments/like', 'POST', { ...body, reactionType })).status, 400);
+    for (const accountId of ['fb', 'bs', 'rd', 'xx', 'ig']) assert.equal((await f.request(f.path + '/comments/like', 'POST', { ...body, accountId, reactionType: 'LIKE' })).status, 400);
+    assert.equal((await f.request(f.path + '/comments/unlike', 'POST', { ...body, reactionType: 'LIKE' })).status, 400); assert.equal(f.writes().length, 0);
+    const blue = { ...body, accountId: 'bs' }; assert.equal((await f.request(f.path + '/comments/like', 'POST', blue)).data.error.code, 'COMMENT_REFERENCE_REQUIRED');
+    f.comments[0].cid = 'comment-cid'; f.comments[0].likeUri = 'at://did:plc:account/app.bsky.feed.like/like-1';
+    for (const kind of ['like', 'unlike']) { assert.equal((await f.request(f.path + '/comments/' + kind, 'POST', blue)).status, 200); const call = f.writes().at(-1); if (kind === 'like') assert.equal(call.body.cid, 'comment-cid'); else assert.equal(call.url.searchParams.get('likeUri'), f.comments[0].likeUri); }
+  } finally { await f.close(); }
+});
+
+test('LinkedIn 403 and 409 rejections never remove or replace an existing reaction', async () => {
+  const f = await commentReactionFixture(); let providerStatus = 403;
+  f.state.response = () => Response.json({ code: providerStatus === 403 ? 'linkedin_reconnect_required' : 'invalid_resource_state', secret: 'PRIVATE_PROVIDER_BODY' }, { status: providerStatus });
+  try {
+    for (const status of [403, 409]) {
+      providerStatus = status; const key = randomUUID(), before = f.writes().length, result = await f.react({ reactionType: 'PRAISE' }, key);
+      assert.equal(result.status, status); assert.equal(result.data.operation.status, 'failed'); assert.equal(result.data.error.code, status === 403 ? 'LINKEDIN_REACTION_PERMISSION_REQUIRED' : 'LINKEDIN_REACTION_CONFLICT');
+      assert.equal(JSON.stringify(result.data).includes('PRIVATE_PROVIDER_BODY'), false);
+      assert.equal(f.writes().length, before + 1); assert.equal(f.writes().at(-1).options.method, 'POST');
+      await f.react({ reactionType: 'PRAISE' }, key); assert.equal(f.writes().length, before + 1);
+    }
+    f.state.response = null; assert.equal((await f.react({}, randomUUID(), 'unlike')).status, 200, 'Removal requires a separate explicit request.');
+  } finally { await f.close(); }
+});
+
+test('malformed and lost LinkedIn reaction acknowledgments remain durable and block retries and replacement reactions', async () => {
+  for (const mutation of [{ commentId: 'foreign' }, { platform: 'facebook' }, { accountId: 'foreign' }, { postId: 'foreign' }, { liked: false }, { reactionType: 'LIKE' }, { reactionType: undefined }, { alreadyReacted: 'yes' }, 'unreadable', 'lost']) {
+    const f = await commentReactionFixture();
+    f.state.response = () => { if (mutation === 'lost') throw new TypeError('Lost acknowledgment'); if (mutation === 'unreadable') return new Response('{', { status: 200 }); return Response.json({ status: 'success', platform: 'linkedin', commentId: f.body.commentId, liked: true, reactionType: 'PRAISE', ...mutation }); };
+    try {
+      const key = randomUUID(), result = await f.react({ reactionType: 'PRAISE' }, key); assert.equal(result.status, 409, JSON.stringify(mutation)); assert.equal(result.data.operation.status, 'uncertain');
+      assert.equal(f.app.db.prepare('SELECT status FROM integration_operations WHERE id=?').get(result.data.operation.id).status, 'uncertain');
+      for (const [extra, retryKey, kind] of [[{ reactionType: 'PRAISE' }, key, 'like'], [{ reactionType: 'EMPATHY' }, randomUUID(), 'like'], [{}, randomUUID(), 'unlike']]) assert.equal((await f.react(extra, retryKey, kind)).status, 409);
+      assert.equal(f.writes().length, 1, 'An unknown outcome cannot dispatch a second reaction or removal.');
+    } finally { await f.close(); }
+  }
+});
+
+test('LinkedIn reaction boundaries recheck role, account, post and comment identities before dispatch', async () => {
+  for (const mode of ['viewer', 'inactive', 'remapped-account', 'foreign-post', 'missing-comment']) {
+    const f = await commentReactionFixture();
+    f.state.before = (url, options) => {
+      if (options.method !== 'GET') return;
+      if (url.pathname.endsWith('/inbox/comments') && mode === 'foreign-post') return Response.json({ data: [{ id: 'post-1', accountId: 'fb', platform: 'facebook' }], pagination: { hasMore: false, nextCursor: null } });
+      if (!url.pathname.endsWith('/inbox/comments/post-1')) return;
+      if (mode === 'viewer') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+      if (mode === 'inactive') f.accounts.find(row => row._id === 'li').isActive = false;
+      if (mode === 'remapped-account') f.accounts.find(row => row._id === 'li').profileId = 'another-profile';
+      if (mode === 'missing-comment') return Response.json({ comments: [], meta: { accountId: 'li', platform: 'linkedin', postId: 'post-1' }, pagination: { hasMore: false, nextCursor: null } });
+    };
+    try { const result = await f.react({ reactionType: 'PRAISE' }); assert.ok([403, 409, 502].includes(result.status), mode + ': ' + JSON.stringify(result.data)); assert.equal(f.writes().length, 0); }
+    finally { await f.close(); }
+  }
+});
+
+test('native comment uncertainty survives SQLite reopen, project mapping handoff and account aliases until an explicit review', async () => {
+  for (const legacy of [false, true]) {
+    const f = await commentReactionFixture();
+    f.accounts.find(row => row._id === 'li').platformUserId = 'native-linkedin-42';
+    f.accounts.push({ _id: 'li-alias', platform: 'linkedin', platformUserId: 'native-linkedin-42', profileId: 'inbox-profile', isActive: true });
+    f.state.response = () => { throw new TypeError('Provider applied the reaction but its acknowledgment was lost'); };
+    try {
+      const original = await f.react({ reactionType: 'PRAISE' }); assert.equal(original.data.operation.status, 'uncertain'); assert.equal(f.writes().length, 1);
+      if (legacy) f.app.db.exec('DELETE FROM inbox_comment_reactions');
+      const reopened = await f.reopen(), workspaceId = reopened.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(f.projectId).workspace_id;
+      assert.equal(reopened.db.prepare('SELECT status FROM integration_operations WHERE id=?').get(original.data.operation.id).status, 'uncertain');
+      const created = await f.request('/api/projects', 'POST', { name: 'Reaction mapping handoff', workspaceId }); assert.equal(created.status, 201, JSON.stringify(created.data));
+      const secondId = created.data.project.id, route = `/api/projects/${secondId}/integrations/inbox/comments/`;
+      assert.equal((await f.request(`/api/projects/${f.projectId}`, 'PATCH', { zernioProfileId: '' })).status, 200);
+      assert.equal((await f.request(`/api/projects/${secondId}`, 'PATCH', { zernioProfileId: 'inbox-profile' })).status, 200);
+      const aliasBody = { ...f.body, accountId: 'li-alias' };
+      for (const [kind, extra] of [['like', { reactionType: 'PRAISE' }], ['like', { reactionType: 'EMPATHY' }], ['unlike', {}]]) { const blocked = await f.request(route + kind, 'POST', { ...aliasBody, ...extra }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'COMMENT_REACTION_UNCERTAIN'); }
+      assert.equal(f.writes().length, 1);
+      const reviewed = await f.request(`/api/projects/${f.projectId}/operations/${original.data.operation.id}/review`, 'POST', { resolution: 'applied', confirmChecked: true, note: 'Checked LinkedIn and confirmed the original reaction is present.' }); assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+      assert.equal((await f.request(route + 'like', 'POST', { ...aliasBody, reactionType: 'PRAISE' })).status, 409); assert.equal(f.writes().length, 1);
+      f.state.response = null; assert.equal((await f.request(route + 'unlike', 'POST', aliasBody)).status, 200, 'A reconciled applied reaction permits a new explicit removal.'); assert.equal(f.writes().length, 2); assert.equal(f.writes().at(-1).options.method, 'DELETE');
+    } finally { await f.close(); }
+  }
+});
+
+test('the final awaited account preflight cannot race a concurrent native-comment dispatch', async () => {
+  const f = await commentReactionFixture();
+  f.accounts.find(row => row._id === 'li').platformUserId = 'native-linkedin-42';
+  f.accounts.push({ _id: 'li-alias', platform: 'linkedin', platformUserId: 'native-linkedin-42', profileId: 'inbox-profile', isActive: true });
+  let accountReads = 0, releasePreflight, reachedPreflight;
+  const held = new Promise(resolve => { releasePreflight = resolve; }), reached = new Promise(resolve => { reachedPreflight = resolve; });
+  f.state.before = async url => { if (url.pathname.endsWith('/accounts') && ++accountReads === 2) { reachedPreflight(); await held; } };
+  f.state.response = () => { throw new TypeError('Lost concurrent acknowledgment'); };
+  try {
+    const first = f.react({ reactionType: 'PRAISE' }); await reached;
+    const second = await f.react({ accountId: 'li-alias', reactionType: 'EMPATHY' }); assert.equal(second.data.error.code, 'COMMENT_REACTION_UNCERTAIN'); assert.equal(f.writes().length, 0); releasePreflight();
+    const resumed = await first; assert.equal(resumed.status, 409); assert.equal(resumed.data.operation.status, 'uncertain'); assert.equal(f.writes().length, 1);
+  } finally { releasePreflight(); await f.close(); }
+});
 
 async function privateReplyFixture(accountId = 'fb') {
   const f = await fixture(), state = { before: null, response: null, onSend: null };
@@ -290,6 +516,7 @@ test('Meta combined replies validate independent message IDs and partial text fa
     ].entries()) {
       receipt = bad; const malformedBody = { ...body, message: `Malformed receipt ${index}` }, malformedKey = randomUUID(), before = f.writes().length, result = await f.request(route, 'POST', malformedBody, malformedKey);
       assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.operation.status, 'uncertain'); assert.equal((await f.request(route, 'POST', malformedBody, malformedKey)).status, 409); assert.equal((await f.request(route, 'POST', malformedBody)).status, 409); assert.equal(f.writes().length, before + 1);
+      f.app.db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?").run(result.data.operation.id);
     }
   } finally { await f.close(); }
 });
@@ -494,7 +721,7 @@ test('inbox message actions share a conversation lock and viewers cannot dispatc
   try {
     const own = (await f.thread()).data.messages[0]; f.state.hold = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; }); f.state.onWrite = entered;
     const pending = f.write(own, 'edit', { text: 'Held edit' }); await started;
-    const simultaneous = await f.write(own, 'delete', { confirmMessageId: own.id }); assert.equal(simultaneous.status, 409); assert.equal(simultaneous.data.error.code, 'PROVIDER_RESOURCE_BUSY'); assert.equal(f.writes().some(call => call.options.method === 'DELETE'), false);
+    const simultaneous = await f.write(own, 'delete', { confirmMessageId: own.id }); assert.equal(simultaneous.status, 409); assert.equal(simultaneous.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(simultaneous.data.operation.status, 'failed'); assert.equal(f.writes().some(call => call.options.method === 'DELETE'), false);
     release(); f.state.hold = null; assert.equal((await pending).status, 200);
     const fresh = (await f.thread()).data.messages[0]; f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const writes = f.writes().length;
     assert.equal((await f.write(fresh, 'delete', { confirmMessageId: fresh.id })).status, 403); assert.equal(f.writes().length, writes);
@@ -603,6 +830,30 @@ test('inbox reads are scoped, side-effect-free and create identity-only contacts
   } finally { await f.close(); }
 });
 
+test('WhatsApp selected-button history projects only scoped incoming selection facts and rejects malformed metadata', async () => {
+  const f = await fixture(), route = accountId => `${f.path}/conversations/thread-1/messages?accountId=${accountId}`;
+  let rows = [{ id: 'button-response', message: '', metadata: { interactiveType: 'button_reply', interactiveId: 'reply_2', access_token: 'never-return-selection-secret', waInteractive: { buttons: ['untrusted'] } } }];
+  f.setHook((url, options) => options.method === 'GET' && url.pathname.endsWith('/messages') ? Response.json({ messages: rows.map(row => ({ accountId: url.searchParams.get('accountId'), platform: f.accounts.find(account => account._id === url.searchParams.get('accountId'))?.platform, conversationId: 'thread-1', direction: 'incoming', senderId: 'participant-a', createdAt: new Date().toISOString(), ...row })), pagination: { hasMore: false, nextCursor: null }, sortOrderApplied: 'desc' }) : undefined);
+  try {
+    f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+    const selected = await f.request(route('wa')); assert.equal(selected.status, 200, JSON.stringify(selected.data)); assert.equal(selected.data.messages[0].message, ''); assert.deepEqual(selected.data.messages[0].metadata, { interactiveType: 'button_reply', interactiveId: 'reply_2' }); assert.equal(JSON.stringify(selected.data).includes('never-return-selection-secret'), false);
+    rows = [{ id: 'labelled', message: '<b>Yes & please</b>', metadata: { interactiveType: 'button_reply', interactiveId: '<script>reply_1</script>' } }, { id: 'deleted', message: 'Deleted label', isDeleted: true, metadata: { interactiveType: 'button_reply', interactiveId: 'reply_3' } }];
+    const labelled = await f.request(route('wa')); assert.equal(labelled.status, 200); assert.equal(labelled.data.messages[0].message, rows[0].message); assert.equal(labelled.data.messages[0].metadata.interactiveId, rows[0].metadata.interactiveId); assert.equal(labelled.data.messages[1].isDeleted, true);
+    for (const row of [{ metadata: null }, { metadata: { interactiveType: 'list_reply', interactiveId: 'list-row', arbitrary: 'hidden' } }, { direction: 'outgoing', metadata: { interactiveType: 'button_reply', interactiveId: { ignored: true } } }]) {
+      rows = [{ id: 'not-a-button-response', message: 'Ordinary text', ...row }]; const result = await f.request(route('wa')); assert.equal(result.status, 200); assert.equal(result.data.messages[0].metadata, undefined);
+    }
+    rows = [{ id: 'other-platform', message: 'Unchanged text', metadata: { interactiveType: 'button_reply', interactiveId: { ignored: true } } }];
+    const other = await f.request(route('bs')); assert.equal(other.status, 200); assert.equal(other.data.messages[0].message, 'Unchanged text'); assert.equal(other.data.messages[0].metadata, undefined);
+    for (const metadata of [[], 'invalid', { interactiveType: 3 }, ...[undefined, null, '', ' ', {}, 'x'.repeat(2001), 'bad\u0000id'].map(interactiveId => ({ interactiveType: 'button_reply', interactiveId }))]) {
+      rows = [{ id: 'bad-button-response', message: '', metadata }]; const result = await f.request(route('wa')); assert.equal(result.status, 502, JSON.stringify(metadata)); assert.equal(result.data.error.code, 'INVALID_PROVIDER_RESPONSE'); assert.equal(result.data.messages, undefined);
+    }
+    rows = [{ id: 'foreign-response', accountId: 'foreign', message: '', metadata: { interactiveType: 'button_reply', interactiveId: 'foreign-secret-id' } }];
+    const foreign = await f.request(route('wa')); assert.equal(foreign.status, 502); assert.equal(JSON.stringify(foreign.data).includes('foreign-secret-id'), false); assert.equal(f.writes().length, 0);
+    f.app.db.prepare("UPDATE memberships SET role='owner'").run(); rows = [{ id: 'bad-button-response', message: '', metadata: { interactiveType: 'button_reply', interactiveId: {} } }];
+    const reply = await f.request(f.path + '/conversations/thread-1/reply', 'POST', { accountId: 'wa', message: 'Do not send against malformed history' }); assert.equal(reply.status, 502); assert.equal(reply.data.operation.status, 'failed'); assert.equal(f.writes().length, 0);
+  } finally { await f.close(); }
+});
+
 test('inbox replies, read and archive use durable receipts, platform windows, limits and uncertain retry protection', async () => {
   const f = await fixture();
   try {
@@ -645,6 +896,82 @@ test('comments scope posts and individual permissions, route Meta ad moderation 
     assert.equal((await f.request(f.path + '/comments/unhide', 'POST', { ...instagram, commentId: 'arbitrary-hidden-comment' })).status, 403);
     f.setHook((url, options) => url.pathname.endsWith('/hide') && options.method === 'POST' ? Response.json({ status: 'success', commentId: 'wrong-comment', hidden: true, platform: 'facebook' }) : undefined);
     const result = await f.request(f.path + '/comments/hide', 'POST', payload); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
+  } finally { await f.close(); }
+});
+
+test('LinkedIn mentions force the project and active account, validate each page and remain read only', async () => {
+  const f = await fixture(), endpoint = f.path + '/mentions', cursor = 'opaque +/first', next = 'opaque +/next';
+  f.accounts.push({ _id: 'li', platform: 'linkedin', profileId: 'inbox-profile', isActive: true }, { _id: 'li-other', platform: 'linkedin', profileId: 'inbox-profile', isActive: true }, { _id: 'li-inactive', platform: 'linkedin', profileId: 'inbox-profile', isActive: false });
+  const mention = { id: 'mention-document-1', accountId: 'li', platform: 'linkedin', organizationalEntity: 'urn:li:organization:42', content: 'Team report', permalink: null, authorName: null, authorUsername: null, authorPicture: null, authorUrn: null, publishedAt: '2026-10-18T12:00:00Z', createdAt: '2026-10-18T12:01:00Z', apiKey: 'never-return-this' };
+  const good = { data: [mention], pagination: { hasMore: true, cursor: next }, meta: { total: 2, sortOrder: 'asc' } };
+  let response = good;
+  const reads = () => f.calls.filter(call => call.url.pathname.endsWith('/inbox/mentions'));
+  f.setHook(url => url.pathname.endsWith('/inbox/mentions') ? Response.json(response) : undefined);
+  try {
+    const params = new URLSearchParams({ accountId: 'li', profileId: 'foreign-profile', limit: '2', sortOrder: 'asc', cursor });
+    const first = await f.request(endpoint + '?' + params); assert.equal(first.status, 200); assert.equal(first.data.mentions[0].id, mention.id); assert.equal(first.data.mentions[0].authorName, null); assert.equal(JSON.stringify(first.data).includes('never-return-this'), false);
+    assert.deepEqual(Object.fromEntries(reads().at(-1).url.searchParams), { profileId: 'inbox-profile', accountId: 'li', limit: '2', sortOrder: 'asc', cursor });
+    assert.deepEqual(first.data.pagination, { hasMore: true, nextCursor: next }); assert.deepEqual(first.data.meta, good.meta);
+    response = { data: [], pagination: { hasMore: false, cursor: null } };
+    assert.equal((await f.request(endpoint + '?' + new URLSearchParams({ accountId: 'li', cursor: next }))).status, 200); assert.equal(reads().at(-1).url.searchParams.get('cursor'), next);
+    const before = reads().length;
+    for (const query of ['accountId=foreign', 'accountId=fb', 'accountId=li-inactive']) assert.ok([403, 422].includes((await f.request(endpoint + '?' + query)).status), query);
+    for (const query of ['limit=0', 'limit=101', 'limit=1.5', 'sortOrder=newest', 'cursor=%0A']) assert.equal((await f.request(endpoint + '?accountId=li&' + query)).status, 400, query);
+    assert.equal((await f.request(endpoint, 'POST', { accountId: 'li' })).status, 405); assert.equal((await f.request(endpoint + '/reply', 'POST', { accountId: 'li' })).status, 404); assert.equal(reads().length, before);
+    const badRows = [{ ...mention, id: '' }, { ...mention, accountId: 'li-other' }, { ...mention, platform: 'facebook' }, { ...mention, authorName: {} }, { ...mention, permalink: {} }, { ...mention, organizationalEntity: null }, { ...mention, publishedAt: 'not-a-date' }];
+    const badPages = [
+      ...badRows.map(row => ({ ...good, data: [row] })),
+      { ...good, data: [mention, mention] }, { ...good, data: [mention, { ...mention, id: 'second' }, { ...mention, id: 'third' }] }, { ...good, data: [] },
+      { ...good, pagination: { hasMore: true } }, { ...good, pagination: { hasMore: true, cursor } }, { ...good, pagination: { hasMore: true, cursor: '\n' } },
+      { ...good, pagination: { hasMore: true, cursor: null, nextCursor: next } }, { ...good, pagination: { hasMore: true, cursor, nextCursor: next } },
+      { ...good, meta: { total: 1.5 } }, { ...good, meta: { sortOrder: 'desc' } },
+    ];
+    for (response of badPages) assert.equal((await f.request(endpoint + '?' + params)).status, 502, JSON.stringify(response));
+    response = { data: [], pagination: { hasMore: false, cursor: null } };
+    f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+    assert.deepEqual((await f.request(endpoint + '?accountId=li')).data.mentions, [], 'Viewers can read an empty feed without an organization-type guess.');
+    const status = await f.request(f.path + '/status'); assert.equal(status.data.accounts.find(row => row.id === 'li').capabilities.mentions, true); assert.equal(status.data.accounts.find(row => row.id === 'li-inactive').capabilities.mentions, false);
+    assert.equal(f.writes().length, 0); assert.equal(f.app.direct.contacts.list(f.projectId).length, 0); assert.equal(f.app.db.prepare("SELECT count(*) AS total FROM sqlite_master WHERE name='integration_operations'").get().total, 0);
+  } finally { await f.close(); }
+});
+
+test('mention access failures stay distinct from empty results and revoked project access returns no content', async () => {
+  const f = await fixture(), endpoint = f.path + '/mentions?accountId=li';
+  f.accounts.push({ _id: 'li', platform: 'linkedin', profileId: 'inbox-profile', isActive: true });
+  let status = 403;
+  f.setHook(url => url.pathname.endsWith('/inbox/mentions') ? Response.json({ error: 'PRIVATE_PROVIDER_DETAILS' }, { status }) : undefined);
+  try {
+    const denied = await f.request(endpoint); assert.equal(denied.status, 403); assert.equal(denied.data.error.code, 'MENTIONS_ACCESS_REQUIRED'); assert.match(denied.data.error.message, /Inbox add-on.*access/); assert.equal(JSON.stringify(denied.data).includes('PRIVATE_PROVIDER_DETAILS'), false); assert.equal(denied.data.mentions, undefined);
+    for (status of [401, 429, 503]) { const failed = await f.request(endpoint); assert.ok(failed.status >= 400); assert.equal(failed.data.mentions, undefined); }
+    f.setHook(url => { if (url.pathname.endsWith('/inbox/mentions')) { f.app.db.prepare('DELETE FROM memberships').run(); return Response.json({ data: [{ id: 'private-mention', accountId: 'li', platform: 'linkedin', organizationalEntity: 'urn:li:organization:42', content: 'PRIVATE_MENTION_TEXT' }], pagination: { hasMore: false, cursor: null } }); } });
+    const revoked = await f.request(endpoint); assert.equal(revoked.status, 404); assert.equal(JSON.stringify(revoked.data).includes('PRIVATE_MENTION_TEXT'), false); assert.equal(f.writes().length, 0);
+  } finally { await f.close(); }
+});
+
+test('review filters forward exact scoped values and reject invalid ratings, reply states and sorts before provider retrieval', async () => {
+  const f = await fixture(), endpoint = f.path + '/reviews', reviewCalls = () => f.calls.filter(call => call.url.pathname.endsWith('/inbox/reviews'));
+  try {
+    const filters = { minRating: '1', maxRating: '5', hasReply: 'false', sortBy: 'rating', sortOrder: 'asc', limit: '50', cursor: 'opaque +/cursor' };
+    const result = await f.request(endpoint + '?' + new URLSearchParams({ accountId: 'gb', ...filters })); assert.equal(result.status, 200); assert.equal(result.data.reviews[0].id, 'review-1');
+    assert.deepEqual(Object.fromEntries(reviewCalls().at(-1).url.searchParams), { profileId: 'inbox-profile', accountId: 'gb', ...filters });
+    assert.match(result.data.reviews[0].replyVersion, /^[a-f0-9]{64}$/);
+    for (const query of ['', '&minRating=&maxRating=&hasReply=&sortBy=&sortOrder=']) {
+      assert.equal((await f.request(endpoint + '?accountId=fb' + query)).status, 200);
+      assert.deepEqual(Object.fromEntries(reviewCalls().at(-1).url.searchParams), { profileId: 'inbox-profile', accountId: 'fb', limit: '25' }, 'Unset review filters use the provider defaults.');
+    }
+    assert.equal((await f.request(endpoint + '?accountId=gb&hasReply=true&sortBy=date&sortOrder=desc&minRating=5&maxRating=5')).status, 200);
+    assert.equal(reviewCalls().at(-1).url.searchParams.get('hasReply'), 'true');
+    const before = reviewCalls().length;
+    for (const invalid of ['minRating=0', 'maxRating=6', 'minRating=2.5', 'minRating=01', 'minRating=1e0', 'maxRating=-1', 'minRating=4&maxRating=3', 'hasReply=0', 'hasReply=False', 'hasReply=yes', 'sortBy=comments', 'sortOrder=newest', 'limit=51']) {
+      const response = await f.request(endpoint + '?accountId=gb&' + invalid); assert.equal(response.status, 400, invalid); assert.equal(response.data.error.code, 'INVALID_INBOX_FILTER');
+    }
+    assert.equal(reviewCalls().length, before, 'Invalid filters never reach the review endpoint.');
+    assert.equal((await f.request(endpoint + '?accountId=foreign&hasReply=false')).status, 403);
+    assert.equal((await f.request(endpoint + '?accountId=ig&hasReply=false')).status, 422);
+    assert.equal(reviewCalls().length, before);
+    f.setHook(url => url.pathname.endsWith('/inbox/reviews') ? Response.json({ data: [{ ...f.review, accountId: 'fb', platform: 'facebook' }], pagination: { hasMore: false, nextCursor: null } }) : undefined);
+    const foreign = await f.request(endpoint + '?accountId=gb&hasReply=false'); assert.equal(foreign.status, 502); assert.equal(foreign.data.error.code, 'INVALID_PROVIDER_SCOPE');
+    assert.equal(f.writes().length, 0);
   } finally { await f.close(); }
 });
 
@@ -814,5 +1141,58 @@ test('reply-window checks find recent customer messages after paged outgoing his
     mode = 'limit'; const reads = f.calls.length, incomplete = await f.request(route, 'POST', { accountId: 'wa', message: 'Do not send after incomplete history' });
     assert.equal(incomplete.status, 503); assert.equal(incomplete.data.error.code, 'INCOMPLETE_PROVIDER_DATA'); assert.equal(f.writes().length, before);
     assert.equal(f.calls.slice(reads).filter(call => call.options.method === 'GET' && call.url.pathname.endsWith('/messages')).length, 20);
+  } finally { await f.close(); }
+});
+
+
+test('WhatsApp reply buttons send only the exact text-only generated-ID subset and require an existing operation for checks', async () => {
+  const f = await fixture(), route = f.path + '/conversations/thread-1/reply', buttons = [{ type: 'postback', title: 'Yes', payload: 'reply_1' }, { type: 'postback', title: 'No', payload: 'reply_2' }], body = { accountId: 'wa', message: 'Choose one', buttons }, key = randomUUID();
+  try {
+    const state = await f.request(f.path + '/status'); assert.equal(state.data.accounts.find(row => row.id === 'wa').capabilities.replyButtons, true); assert.equal(state.data.accounts.find(row => row.id === 'ig').capabilities.replyButtons, false);
+    const absent = await f.request(route + '?check=1', 'POST', body, key); assert.equal(absent.data.error.code, 'OPERATION_OUTCOME_UNAVAILABLE'); assert.equal(f.writes().length, 0);
+    for (const extra of [{ buttons: [] }, { buttons: [...buttons, ...buttons] }, { buttons: [{ ...buttons[0], title: '' }] }, { buttons: [{ ...buttons[0], title: ' Yes' }] }, { buttons: [{ ...buttons[0], title: 'Yes\nNo' }] }, { buttons: [{ ...buttons[0], title: 'x'.repeat(21) }] }, { buttons: [{ ...buttons[0], type: 'url' }] }, { buttons: [{ ...buttons[0], payload: 'arbitrary-id' }] }, { buttons: buttons.map(row => ({ ...row, title: 'Same' })) }, { buttons: [{ ...buttons[0], url: 'https://example.test' }] }, { message: '🙂'.repeat(257) }, { message: '' }, { attachmentUrl: 'https://example.test/image.jpg', attachmentType: 'image' }, { templateName: 'service_update' }, { messageTag: 'HUMAN_AGENT' }, { replyTo: 'previous-message' }, { accountId: 'ig' }]) {
+      const denied = await f.request(route, 'POST', { ...body, ...extra }); assert.ok(denied.status >= 400, JSON.stringify(extra)); assert.equal(f.writes().length, 0);
+    }
+    const accepted = await f.request(route, 'POST', body, key); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.equal(accepted.data.sent, true); assert.deepEqual(f.writes()[0].body, body); assert.equal(f.writes()[0].options.headers['Idempotency-Key'], key);
+    assert.equal((await f.request(route + '?check=1', 'POST', body, key)).status, 200); assert.equal(f.writes().length, 1);
+    assert.equal((await f.request(route + '?check=1', 'POST', { ...body, message: 'Different' }, key)).data.error.code, 'IDEMPOTENCY_CONFLICT'); assert.equal(f.writes().length, 1);
+    assert.equal((await f.request(route + '?check=1', 'POST', body, randomUUID())).data.error.code, 'OPERATION_OUTCOME_UNAVAILABLE'); assert.equal(f.writes().length, 1);
+    assert.equal((await f.request(route, 'POST', { ...body, message: '🙂'.repeat(256) })).status, 200); assert.equal(f.writes().length, 2);
+    f.setIncoming(Date.now() - 25 * 3600000); assert.equal((await f.request(route, 'POST', body)).data.error.code, 'MESSAGING_WINDOW_CLOSED'); assert.equal(f.writes().length, 2);
+    f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const before = f.calls.length; assert.equal((await f.request(route, 'POST', body)).status, 403); assert.equal(f.calls.length, before);
+  } finally { await f.close(); }
+});
+
+test('WhatsApp reply-button final history reads cannot dispatch after sender, recipient, handover or access changes', async () => {
+  const f = await fixture(), route = f.path + '/conversations/thread-1/reply', account = f.accounts.find(row => row._id === 'wa'), body = { accountId: 'wa', message: 'Choose one', buttons: [{ type: 'postback', title: 'Yes', payload: 'reply_1' }] };
+  let mode = '', changed = false;
+  f.setHook((url, options) => {
+    if (url.pathname.endsWith('/messages') && options.method === 'GET' && !changed) {
+      changed = true;
+      if (mode === 'inactive') account.isActive = false;
+      if (mode === 'reconnect') account.needsReconnection = true;
+      if (mode === 'sender') account.username = 'changed-sender';
+      if (mode === 'viewer') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+      if (mode === 'mapping') f.app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile'").run();
+    }
+    if (changed && url.pathname.endsWith('/inbox/conversations/thread-1') && ['recipient', 'control'].includes(mode)) return Response.json({ data: { id: 'thread-1', accountId: 'wa', platform: 'whatsapp', participantId: mode === 'recipient' ? 'changed-participant' : 'participant-a', status: 'active', ...(mode === 'control' ? { threadControl: 'ai_agent' } : {}) } });
+  });
+  try {
+    for (const value of ['inactive', 'reconnect', 'sender', 'recipient', 'control', 'viewer', 'mapping']) {
+      mode = value; changed = false; account.isActive = true; account.needsReconnection = false; account.username = 'whatsapp-account'; f.app.db.prepare("UPDATE memberships SET role='owner'").run(); f.app.db.prepare("UPDATE projects SET zernio_profile_id='inbox-profile'").run();
+      const denied = await f.request(route, 'POST', body); assert.ok([403, 409, 422].includes(denied.status), mode + ': ' + JSON.stringify(denied.data)); assert.equal(f.writes().length, 0, mode);
+    }
+  } finally { await f.close(); }
+});
+
+test('unknown WhatsApp button outcomes retain the durable request fence across exact checks, changed bodies and reopen', async () => {
+  const f = await fixture(), route = f.path + '/conversations/thread-1/reply', body = { accountId: 'wa', message: 'Unknown button outcome', buttons: [{ type: 'postback', title: 'Yes', payload: 'reply_1' }] }, key = randomUUID();
+  f.setHook((url, options) => { if (url.pathname.endsWith('/messages') && options.method === 'POST') throw new TypeError('Synthetic native acknowledgement lost'); });
+  try {
+    const first = await f.request(route, 'POST', body, key); assert.equal(first.data.operation.status, 'uncertain'); assert.equal(f.writes().length, 1);
+    assert.equal((await f.request(route + '?check=1', 'POST', body, key)).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(f.writes().length, 1);
+    assert.equal((await f.request(route + '?check=1', 'POST', { ...body, message: 'Changed' }, key)).data.error.code, 'IDEMPOTENCY_CONFLICT'); assert.equal(f.writes().length, 1);
+    assert.equal((await f.request(route, 'POST', { ...body, message: 'Changed' })).data.error.code, 'OPERATION_NOT_SENT'); assert.equal(f.writes().length, 1);
+    await f.reopen(); assert.equal((await f.request(route + '?check=1', 'POST', body, key)).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(f.writes().length, 1);
   } finally { await f.close(); }
 });

@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { transformWithOxc } from 'vite';
+import { AudienceSummary } from '@ten98/ui';
 
 const source = await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8');
 const templateSource = await readFile(new URL('../src/WhatsAppTemplate.tsx', import.meta.url), 'utf8');
@@ -13,6 +17,22 @@ const templateRestriction = compile(section('function templateRestriction(', 'ex
 const templatePreviewText = compile(section('function templatePreviewText(', 'export function templateParameter(', templateSource));
 const templateParameter = compile(section('function templateParameter(', 'export default function WhatsAppTemplate(', templateSource));
 const blankDraft = { name: 'Launch notice', channel: 'email', subject: 'Receipt for {{name}}', text: 'Your receipt', html: '<p>Receipt</p>', accountId: 'wa-account', templateName: 'receipt', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [] };
+
+test('audience readiness renders the real library summary with app counts and preserves unknowns', async () => {
+  const jsx = source.match(/<AudienceSummary[\s\S]*?\/>/)?.[0]; assert.ok(jsx);
+  const { code } = await transformWithOxc(`const render = (validPreview, audienceMode, draft) => (${jsx});`, 'AudienceReadiness.tsx', { jsx: { runtime: 'classic' } });
+  const summary = new Function('React', 'AudienceSummary', 'labels', `${code}; return render;`)(React, AudienceSummary, { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' });
+  const counts = { total: 8, eligible: 5, excluded: 3, unverified: 2 };
+  for (const [mode, scope, channel, purpose] of [['all', 'All contacts in this project', 'email', 'Transactional email'], ['tags', 'Contacts matching tags', 'sms', 'Direct campaign'], ['contacts', 'Chosen contacts', 'whatsapp', 'Direct campaign']]) {
+    const element = summary({ audience: counts }, mode, { channel }); assert.deepEqual(element.props.counts, counts);
+    const html = renderToStaticMarkup(element);
+    assert.match(html, /class="t98-card t98-audience-summary"/); assert.match(html, /Audience readiness/);
+    for (const value of [scope, purpose, channel === 'email' ? 'Email' : channel === 'sms' ? 'SMS' : 'WhatsApp']) assert.ok(html.includes(value));
+    assert.match(html, /<dt>Eligible<\/dt><dd>5<\/dd>/); assert.match(html, /<dt>Unverified<\/dt><dd>2<\/dd>/);
+  }
+  assert.equal((renderToStaticMarkup(summary({}, 'all', blankDraft)).match(/<dd>Unavailable<\/dd>/g) || []).length, 4);
+  assert.match(renderToStaticMarkup(summary({ audience: { ...counts, eligible: 0 } }, 'all', blankDraft)), /<dt>Eligible<\/dt><dd>0<\/dd>/);
+});
 
 test('actual campaign serialization keeps channel fields separate and never broadens an empty explicit audience', () => {
   assert.deepEqual(campaignBody(blankDraft, 'all'), { name: 'Launch notice', channel: 'email', subject: 'Receipt for {{name}}', text: 'Your receipt', html: '<p>Receipt</p>', emailPurpose: 'transactional', contactIds: [], tags: [] });

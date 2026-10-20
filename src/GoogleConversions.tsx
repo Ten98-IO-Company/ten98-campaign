@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 
 type Row = Record<string, any>;
 type Props = { accountId: string; adAccountId: string; campaign?: Row; currency?: string; canWrite: boolean; request: (path: string, body?: any) => Promise<any> };
-type Intent = { route: string; body: Row; summary: string[]; versions: Record<string, string> };
+type Intent = { closed?: boolean; route: string; body: Row; summary: string[]; versions: Record<string, string> };
 const categories = ['DEFAULT', 'PAGE_VIEW', 'PURCHASE', 'SIGNUP', 'DOWNLOAD', 'ADD_TO_CART', 'BEGIN_CHECKOUT', 'SUBSCRIBE_PAID', 'PHONE_CALL_LEAD', 'IMPORTED_LEAD', 'SUBMIT_LEAD_FORM', 'BOOK_APPOINTMENT', 'REQUEST_QUOTE', 'GET_DIRECTIONS', 'OUTBOUND_CLICK', 'CONTACT', 'ENGAGEMENT', 'STORE_VISIT', 'STORE_SALE', 'QUALIFIED_LEAD', 'CONVERTED_LEAD'];
 const actionLabels: Record<string, string> = { name: 'Action name', type: 'Action type', status: 'Action status', category: 'Conversion category', countingType: 'Count after each click', defaultValue: 'Default conversion value', defaultCurrency: 'Default value currency', primaryForGoal: 'Role in goal bidding', alwaysUseDefaultValue: 'Event value handling', clickThroughLookbackWindowDays: 'Click lookback in days', viewThroughLookbackWindowDays: 'View lookback in days' };
 const title = (value: string) => value.replaceAll('_', ' ').toLowerCase();
@@ -47,12 +47,12 @@ export default function GoogleConversions({ accountId, adAccountId, campaign, cu
     setIntent({ route, summary, versions, body: { adAccountId, expectedVersion: versions[primary], ...(versions.actions && primary !== 'actions' ? { expectedActionsVersion: versions.actions } : {}), ...(versions.custom && primary !== 'custom' ? { expectedCustomVersion: versions.custom } : {}), confirmChange: true, settings } }); setReviewed(null); setError(''); setNotice('');
   }
   async function save() {
-    if (!intent || reviewed !== intent || !canWrite || !current() || !unresolved && Object.entries(intent.versions).some(([name, version]) => !fresh(data[name]) || data[name]?.version !== version)) return;
+    if (!intent || intent.closed || reviewed !== intent || !canWrite || !current() || !unresolved && Object.entries(intent.versions).some(([name, version]) => !fresh(data[name]) || data[name]?.version !== version)) return;
     const reviewedIntent = intent;
     await act(async () => {
       let result;
       try { result = await requester.current(path + '/' + reviewedIntent.route, reviewedIntent.body); }
-      catch (failure) { if (current()) { const problem = failure as Error & { code?: string; status?: number; operation?: Row }; if (!problem.status || problem.code === 'OPERATION_UNCERTAIN' || problem.status >= 500) { setUnresolved(true); setRetrySame(!problem.status || problem.code === 'OPERATION_UNCERTAIN'); } } throw failure; }
+      catch (failure) { if (current()) { const problem = failure as Error & { code?: string; status?: number; operation?: Row }; if (problem.code === 'OPERATION_NOT_SENT' || problem.operation?.status === 'failed' || problem.code === 'OPERATION_REVIEWED') { reviewedIntent.closed = true; setIntent(null); setReviewed(null); setUnresolved(false); setRetrySame(false); setActions(previous => previous && { ...previous, stale: true }); setGoals(previous => previous && { ...previous, stale: true }); setCustom(previous => previous && { ...previous, stale: true }); setCampaignGoals(previous => previous && { ...previous, stale: true }); setNotice(problem.code === 'OPERATION_REVIEWED' ? 'The prior action was closed after operator review. Reload conversion settings and review a new action.' : 'This request was not sent. Your entered settings are kept. Reload conversion settings, review and acknowledge a new action.'); } else if (!problem.status || problem.code === 'OPERATION_UNCERTAIN' || problem.status >= 500) { setUnresolved(true); setRetrySame(!problem.status || problem.code === 'OPERATION_UNCERTAIN'); } } throw failure; }
       if (!current()) return;
       if (result.operation?.status !== 'complete') { setUnresolved(true); setRetrySame(false); throw new Error('The conversion receipt could not be read. Check provider outcomes before making another change.'); }
       setIntent(null); setReviewed(null); setActions(null); setGoals(null); setCustom(null); setCampaignGoals(null); setUnresolved(false); setRetrySame(false); setNotice('Google conversion change accepted. Reload conversion settings to inspect the current provider snapshot.');

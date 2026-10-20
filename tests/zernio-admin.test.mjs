@@ -1,13 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioAdmin } from '../server/zernio-admin.mjs';
 import { IntegrationError } from '../server/integrations.mjs';
+import { createApp } from '../server/index.mjs';
 
 const profileId = 'profile-a';
 function setup() {
@@ -43,6 +47,87 @@ function setup() {
   return { db, state, calls, request };
 }
 const snapshot = group => ({ name: group.name, accountIds: [...group.accountIds] });
+
+const teamMember = (id = 'provider-caller') => ({ _id: id, name: '<img src="https://never.example/member">', email: 'member@example.test', role: 'provider-only-role', isRoot: false, profileAccess: ['profile-a'], createdAt: '2026-01-01T00:00:00Z', lastLoginAt: '2026-01-02T00:00:00Z' });
+
+test('provider team reads allowlist bounded native member fields and require one distinct caller', async () => {
+  const db = new DatabaseSync(':memory:'); db.exec("CREATE TABLE instance_operators(user_id TEXT PRIMARY KEY); INSERT INTO instance_operators VALUES('local-operator')");
+  let payload, result, checks = 0; const calls = [];
+  const context = { db, user: { id: 'local-operator', isOperator: true }, role: 'owner', req: { method: 'GET' }, assertProjectMapping(id) { assert.equal(id, profileId); checks++; }, send(status, data) { result = { status, data }; } };
+  const api = async (...args) => { calls.push(args); return payload; };
+  try {
+    payload = { currentUserId: 'provider-caller', token: 'never-return', users: [{ ...teamMember(), credentials: { secret: 'never-return' } }, { _id: 'other-provider-member', name: 'Other', email: 'other@example.test', role: 'future-role' }] };
+    await handleZernioAdmin(context, api, profileId, 'team');
+    assert.equal(result.status, 200); assert.equal(checks, 2); assert.deepEqual(calls, [['/users']]); assert.equal(JSON.stringify(result).includes('never-return'), false);
+    assert.deepEqual(result.data.users[1], { _id: 'other-provider-member', name: 'Other', email: 'other@example.test', role: 'future-role', isRoot: null, profileAccess: null, createdAt: null, lastLoginAt: null });
+    for (const mutate of [
+      value => { value.currentUserId = 'absent'; }, value => { value.users.push(value.users[0]); }, value => { value.users = []; }, value => { value.users = Array.from({ length: 10001 }, () => teamMember()); },
+      value => { value.users[0] = null; }, value => { value.users[0]._id = 'bad id'; }, value => { value.users[0].name = 'x'.repeat(201); }, value => { value.users[0].email = 'bad\u0000email'; }, value => { value.users[0].role = {}; },
+      value => { value.users[0].isRoot = 'true'; }, value => { value.users[0].profileAccess = ['all', profileId]; }, value => { value.users[0].profileAccess = [profileId, profileId]; }, value => { value.users[0].profileAccess = Array.from({ length: 1001 }, (_, index) => String(index)); },
+      value => { value.users[0].createdAt = 'invalid'; }, value => { value.users[0].lastLoginAt = 0; },
+    ]) {
+      payload = { currentUserId: 'provider-caller', users: [teamMember()] }; mutate(payload);
+      await assert.rejects(handleZernioAdmin(context, api, profileId, 'team'), error => error.status === 502 && error.code === 'INVALID_PROVIDER_TEAM');
+    }
+    for (const profileAccess of [[], ['all'], null]) { payload = { currentUserId: 'provider-caller', users: [{ ...teamMember(), profileAccess, isRoot: null, createdAt: null, lastLoginAt: null }] }; await handleZernioAdmin(context, api, profileId, 'team'); assert.deepEqual(result.data.users[0].profileAccess, profileAccess); }
+  } finally { db.close(); }
+});
+
+test('provider team HTTP reads require live operator and administration and withdraw data across every access boundary', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'ten98-provider-team-')), origin = 'http://127.0.0.1:3029', originalFetch = globalThis.fetch;
+  const env = { ZERNIO_API_KEY: 'team-fixture-key' }, app = createApp({ dataDir, appUrl: origin, env, directScheduler: false }), calls = [];
+  let base, cookie, pause, rejection = 0, payload = { currentUserId: 'provider-caller', users: [teamMember()] };
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
+    assert.equal(url.href, 'https://zernio.com/api/v1/users'); assert.equal(options.method, 'GET'); assert.equal(options.body, undefined); calls.push(options.headers.Authorization);
+    if (pause) { const waiting = pause; pause = null; waiting.started(); await waiting.wait; }
+    return Response.json(rejection ? { error: 'private-provider-error', token: 'never-return' } : payload, { status: rejection || 200 });
+  };
+  async function request(path, { method = 'GET', body, selected = cookie } = {}) {
+    const response = await originalFetch(base + '/api' + path, { method, headers: { Origin: origin, ...(selected ? { Cookie: selected } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
+  }
+  let state, route;
+  async function changedDuring(change, restore, expected) {
+    let started, release; const entered = new Promise(resolve => { started = resolve; }), wait = new Promise(resolve => { release = resolve; });
+    pause = { started, wait }; const pending = request(route);
+    try {
+      await Promise.race([entered, new Promise((_, reject) => { setTimeout(() => reject(new Error('Expected team read boundary.')), 3000).unref(); })]);
+      await change(); release(); const denied = await pending;
+      assert.equal(denied.status, expected, JSON.stringify(denied.data)); assert.equal(denied.data.users, undefined); assert.equal(JSON.stringify(denied.data).includes('member@example.test'), false);
+    } finally { release(); await restore(); }
+  }
+  try {
+    await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`;
+    const password = 'provider team fixture password 2026', email = 'team-operator@example.test';
+    const setup = await request('/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Team operator', email, password, sample: false } }); assert.equal(setup.status, 201); cookie = setup.cookie;
+    state = (await request('/state')).data; route = `/projects/${state.projectId}/integrations/admin/team`; const project = `/projects/${state.projectId}`, workspaceId = state.workspaces[0].id, userId = state.user.id;
+    assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);
+    let result = await request(route); assert.equal(result.status, 200); assert.equal(result.data.currentUserId, 'provider-caller'); assert.equal(result.data.users[0].role, 'provider-only-role');
+    const beforeDenied = calls.length; assert.equal((await request(route, { selected: null })).status, 401);
+    for (const role of ['editor', 'viewer']) { app.db.prepare('UPDATE memberships SET role=? WHERE workspace_id=? AND user_id=?').run(role, workspaceId, userId); assert.equal((await request(route)).status, 403); }
+    app.db.prepare("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?").run(workspaceId, userId);
+    app.db.prepare('DELETE FROM instance_operators WHERE user_id=?').run(userId); assert.equal((await request(route)).status, 403); app.db.prepare('INSERT INTO instance_operators VALUES(?)').run(userId);
+    assert.equal((await request(route, { method: 'POST', body: {} })).status, 405);
+    const outsider = randomUUID(), hash = app.db.prepare('SELECT password FROM users WHERE id=?').get(userId).password;
+    app.db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(outsider, 'Outside', 'team-outsider@example.test', hash);
+    const outsideCookie = (await request('/auth/login', { method: 'POST', body: { email: 'team-outsider@example.test', password } })).cookie;
+    assert.equal((await request(route, { selected: outsideCookie })).status, 404); assert.equal(calls.length, beforeDenied);
+    app.db.prepare("UPDATE memberships SET role='admin' WHERE workspace_id=? AND user_id=?").run(workspaceId, userId); assert.equal((await request(route)).status, 200); app.db.prepare("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?").run(workspaceId, userId);
+    for (const status of [401, 403, 429, 500]) { rejection = status; const before = calls.length; result = await request(route); assert.equal(result.status, status === 403 ? 403 : status === 401 ? 400 : status === 500 ? 502 : status); assert.equal(calls.length, before + 1); assert.equal(result.data.users, undefined); assert.equal(JSON.stringify(result).includes('private-provider-error'), false); }
+    rejection = 0;
+    await changedDuring(() => app.db.prepare('DELETE FROM instance_operators WHERE user_id=?').run(userId), () => app.db.prepare('INSERT INTO instance_operators VALUES(?)').run(userId), 403);
+    await changedDuring(() => app.db.prepare("UPDATE memberships SET role='viewer' WHERE workspace_id=? AND user_id=?").run(workspaceId, userId), () => app.db.prepare("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?").run(workspaceId, userId), 403);
+    await changedDuring(() => app.db.prepare('DELETE FROM memberships WHERE workspace_id=? AND user_id=?').run(workspaceId, userId), () => app.db.prepare("INSERT INTO memberships VALUES(?,?,'owner')").run(workspaceId, userId), 403);
+    await changedDuring(() => app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?").run(state.projectId), () => app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, state.projectId), 409);
+    await changedDuring(async () => { assert.equal((await request('/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-team-fixture-key' } } })).status, 200); }, async () => { assert.equal((await request('/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'team-fixture-key' } } })).status, 200); }, 409);
+    const revoker = (await request('/auth/login', { method: 'POST', body: { email, password } })).cookie;
+    await changedDuring(async () => { assert.equal((await request('/account/sessions/revoke', { method: 'POST', body: {}, selected: revoker })).status, 200); }, () => { cookie = revoker; }, 403);
+    const beforeUnmapped = calls.length; app.db.prepare("UPDATE projects SET zernio_profile_id='' WHERE id=?").run(state.projectId); assert.equal((await request(route)).status, 409); assert.equal(calls.length, beforeUnmapped);
+    const operationsExist = app.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operations'").get();
+    assert.equal(operationsExist ? app.db.prepare('SELECT COUNT(*) AS count FROM integration_operations').get().count : 0, 0, 'Team reads create no write receipts.');
+  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+});
 
 test('administration reads only the mapped profile and complete project-owned groups, with no foreign names or secrets', async () => {
   const { db, state, calls, request } = setup();
@@ -111,13 +196,15 @@ test('malformed or unconfirmed group writes remain uncertain and cannot be resen
 });
 
 test('group mutations share a resource lock while a provider write is pending', async () => {
-  const { db, state, calls, request } = setup(); let release, entered;
+  const { db, state, calls, request } = setup(); let release, entered, pending;
   try {
     state.hold = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; }); state.onWrite = entered;
-    const pending = request('groups/create', { body: { name: 'Held group', accountIds: ['account-a'] } }); await started;
-    const result = await request('groups/group-a/delete', { body: { confirmGroupId: 'group-a', expectedGroup: snapshot(state.groups[0]) } }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'PROVIDER_RESOURCE_BUSY'); assert.equal(calls.some(row => row.method === 'DELETE'), false);
+    pending = request('groups/create', { body: { name: 'Held group', accountIds: ['account-a'] } }); await started;
+    const body = { confirmGroupId: 'group-a', expectedGroup: snapshot(state.groups[0]) }, key = 'blocked-admin-delete';
+    const result = await request('groups/group-a/delete', { body, key }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(result.data.operation.status, 'failed'); assert.equal(calls.some(row => row.method === 'DELETE'), false);
     release(); state.hold = null; assert.equal((await pending).status, 200);
-  } finally { release?.(); db.close(); }
+    assert.deepEqual((await request('groups/group-a/delete', { body, key })).data, result.data); assert.equal(calls.some(row => row.method === 'DELETE'), false);
+  } finally { release?.(); await pending?.catch(() => {}); db.close(); }
 });
 
 test('administration UI retains uncertain keys and ignores stale project or out-of-order reads', async () => {

@@ -15,7 +15,7 @@ test('record deletion preserves assignments and administrators can remove sample
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   try {
-    const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Lifecycle owner', email: 'lifecycle-owner@example.test', password: secret, sample: true } });
+    const setup = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Lifecycle owner', email: 'lifecycle-owner@example.test', password: secret, sample: true } });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const initial = (await request('/api/state')).data, projectId = initial.projectId, project = `/api/projects/${projectId}`, workspaceId = initial.workspaces[0].id;
     const hash = app.db.prepare('SELECT password FROM users WHERE id=?').get(initial.user.id).password;

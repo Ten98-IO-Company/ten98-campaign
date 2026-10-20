@@ -1,6 +1,7 @@
 FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY vendor ./vendor
 RUN npm ci
 COPY index.html tsconfig.json vite.config.mjs ./
 COPY src ./src

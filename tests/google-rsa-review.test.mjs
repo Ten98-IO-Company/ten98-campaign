@@ -39,7 +39,7 @@ async function fixture(run) {
     return response;
   }
   const review = async () => { const result = await invoke('ads/details?adId=rsa-ad'); assert.equal(result.status, 200, JSON.stringify(result)); return result.data.creativeReview; };
-  try { await run({ state, ad, initial, invoke, review }); } finally { globalThis.fetch = originalFetch; db.close(); }
+  try { await run({ db, state, ad, initial, invoke, review }); } finally { globalThis.fetch = originalFetch; db.close(); }
 }
 
 test('RSA reviews require explicit recent creative enrichment and verified native scope', () => fixture(async ({ state, review, invoke }) => {
@@ -112,13 +112,17 @@ test('RSA structured edits validate exact text, positions and complete lists bef
   assert.equal(state.writes.length, 0, 'Pin-only provider changes invalidate the reviewed version.');
 }));
 
-test('RSA pin mismatches after an accepted write retain an uncertain receipt and block duplicate writes', () => fixture(async ({ state, review, invoke }) => {
+test('RSA pin mismatches after an accepted write retain an uncertain receipt and block duplicate writes', () => fixture(async ({ db, state, review, invoke }) => {
   const body = { adId: 'rsa-ad', expectedCreativeVersion: (await review()).version, headlines: [{ text: 'Pinned headline' }, { text: 'Second headline' }, { text: 'Third headline', pinnedField: 'HEADLINE_2' }] };
   state.afterWrite = () => { state.creative.headlines[0].pinnedField = 'HEADLINE_1'; };
   const result = await invoke('ads/edit', body, 'rsa-pin-readback');
   assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(state.writes.length, 1);
   assert.equal((await invoke('ads/edit', body, 'rsa-pin-readback')).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(state.writes.length, 1);
-  assert.equal((await invoke('ads/edit', body, 'rsa-pin-new-request')).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(state.writes.length, 1, 'A new key cannot blindly repeat the same unresolved request.');
+  const blocked = await invoke('ads/edit', body, 'rsa-pin-new-request');
+  assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.equal(state.writes.length, 1, 'A new key cannot blindly repeat the same unresolved request.');
+  assert.notEqual(blocked.data.operation.id, result.data.operation.id);
+  db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE id=?").run(result.data.operation.id);
+  assert.deepEqual((await invoke('ads/edit', body, 'rsa-pin-new-request')).data, blocked.data); assert.equal(state.writes.length, 1);
 }));
 
 test('RSA edits reject missing or changed reviews, pinned removals, stale reads, and role or mapping races before mutation', () => fixture(async ({ state, review, invoke }) => {

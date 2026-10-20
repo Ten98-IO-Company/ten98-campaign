@@ -3,8 +3,9 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve, relative, extname, sep, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
+import { oidcEndpoint, workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
 import { openDatabase, createStore, collections, transaction } from './database.mjs';
-import { createAuth, sessionSecret, hashPassword, HttpError, publicUser } from './auth.mjs';
+import { createAuth, sessionSecret, bootstrapToken, hashPassword, HttpError, publicUser } from './auth.mjs';
 import { seedSample } from './seed.mjs';
 import { handleIntegration, IntegrationError, mediaUrl } from './integrations.mjs';
 import { createIntegrationSettings } from './integration-settings.mjs';
@@ -21,11 +22,10 @@ import { createDirectCampaigns } from './direct-campaigns.mjs';
 import { handleInbox } from './inbox.mjs';
 import { createSmsInbox } from './sms-inbox.mjs';
 import { createLinks } from './links.mjs';
-import { normalizePostVariants, normalizeAccountVariants, normalizeMediaItems } from '../shared/social-posts.mjs';
+import { normalizePostVariants, normalizeAccountVariants, normalizeMediaItems, normalizePostTags } from '../shared/social-posts.mjs';
 import { validateQueueIntent } from './zernio-queues.mjs';
 import { MEDIA_UPLOAD_TIMEOUT, MEDIA_DELIVERY_FIELDS, closeMediaUploads } from './zernio-media.mjs';
 
-const roles = ['owner', 'admin', 'editor', 'viewer'];
 const projectFields = 'p.id,p.workspace_id AS workspaceId,p.name,p.color,p.zernio_profile_id AS zernioProfileId,p.drive_folder_id AS driveFolderId';
 const bad = message => { throw new HttpError(400, message || 'Check the submitted fields.'); };
 function object(value) { if (!value || typeof value !== 'object' || Array.isArray(value)) bad('A JSON object is required.'); return value; }
@@ -63,6 +63,7 @@ function validateRecord(collection, raw) {
     if (data.accounts !== undefined) data.accounts = strings(data.accounts, 'Accounts', 50);
     validateQueueIntent(data);
     try {
+      if (data.tags !== undefined) data.tags = normalizePostTags(data.tags);
       if (data.mediaItems !== undefined && data.mediaItems !== null) data.mediaItems = normalizeMediaItems(data.mediaItems);
       if (data.platformOverrides !== undefined) data.platformOverrides = normalizePostVariants(data);
       if (data.accountOverrides !== undefined) {
@@ -108,10 +109,11 @@ export function createApp(options = {}) {
   const appUrl = (options.appUrl || env.APP_URL || 'http://127.0.0.1:3018').replace(/\/$/, '');
   const parsed = new URL(appUrl);
   if (!['https:', 'http:'].includes(parsed.protocol) || parsed.origin !== appUrl || parsed.username || parsed.password || (parsed.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname))) throw new Error('APP_URL must be an HTTPS origin, or HTTP loopback for local use.');
+  if (env.OIDC_ISSUER && env.OIDC_CLIENT_ID) oidcEndpoint(env.OIDC_ISSUER, { issuer: true });
   const db = openDatabase(dataDir), store = createStore(db);
   const config = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean) };
   config.oidcEnabled = Boolean(config.oidcIssuer && config.oidcClientId);
-  if (config.oidcEnabled && new URL(config.oidcIssuer).protocol !== 'https:') throw new Error('OIDC_ISSUER must use HTTPS.');
+  if (!db.prepare('SELECT claimed FROM installation WHERE id=1').get().claimed) config.bootstrapToken = bootstrapToken(dataDir, env.BOOTSTRAP_TOKEN);
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
   const integrationSettings = createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
@@ -155,20 +157,22 @@ export function createApp(options = {}) {
         if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
         if (mutating && req.headers.origin !== appUrl) throw new HttpError(403, 'A matching Origin header is required.');
         const body = mutating && req.method !== 'DELETE' && !rawMediaContent ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : /^\/api\/projects\/[^/]+\/(?:posts(?:\/[^/]+)?|integrations\/social\/(?:validate|update)|direct\/(?:contacts\/import|campaigns(?:\/[^/]+)?))$/.test(path) ? 2 * 1024 * 1024 : 65536) : {};
-        if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(auth.user(req, res)), setupRequired: !db.prepare('SELECT id FROM users LIMIT 1').get(), oidcEnabled: config.oidcEnabled });
+        if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(auth.user(req, res)), setupRequired: !db.prepare('SELECT claimed FROM installation WHERE id=1').get().claimed, oidcEnabled: config.oidcEnabled });
         if (path === '/api/auth/setup' && req.method === 'POST') {
           auth.limit('setup:' + req.socket.remoteAddress, 10);
-          if (db.prepare('SELECT id FROM users LIMIT 1').get()) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
+          if (db.prepare('SELECT claimed FROM installation WHERE id=1').get().claimed) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
+          auth.requireSetupProof(body.token);
           const name = text(body.name, 'Name'), mail = email(body.email), hash = await hashPassword(password(body.password));
           if (body.sample !== undefined && typeof body.sample !== 'boolean') bad('Sample must be true or false.');
           const id = randomUUID(), workspaceId = randomUUID(), projectId = randomUUID();
           transaction(db, () => {
-            if (db.prepare('SELECT id FROM users LIMIT 1').get()) throw new HttpError(409, 'Setup is already complete.');
+            if (db.prepare('SELECT claimed FROM installation WHERE id=1').get().claimed) throw new HttpError(409, 'Setup is already complete.');
             db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(id, name, mail, hash);
             db.prepare('INSERT INTO instance_operators VALUES(?)').run(id);
             db.prepare('INSERT INTO workspaces VALUES(?,?)').run(workspaceId, 'ten98 studio'); db.prepare("INSERT INTO memberships VALUES(?,?,'owner')").run(workspaceId, id);
             db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run(projectId, workspaceId, 'Brand launch');
             if (body.sample) seedSample(store, projectId);
+            db.prepare('UPDATE installation SET claimed=1 WHERE id=1').run();
           });
           auth.establish(res, id, req); return send(201, { user: { id, name, email: mail, isOperator: true }, projectId });
         }
@@ -235,7 +239,7 @@ export function createApp(options = {}) {
             if (!target) throw new HttpError(400, 'This account does not exist. Ask the operator to create it first.');
             const previous = db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(memberRoute[1], target.id);
             if (req.method !== 'POST' && !previous) throw new HttpError(404, 'Workspace member not found.');
-            if (role === 'admin' && (['owner', 'admin'].includes(requested) || ['owner', 'admin'].includes(previous?.role))) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
+            if ((requested !== null && !mayGrantWorkspaceRole(role, requested)) || (previous && !mayGrantWorkspaceRole(role, previous.role))) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
             if (previous?.role === 'owner' && requested !== 'owner' && db.prepare("SELECT count(*) AS count FROM memberships WHERE workspace_id=? AND role='owner'").get(memberRoute[1]).count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
             if (req.method === 'DELETE') db.prepare('DELETE FROM memberships WHERE workspace_id=? AND user_id=?').run(memberRoute[1], target.id);
             else db.prepare('INSERT INTO memberships VALUES(?,?,?) ON CONFLICT(workspace_id,user_id) DO UPDATE SET role=excluded.role').run(memberRoute[1], target.id, requested);
