@@ -4,7 +4,7 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDatabase, createStore } from '../server/database.mjs';
+import { openDatabase, createStore } from '../server/database.ts';
 import { handleCalendar, calendarPlan } from '../server/calendar.mjs';
 import { handleOperationRecovery } from '../server/operation-recovery.mjs';
 import { postScheduleEntries } from '../shared/post-schedule.ts';

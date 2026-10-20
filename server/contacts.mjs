@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Resolver } from 'node:dns/promises';
 import { domainToASCII } from 'node:url';
-import { HttpError } from './auth.mjs';
-import { transaction } from './database.mjs';
+import { HttpError } from './auth.ts';
+import { transaction } from './database.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const channels = ['email', 'sms', 'whatsapp'], own = (value, key) => Object.hasOwn(value, key);

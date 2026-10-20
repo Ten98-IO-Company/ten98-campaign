@@ -1,8 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import qrcode from 'qrcode-generator';
-import { HttpError } from './auth.mjs';
-import { transaction } from './database.mjs';
+import { HttpError } from './auth.ts';
+import { transaction } from './database.ts';
 
 const fail = (status, message) => { throw new HttpError(status, message); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);

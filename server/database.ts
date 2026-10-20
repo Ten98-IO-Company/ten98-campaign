@@ -3,8 +3,11 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+export type ProjectRecord = { id: string; projectId: string; createdAt: string; updatedAt: string; [key: string]: any };
+export type Store = ReturnType<typeof createStore>;
+
 export const collections = ['campaigns', 'posts', 'placements', 'assets', 'providers'];
-export function openDatabase(dataDir) {
+export function openDatabase(dataDir: string): DatabaseSync {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(join(dataDir, 'campaign.sqlite'));
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
@@ -28,34 +31,34 @@ export function openDatabase(dataDir) {
   return db;
 }
 
-export function transaction(db, run) {
+export function transaction<T>(db: DatabaseSync, run: () => T): T {
   db.exec('BEGIN IMMEDIATE');
   try { const value = run(); db.exec('COMMIT'); return value; }
   catch (error) { db.exec('ROLLBACK'); throw error; }
 }
 
-export function createStore(db) {
+export function createStore(db: DatabaseSync) {
   const read = db.prepare('SELECT data FROM records WHERE project_id=? AND collection=? ORDER BY rowid DESC');
   const find = db.prepare('SELECT data FROM records WHERE project_id=? AND collection=? AND id=?');
   return {
-    list(projectId, collection) { return read.all(projectId, collection).map(row => JSON.parse(row.data)); },
-    get(projectId, collection, id) { const row = find.get(projectId, collection, id); return row ? JSON.parse(row.data) : null; },
-    create(projectId, collection, data) {
+    list(projectId: string, collection: string): ProjectRecord[] { return read.all(projectId, collection).map(row => JSON.parse(row.data as string)); },
+    get(projectId: string, collection: string, id: string): ProjectRecord | null { const row = find.get(projectId, collection, id); return row ? JSON.parse(row.data as string) : null; },
+    create(projectId: string, collection: string, data: Record<string, unknown>): ProjectRecord {
       if (!collections.includes(collection)) throw new Error('Unknown collection.');
       const now = new Date().toISOString();
       const record = { ...data, id: randomUUID(), projectId, createdAt: now, updatedAt: now };
       db.prepare('INSERT INTO records VALUES(?,?,?,?)').run(record.id, projectId, collection, JSON.stringify(record));
       return record;
     },
-    update(projectId, collection, id, data) {
+    update(projectId: string, collection: string, id: string, data: Record<string, unknown>): ProjectRecord | null {
       const previous = this.get(projectId, collection, id);
       if (!previous) return null;
       const record = { ...previous, ...data, id, projectId, createdAt: previous.createdAt, updatedAt: new Date().toISOString() };
       db.prepare('UPDATE records SET data=? WHERE project_id=? AND collection=? AND id=?').run(JSON.stringify(record), projectId, collection, id);
       return record;
     },
-    remove(projectId, collection, id) { return db.prepare('DELETE FROM records WHERE project_id=? AND collection=? AND id=?').run(projectId, collection, id).changes > 0; },
-    activity(projectId, message, sample = false) {
+    remove(projectId: string, collection: string, id: string): boolean { return db.prepare('DELETE FROM records WHERE project_id=? AND collection=? AND id=?').run(projectId, collection, id).changes > 0; },
+    activity(projectId: string, message: string, sample = false): void {
       db.prepare('INSERT INTO activity VALUES(?,?,?,?,?)').run(randomUUID(), projectId, message, new Date().toISOString(), Number(sample));
       db.prepare('DELETE FROM activity WHERE project_id=? AND id NOT IN (SELECT id FROM activity WHERE project_id=? ORDER BY rowid DESC LIMIT 50)').run(projectId, projectId);
     },

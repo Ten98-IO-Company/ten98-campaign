@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openDatabase } from '../server/database.mjs';
+import { openDatabase } from '../server/database.ts';
 import { createApp } from '../server/index.mjs';
 
 const cli = fileURLToPath(new URL('../server/cli.mjs', import.meta.url));

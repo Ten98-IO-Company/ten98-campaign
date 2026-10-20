@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
-import { hashPassword, HttpError, publicUser } from './auth.mjs';
-import { transaction } from './database.mjs';
+import { hashPassword, HttpError, publicUser } from './auth.ts';
+import { transaction } from './database.ts';
 
 const initialized = new WeakSet();
 const fail = (status, message) => { throw new HttpError(status, message); };

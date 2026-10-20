@@ -1,7 +1,7 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
 import { readResponseText } from '@ten98/runtime';
 import { PLATFORM_RULES, buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostVariants, normalizePostTags, normalizeAccountVariants, assertAccountSchedules, validPostInstant, resolveVariant, validatePostForPlatforms, wireMediaItems, assetDeliveryIssue, providerPostMediaUrls } from '../shared/social-posts.ts';
-import { transaction } from './database.mjs';
+import { transaction } from './database.ts';
 import { handleGoogleAds } from './google-ads.mjs';
 import { handleGoogleConversions } from './zernio-google-conversions.mjs';
 import { handleZernioContacts } from './zernio-contacts.mjs';

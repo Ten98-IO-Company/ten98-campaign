@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { IntegrationError, operation, scopedAccounts, requireAccount } from './integrations.mjs';
 import { validPostInstant } from '../shared/social-posts.ts';
-import { transaction } from './database.mjs';
+import { transaction } from './database.ts';
 
 const fail = (status, code, message) => { throw new IntegrationError(status, code, message); };
 const object = value => value && typeof value === 'object' && !Array.isArray(value);

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { handleOoh } from '../server/ooh.mjs';
-import { createStore } from '../server/database.mjs';
+import { createStore } from '../server/database.ts';
 import { operation, IntegrationError } from '../server/integrations.mjs';
 import { handleOperationRecovery } from '../server/operation-recovery.mjs';
 

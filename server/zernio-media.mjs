@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { IntegrationError, operation } from './integrations.mjs';
-import { transaction } from './database.mjs';
+import { transaction } from './database.ts';
 
 export const MEDIA_UPLOAD_MAX_BYTES = 5_000_000_000;
 export const MEDIA_UPLOAD_TIMEOUT = 30 * 60 * 1000;

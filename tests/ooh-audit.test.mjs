@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { createStore } from '../server/database.mjs';
+import { createStore } from '../server/database.ts';
 import { handleOoh } from '../server/ooh.mjs';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';

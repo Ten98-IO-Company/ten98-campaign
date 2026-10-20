@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { transaction } from './database.mjs';
+import { transaction } from './database.ts';
 import { createContacts } from './contacts.mjs';
-import { HttpError } from './auth.mjs';
+import { HttpError } from './auth.ts';
 import { validPostInstant as iso } from '../shared/social-posts.ts';
 import { paidAdEvents, minimizeAdEvent, initializeAdEvents, recordAdEvent } from './zernio-ad-events.mjs';
 

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../server/index.mjs';
-import { hashPassword } from '../server/auth.mjs';
+import { hashPassword } from '../server/auth.ts';
 
 const origin = 'http://127.0.0.1:3018';
 async function start(app) {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { IntegrationError, operation } from './integrations.mjs';
-import { transaction } from './database.mjs';
+import { transaction } from './database.ts';
 import { validPostInstant } from '../shared/social-posts.ts';
 
 const initialized = new WeakSet(), fail = (status, code, message) => { throw new IntegrationError(status, code, message); };

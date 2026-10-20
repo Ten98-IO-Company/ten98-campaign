@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { IntegrationError, operation } from './integrations.mjs';
-import { transaction } from './database.mjs';
+import { transaction } from './database.ts';
 
 // Contracts: https://docs.broadsign.com/broadsign-platform/en/Documentation_Gteed_Campaigns/g-c-new-campaign-rest.html
 // API-key auth: https://docs.broadsign.com/broadsign-platform/en/Documentation_Settings/settings-api-keys.html

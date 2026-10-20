@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { transaction } from './database.mjs';
+import { transaction } from './database.ts';
 import { IntegrationError, scopedAccounts, zernioClient } from './integrations.mjs';
 import { createContacts } from './contacts.mjs';
 import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions } from './direct-providers.mjs';

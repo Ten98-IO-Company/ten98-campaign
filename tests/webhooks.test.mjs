@@ -4,7 +4,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDatabase, createStore } from '../server/database.mjs';
+import { openDatabase, createStore } from '../server/database.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from '../server/webhooks.mjs';
 
 const env = { ZERNIO_WEBHOOK_SECRET: 'webhook-test-secret-with-enough-entropy' };

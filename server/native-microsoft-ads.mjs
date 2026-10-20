@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { IntegrationError, operation, providerRequest, mediaUrl } from './integrations.mjs';
-import { transaction } from './database.mjs';
+import { transaction } from './database.ts';
 
 const campaignApi = 'https://campaign.api.bingads.microsoft.com/CampaignManagement/v13', customerApi = 'https://clientcenter.api.bingads.microsoft.com/CustomerManagement/v13', reportingApi = 'https://reporting.api.bingads.microsoft.com/Reporting/v13';
 const initialized = new WeakSet(), fail = (status, code, message, uncertain = false) => { throw new IntegrationError(status, code, message, uncertain); };

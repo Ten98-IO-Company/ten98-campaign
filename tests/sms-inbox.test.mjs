@@ -11,7 +11,7 @@ import { createDirectCampaigns } from '../server/direct-campaigns.mjs';
 import { createSmsInbox } from '../server/sms-inbox.mjs';
 import { createIntegrationSettings } from '../server/integration-settings.mjs';
 import { sendDirect } from '../server/direct-providers.mjs';
-import { HttpError } from '../server/auth.mjs';
+import { HttpError } from '../server/auth.ts';
 
 const token = (prefix, value) => prefix + String(value).padStart(32, '0');
 function fixture() {

@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { openDatabase, transaction } from './database.mjs';
-import { hashPassword } from './auth.mjs';
+import { openDatabase, transaction } from './database.ts';
+import { hashPassword } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
 
 // Read JSON from stdin so passwords never appear in process arguments or output.

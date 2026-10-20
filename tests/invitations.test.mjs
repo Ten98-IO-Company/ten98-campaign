@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { handleInvitations } from '../server/invitations.mjs';
-import { HttpError } from '../server/auth.mjs';
+import { HttpError } from '../server/auth.ts';
 
 test('workspace invitations use hashed single-use links, enforce current authority, safely create users, and preserve existing accounts and membership', async () => {
   const db = new DatabaseSync(':memory:'), established = [];

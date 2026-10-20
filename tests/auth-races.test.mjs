@@ -4,8 +4,9 @@ import { readFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { createHmac, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
-import { createAuth, hashPassword, cookies, publicUser, HttpError } from '../server/auth.mjs';
-import { transaction } from '../server/database.mjs';
+import { stripTypeScriptTypes } from 'node:module';
+import { createAuth, hashPassword, cookies, publicUser, HttpError } from '../server/auth.ts';
+import { transaction } from '../server/database.ts';
 
 function database() {
   const db = new DatabaseSync(':memory:');
@@ -62,7 +63,7 @@ test('a password change cannot replace credentials or recreate a session revoked
 });
 
 test('OIDC invitation continuation is browser-bound, single-use and origin-fixed without bypassing provisioning or identity linking', async () => {
-  const db = database(), source = await readFile(new URL('../server/auth.mjs', import.meta.url), 'utf8');
+  const db = database(), source = stripTypeScriptTypes(await readFile(new URL('../server/auth.ts', import.meta.url), 'utf8'));
   const appUrl = 'https://campaign.example', issuer = 'https://identity.example', invite = 'A'.repeat(43);
   const config = { appUrl, sessionSecret: 'oidc-continuation-fixture-secret-32-characters', oidcEnabled: true, oidcIssuer: issuer, oidcClientId: 'fixture-client', oidcAllowedEmails: ['allowed@example.test', 'local@example.test'] };
   db.prepare('INSERT INTO users VALUES(?,?,?,?)').run('local-user', 'Local', 'local@example.test', 'unchanged-local-hash');
