@@ -2,7 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { sql } from 'drizzle-orm';
 import { createStore } from './database.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
-import { IntegrationError, fail, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
+import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { createContacts, lockContacts } from './contacts.ts';
 import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions } from './direct-providers.ts';
 
@@ -266,6 +266,27 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     }
     if (method !== 'POST') return false;
     if (action === 'preview') { if (campaign.channel === 'whatsapp') { const result = await listWhatsAppTemplates({ env: { ...env }, project, accountId: campaign.accountId, assertMapping: () => context.assertProjectMapping(project.zernioProfileId) }), approved = result.templates.find((template: any) => template.name === campaign.templateName && template.language === campaign.templateLanguage); if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template.'); validateWhatsAppTemplate(campaign, approved); } send(200, await preview(campaign)); return true; }
+    // A test send renders the draft for one recipient: the signed-in user's own email address, or one project contact with
+    // recorded SMS consent. It creates no delivery and leaves the draft unchanged; its receipt keeps a retried key from
+    // sending twice, and a project gets 10 per hour.
+    if (action === 'test') {
+      if (campaign.status !== 'draft') fail(409, 'CAMPAIGN_LOCKED', 'Send a test from a draft.');
+      if (!['email', 'sms'].includes(campaign.channel)) fail(400, 'TEST_SEND_UNSUPPORTED', 'Test sends are available for email and SMS drafts.');
+      if (!body || typeof body !== 'object' || Object.keys(body).some(key => !['confirmed', 'contactId'].includes(key))) fail(400, 'INVALID_TEST_SEND', 'Use only the fields shown in the test send form.');
+      if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Confirm the test send and its provider charge.');
+      if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
+      if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending.');
+      let contact: any;
+      if (campaign.channel === 'email') { if (body.contactId !== undefined) fail(400, 'INVALID_TEST_RECIPIENT', 'Email tests go to your own address.'); contact = { name: user.name, email: user.email }; }
+      else { contact = typeof body.contactId === 'string' ? await contacts.get(project.id, body.contactId) : null; if (!contact || exclusion(contact, 'sms')) fail(400, 'INVALID_TEST_RECIPIENT', 'Choose one contact with recorded SMS consent.'); }
+      const [recent] = await resultRows(db.execute(sql`SELECT count(*) AS count FROM integration_operations WHERE project_id = ${project.id} AND action_path LIKE 'POST %/test' AND created_at > ${new Date(Date.now() - 3600000).toISOString()}`));
+      if (recent.count >= 10) fail(429, 'TEST_SEND_LIMIT', 'A project can send 10 tests per hour. Try again later.');
+      const outcome = await operation(context, async () => {
+        const result: any = await sendDirect({ channel: campaign.channel, campaign: content(campaign, contact), contact, env: { ...env }, project, appUrl, unsubscribeUrl: campaign.channel === 'email' ? `${appUrl}/api/direct/unsubscribe/${unsubscribeToken(project.id, contact.email)}` : undefined, assertMapping: () => context.assertIntegrationSettings() });
+        return { test: { channel: campaign.channel, recipient: campaign.channel === 'email' ? contact.email : contact.phone, status: result.status, providerId: result.providerId } };
+      });
+      send(outcome.status, outcome.data); return true;
+    }
     if (['send', 'schedule'].includes(action)) {
       if (campaign.status !== 'draft') { send(200, { campaign: await decorate(campaign), deliveries: await deliveries(id) }); return true; }
       if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Review the audience and confirm provider charges before sending.');
