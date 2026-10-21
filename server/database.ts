@@ -10,6 +10,15 @@ import * as schema from './schema.ts';
 // PostgreSQL (issue #25): modules move here from the SQLite functions below one by one until cutover.
 // Ported from ten98-discover (MIT) src/server/db.ts and cli.ts migrate at e36503c: the pool, versioned SQL
 // files and checksum ledger. Planned to move into @ten98/runtime so both apps share one implementation.
+// node-pg returns int8 (bigint columns, count(*), seq) as strings, which would silently break numeric
+// comparisons. Every int8 here (epoch ms, seq, counts) fits a double; fail loudly if one ever does not.
+export function parseInt8(value: string): number {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number)) throw new RangeError('A bigint value is outside the safe integer range.');
+  return number;
+}
+pg.types.setTypeParser(pg.types.builtins.INT8, parseInt8);
+
 let database: { pool: pg.Pool; db: ReturnType<typeof drizzle<typeof schema>> } | undefined;
 export function getDatabase(connectionString = process.env.DATABASE_URL) {
   if (!database) {
@@ -22,7 +31,7 @@ export function getDatabase(connectionString = process.env.DATABASE_URL) {
 }
 export async function closeDatabase() { if (database) { const { pool } = database; database = undefined; await pool.end(); } }
 
-const migrationFiles = ['0001_baseline.sql'] as const;
+const migrationFiles = ['0001_baseline.sql', '0002_insertion_order.sql'] as const;
 type Migration = Readonly<{ version: string; filename: string; sql: string; checksum: string }>;
 type AppliedMigration = Readonly<{ version: string; checksum: string }>;
 let migrations: Promise<readonly Migration[]> | undefined;

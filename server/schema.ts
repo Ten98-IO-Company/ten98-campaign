@@ -39,6 +39,7 @@ export const sessions = pgTable('sessions', {
 export const workspaces = pgTable('workspaces', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 });
 export const memberships = pgTable('memberships', {
   workspace_id: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
@@ -55,14 +56,16 @@ export const projects = pgTable('projects', {
   color: text('color').notNull().default('#5943ce'),
   zernio_profile_id: text('zernio_profile_id').notNull().default(''),
   drive_folder_id: text('drive_folder_id').notNull().default(''),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 });
 export const records = pgTable('records', {
   id: text('id').primaryKey(),
   project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   collection: text('collection').notNull(),
   data: json('data').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
-  index('records_project').on(t.project_id, t.collection),
+  index('records_project').on(t.project_id, t.collection, t.seq),
 ]);
 export const activity = pgTable('activity', {
   id: text('id').primaryKey(),
@@ -70,7 +73,10 @@ export const activity = pgTable('activity', {
   message: text('message').notNull(),
   created_at: text('created_at').notNull(),
   sample: boolean('sample').notNull().default(false),
-});
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
+}, t => [
+  index('activity_project').on(t.project_id, t.seq),
+]);
 export const oidcFlows = pgTable('oidc_flows', {
   state: text('state').primaryKey(),
   browser: text('browser').notNull(),
@@ -105,6 +111,7 @@ export const workspaceInvitations = pgTable('workspace_invitations', {
   expires_at: bigint('expires_at', { mode: 'number' }).notNull(),
   accepted_at: bigint('accepted_at', { mode: 'number' }),
   revoked_at: bigint('revoked_at', { mode: 'number' }),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   check('workspace_invitations_role_check', sql`${t.role} IN ('owner','admin','editor','viewer')`),
   index('workspace_invitations_workspace').on(t.workspace_id, t.created_at),
@@ -123,6 +130,7 @@ export const integrationOperations = pgTable('integration_operations', {
   action_path: text('action_path').notNull().default(''),
   run_id: text('run_id').notNull().default(''),
   resource_key: text('resource_key').notNull().default(''),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   unique('integration_operations_project_id_request_key_key').on(t.project_id, t.request_key),
   index('integration_operations_resource').on(t.project_id, t.resource_key, t.status),
@@ -166,6 +174,7 @@ export const agentRuns = pgTable('agent_runs', {
   usage: json('usage').notNull(),
   error: text('error'),
   created_at: text('created_at').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   unique('agent_runs_project_id_user_id_request_key_key').on(t.project_id, t.user_id, t.request_key),
 ]);
@@ -199,6 +208,7 @@ export const postApprovalReviews = pgTable('post_approval_reviews', {
   reviewed_by: text('reviewed_by').references(() => users.id),
   reviewed_at: text('reviewed_at'),
   note: text('note').notNull().default(''),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   check('post_approval_reviews_status_check', sql`${t.status} IN ('pending','approved','rejected')`),
   index('post_approval_reviews_post').on(t.project_id, t.post_id),
@@ -248,6 +258,7 @@ export const microsoftAdReports = pgTable('microsoft_ad_reports', {
   account_id: text('account_id').notNull(),
   request_id: text('request_id').notNull(),
   data: json('data').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 });
 
 // Out-of-home media (ooh.ts)
@@ -261,6 +272,7 @@ export const projectOohInventory = pgTable('project_ooh_inventory', {
   project_id: text('project_id').notNull(),
   screen_id: bigint('screen_id', { mode: 'number' }).notNull(),
   data: json('data').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   primaryKey({ columns: [t.project_id, t.screen_id] }),
 ]);
@@ -268,6 +280,7 @@ export const projectOohBookings = pgTable('project_ooh_bookings', {
   id: text('id').primaryKey(),
   project_id: text('project_id').notNull(),
   data: json('data').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 });
 
 // Links and website analytics (links.ts)
@@ -289,6 +302,7 @@ export const campaignLinks = pgTable('campaign_links', {
   short_origin: text('short_origin').notNull(),
   archived: boolean('archived').notNull().default(false),
   created_at: text('created_at').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('campaign_links_project').on(t.project_id),
   uniqueIndex('campaign_links_active_destination').on(t.project_id, t.destination, t.campaign_id).where(sql`NOT ${t.archived}`),
@@ -330,6 +344,7 @@ export const directContacts = pgTable('direct_contacts', {
   id: text('id').primaryKey(),
   project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   data: json('data').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('direct_contacts_project').on(t.project_id),
 ]);
@@ -359,6 +374,7 @@ export const directCampaigns = pgTable('direct_campaigns', {
   id: text('id').primaryKey(),
   project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   data: json('data').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('direct_campaigns_project').on(t.project_id),
 ]);
@@ -367,6 +383,7 @@ export const directDeliveries = pgTable('direct_deliveries', {
   campaign_id: text('campaign_id').notNull().references(() => directCampaigns.id, { onDelete: 'cascade' }),
   contact_id: text('contact_id').notNull(),
   data: json('data').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   unique('direct_deliveries_campaign_id_contact_id_key').on(t.campaign_id, t.contact_id),
 ]);
@@ -415,6 +432,7 @@ export const webhookEvents = pgTable('webhook_events', {
   next_attempt: bigint('next_attempt', { mode: 'number' }).notNull().default(0),
   received_at: text('received_at').notNull(),
   processed_at: text('processed_at'),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('webhook_pending').on(t.status, t.next_attempt),
 ]);
@@ -533,6 +551,7 @@ export const zernioMediaUploads = pgTable('zernio_media_uploads', {
   profile_id: text('profile_id').notNull(),
   asset_id: text('asset_id').notNull(),
   data: json('data').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('zernio_media_scope').on(t.project_id, t.user_id, t.profile_id, t.asset_id),
 ]);
@@ -561,6 +580,7 @@ export const zernioCampaignCopyReceipts = pgTable('zernio_campaign_copy_receipts
   discovery: text('discovery'),
   verification: text('verification').notNull().default('pending'),
   status_read_at: text('status_read_at'),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   primaryKey({ columns: [t.project_id, t.request_key] }),
 ]);

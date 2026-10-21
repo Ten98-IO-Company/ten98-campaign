@@ -1,9 +1,10 @@
 -- Baseline PostgreSQL schema: the 81 tables the SQLite modules create lazily as of 0.8.12.
 -- Value representations are preserved for an ID-preserving import: ISO-8601 timestamps stay text,
 -- epoch-millisecond values are bigint, 0/1 flags are boolean, encrypted settings are bytea.
--- JSON documents use json (not jsonb) so stored key order, and every fingerprint computed from a
--- parsed document, stays identical. Exact provider evidence, idempotent replay bodies and
--- fingerprinted snapshots stay text.
+-- JSON documents use json, not jsonb: jsonb reorders object keys, and approvals and recycling
+-- fingerprint sha256(JSON.stringify(parsed document)), so a jsonb round trip would mark approved
+-- posts stale and raise false APPROVAL_POST_CHANGED errors. json keeps the stored text and still
+-- supports ->>. Exact provider evidence, idempotent replay bodies and fingerprinted snapshots stay text.
 
 -- Identity, tenancy and installation (database.ts, invitations.ts)
 CREATE TABLE installation (id integer PRIMARY KEY CHECK (id = 1), claimed boolean NOT NULL DEFAULT false);
