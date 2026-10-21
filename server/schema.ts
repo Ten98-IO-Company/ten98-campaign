@@ -196,6 +196,7 @@ export const agentActions = pgTable('agent_actions', {
 export const projectApprovalPolicy = pgTable('project_approval_policy', {
   project_id: text('project_id').primaryKey().references(() => projects.id, { onDelete: 'cascade' }),
   require_approval: boolean('require_approval').notNull(),
+  require_ad_approval: boolean('require_ad_approval').notNull().default(false),
   updated_by: text('updated_by').notNull().references(() => users.id),
   updated_at: text('updated_at').notNull(),
 });
@@ -213,9 +214,14 @@ export const postApprovalReviews = pgTable('post_approval_reviews', {
   note: text('note').notNull().default(''),
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
   self_approved: boolean('self_approved').notNull().default(false),
+  kind: text('kind').notNull().default('post'),
+  consumed_by: text('consumed_by'),
+  consumed_at: text('consumed_at'),
 }, t => [
   check('post_approval_reviews_status_check', sql`${t.status} IN ('pending','approved','rejected')`),
+  check('post_approval_reviews_kind_check', sql`${t.kind} IN ('post','ad_spend')`),
   index('post_approval_reviews_post').on(t.project_id, t.post_id),
+  index('post_approval_reviews_fingerprint').on(t.project_id, t.kind, t.fingerprint),
 ]);
 export const postRecyclingReviews = pgTable('post_recycling_reviews', {
   id: text('id').primaryKey(),
