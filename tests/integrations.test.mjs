@@ -747,3 +747,57 @@ test('with approval required, social/update needs an approved review of the prop
     assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVED_PROVIDER_EDIT_RESTRICTED'); assert.equal(updates.length, 1);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+// Council decision ten98-code-system#30 (Q2 amendment): a submitted post's proposed update is reviewed, then exactly
+// that update may be sent. Both sides fingerprint the provider copy merged with the same update fields.
+async function proposalFixture(t) {
+  const { db, pool } = await testDatabase(t), originalFetch = globalThis.fetch, updates = [];
+  t.after(() => { globalThis.fetch = originalFetch; });
+  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner','Owner','owner@example.test'),('admin','Admin','admin@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO memberships VALUES ('w','owner','owner'),('w','admin','admin'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('proposal-project','w','Proposal','profile-proposal')");
+  const project = { id: 'proposal-project', zernioProfileId: 'profile-proposal' }, store = createStore(db), account = { _id: 'facebook-proposal', profileId: project.zernioProfileId, platform: 'facebook' };
+  let remote = { _id: 'remote-proposal', status: 'draft', content: 'Live caption', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] }, keySequence = 0;
+  const context = (role, extra) => { const value = { db, store, project, role, user: { id: role, name: role }, config: { env: {}, ZERNIO_API_KEY: 'sk_test_stub' }, assertProjectMapping(expected) { if (expected !== project.zernioProfileId) throw new Error('Mapping changed'); }, ...extra }; value.assertProviderPostEdit = () => assertProviderPostEdit(value); return value; };
+  async function approvals(path, role, body = {}) {
+    let response; await handleApprovals({ ...context(role), req: { method: 'POST' }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body, send(status, data) { response = { status, data }; } });
+    return response;
+  }
+  async function update(body, role = 'owner') {
+    let response;
+    await handleIntegration(context(role, { req: { method: 'POST', headers: { 'idempotency-key': `proposal-update-${++keySequence}` } }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/social/update`), body: { postId: local.id, ...body }, send(status, data) { response = { status, data }; } }));
+    return response;
+  }
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(target), method = options.method || 'GET'; let result;
+    if (url.pathname === '/api/v1/accounts') result = { accounts: [account] };
+    else if (url.pathname === '/api/v1/posts/remote-proposal' && method === 'GET') result = { post: remote };
+    else if (url.pathname === '/api/v1/posts/remote-proposal' && method === 'PUT') { const payload = JSON.parse(options.body); updates.push(payload); remote = { ...remote, ...payload, status: payload.isDraft ? 'draft' : 'scheduled' }; result = { post: remote }; }
+    else throw new Error(`Unexpected provider call ${method} ${url.pathname}`);
+    return new Response(JSON.stringify(result), { status: 200 });
+  };
+  const local = await store.create(project.id, 'posts', { content: 'Live caption', platforms: ['facebook'], accounts: [account._id], status: 'draft', mediaItems: [] });
+  await store.update(project.id, 'posts', local.id, { externalId: remote._id, zernioProfileId: project.zernioProfileId });
+  assert.equal((await approvals('policy', 'owner', { requireApproval: true })).status, 200);
+  async function approveProposal(proposal) {
+    const requested = await approvals(`posts/${local.id}/request`, 'owner', { proposal });
+    assert.equal(requested.status, 200, JSON.stringify(requested.data)); assert.equal(requested.data.item.review.status, 'pending'); assert.equal(requested.data.item.review.requestedBy.id, 'owner');
+    const reviewed = await approvals(`posts/${local.id}/review`, 'admin', { reviewId: requested.data.item.review.id, decision: 'approved' });
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data)); assert.equal(reviewed.data.item.review.status, 'approved'); assert.equal(reviewed.data.item.review.selfApproved, false);
+  }
+  return { updates, update, approveProposal };
+}
+
+test('a proposal approved by another admin lets the identical social/update reach the provider exactly once', { skip: postgresSkip }, async t => {
+  const f = await proposalFixture(t), proposal = { content: 'Proposed caption', tags: ['launch'], mode: 'draft' };
+  await f.approveProposal(proposal);
+  const result = await f.update(proposal);
+  assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(f.updates.length, 1); assert.equal(f.updates[0].content, 'Proposed caption'); assert.deepEqual(f.updates[0].tags, ['launch']);
+});
+
+test('a social/update that differs from the approved proposal is stale and never reaches the provider', { skip: postgresSkip }, async t => {
+  const f = await proposalFixture(t);
+  await f.approveProposal({ content: 'Proposed caption', mode: 'draft' });
+  for (const different of [{ content: 'Different caption', mode: 'draft' }, { content: 'Proposed caption', mode: 'scheduled', scheduledAt: '2070-05-01T09:00:00Z' }, { content: 'Proposed caption', tags: ['unreviewed'], mode: 'draft' }]) {
+    const result = await f.update(different);
+    assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.error.code, 'PUBLISHING_APPROVAL_STALE'); assert.equal(f.updates.length, 0);
+  }
+});

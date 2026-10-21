@@ -5,6 +5,7 @@ import type { Executor } from './database.ts';
 import { fail, IntegrationError, targetConfiguration, zernioClient, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
 import { queueList, reviewedQueue } from './zernio-queues.ts';
+import { SOCIAL_UPDATE_FIELDS, socialUpdateProposal } from './integrations.ts';
 
 type ApprovalContext = Omit<OperationContext, 'project' | 'body'> & { project: ProviderRecord; body?: any };
 const administrators = new Set(['owner', 'admin']);
@@ -42,6 +43,8 @@ async function postSnapshot(context: ApprovalContext, post: ProviderRecord) {
 }
 const fingerprint = (snapshot: ProviderRecord) => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
 const latest = (db: Executor, projectId: string, postId: string) => first(db.execute(sql`SELECT * FROM post_approval_reviews WHERE project_id=${projectId} AND post_id=${postId} ORDER BY seq DESC LIMIT 1`));
+// A review of a proposed provider update stores the proposal beside the snapshot it fingerprints (#30 Q2).
+const proposalOf = (review: ProviderRecord | undefined) => Boolean(review && JSON.parse(review.snapshot).proposal);
 const submitted = (post: ProviderRecord) => Boolean(post.externalId || post.zernioPostId || ['published', 'submitted', 'partial'].includes(post.status));
 const retryableFailure = (post: ProviderRecord) => Boolean((post.externalId || post.zernioPostId) && ['failed', 'partial'].includes(post.status) && Array.isArray(post.providerResults) && post.providerResults.some((copy: ProviderRecord) => copy.status === 'failed') && (post.status === 'partial') === post.providerResults.some((copy: ProviderRecord) => copy.status === 'published') && post.providerResults.every((copy: ProviderRecord) => ['failed', 'published', 'cancelled'].includes(copy.status)));
 async function localPost(context: ApprovalContext, id: string) {
@@ -90,6 +93,23 @@ async function assertSelfApprovalAllowed(tx: Executor, projectId: string, userId
   if (reviewers.length === 1 && reviewers[0].id === userId) return;
   const others = reviewers.filter(row => row.id !== userId).map(row => String(row.name)).sort((a, b) => a.localeCompare(b));
   fail(403, 'APPROVAL_SELF_REVIEW', `You requested this review, so another owner or administrator must approve it${others.length ? `: ${others.join(', ')}` : ''}.`);
+}
+// Council decision ten98-code-system#30 (Q2): with a proposal, a submitted post's review covers the post that
+// social/update would send (the provider copy merged with the proposal). The newest proposal supersedes pending reviews.
+async function requestProposal(context: ApprovalContext, post: ProviderRecord) {
+  const { project, user, db, store, body } = context;
+  fields(body, ['proposal']); fields(body.proposal, SOCIAL_UPDATE_FIELDS);
+  const proposed = await socialUpdateProposal(context, post, body.proposal), snapshot = await postSnapshot(context, proposed), hash = fingerprint(snapshot);
+  if ((await policy(db, project.id)).requireApproval) approvalAccounts(proposed);
+  await db.transaction(async (tx: Executor) => {
+    await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
+    const current = await latest(tx, project.id, post.id), now = new Date().toISOString();
+    if (current?.fingerprint === hash && (current.status === 'approved' || current.status === 'pending' && proposalOf(current))) return;
+    await tx.execute(sql`UPDATE post_approval_reviews SET status='rejected',reviewed_at=${now},note=${'Superseded by a newer proposed update.'} WHERE project_id=${project.id} AND post_id=${post.id} AND status='pending'`);
+    await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${randomUUID()}, ${project.id}, ${post.id}, ${hash}, ${JSON.stringify({ ...snapshot, proposal: body.proposal })}, 'pending', ${user.id}, ${now})`);
+    await store.activity(project.id, `Review of a proposed provider update requested by ${user.name || user.id}.`);
+  });
+  return queueItem(context, post);
 }
 async function assertApprovedReview(context: ApprovalContext, post: ProviderRecord, snapshot: ProviderRecord) {
   approvalAccounts(post);
@@ -142,7 +162,12 @@ export async function handleApprovals(context: ApprovalContext) {
     const match = path.match(/^posts\/([^/]+)\/(request|review)$/);
     if (!match || req.method !== 'POST') fail(404, 'APPROVAL_ACTION_NOT_FOUND', 'This approval action was not found.');
     if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'APPROVAL_WRITE_REQUIRED', 'Editing permission is required to request content review.');
-    const post = await localPost(context, match[1]), snapshot = await postSnapshot(context, post), hash = fingerprint(snapshot), review = await latest(db, project.id, post.id);
+    // A provider copy takes a proposal request, and a review of its pending proposal; every other case stays local.
+    const stored = await store.get(project.id, 'posts', match[1]), storedReview = stored ? await latest(db, project.id, stored.id) : undefined;
+    const proposing = Boolean(stored?.externalId && !stored.sample) && (match[2] === 'request' ? Boolean(body && typeof body === 'object' && Object.hasOwn(body, 'proposal')) : proposalOf(storedReview));
+    if (proposing && match[2] === 'request') { send(200, { item: await requestProposal(context, stored) }); return true; }
+    const post = proposing ? stored : await localPost(context, match[1]), review = proposing ? storedReview : await latest(db, project.id, post.id);
+    const snapshot = proposing ? JSON.parse(review!.snapshot) : await postSnapshot(context, post), hash = proposing ? review!.fingerprint : fingerprint(snapshot);
     if (match[2] === 'request') {
       fields(body, []);
       if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
@@ -169,7 +194,10 @@ export async function handleApprovals(context: ApprovalContext) {
     if (!['approved', 'rejected'].includes(body.decision) || typeof note !== 'string' || note.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(note) || typeof body.reviewId !== 'string') fail(400, 'INVALID_APPROVAL_REVIEW', 'Choose approve or reject and use a review note of at most 2,000 characters.');
     if (!review || review.id !== body.reviewId || review.status !== 'pending' || review.fingerprint !== hash) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
     let queue = null;
-    if (body.decision === 'approved') {
+    if (body.decision === 'approved' && proposing) {
+      if ((await policy(db, project.id)).requireApproval) approvalAccounts(snapshot);
+      assetApproved(snapshot);
+    } else if (body.decision === 'approved') {
       if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
       if (post.queueId) queue = reviewedQueue(post, await publishingQueues(context));
       const currentReview = await latest(db, project.id, post.id);

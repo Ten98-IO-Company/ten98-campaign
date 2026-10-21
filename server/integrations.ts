@@ -690,6 +690,47 @@ function saveDriveFiles(db: any, projectId: any, files: any, assertMapping: any)
   });
 }
 
+export const SOCIAL_UPDATE_FIELDS = ['content', 'tags', 'mediaItems', 'assetId', 'platformOverrides', 'accountOverrides', 'confirmReplaceVariants', 'mode', 'scheduledAt'];
+// The post a social/update would leave behind: the provider copy's model merged with the update body. Content review of
+// a proposed update (council #30 Q2) fingerprints this same object, so an approval authorises exactly this update.
+async function proposedSocialUpdate(store: any, projectId: string, post: any, remote: any, body: any) {
+  if (!['draft', 'scheduled', 'failed', 'cancelled'].includes(remote.status) || remote.platforms.some((item: any) => ['published', 'publishing'].includes(item.status))) fail(409, 'POST_NOT_EDITABLE', 'Only unpublished posts can be rescheduled or changed here.');
+  const content = body.content === undefined ? remote.content ?? post.content ?? '' : body.content;
+  if (typeof content !== 'string' || content.length > 100000) fail(400, 'INVALID_CONTENT', 'Use a caption of at most 100,000 characters.');
+  if (!['draft', 'scheduled'].includes(body.mode)) fail(400, 'INVALID_POST_MODE', 'Save as a draft or choose a future schedule.');
+  const payload: any = { content, isDraft: body.mode === 'draft' }; let scheduledAt = '';
+  if (body.mode === 'scheduled') {
+    const value = body.scheduledAt;
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value.slice(0, 10)).toISOString().slice(0, 10) !== value.slice(0, 10)) fail(400, 'INVALID_DATE', 'Choose a valid scheduled time with a timezone.');
+    scheduledAt = new Date(value).toISOString();
+    if (Date.parse(scheduledAt) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'Choose a future time before scheduling.');
+    Object.assign(payload, { scheduledFor: scheduledAt, timezone: 'UTC' });
+  }
+  const model = await remotePostModel(store, projectId, post, remote), replacingPlatforms = Object.hasOwn(body, 'platformOverrides'), replacingAccounts = Object.hasOwn(body, 'accountOverrides');
+  const changed: any = { ...model, content, scheduledAt, ...(Object.hasOwn(body, 'tags') ? { tags: body.tags } : {}), ...(Object.hasOwn(body, 'mediaItems') ? { mediaItems: body.mediaItems } : {}), ...(Object.hasOwn(body, 'assetId') ? { assetId: body.assetId } : {}), ...(replacingPlatforms ? { platformOverrides: body.platformOverrides, ...(!replacingAccounts ? { accountOverrides: {} } : {}) } : {}), ...(replacingAccounts ? { accountOverrides: body.accountOverrides } : {}) };
+  normalizedVariants(changed);
+  if (Object.hasOwn(body, 'tags')) { changed.tags = normalizePostTags(body.tags); payload.tags = changed.tags; }
+  return { content, payload, scheduledAt, model, replacingPlatforms, replacingAccounts, changed };
+}
+function assertProposedDestinations(changed: any, remote: any, body: any) {
+  for (const [id, variant] of Object.entries(normalizeAccountVariants(changed))) if (!remote.platforms.some((target: any) => String(target.accountId?._id || target.accountId) === id && target.platform === variant.platform)) fail(400, 'ACCOUNT_VARIANT_MISMATCH', 'Every account customization must match an existing destination and platform on this post.');
+  if (body.mode === 'scheduled') try { assertAccountSchedules(changed); } catch (error: any) { fail(400, 'ACCOUNT_SCHEDULE_INVALID', error.message); }
+}
+// Reads the provider copy and returns the proposed post of a social/update body after that route's local validation.
+// Provider-side preflight (variant replacement, destinations, platform validation) still runs when the update is sent.
+export async function socialUpdateProposal(context: any, post: any, body: any) {
+  const env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) };
+  if (!env.ZERNIO_API_KEY) fail(503, 'ZERNIO_NOT_CONFIGURED', 'Configure a Zernio API key to connect providers.');
+  if (!context.project.zernioProfileId) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
+  const profileId = String(context.project.zernioProfileId), api = zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping?.(profileId));
+  if (sample(post)) fail(400, 'SAMPLE_RECORD', 'Sample posts cannot be sent to live providers.');
+  const remote = await scopedPost(api, profileId, post, body.mode === 'scheduled');
+  await assertRecyclingSeedEditable(remote, null as any);
+  const { changed } = await proposedSocialUpdate(context.store, context.project.id, post, remote, body);
+  assertProposedDestinations(changed, remote, body);
+  return changed;
+}
+
 export async function handleIntegration(context: any) {
   const { req, url, body = {}, project, role, send, store, db } = context;
   const prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/`;
@@ -1085,7 +1126,7 @@ export async function handleIntegration(context: any) {
       send(200, { post: updated, provider: { id: post.externalId, status: remote.status } }); return true;
     }
     if (req.method === 'POST' && ['social/update', 'social/cancel', 'social/retry', 'social/edit-published', 'social/update-metadata', 'social/unpublish'].includes(path)) {
-      const allowed = path === 'social/update' ? ['postId', 'content', 'tags', 'mediaItems', 'assetId', 'platformOverrides', 'accountOverrides', 'confirmReplaceVariants', 'mode', 'scheduledAt'] : path === 'social/retry' ? ['postId', 'confirmPublish'] : path === 'social/edit-published' ? ['postId', 'accountId', 'content', 'confirmEdit'] : path === 'social/update-metadata' ? ['postId', 'accountId', 'videoId', 'title', 'tags', 'confirmEdit'] : path === 'social/unpublish' ? ['postId', 'accountId', 'confirmRemoval'] : ['postId', 'confirmCancellation'];
+      const allowed = path === 'social/update' ? ['postId', ...SOCIAL_UPDATE_FIELDS] : path === 'social/retry' ? ['postId', 'confirmPublish'] : path === 'social/edit-published' ? ['postId', 'accountId', 'content', 'confirmEdit'] : path === 'social/update-metadata' ? ['postId', 'accountId', 'videoId', 'title', 'tags', 'confirmEdit'] : path === 'social/unpublish' ? ['postId', 'accountId', 'confirmRemoval'] : ['postId', 'confirmCancellation'];
       fields(body, allowed, 'post action');
       const postId = identifier(body.postId, 'post ID');
       const outcome = await operation(context, async key => {
@@ -1102,26 +1143,10 @@ export async function handleIntegration(context: any) {
         }
         if (path === 'social/update') {
           await context.assertProviderPostEdit?.();
-          if (!['draft', 'scheduled', 'failed', 'cancelled'].includes(remote.status) || remote.platforms.some((item: any) => ['published', 'publishing'].includes(item.status))) fail(409, 'POST_NOT_EDITABLE', 'Only unpublished posts can be rescheduled or changed here.');
-          const content = body.content === undefined ? remote.content ?? post.content ?? '' : body.content;
-          if (typeof content !== 'string' || content.length > 100000) fail(400, 'INVALID_CONTENT', 'Use a caption of at most 100,000 characters.');
-          if (!['draft', 'scheduled'].includes(body.mode)) fail(400, 'INVALID_POST_MODE', 'Save as a draft or choose a future schedule.');
-          const payload: any = { content, isDraft: body.mode === 'draft' }; let scheduledAt = '', validationWarnings = [];
-          if (body.mode === 'scheduled') {
-            const value = body.scheduledAt;
-            if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value.slice(0, 10)).toISOString().slice(0, 10) !== value.slice(0, 10)) fail(400, 'INVALID_DATE', 'Choose a valid scheduled time with a timezone.');
-            scheduledAt = new Date(value).toISOString();
-            if (Date.parse(scheduledAt) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'Choose a future time before scheduling.');
-            Object.assign(payload, { scheduledFor: scheduledAt, timezone: 'UTC' });
-          }
-          const model = await remotePostModel(store, project.id, post, remote), replacingPlatforms = Object.hasOwn(body, 'platformOverrides'), replacingAccounts = Object.hasOwn(body, 'accountOverrides');
-          const changed: any = { ...model, content, scheduledAt, ...(Object.hasOwn(body, 'tags') ? { tags: body.tags } : {}), ...(Object.hasOwn(body, 'mediaItems') ? { mediaItems: body.mediaItems } : {}), ...(Object.hasOwn(body, 'assetId') ? { assetId: body.assetId } : {}), ...(replacingPlatforms ? { platformOverrides: body.platformOverrides, ...(!replacingAccounts ? { accountOverrides: {} } : {}) } : {}), ...(replacingAccounts ? { accountOverrides: body.accountOverrides } : {}) };
-          normalizedVariants(changed);
-          if (Object.hasOwn(body, 'tags')) { changed.tags = normalizePostTags(body.tags); payload.tags = changed.tags; }
+          const { content, payload, scheduledAt, model, replacingPlatforms, replacingAccounts, changed } = await proposedSocialUpdate(store, project.id, post, remote, body); let validationWarnings = [];
           // With approval required, the proposed content needs its own approved review; checked again after the provider checks.
           await assertProposedPostApproval(context, changed);
-          for (const [id, variant] of Object.entries(normalizeAccountVariants(changed))) if (!remote.platforms.some((target: any) => String(target.accountId?._id || target.accountId) === id && target.platform === variant.platform)) fail(400, 'ACCOUNT_VARIANT_MISMATCH', 'Every account customization must match an existing destination and platform on this post.');
-          if (body.mode === 'scheduled') try { assertAccountSchedules(changed); } catch (error: any) { fail(400, 'ACCOUNT_SCHEDULE_INVALID', error.message); }
+          assertProposedDestinations(changed, remote, body);
           const assets = await postAssets(store, project.id, changed), replacingVariants = replacingPlatforms || replacingAccounts, replacingMedia = Object.hasOwn(body, 'mediaItems') || Object.hasOwn(body, 'assetId');
           if (Object.hasOwn(body, 'confirmReplaceVariants') && typeof body.confirmReplaceVariants !== 'boolean') fail(400, 'INVALID_VARIANT_CONFIRMATION', 'Explicitly confirm replacement of account-specific provider copies.');
           const divergent = remote.platforms.filter((target: any) => remote.platforms.some((other: any) => other.platform === target.platform && (canonical(targetConfiguration(other)) !== canonical(targetConfiguration(target)) || replacingAccounts && Date.parse(other.scheduledFor || remote.scheduledFor) !== Date.parse(target.scheduledFor || remote.scheduledFor))));

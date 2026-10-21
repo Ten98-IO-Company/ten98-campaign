@@ -200,3 +200,74 @@ test('the self-approval exception counts active owners and administrators at rev
   assert.equal(result.status, 403); assert.match(result.data.error.message, /: Abe Admin, Dana Admin\.$/, 'Eligible reviewers are listed in name order.');
   assert.deepEqual(await f.stored(reviewId), { status: 'pending', self_approved: false });
 });
+
+// Council decision ten98-code-system#30 (Q2 amendment): a submitted post takes a review of a proposed provider update.
+async function proposalFixture(t, members) {
+  const { db, pool, sql } = await testDatabase(t), originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  await pool.query("INSERT INTO users (id, name, email) VALUES ('blair','Blair Owner','blair@example.test'),('avery','Avery Admin','avery@example.test'),('casey','Casey Editor','casey@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a','w','A','profile-a')");
+  for (const [id, role] of members) await pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', ['w', id, role]);
+  const store = createStore(db), project = { id: 'project-a', zernioProfileId: 'profile-a' }, roles = Object.fromEntries(members), names = { blair: 'Blair Owner', avery: 'Avery Admin', casey: 'Casey Editor' };
+  const account = { _id: 'facebook-a', profileId: project.zernioProfileId, platform: 'facebook' }, remote = { _id: 'remote-a', status: 'scheduled', content: 'Live caption', scheduledFor: '2070-01-01T09:00:00Z', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] };
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(target), method = options.method || 'GET';
+    if (method === 'GET' && url.pathname === '/api/v1/accounts') return new Response(JSON.stringify({ accounts: [account] }), { status: 200 });
+    if (method === 'GET' && url.pathname === '/api/v1/posts/remote-a') return new Response(JSON.stringify({ post: remote }), { status: 200 });
+    throw new Error(`Unexpected provider call ${method} ${url.pathname}`);
+  };
+  async function invoke(path, userId, body = {}) {
+    let result;
+    await handleApprovals({ db, store, project, role: roles[userId], user: { id: userId, name: names[userId] }, config: { env: {}, ZERNIO_API_KEY: 'sk_test_stub' }, assertProjectMapping: async () => {}, req: { method: 'POST' }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body, send(status, data) { result = { status, data }; } });
+    return result;
+  }
+  const post = await store.create(project.id, 'posts', { content: 'Live caption', platforms: ['facebook'], accounts: [account._id], status: 'scheduled', scheduledAt: remote.scheduledFor, mediaItems: [] });
+  await store.update(project.id, 'posts', post.id, { externalId: remote._id, zernioProfileId: project.zernioProfileId });
+  assert.equal((await invoke('policy', members.find(([, role]) => role === 'owner')[0], { requireApproval: true })).status, 200);
+  const request = (userId, body) => invoke(`posts/${post.id}/request`, userId, body);
+  const review = (userId, reviewId, decision = 'approved') => invoke(`posts/${post.id}/review`, userId, { reviewId, decision, note: 'Checked the proposed update.' });
+  const stored = reviewId => sql.get('SELECT status, note, requested_by, self_approved FROM post_approval_reviews WHERE id = ?', reviewId);
+  const count = async () => Number((await sql.get('SELECT count(*) AS count FROM post_approval_reviews WHERE post_id = ?', post.id)).count);
+  return { request, review, stored, count };
+}
+
+test('a submitted post still needs a proposal to request review, and an invalid proposal opens no review', { skip: postgresSkip }, async t => {
+  const f = await proposalFixture(t, [['blair', 'owner'], ['avery', 'admin'], ['casey', 'editor']]);
+  let result = await f.request('casey', {});
+  assert.equal(result.status, 409); assert.equal(result.data.error.code, 'APPROVAL_LOCAL_POST_REQUIRED');
+  for (const [proposal, code] of [[{ content: 'Proposed caption' }, 'INVALID_POST_MODE'], [{ content: 7, mode: 'draft' }, 'INVALID_CONTENT'], [{ mode: 'scheduled', scheduledAt: '2020-01-01T09:00:00Z' }, 'SCHEDULE_PASSED'], [{ mode: 'draft', postId: 'another-post' }, 'INVALID_APPROVAL_FIELDS'], [{ mode: 'draft', accountOverrides: { 'another-account': { platform: 'facebook', content: 'Elsewhere' } } }, 'ACCOUNT_VARIANT_MISMATCH']]) {
+    result = await f.request('casey', { proposal });
+    assert.ok(result.status >= 400 && result.status < 500, JSON.stringify(result.data)); assert.equal(result.data.error.code, code);
+  }
+  assert.equal(await f.count(), 0, 'An invalid proposal cannot be reviewed or approved.');
+});
+
+test('a newer proposal supersedes the pending one, which can no longer be approved', { skip: postgresSkip }, async t => {
+  const f = await proposalFixture(t, [['blair', 'owner'], ['avery', 'admin'], ['casey', 'editor']]);
+  let result = await f.request('casey', { proposal: { content: 'First proposal', mode: 'draft' } }); assert.equal(result.status, 200, JSON.stringify(result.data));
+  const first = result.data.item.review.id; assert.equal(result.data.item.review.snapshot.content, 'First proposal'); assert.deepEqual(result.data.item.review.snapshot.proposal, { content: 'First proposal', mode: 'draft' });
+  assert.equal((await f.request('casey', { proposal: { content: 'First proposal', mode: 'draft' } })).data.item.review.id, first, 'Repeating a pending proposal does not open a duplicate review.');
+  result = await f.request('casey', { proposal: { content: 'Second proposal', mode: 'draft' } }); assert.equal(result.status, 200, JSON.stringify(result.data));
+  const second = result.data.item.review.id; assert.notEqual(second, first);
+  assert.deepEqual(await f.stored(first), { status: 'rejected', note: 'Superseded by a newer proposed update.', requested_by: 'casey', self_approved: false });
+  result = await f.review('blair', first); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'APPROVAL_REVIEW_CHANGED');
+  assert.equal((await f.stored(first)).status, 'rejected');
+  result = await f.review('blair', second); assert.equal(result.status, 200, JSON.stringify(result.data));
+  assert.deepEqual(await f.stored(second), { status: 'approved', note: 'Checked the proposed update.', requested_by: 'casey', self_approved: false });
+});
+
+test('approving a proposal follows the self-review rule and its single-administrator exception', { skip: postgresSkip }, async t => {
+  await t.test('another owner or administrator is active', async t => {
+    const f = await proposalFixture(t, [['blair', 'owner'], ['avery', 'admin']]);
+    const requested = await f.request('avery', { proposal: { content: 'Admin proposal', mode: 'draft' } }); assert.equal(requested.status, 200, JSON.stringify(requested.data));
+    const result = await f.review('avery', requested.data.item.review.id);
+    assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVAL_SELF_REVIEW'); assert.match(result.data.error.message, /: Blair Owner\.$/);
+    assert.deepEqual(await f.stored(requested.data.item.review.id), { status: 'pending', note: '', requested_by: 'avery', self_approved: false });
+  });
+  await t.test('the single owner or administrator', async t => {
+    const f = await proposalFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+    const requested = await f.request('blair', { proposal: { content: 'Owner proposal', mode: 'draft' } }); assert.equal(requested.status, 200, JSON.stringify(requested.data));
+    const result = await f.review('blair', requested.data.item.review.id);
+    assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.item.review.selfApproved, true);
+    assert.deepEqual(await f.stored(requested.data.item.review.id), { status: 'approved', note: 'Checked the proposed update.', requested_by: 'blair', self_approved: true });
+  });
+});

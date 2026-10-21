@@ -48,8 +48,19 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     async function draft(extra = {}) { const result = await request(project + '/posts', 'POST', { ...fields, ...extra }); assert.equal(result.status, 201, JSON.stringify(result.data)); return result.data.record; }
     async function approve(record) {
       const asked = await request(`${project}/approvals/posts/${record.id}/request`, 'POST', {}); assert.equal(asked.status, 200, JSON.stringify(asked.data));
+      // An approved proposed update (#30 Q2) may already cover this exact content; it is not reviewed twice.
+      if (asked.data.item.review.status === 'approved') return asked.data.item;
       const approved = await request(`${project}/approvals/posts/${record.id}/review`, 'POST', { reviewId: asked.data.item.review.id, decision: 'approved', note: 'Reviewed each distinct account copy and fixed time.' }); assert.equal(approved.status, 200, JSON.stringify(approved.data)); return approved.data.item;
     }
+    // Council decision #30 (Q2): with the policy on, a submitted post's update is requested as a proposal and approved first.
+    // The fixture owner is the project's single owner/admin, so this is the recorded self-approval exception.
+    async function approveUpdate({ postId, ...proposal }) {
+      const asked = await request(`${project}/approvals/posts/${postId}/request`, 'POST', { proposal }); assert.equal(asked.status, 200, JSON.stringify(asked.data));
+      if (asked.data.item.review.status === 'approved') return;
+      const approved = await request(`${project}/approvals/posts/${postId}/review`, 'POST', { reviewId: asked.data.item.review.id, decision: 'approved', note: 'Reviewed the proposed provider update.' });
+      assert.equal(approved.status, 200, JSON.stringify(approved.data)); assert.equal(approved.data.item.review.selfApproved, true);
+    }
+    async function approvedUpdate(body, key) { await approveUpdate(body); return request(social + '/update', 'POST', body, key); }
     async function reviewSyntheticReceipt(key) {
       // These fixture writes were accepted by the mock; close only their exact receipts between independent scenarios.
       const receipt = await app.sql.get('SELECT id,response FROM integration_operations WHERE project_id=? AND request_key=? AND status=?', state.projectId, key, 'uncertain'); assert.ok(receipt, key);
@@ -83,16 +94,16 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     const recurrence = project + '/integrations/recycling/posts/' + single.id, detail = await request(recurrence); assert.equal(detail.status, 200); assert.equal(detail.data.canEnable, false); assert.match(detail.data.unavailable, /Separate account times/);
     result = await request(recurrence + '/review', 'POST', { expectedFingerprint: detail.data.fingerprint, confirmReview: true, configuration: { enabled: true, gap: 1, gapFreq: 'week', startDate: '2070-04-01T09:00:00Z', expireDate: null, expireCount: 3, contentVariations: [] } }); assert.equal(result.status, 422); assert.equal(writes.length, beforeExpired, 'Unsupported recurring account offsets are rejected before writes.');
     const updatedCopies = { first: { platform: 'facebook', content: 'Edited first account', mediaItems: [], options: {} }, second: { platform: 'facebook', content: 'Edited second account', mediaItems: [{ type: 'image', url: asset.deliveryUrl }], options: { firstComment: 'Second account only' }, scheduledAt: '2070-02-03T09:00:00Z' } };
-    result = await request(social + '/update', 'POST', { postId: scheduled.id, content: 'Shared unchanged fallback', platformOverrides: {}, accountOverrides: updatedCopies, mode: 'scheduled', scheduledAt: '2070-02-01T09:00:00Z' }, 'account-edit'); assert.equal(result.status, 200, JSON.stringify(result.data));
+    result = await approvedUpdate({ postId: scheduled.id, content: 'Shared unchanged fallback', platformOverrides: {}, accountOverrides: updatedCopies, mode: 'scheduled', scheduledAt: '2070-02-01T09:00:00Z' }, 'account-edit'); assert.equal(result.status, 200, JSON.stringify(result.data));
     assert.equal(writes.at(-1).payload.platforms[0].customContent, updatedCopies.first.content); assert.equal(writes.at(-1).payload.platforms[1].customContent, updatedCopies.second.content); assert.equal(remote.platforms[1].scheduledFor, updatedCopies.second.scheduledAt);
     result = await request(social + '/status?postId=' + scheduled.id); assert.equal(result.status, 200); assert.equal(result.data.post.accountOverrides.first.content, updatedCopies.first.content); assert.equal(result.data.post.accountOverrides.second.content, updatedCopies.second.content);
-    result = await request(social + '/update', 'POST', { postId: scheduled.id, mode: 'scheduled', scheduledAt: '2070-02-05T09:00:00Z' }, 'account-parent-reschedule'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(remote.platforms[1].scheduledFor, updatedCopies.second.scheduledAt, 'Changing only the parent time preserves a separate account time.');
-    result = await request(social + '/update', 'POST', { postId: scheduled.id, accountOverrides: { ...updatedCopies, second: { ...updatedCopies.second, scheduledAt: '' } }, mode: 'scheduled', scheduledAt: '2070-02-04T09:00:00Z' }, 'account-clear-time'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.notEqual(remote.platforms[1].scheduledFor, updatedCopies.second.scheduledAt, 'An explicit inherited-time choice cannot retain the obsolete account time.');
+    result = await approvedUpdate({ postId: scheduled.id, mode: 'scheduled', scheduledAt: '2070-02-05T09:00:00Z' }, 'account-parent-reschedule'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(remote.platforms[1].scheduledFor, updatedCopies.second.scheduledAt, 'Changing only the parent time preserves a separate account time.');
+    result = await approvedUpdate({ postId: scheduled.id, accountOverrides: { ...updatedCopies, second: { ...updatedCopies.second, scheduledAt: '' } }, mode: 'scheduled', scheduledAt: '2070-02-04T09:00:00Z' }, 'account-clear-time'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.notEqual(remote.platforms[1].scheduledFor, updatedCopies.second.scheduledAt, 'An explicit inherited-time choice cannot retain the obsolete account time.');
     const beforeInvalid = writes.length;
     for (const overrides of [{ foreign: { platform: 'facebook', content: 'Wrong project' } }, { first: { platform: 'twitter', content: 'Wrong platform' } }]) { result = await request(social + '/validate', 'POST', { ...fields, accountOverrides: overrides }); assert.ok([400, 403, 422].includes(result.status), JSON.stringify(result)); }
     const queueTimed = await request(social + '/validate', 'POST', { ...fields, queueId: 'synthetic-queue', queueVersion: 'a'.repeat(64), accountOverrides: timed }); assert.ok(queueTimed.status >= 400); assert.equal(writes.length, beforeInvalid);
     remote.platforms.push({ ...structuredClone(remote.platforms[0]), customContent: 'Second destination on first account' });
-    result = await request(social + '/update', 'POST', { postId: scheduled.id, accountOverrides: updatedCopies, mode: 'scheduled', scheduledAt: '2070-02-04T09:00:00Z' }, 'account-ambiguous-edit'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'AMBIGUOUS_POST_DESTINATIONS'); assert.equal(writes.length, beforeInvalid); remote.platforms.pop();
+    result = await approvedUpdate({ postId: scheduled.id, accountOverrides: updatedCopies, mode: 'scheduled', scheduledAt: '2070-02-04T09:00:00Z' }, 'account-ambiguous-edit'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'AMBIGUOUS_POST_DESTINATIONS'); assert.equal(writes.length, beforeInvalid); remote.platforms.pop();
     remote.status = 'failed'; remote.platforms = remote.platforms.map(copy => ({ ...copy, status: 'failed' }));
     remote.status = 'partial'; remote.platforms[1].status = 'published';
     result = await request(social + '/status?postId=' + scheduled.id); assert.equal(result.status, 200); await approve(result.data.post);
@@ -148,8 +159,8 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     tagRemote.tags = ['launch, product']; tagRemote.status = 'failed'; tagRemote.platforms = tagRemote.platforms.map(copy => ({ ...copy, status: 'failed' }));
     result = await request(social + '/status?postId=' + tagScheduled.id); assert.equal(result.status, 200); assert.deepEqual(result.data.post.tags, ['launch, product'], 'Status must preserve provider keyword strings.');
     const changedTagQueue = await request(project + '/approvals/posts'); assert.equal(changedTagQueue.status, 200); const changedTagReview = changedTagQueue.data.posts.find(item => item.post.id === tagScheduled.id); assert.equal(changedTagReview.status, 'stale', 'A comma-joined provider keyword cannot retain approval for separate keywords.'); assert.deepEqual(changedTagReview.post.tags, ['launch, product']);
-    result = await request(social + '/update', 'POST', { postId: tagScheduled.id, tags: ['new keyword'], mode: 'scheduled', scheduledAt: '2070-01-02T09:00:00Z' }, 'tags-update'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.deepEqual(writes.at(-1).payload.tags, ['new keyword']); assert.deepEqual(result.data.post.tags, ['new keyword']);
-    result = await request(social + '/update', 'POST', { postId: tagScheduled.id, tags: [], mode: 'draft' }, 'tags-clear'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.deepEqual(tagRemote.tags, []); assert.deepEqual(result.data.post.tags, []);
+    result = await approvedUpdate({ postId: tagScheduled.id, tags: ['new keyword'], mode: 'scheduled', scheduledAt: '2070-01-02T09:00:00Z' }, 'tags-update'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.deepEqual(writes.at(-1).payload.tags, ['new keyword']); assert.deepEqual(result.data.post.tags, ['new keyword']);
+    result = await approvedUpdate({ postId: tagScheduled.id, tags: [], mode: 'draft' }, 'tags-clear'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.deepEqual(tagRemote.tags, []); assert.deepEqual(result.data.post.tags, []);
     tagRemote.status = 'failed'; tagRemote.platforms = tagRemote.platforms.map(copy => ({ ...copy, status: 'failed' }));
     result = await request(social + '/status?postId=' + tagScheduled.id); assert.equal(result.status, 200); await approve(result.data.post);
     const beforeEmptyTags = writes.length; omitTagReadback = true;
@@ -170,8 +181,8 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     result = await request(project + '/posts', 'POST', { ...youtubeFields, tags: [123] }); assert.equal(result.status, 400);
     result = await request(social + '/status?postId=' + tagScheduled.id); assert.equal(result.status, 200);
     omitTagReadback = true;
-    result = await request(social + '/update', 'POST', { postId: tagScheduled.id, tags: ['unverified change'], mode: 'draft' }, 'tags-missing-update-readback'); assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN');
-    const afterMissingTag = writes.length; result = await request(social + '/update', 'POST', { postId: tagScheduled.id, tags: ['unverified change'], mode: 'draft' }, 'tags-missing-update-readback'); assert.ok(result.status >= 400); assert.equal(writes.length, afterMissingTag); assert.deepEqual((await app.store.get(state.projectId, 'posts', tagScheduled.id)).tags, ['upstream keyword'], 'Unverified keywords must not replace the last confirmed local state.');
+    result = await approvedUpdate({ postId: tagScheduled.id, tags: ['unverified change'], mode: 'draft' }, 'tags-missing-update-readback'); assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN');
+    const afterMissingTag = writes.length; result = await approvedUpdate({ postId: tagScheduled.id, tags: ['unverified change'], mode: 'draft' }, 'tags-missing-update-readback'); assert.ok(result.status >= 400); assert.equal(writes.length, afterMissingTag); assert.deepEqual((await app.store.get(state.projectId, 'posts', tagScheduled.id)).tags, ['upstream keyword'], 'Unverified keywords must not replace the last confirmed local state.');
     await reviewSyntheticReceipt('tags-missing-update-readback');
     omitTagReadback = false;
     tagRemote.tags = null; result = await request(social + '/status?postId=' + tagScheduled.id); assert.equal(result.status, 502); assert.deepEqual((await app.store.get(state.projectId, 'posts', tagScheduled.id)).tags, ['upstream keyword']); tagRemote.tags = ['upstream keyword'];
@@ -185,7 +196,9 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
       if (action === 'update') { result = await request(social + '/publish', 'POST', { postId: alteredTags.id }, 'tags-altered-update-setup'); assert.equal(result.status, 200, JSON.stringify(result.data)); }
       omitCreateTags = true; readbackTags = ['launch, product'];
       const path = action === 'create' ? '/publish' : '/update', body = { postId: alteredTags.id, ...(action === 'update' ? { tags: ['launch', 'product'], mode: 'draft' } : {}) }, key = `tags-altered-${action}`;
+      if (action === 'update') await approveUpdate(body);
       const beforeAlteredTags = writes.length; result = await request(social + path, 'POST', body, key); assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(writes.length, beforeAlteredTags + 1, 'The altered receipt is rejected after exactly one provider write.');
+      if (action === 'update') await approveUpdate(body);
       const afterAlteredTags = writes.length; result = await request(social + path, 'POST', body, key); assert.ok(result.status >= 400); assert.equal(writes.length, afterAlteredTags); assert.deepEqual((await app.store.get(state.projectId, 'posts', alteredTags.id)).tags, ['launch', 'product'], 'Altered keyword receipts must preserve the approved local copy.');
       if (action === 'create') assert.equal((await app.store.get(state.projectId, 'posts', alteredTags.id)).externalId, undefined);
       await reviewSyntheticReceipt(key);
