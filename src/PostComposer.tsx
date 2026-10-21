@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Badge, Button, Checkbox, CheckboxGroup, ContentPreview, DateTimeField, DestinationPicker, Disclosure, Field, Fieldset, Form, FormGrid, Grid, Heading, Image as MediaImage, Inline, Input, List, ListItem, MediaPlayer, MediaStrip, Option, ReviewConfirm, Select, Stack, StatusLine, Tabs, Text, Textarea, ValidationSummary, VisuallyHidden, type MediaItem as StripItem, type ValidationMessage } from '@ten98/ui';
+import { Alert, Badge, Button, Checkbox, CheckboxGroup, ContentPreview, DateTimeField, DestinationPicker, Disclosure, Field, Fieldset, Form, FormGrid, Grid, Heading, Image as MediaImage, Inline, Input, List, ListItem, MediaPlayer, MediaStrip, Option, ReviewConfirm, SegmentedControl, Select, Stack, StatusLine, Tabs, Text, Textarea, ValidationSummary, VisuallyHidden, type MediaItem as StripItem, type ValidationMessage } from '@ten98/ui';
 import { PLATFORM_RULES, captionLimitForVariant, countCaption, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms, providerPostMediaUrls } from '../shared/social-posts.ts';
 // The library has no sticky form footer or wide dialog size for this native modal; this sheet keeps only those two rules.
 import './post-composer.css';
@@ -27,6 +27,15 @@ const localTime = (value = '') => value && Number.isFinite(Date.parse(value)) ? 
 const accountId = (account: Row) => String(account._id || account.id);
 export const accountLabel = (account: Row) => account.displayName || account.username || account.name || accountId(account);
 const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+// Quick schedule presets ported from zernio-dev/latewiz@28dd018063b955769de11f881acd03bb64c61cd4 src/app/dashboard/compose/_components/schedule-picker.tsx:91-137 (MIT).
+// Like the datetime-local input, they are wall-clock times in the browser's time zone; next Monday is never today.
+const schedulePresets = [{ key: 'tomorrow-9', label: 'Tomorrow 9 AM' }, { key: 'tomorrow-18', label: 'Tomorrow 6 PM' }, { key: 'monday-9', label: 'Next Monday 9 AM' }];
+function presetTime(preset: string, now = new Date()) {
+  const date = new Date(now);
+  date.setDate(date.getDate() + (preset === 'monday-9' ? (8 - date.getDay()) % 7 || 7 : 1));
+  date.setHours(preset === 'tomorrow-18' ? 18 : 9, 0, 0, 0);
+  return localTime(date.toISOString());
+}
 const issueMessages = (errors: { message: string }[], warnings: { message: string }[]): ValidationMessage[] => [...errors.map((item, index) => ({ id: 'error' + index, text: item.message })), ...warnings.map((item, index) => ({ id: 'warning' + index, text: 'To verify: ' + item.message }))];
 function AccountGroupPicker({ load, onChoose, disabled }: { load: NonNullable<Props['onLoadGroups']>; onChoose: (members: Row[], directory: Row[]) => void; disabled: boolean }) {
   const [data, setData] = useState<any>(null), [selectedId, setSelectedId] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
@@ -180,12 +189,16 @@ function StructuredOption({ schema, value, onChange, label, onInvalid, depth = 0
 }
 
 const previewMedia = (items: MediaItem[] = []) => items.length ? <Grid columns="auto" minItemWidth="sm" gap={2}>{items.map((item, index) => <Stack key={item.url + ':' + index} gap={1}><PreviewMedia item={item}/>{items.length > 1 && <Text size="xs" tone="muted">{index + 1} / {items.length}</Text>}</Stack>)}</Grid> : undefined;
-export function PostVariantPreview({ platform, variant, accountName = 'Your brand', scheduled = false }: { platform: string; variant: { content: string; mediaItems: MediaItem[]; options?: Record<string, any> }; accountName?: string; scheduled?: boolean }) {
+type PreviewSize = 'mobile' | 'desktop';
+// The mobile/desktop preview toggle follows zernio-dev/latewiz@28dd018063b955769de11f881acd03bb64c61cd4 src/app/dashboard/compose/_components/platform-previews.tsx:34-50 (MIT).
+// ContentPreview has no frame width, so the size changes where feeds cut a caption: phones show fewer characters.
+const captionCutoff = (platform: string, size: PreviewSize) => ['instagram', 'tiktok', 'threads'].includes(platform) ? size === 'mobile' ? 125 : 180 : size === 'mobile' ? 140 : 300;
+export function PostVariantPreview({ platform, variant, accountName = 'Your brand', scheduled = false, size = 'desktop' }: { platform: string; variant: { content: string; mediaItems: MediaItem[]; options?: Record<string, any> }; accountName?: string; scheduled?: boolean; size?: PreviewSize }) {
   const options = variant.options || {}, rule = PLATFORM_RULES[platform];
   const entries: { content?: string; mediaItems?: MediaItem[] }[] = options.threadItems?.length ? options.threadItems : [variant];
   const pollAnswers = options.poll?.options || options.poll?.answers?.map((answer: any) => answer.poll_media?.text || 'Poll answer') || [];
   const [first, ...rest] = entries, caption = first.content || undefined;
-  return <ContentPreview label={`${rule?.label || platform} post preview`} destination={accountName} provider={`${rule?.label || platform} · ${options.postType || options.mediaType || options.contentType || 'Post'}${scheduled ? ' · Planned' : ''}`} chrome={[options.contentType, options.postType].includes('story') ? 'story' : ['discord', 'telegram', 'whatsapp'].includes(platform) ? 'message' : 'post'} captionLimit={['instagram', 'tiktok', 'threads'].includes(platform) ? 180 : 300} emptyMessage="Your caption will appear here."
+  return <ContentPreview label={`${rule?.label || platform} post preview`} destination={accountName} provider={`${rule?.label || platform} · ${options.postType || options.mediaType || options.contentType || 'Post'}${scheduled ? ' · Planned' : ''}`} chrome={[options.contentType, options.postType].includes('story') ? 'story' : ['discord', 'telegram', 'whatsapp'].includes(platform) ? 'message' : 'post'} captionLimit={captionCutoff(platform, size)} emptyMessage="Your caption will appear here."
     text={options.title ? <Stack gap={1}><Text weight="semibold">{options.title}</Text>{caption && <Text preserveWhitespace>{caption}</Text>}</Stack> : caption} media={previewMedia(first.mediaItems)}
     thread={rest.map((entry, position) => ({ id: platform + ':' + (position + 1), text: entry.content || undefined, media: previewMedia(entry.mediaItems) }))}
     poll={options.poll ? { question: typeof options.poll.question === 'string' ? options.poll.question : options.poll.question?.text || 'Poll', options: pollAnswers, duration: 'Voting opens on the platform after publication.' } : undefined}
@@ -206,7 +219,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [shortening, setShortening] = useState(false), alive = useRef(true);
   const [groupAccounts, setGroupAccounts] = useState<Row[] | null>(null), accounts = groupAccounts || connectedAccounts;
-  const [tagInput, setTagInput] = useState((post?.tags || []).join('\n'));
+  const [tagInput, setTagInput] = useState((post?.tags || []).join('\n')), [previewSize, setPreviewSize] = useState<PreviewSize>('desktop');
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const disabled = busy || saving || shortening || !canWrite || readOnly || post?.status === 'published' || !!post?.externalId && !providerPost;
   const selected = platforms.includes(activePlatform) ? activePlatform : platforms[0] || '', rule = PLATFORM_RULES[selected];
@@ -304,7 +317,8 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     <ValidationSummary title={`${rule.label} restriction checks`} items={[{ id: editKey, target: editingAccount ? `${accountLabel(editingAccount)} · ${rule.label}` : rule.label, status: errors.length ? 'error' : warnings.length ? 'warning' : 'ok', messages: errors.length || warnings.length ? issueMessages(errors, warnings) : [{ id: 'ok', text: 'No known caption or media restriction failed.' }] }]}/>
     {editingAccountId && <DateTimeField label="Separate account time (your local timezone, optional)" timeZoneLabel={browserTimeZone} disabled={!!queueId || !scheduledAt} value={localTime(accountOverrides[editingAccountId]?.scheduledAt)} onValueChange={value => { setAccountOverrides(previous => ({ ...previous, [editingAccountId]: { ...previous[editingAccountId], platform: selected, scheduledAt: value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : '' } })); }} description="Leave empty to use the planned post time. Choose a fixed post time first. Separate times are unavailable for immediate publishing and queues."/>}
     {editingAccountId && accountOverrides[editingAccountId]?.scheduledAt && <Text tone="muted" size="sm">This account: {new Date(accountOverrides[editingAccountId].scheduledAt!).toLocaleString()}</Text>}
-    <PostVariantPreview platform={selected} variant={variant} accountName={editingAccount ? accountLabel(editingAccount) + ' · ' + editingAccountId : activeAccounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))).map(accountLabel).join(', ') || 'Your brand'} scheduled={!!scheduledAt || !!queueId}/>
+    <SegmentedControl label="Preview size" value={previewSize} onValueChange={value => setPreviewSize(value === 'mobile' ? 'mobile' : 'desktop')} options={[{ value: 'mobile', label: 'Mobile' }, { value: 'desktop', label: 'Desktop' }]}/>
+    <PostVariantPreview size={previewSize} platform={selected} variant={variant} accountName={editingAccount ? accountLabel(editingAccount) + ' · ' + editingAccountId : activeAccounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))).map(accountLabel).join(', ') || 'Your brand'} scheduled={!!scheduledAt || !!queueId}/>
   </Stack>;
   return <Form className="post-composer" onSubmit={(_, event) => submit(event)}>
     <Input type="hidden" name="draftSnapshot" readOnly value={JSON.stringify(values)}/>
@@ -335,6 +349,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
       <Stack as="section" gap={3}><Heading level={3}>4. Campaign and timing</Heading>
         <Field label="Campaign"><Select disabled={providerPost} value={campaignId} onChange={event => setCampaignId(event.target.value)}><Option value="">No campaign</Option>{campaigns.map(campaign => <Option value={campaign.id} key={campaign.id}>{campaign.name}</Option>)}</Select></Field>
         <DateTimeField label="Plan for (your local timezone, optional)" timeZoneLabel={browserTimeZone} disabled={!!queueId} value={scheduledAt} onValueChange={setScheduledAt} description={`${scheduledAt ? `Planned for ${new Date(scheduledAt).toLocaleString()}. ` : ''}${providerPost ? 'Accounts without a separate time use this planned time. Clear every separate account time before returning the provider post to an unpublished draft.' : 'Saving keeps the post local. Choose Publish or Schedule in Publishing to submit it to Zernio.'}`}/>
+        <Inline gap={2} role="group" aria-label="Quick schedule times">{schedulePresets.map(preset => <Button key={preset.key} variant="secondary" size="sm" disabled={!!queueId} onClick={() => setScheduledAt(presetTime(preset.key))}>{preset.label}</Button>)}</Inline>
       </Stack>
       {!providerPost && (onLoadQueues || queueId) && <Stack as="section" gap={3}><Heading level={3}>Publishing queue</Heading>
         {onLoadQueues && <Inline><Button variant="secondary" disabled={disabled || loadingQueues} onClick={async () => { if (loadingQueues) return; setLoadingQueues(true); setError(''); try { const result = await onLoadQueues(); if (alive.current) setQueues(result.queues || []); } catch (failure) { if (alive.current) setError((failure as Error).message || 'Publishing queues could not be loaded.'); } finally { if (alive.current) setLoadingQueues(false); } }}>{loadingQueues ? 'Loading queues…' : 'Load publishing queues'}</Button></Inline>}
