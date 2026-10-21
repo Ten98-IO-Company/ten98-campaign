@@ -196,9 +196,9 @@ export const agentActions = pgTable('agent_actions', {
 export const projectApprovalPolicy = pgTable('project_approval_policy', {
   project_id: text('project_id').primaryKey().references(() => projects.id, { onDelete: 'cascade' }),
   require_approval: boolean('require_approval').notNull(),
-  require_ad_approval: boolean('require_ad_approval').notNull().default(false),
   updated_by: text('updated_by').notNull().references(() => users.id),
   updated_at: text('updated_at').notNull(),
+  require_ad_approval: boolean('require_ad_approval').notNull().default(false),
 });
 export const postApprovalReviews = pgTable('post_approval_reviews', {
   id: text('id').primaryKey(),
