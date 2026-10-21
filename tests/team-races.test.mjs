@@ -126,3 +126,16 @@ test('a demotion racing an acceptance either follows the acceptance or refuses i
   assert.deepEqual([(await accepted).status, (await demoted).status], [200, 200]);
   const row = await early.invitation(); assert.notEqual(row.accepted_at, null); assert.equal(row.revoked_at, null);
 });
+
+test('an administrator manages editors and viewers but not owners or administrators', { skip: postgresSkip }, async t => {
+  const { pool, request, workspaceId, first, second } = await owners(t);
+  await pool.query("UPDATE memberships SET role = 'admin' WHERE user_id = 'second'");
+  await pool.query("INSERT INTO users VALUES ('third', 'Third', 'third@example.test', NULL)"); await pool.query("INSERT INTO memberships VALUES ($1, 'third', 'editor')", [workspaceId]);
+  const change = (target, body, method = 'PATCH') => request(`/workspaces/${workspaceId}/members/${target}`, { method, body, cookie: second.cookie });
+  assert.equal((await change('third', { role: 'viewer' })).status, 200);
+  assert.equal((await change('third', { role: 'admin' })).status, 403, 'An administrator cannot grant administrator.');
+  assert.equal((await change(first.id, { role: 'editor' })).status, 403, 'An administrator cannot change an owner.');
+  assert.equal((await change(first.id, undefined, 'DELETE')).status, 403, 'An administrator cannot remove an owner.');
+  assert.equal((await change('third', undefined, 'DELETE')).status, 200);
+  assert.deepEqual((await pool.query('SELECT user_id, role FROM memberships WHERE workspace_id = $1 ORDER BY user_id', [workspaceId])).rows.map(row => [row.user_id, row.role]).sort(), [[first.id, 'owner'], ['second', 'admin']].sort());
+});

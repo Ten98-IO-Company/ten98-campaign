@@ -4,7 +4,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve, relative, extname, sep, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
-import { oidcEndpoint, workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
+import { oidcEndpoint, workspaceRoles as roles, mayManageWorkspaceMember } from '@ten98/runtime';
 import { assertSchema, closeDatabase, createStore, collections, getDatabase, type Connection, type Database, type Executor, type Store } from './database.ts';
 import { createAuth, sessionSecret, bootstrapToken, hashPassword, HttpError, lockWorkspace, memberRole, publicUser, type AuthConfig, type PublicUser } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
@@ -275,7 +275,8 @@ export async function createApp(options: AppOptions = {}) {
             if (!['owner', 'admin'].includes(current)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
             const target = { id: memberRoute[2] }, previous = await memberRole(tx, memberRoute[1], target.id);
             if (!previous) throw new HttpError(404, 'Workspace member not found.');
-            if ((requested !== null && !mayGrantWorkspaceRole(current, requested)) || !mayGrantWorkspaceRole(current, previous)) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
+            // The shared rule checks both the saved and the requested role; removal passes no next role.
+            if (!mayManageWorkspaceMember(current, previous, requested ?? undefined)) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
             if (previous === 'owner' && requested !== 'owner' && (await first<{ count: number }>(tx.execute(sql`SELECT count(*) AS count FROM memberships WHERE workspace_id=${memberRoute[1]} AND role='owner'`)))!.count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
             if (req.method === 'DELETE') await tx.execute(sql`DELETE FROM memberships WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
             else await tx.execute(sql`UPDATE memberships SET role=${requested} WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
