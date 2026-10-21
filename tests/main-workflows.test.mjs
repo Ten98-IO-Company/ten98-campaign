@@ -102,7 +102,7 @@ test('post status buttons remain a subordinate pressed group with their actual l
   const filter = new Function('state', 'tab', 'filtered', declaration + '; return visiblePosts;');
   const posts = statuses.slice(1).map(status => ({ id: status, status }));
   for (const status of statuses) assert.deepEqual(filter({ posts }, status, rows => rows).map(post => post.id), status === 'all' ? statuses.slice(1) : [status]);
-  assert.match(appSource, /<nav className="tabs" aria-label="Publishing sections">/, 'Publishing route navigation stays separate.');
+  assert.match(appSource, /sections\('Publishing sections', publishingView, /, 'Publishing route navigation stays separate.');
 });
 
 test('Overview campaign totals and channel counts use singular only for one campaign', async () => {
