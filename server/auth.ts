@@ -6,6 +6,7 @@ import { BlockList, isIP } from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sql } from 'drizzle-orm';
 import type { Database, Executor } from './database.ts';
+import { joinInvitation, lockInvitation } from './invitations.ts';
 
 export interface AuthConfig { appUrl: string; sessionSecret: string; bootstrapToken?: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[]; trustedProxies?: string[] }
 export interface PublicUser { id: string; name: string; email: string; isOperator: boolean }
@@ -221,23 +222,30 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
         const tokens = await client.authorizationCodeGrant(provider, url, { pkceCodeVerifier: flow.verifier, expectedState: state, expectedNonce: flow.nonce, idTokenExpected: true });
         const claims = tokens.claims();
         if (!claims?.sub || typeof claims.sub !== 'string' || claims.sub.length > 1024) throw new Error('Missing subject.');
+        let joined = false;
         await db.transaction(async tx => {
+          // A usable invitation (re-checked under its workspace and row locks) provisions its exact verified email into that
+          // workspace only; an unusable one leaves the allowlist rules in place.
+          const invited = invite ? await lockInvitation(tx, invite).catch(error => { if (error instanceof HttpError) return undefined; throw error; }) : undefined;
           await advisoryLock(tx, 'oidc:' + JSON.stringify([claims.iss, claims.sub]));
           const existing = await first<{ user_id: string }>(tx.execute(sql`SELECT user_id FROM oidc_identities WHERE issuer = ${claims.iss} AND subject = ${claims.sub}`));
           if (existing) return establish(res, existing.user_id, req, tx);
           const email = typeof claims.email === 'string' ? claims.email.trim().toLowerCase() : '';
-          if (claims.email_verified !== true || !config.oidcAllowedEmails.includes(email) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.');
+          if (claims.email_verified !== true || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.');
+          if (invited && invited.email !== email) throw new HttpError(403, `This invitation is for ${invited.email}. Sign in with that identity to accept it.`);
+          if (!invited && !config.oidcAllowedEmails.includes(email)) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.');
           await advisoryLock(tx, 'email:' + email);
           if ((await tx.execute(sql`SELECT id FROM users WHERE email = ${email}`)).rowCount) throw new HttpError(403, 'This email already has an account. Automatic identity linking is disabled.');
           const id = randomUUID(), workspace = randomUUID();
           await tx.execute(sql`INSERT INTO users VALUES (${id}, ${typeof claims.name === 'string' ? claims.name.slice(0, 120) : email}, ${email}, NULL)`);
           await tx.execute(sql`INSERT INTO oidc_identities VALUES (${claims.iss}, ${claims.sub}, ${id})`);
+          if (invited) { await joinInvitation(tx, invited, id); joined = true; return establish(res, id, req, tx); }
           await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspace}, 'My workspace')`);
           await tx.execute(sql`INSERT INTO memberships VALUES (${workspace}, ${id}, 'owner')`);
           await tx.execute(sql`INSERT INTO projects (id, workspace_id, name) VALUES (${randomUUID()}, ${workspace}, 'My project')`);
           return establish(res, id, req, tx);
         });
-        res.writeHead(302, { Location: config.appUrl + '/' + (invite ? '?invite=' + encodeURIComponent(invite) : '') }); res.end();
+        res.writeHead(302, { Location: config.appUrl + '/' + (invite && !joined ? '?invite=' + encodeURIComponent(invite) : '') }); res.end();
       } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, 'Identity sign-in could not be verified. Start again.'); }
     },
   };
