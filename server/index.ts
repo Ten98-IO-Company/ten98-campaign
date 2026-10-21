@@ -12,7 +12,7 @@ import { seedSample } from './seed.ts';
 import { handleIntegration } from './integrations.ts';
 import { IntegrationError, mediaUrl, type ProviderRecord, type OperationContext } from './provider-core.ts';
 import { createIntegrationSettings } from './integration-settings.ts';
-import { handleInvitations } from './invitations.ts';
+import { handleInvitations, revokeMemberInvitations } from './invitations.ts';
 import { handleOperationRecovery } from './operation-recovery.ts';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from './approvals.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.ts';
@@ -279,6 +279,7 @@ export async function createApp(options: AppOptions = {}) {
             if (previous === 'owner' && requested !== 'owner' && (await first<{ count: number }>(tx.execute(sql`SELECT count(*) AS count FROM memberships WHERE workspace_id=${memberRoute[1]} AND role='owner'`)))!.count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
             if (req.method === 'DELETE') await tx.execute(sql`DELETE FROM memberships WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
             else await tx.execute(sql`UPDATE memberships SET role=${requested} WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
+            await revokeMemberInvitations(tx, memberRoute[1], target.id, requested);
             const activityStore = createStore(tx);
             for (const project of (await tx.execute(sql`SELECT id FROM projects WHERE workspace_id=${memberRoute[1]}`)).rows as { id: string }[]) await activityStore.activity(project.id, 'Workspace team membership updated.');
           });

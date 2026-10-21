@@ -32,6 +32,16 @@ export async function joinInvitation(tx: Executor, invite: ProviderRecord, userI
   await tx.execute(sql`UPDATE workspace_invitations SET accepted_at = ${Date.now()} WHERE id = ${invite.id}`);
   return role;
 }
+/**
+ * Under the workspace lock, after a member's role changes (role null: removed): revokes the member's pending invitations
+ * for roles they can no longer grant and, on removal, pending invitations addressed to them. Acceptance takes the same
+ * lock, so it completes before the change or finds the invitation revoked.
+ */
+export async function revokeMemberInvitations(tx: Executor, workspaceId: string, userId: string, role: string | null): Promise<void> {
+  const now = Date.now(), { rows } = await tx.execute(sql`SELECT id, role FROM workspace_invitations WHERE workspace_id = ${workspaceId} AND inviter_id = ${userId} AND accepted_at IS NULL AND revoked_at IS NULL`);
+  for (const row of rows as ProviderRecord[]) if (!mayGrantWorkspaceRole(role, row.role)) await tx.execute(sql`UPDATE workspace_invitations SET revoked_at = ${now} WHERE id = ${row.id} AND accepted_at IS NULL AND revoked_at IS NULL`);
+  if (role === null) await tx.execute(sql`UPDATE workspace_invitations SET revoked_at = ${now} WHERE workspace_id = ${workspaceId} AND email = (SELECT email FROM users WHERE id = ${userId}) AND accepted_at IS NULL AND revoked_at IS NULL`);
+}
 function object(body: any, allowed: string[]) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'Use only the fields shown in the invitation form.');
 }
