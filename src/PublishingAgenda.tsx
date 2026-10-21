@@ -22,13 +22,16 @@ type Props = {
   onViewChange?: (view: 'month' | 'list') => void;
   /** Moves the shown month; the grid's own previous, next and today controls use it. */
   onMonthChange?: (month: Date) => void;
+  /** Approval status text by post id, supplied only when the project requires approval before publishing. */
+  postApprovals?: Record<string, string>;
 };
 const localDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 
-export default function CampaignPublishingAgenda({ posts, googleEvents, month, accounts = [], canWrite, postLabel, onSelect, onCreateDay, googleEventActions, actions, view = 'list', onViewChange, onMonthChange }: Props) {
+export default function CampaignPublishingAgenda({ posts, googleEvents, month, accounts = [], canWrite, postLabel, onSelect, onCreateDay, googleEventActions, actions, view = 'list', onViewChange, onMonthChange, postApprovals }: Props) {
   const start = new Date(month.getFullYear(), month.getMonth(), 1), end = new Date(month.getFullYear(), month.getMonth() + 1, 1);
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const format = new Intl.DateTimeFormat('en', { timeZone: timezone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
+  const approval = (post: Row) => postApprovals ? ' · ' + (postApprovals[post.id] || 'Approval not requested') : '';
   const timeOnly = new Intl.DateTimeFormat('en', { timeZone: timezone, hour: '2-digit', minute: '2-digit' });
   // Month grid days, keyed by the browser-local date that the agenda's times also use.
   const days = new Map<string, CalendarEntry[]>(), addDay = (day: string, entry: CalendarEntry) => days.set(day, [...(days.get(day) || []), entry]);
@@ -38,11 +41,11 @@ export default function CampaignPublishingAgenda({ posts, googleEvents, month, a
   const entries: (PublishingAgendaEntry & { order: number })[] = posts.filter(entry => new Date(entry.scheduledAt) >= start && new Date(entry.scheduledAt) < end).map(entry => ({
     id: `post:${entry.id}`, title: entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post)),
     dateTime: entry.scheduledAt, when: format.format(new Date(entry.scheduledAt)), order: Date.parse(entry.scheduledAt),
-    status: entry.post.status || 'Status unavailable',
+    status: (entry.post.status || 'Status unavailable') + approval(entry.post),
     details: [entry.platform, entry.accountId && (accounts.find(account => String(account._id || account.id) === entry.accountId)?.displayName || entry.accountId)].filter(Boolean).join(' · '),
     actions: <Button variant="secondary" size="sm" onClick={() => onSelect(entry.post)}>{canWrite ? 'Open post' : 'View post'}</Button>,
   }));
-  for (const entry of monthPosts) addDay(localDate(new Date(entry.scheduledAt)), { id: `post:${entry.id}`, label: entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post)), time: timeOnly.format(new Date(entry.scheduledAt)), onSelect: () => onSelect(entry.post) });
+  for (const entry of monthPosts) addDay(localDate(new Date(entry.scheduledAt)), { id: `post:${entry.id}`, label: (entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post))) + approval(entry.post), time: timeOnly.format(new Date(entry.scheduledAt)), onSelect: () => onSelect(entry.post) });
   let googleCount = 0;
   for (const event of googleEvents) {
     const allDay = Boolean(event.start?.date), dateTime = event.start?.date || event.start?.dateTime;
