@@ -5,6 +5,8 @@
 -- fingerprint sha256(JSON.stringify(parsed document)), so a jsonb round trip would mark approved
 -- posts stale and raise false APPROVAL_POST_CHANGED errors. json keeps the stored text and still
 -- supports ->>. Exact provider evidence, idempotent replay bodies and fingerprinted snapshots stay text.
+-- oidc_return_targets keeps only a keyed hash of the invitation continuation, not the raw token (#27).
+-- That column changed in place before any deployment had applied 0001.
 
 -- Identity, tenancy and installation (database.ts, invitations.ts)
 CREATE TABLE installation (id integer PRIMARY KEY CHECK (id = 1), claimed boolean NOT NULL DEFAULT false);
@@ -20,7 +22,7 @@ CREATE TABLE records (id text PRIMARY KEY, project_id text NOT NULL REFERENCES p
 CREATE INDEX records_project ON records (project_id, collection);
 CREATE TABLE activity (id text PRIMARY KEY, project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE, message text NOT NULL, created_at text NOT NULL, sample boolean NOT NULL DEFAULT false);
 CREATE TABLE oidc_flows (state text PRIMARY KEY, browser text NOT NULL, verifier text NOT NULL, nonce text NOT NULL, expires_at bigint NOT NULL);
-CREATE TABLE oidc_return_targets (state text PRIMARY KEY REFERENCES oidc_flows(state) ON DELETE CASCADE, invite_token text NOT NULL);
+CREATE TABLE oidc_return_targets (state text PRIMARY KEY REFERENCES oidc_flows(state) ON DELETE CASCADE, invite_hash text NOT NULL);
 CREATE TABLE oidc_identities (issuer text NOT NULL, subject text NOT NULL, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY (issuer, subject));
 CREATE TABLE login_limits (key text PRIMARY KEY, count integer NOT NULL, expires_at bigint NOT NULL);
 CREATE TABLE workspace_invitations (id text PRIMARY KEY, workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, email text NOT NULL, role text NOT NULL CHECK (role IN ('owner','admin','editor','viewer')), inviter_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash text NOT NULL UNIQUE, created_at bigint NOT NULL, expires_at bigint NOT NULL, accepted_at bigint, revoked_at bigint);

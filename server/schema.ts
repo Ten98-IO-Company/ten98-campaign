@@ -86,7 +86,7 @@ export const oidcFlows = pgTable('oidc_flows', {
 });
 export const oidcReturnTargets = pgTable('oidc_return_targets', {
   state: text('state').primaryKey().references(() => oidcFlows.state, { onDelete: 'cascade' }),
-  invite_token: text('invite_token').notNull(),
+  invite_hash: text('invite_hash').notNull(),
 });
 export const oidcIdentities = pgTable('oidc_identities', {
   issuer: text('issuer').notNull(),

@@ -1,15 +1,12 @@
-import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { drizzle } from 'drizzle-orm/node-postgres';
+import { and, desc, eq, sql } from 'drizzle-orm';
+import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import * as schema from './schema.ts';
+import { activity, records } from './schema.ts';
 
-// PostgreSQL (issue #25): modules move here from the SQLite functions below one by one until cutover.
-// Ported from ten98-discover (MIT) src/server/db.ts and cli.ts migrate at e36503c: the pool, versioned SQL
-// files and checksum ledger. Planned to move into @ten98/runtime so both apps share one implementation.
 // node-pg returns int8 (bigint columns, count(*), seq) as strings, which would silently break numeric
 // comparisons. Every int8 here (epoch ms, seq, counts) fits a double; fail loudly if one ever does not.
 export function parseInt8(value: string): number {
@@ -19,18 +16,30 @@ export function parseInt8(value: string): number {
 }
 pg.types.setTypeParser(pg.types.builtins.INT8, parseInt8);
 
-let database: { pool: pg.Pool; db: ReturnType<typeof drizzle<typeof schema>> } | undefined;
-export function getDatabase(connectionString = process.env.DATABASE_URL) {
-  if (!database) {
-    if (!connectionString) throw new Error('Set DATABASE_URL to the PostgreSQL connection string.');
-    const pool = new pg.Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10000, statement_timeout: 10000 });
-    pool.on('error', () => console.error('Database connection failed; check database availability.'));
-    database = { pool, db: drizzle(pool, { schema }) };
-  }
-  return database;
-}
-export async function closeDatabase() { if (database) { const { pool } = database; database = undefined; await pool.end(); } }
+export type Database = NodePgDatabase<typeof schema>;
+export type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+/** Statements that may run on their own or inside a caller's transaction. */
+export type Executor = Database | Transaction;
+export type Connection = { pool: pg.Pool; db: Database };
 
+export function connect(connectionString: string): Connection {
+  const pool = new pg.Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10000, statement_timeout: 10000 });
+  pool.on('error', () => console.error('Database connection failed; check database availability.'));
+  return { pool, db: drizzle(pool, { schema }) };
+}
+
+let shared: Connection | undefined;
+export function getDatabase(connectionString = process.env.DATABASE_URL): Connection {
+  if (!shared) {
+    if (!connectionString) throw new Error('Set DATABASE_URL to the PostgreSQL connection string.');
+    shared = connect(connectionString);
+  }
+  return shared;
+}
+export async function closeDatabase() { if (shared) { const { pool } = shared; shared = undefined; await pool.end(); } }
+
+// Ported from ten98-discover (MIT) src/server/db.ts and cli.ts migrate at e36503c: versioned SQL files and a
+// checksum ledger. Planned to move into @ten98/runtime so both apps share one implementation.
 const migrationFiles = ['0001_baseline.sql', '0002_insertion_order.sql'] as const;
 type Migration = Readonly<{ version: string; filename: string; sql: string; checksum: string }>;
 type AppliedMigration = Readonly<{ version: string; checksum: string }>;
@@ -56,15 +65,15 @@ export async function pendingMigrations(applied: readonly AppliedMigration[]): P
   return sources.slice(applied.length);
 }
 
-export async function assertSchema() {
-  const { rows } = await getDatabase().pool.query<AppliedMigration>('SELECT version, checksum FROM schema_version ORDER BY version');
+export async function assertSchema(pool = getDatabase().pool) {
+  const { rows } = await pool.query<AppliedMigration>('SELECT version, checksum FROM schema_version ORDER BY version');
   if ((await pendingMigrations(rows)).length !== 0) throw schemaMismatch();
 }
 
 // One transaction under an advisory lock, so concurrent starts apply each migration exactly once.
-export async function migrate(): Promise<string[]> {
+export async function migrate(pool = getDatabase().pool): Promise<string[]> {
   await migrationSources();
-  const client = await getDatabase().pool.connect(), applied: string[] = [];
+  const client = await pool.connect(), applied: string[] = [];
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1, $2)', [109858, 1]);
@@ -87,62 +96,43 @@ export async function migrate(): Promise<string[]> {
 
 export type ProjectRecord = { id: string; projectId: string; createdAt: string; updatedAt: string; [key: string]: any };
 export type Store = ReturnType<typeof createStore>;
-
 export const collections = ['campaigns', 'posts', 'placements', 'assets', 'providers'];
-export function openDatabase(dataDir: string): DatabaseSync {
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const db = new DatabaseSync(join(dataDir, 'campaign.sqlite'));
-  db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
-    CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT UNIQUE NOT NULL,password TEXT);
-    CREATE TABLE IF NOT EXISTS instance_operators(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE);
-    CREATE TABLE IF NOT EXISTS instance_operator_audit(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,action TEXT NOT NULL CHECK(action IN ('bootstrap','grant','revoke')),source TEXT NOT NULL CHECK(source IN ('bootstrap','host')),created_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY,name TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS memberships(workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,role TEXT NOT NULL CHECK(role IN ('owner','admin','editor','viewer')),PRIMARY KEY(workspace_id,user_id));
-    CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,name TEXT NOT NULL,color TEXT NOT NULL DEFAULT '#5943ce',zernio_profile_id TEXT NOT NULL DEFAULT '',drive_folder_id TEXT NOT NULL DEFAULT '');
-    CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,collection TEXT NOT NULL,data TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS records_project ON records(project_id,collection);
-    CREATE TABLE IF NOT EXISTS activity(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,message TEXT NOT NULL,created_at TEXT NOT NULL,sample INTEGER NOT NULL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS oidc_flows(state TEXT PRIMARY KEY,browser TEXT NOT NULL,verifier TEXT NOT NULL,nonce TEXT NOT NULL,expires_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS oidc_return_targets(state TEXT PRIMARY KEY REFERENCES oidc_flows(state) ON DELETE CASCADE,invite_token TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS oidc_identities(issuer TEXT NOT NULL,subject TEXT NOT NULL,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(issuer,subject));
-    CREATE TABLE IF NOT EXISTS login_limits(key TEXT PRIMARY KEY,count INTEGER NOT NULL,expires_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS installation(id INTEGER PRIMARY KEY CHECK(id=1),claimed INTEGER NOT NULL CHECK(claimed IN (0,1)));
-    INSERT OR IGNORE INTO installation VALUES(1,0);
-    UPDATE installation SET claimed=1 WHERE id=1 AND EXISTS(SELECT 1 FROM users);`);
-  return db;
-}
 
-export function transaction<T>(db: DatabaseSync, run: () => T): T {
-  db.exec('BEGIN IMMEDIATE');
-  try { const value = run(); db.exec('COMMIT'); return value; }
-  catch (error) { db.exec('ROLLBACK'); throw error; }
-}
-
-export function createStore(db: DatabaseSync) {
-  const read = db.prepare('SELECT data FROM records WHERE project_id=? AND collection=? ORDER BY rowid DESC');
-  const find = db.prepare('SELECT data FROM records WHERE project_id=? AND collection=? AND id=?');
+/** Project documents; pass a transaction to keep store writes inside the caller's critical section. */
+export function createStore(db: Executor) {
+  const scope = (projectId: string, collection: string) => and(eq(records.project_id, projectId), eq(records.collection, collection));
   return {
-    list(projectId: string, collection: string): ProjectRecord[] { return read.all(projectId, collection).map(row => JSON.parse(row.data as string)); },
-    get(projectId: string, collection: string, id: string): ProjectRecord | null { const row = find.get(projectId, collection, id); return row ? JSON.parse(row.data as string) : null; },
-    create(projectId: string, collection: string, data: Record<string, unknown>): ProjectRecord {
+    async list(projectId: string, collection: string): Promise<ProjectRecord[]> {
+      return (await db.select({ data: records.data }).from(records).where(scope(projectId, collection)).orderBy(desc(records.seq))).map(row => row.data as ProjectRecord);
+    },
+    async get(projectId: string, collection: string, id: string): Promise<ProjectRecord | null> {
+      const [row] = await db.select({ data: records.data }).from(records).where(and(scope(projectId, collection), eq(records.id, id)));
+      return row ? row.data as ProjectRecord : null;
+    },
+    async create(projectId: string, collection: string, data: Record<string, unknown>): Promise<ProjectRecord> {
       if (!collections.includes(collection)) throw new Error('Unknown collection.');
       const now = new Date().toISOString();
       const record = { ...data, id: randomUUID(), projectId, createdAt: now, updatedAt: now };
-      db.prepare('INSERT INTO records VALUES(?,?,?,?)').run(record.id, projectId, collection, JSON.stringify(record));
+      await db.insert(records).values({ id: record.id, project_id: projectId, collection, data: record });
       return record;
     },
-    update(projectId: string, collection: string, id: string, data: Record<string, unknown>): ProjectRecord | null {
-      const previous = this.get(projectId, collection, id);
-      if (!previous) return null;
-      const record = { ...previous, ...data, id, projectId, createdAt: previous.createdAt, updatedAt: new Date().toISOString() };
-      db.prepare('UPDATE records SET data=? WHERE project_id=? AND collection=? AND id=?').run(JSON.stringify(record), projectId, collection, id);
-      return record;
+    // Read-modify-write under a row lock so concurrent partial updates cannot drop each other's fields.
+    update(projectId: string, collection: string, id: string, data: Record<string, unknown>): Promise<ProjectRecord | null> {
+      return db.transaction(async tx => {
+        const [row] = await tx.select({ data: records.data }).from(records).where(and(scope(projectId, collection), eq(records.id, id))).for('update');
+        if (!row) return null;
+        const previous = row.data as ProjectRecord;
+        const record = { ...previous, ...data, id, projectId, createdAt: previous.createdAt, updatedAt: new Date().toISOString() };
+        await tx.update(records).set({ data: record }).where(eq(records.id, id));
+        return record;
+      });
     },
-    remove(projectId: string, collection: string, id: string): boolean { return db.prepare('DELETE FROM records WHERE project_id=? AND collection=? AND id=?').run(projectId, collection, id).changes > 0; },
-    activity(projectId: string, message: string, sample = false): void {
-      db.prepare('INSERT INTO activity VALUES(?,?,?,?,?)').run(randomUUID(), projectId, message, new Date().toISOString(), Number(sample));
-      db.prepare('DELETE FROM activity WHERE project_id=? AND id NOT IN (SELECT id FROM activity WHERE project_id=? ORDER BY rowid DESC LIMIT 50)').run(projectId, projectId);
+    async remove(projectId: string, collection: string, id: string): Promise<boolean> {
+      return ((await db.delete(records).where(and(scope(projectId, collection), eq(records.id, id)))).rowCount ?? 0) > 0;
+    },
+    async activity(projectId: string, message: string, sample = false): Promise<void> {
+      await db.insert(activity).values({ id: randomUUID(), project_id: projectId, message, created_at: new Date().toISOString(), sample });
+      await db.execute(sql`DELETE FROM activity WHERE project_id = ${projectId} AND seq NOT IN (SELECT seq FROM activity WHERE project_id = ${projectId} ORDER BY seq DESC LIMIT 50)`);
     },
   };
 }
