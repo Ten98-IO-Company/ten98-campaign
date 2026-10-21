@@ -72,8 +72,8 @@ test('queue row actions keep short visible labels, full accessible identities an
   const { code } = await transformWithOxc(`const render = () => (<>${source.slice(start, end)}</>);`, 'QueueRowActions.tsx', { jsx: { runtime: 'classic' } });
   const queue = { _id: 'queue-one', name: 'Weekly launch queue for a long descriptive campaign', timezone: 'UTC', slots: [{ dayOfWeek: 1, time: '09:00' }], active: true, isDefault: true };
   const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
-  function render(canManage, busy, row = queue) {
-    const calls = [], context = { React, ...library, queues: [row], canManage, busy, days: ['Sunday', 'Monday'], inspect: value => calls.push(['Preview', value]), choose: value => calls.push(['Edit', value]), remove: value => calls.push(['Delete', value]), setActive: (value, active) => calls.push([active ? 'Activate' : 'Pause', value]) };
+  function render(canManage, busy, row = queue, editor = { selected: null, editing: false }) {
+    const calls = [], context = { React, ...library, queues: [row], canManage, busy, ...editor, days: ['Sunday', 'Monday'], inspect: value => calls.push(['Preview', value]), choose: value => calls.push(['Edit', value]), remove: value => calls.push(['Delete', value]), setActive: (value, active) => calls.push([active ? 'Activate' : 'Pause', value]) };
     const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context)), table = nodes(tree).find(node => node.type === library.DataTable);
     return { tree, table, calls, buttons: nodes(table.props.rowActions(row)).filter(node => node.type === library.Button) };
   }
@@ -89,4 +89,9 @@ test('queue row actions keep short visible labels, full accessible identities an
     assert.match(renderToStaticMarkup(view.tree), /aria-label="Preview Weekly launch queue for a long descriptive campaign"/);
   }
   for (const row of [{ ...queue, active: false }, { ...queue, slots: [] }]) assert.equal(render(false, false, row).buttons[0].props.disabled, true);
+  const toggle = (row, editor) => render(true, false, row, editor).buttons.find(button => ['Pause', 'Activate'].includes(button.props.children));
+  assert.equal(toggle(queue, { selected: queue, editing: true }).props.disabled, true, 'The row open with unsaved edits cannot be paused.');
+  assert.equal(toggle(queue, { selected: queue, editing: false }).props.disabled, false);
+  assert.equal(toggle(queue, { selected: { ...queue, _id: 'other' }, editing: true }).props.disabled, false, 'Edits to another queue do not block this row.');
+  assert.equal(toggle({ ...queue, active: false, slots: [] }, { selected: null, editing: false }).props.disabled, true, 'A paused queue without slots cannot be activated.');
 });
