@@ -20,8 +20,21 @@ function campaignBody(draft: Draft, audienceMode: string) {
 }
 const when = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : 'Not scheduled';
 const contactName = (contact: any = {}) => contact.name || contact.email || contact.phone || contact.id || 'Contact';
-const statusLabel = (value?: string) => ({ draft: 'Draft', scheduled: 'Scheduled', sending: 'Sending', completed: 'Completed', cancelled: 'Cancelled', attention: 'Needs attention', accepted: 'Accepted by provider', delivered: 'Delivered', failed: 'Failed', suppressed: 'Suppressed', pending: 'Queued', uncertain: 'Outcome needs review' }[value || ''] || value || 'Not reported');
+const statusLabel = (value?: string) => ({ draft: 'Draft', scheduled: 'Scheduled', sending: 'Sending', completed: 'Completed', cancelled: 'Cancelled', attention: 'Needs attention', accepted: 'Accepted by provider', delivered: 'Delivered', failed: 'Failed', suppressed: 'Suppressed', pending: 'Queued', queued: 'Queued by provider', sent: 'Sent by provider', uncertain: 'Outcome needs review' }[value || ''] || value || 'Not reported');
 const deliveryStatus = (value?: string): OperationStatus => ({ pending: 'pending', sending: 'pending', queued: 'pending', accepted: 'accepted', sent: 'accepted', delivered: 'delivered', read: 'observed', failed: 'error', undelivered: 'error', suppressed: 'suppressed', cancelled: 'skipped', skipped: 'skipped', uncertain: 'unknown' } as Record<string, OperationStatus>)[value || ''] || 'unknown';
+// SMS tests go to one contact with recorded SMS permission (the server checks again); email tests go only to the signed-in user.
+const smsTestContacts = (people: Row[]) => people.filter(person => person.phone && person.consents?.sms && !person.suppression?.sms);
+const testSendErrors: Record<string, string> = {
+  SEND_CONFIRMATION_REQUIRED: 'Confirm the test send before it is sent.',
+  INVALID_TEST_RECIPIENT: 'Choose a contact with recorded SMS permission and a valid phone number.',
+  INVALID_TEST_SEND: 'The test send was not accepted. Refresh the campaign and try again.',
+  TEST_SEND_UNSUPPORTED: 'Test sends are available for email and SMS drafts only.',
+  CAMPAIGN_LOCKED: 'Only a draft can send a test. Refresh the campaign to see its current status.',
+  INTEGRATION_NOT_CONFIGURED: 'Configure this sending provider in Integrations before sending a test.',
+  PUBLIC_URL_REQUIRED: 'Sending needs a public address. The instance operator must set APP_URL to this app’s public HTTPS address.',
+  TEST_SEND_LIMIT: 'This project has sent 10 tests in the last hour. Try again later.',
+};
+const testSendError = (failure: any) => (typeof failure?.code === 'string' && Object.hasOwn(testSendErrors, failure.code) ? testSendErrors[failure.code] : failure?.message) || 'The test could not be sent. Try again.';
 
 export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/direct`, requester = useRef(request), version = useRef(0), csvRead = useRef(0), pending = useRef(false), actionVersion = useRef(0), formRef = useRef<HTMLFormElement>(null);
@@ -34,8 +47,10 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   const [suppression, setSuppression] = useState<{ id: string; channel: Channel; reason: string } | null>(null);
   const [audienceTags, setAudienceTags] = useState('');
   const [confirmingCancel, setConfirmingCancel] = useState(false), [deliveryLimit, setDeliveryLimit] = useState({ id: '', count: 50 });
+  const [testContactId, setTestContactId] = useState(''), [confirmingTest, setConfirmingTest] = useState(false), [testSend, setTestSend] = useState<{ campaignId: string; result?: any; error?: string } | null>(null);
   const latestDraft = useRef({ draft, editingId }); latestDraft.current = { draft, editingId };
   const signature = JSON.stringify({ editingId, draft, audienceMode }), current = campaigns.find(item => item.id === editingId), editable = !current || current.status === 'draft';
+  const testable = !readOnly && current?.status === 'draft' && (current.channel === 'email' || current.channel === 'sms');
   const retryCancellation = current?.status === 'cancelled' && current.channel === 'whatsapp' && !!current.providerId && current.providerStatus !== 'cancelled' && !!current.lastError;
   const validPreview = preview?.signature === signature ? preview.result : null, ready = !readOnly && editable && !!current && !!validPreview?.previewToken && validPreview?.audience?.eligible > 0 && validPreview.audience.eligible <= 500 && !!status?.providers?.[draft.channel] && status?.publicCallbacks === true;
   const visibleContacts = contacts.filter(item => !search || [item.name, item.email, item.phone, item.company, ...(item.tags || []), ...(item.identities || []).map((identity: Row) => identity.participantId)].some(value => String(value || '').toLowerCase().includes(search.toLowerCase())));
@@ -143,6 +158,18 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
       setContacts(previous => previous.some(item => item.id === result.contact.id) ? previous.map(item => item.id === result.contact.id ? result.contact : item) : [result.contact, ...previous]); editContact(contactEditId ? result.contact : undefined); setNotice('Contact saved. Permission is tracked separately for each channel.');
     });
   }
+  // A test sends the last saved draft to one recipient and leaves the draft unchanged. Each confirmed click gets a new key,
+  // so it is a separate provider request; the server allows 10 per project per hour.
+  async function sendTest() {
+    const campaign = current, contactId = testContactId;
+    if (readOnly || campaign?.status !== 'draft' || !['email', 'sms'].includes(campaign.channel) || campaign.channel === 'sms' && !smsTestContacts(contacts).some(person => person.id === contactId)) return;
+    await action('Sending test', async generation => {
+      try {
+        const result = await requester.current(path + '/campaigns/' + encodeURIComponent(campaign.id) + '/test', 'POST', { confirmed: true, ...(campaign.channel === 'sms' ? { contactId } : {}) }, crypto.randomUUID());
+        if (generation === version.current) setTestSend({ campaignId: campaign.id, result: result.test });
+      } catch (failure) { if (generation === version.current) setTestSend({ campaignId: campaign.id, error: testSendError(failure) }); }
+    });
+  }
   async function importContacts(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (readOnly || !csv.trim()) return;
     const dryRun = (event.nativeEvent as SubmitEvent).submitter?.getAttribute('value') === 'preview';
@@ -178,6 +205,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
 
 
   const deliveries: any[] = detail?.deliveries || [], deliveriesShown = deliveryLimit.id === current?.id ? deliveryLimit.count : 50, replies = !!onOpenReplies && ['sms', 'whatsapp'].includes(current?.channel);
+  const testRecipients = smsTestContacts(contacts), testRecipient = testRecipients.find(person => person.id === testContactId), shownTest = testSend?.campaignId === current?.id ? testSend : null;
   return <Stack gap={6}>
     <Inline justify="between" align="center"><Stack gap={1}><Heading level={2}>Direct campaigns</Heading><Text tone="muted">Manage permission-based email, SMS and approved WhatsApp template campaigns with one contact list.</Text></Stack><Button variant="secondary" disabled={!!busy} onClick={() => action('Refreshing campaigns', async generation => { await load(generation); })}>Refresh lists</Button></Inline>
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
@@ -214,6 +242,16 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
           </Fieldset>
           <FormActions><Button variant="primary" type="submit" disabled={!!busy || readOnly || !editable}>Save draft</Button><Button variant="secondary" disabled={!!busy || readOnly || !editable} onClick={checkAudience}>Save and check audience</Button></FormActions>
         </Stack></Form>
+        {!readOnly && current?.status === 'draft' && <Stack as="section" gap={3}><Heading level={4}>Test send</Heading>
+          {testable ? <>
+            <Text tone="muted" size="sm">{current.channel === 'email' ? 'Sends the last saved version of this draft to your own email address only.' : 'Sends the last saved version of this draft to one contact with recorded SMS permission. Your SMS provider may charge for it.'} The draft and its audience stay unchanged. A project can send 10 tests per hour.</Text>
+            {current.channel === 'sms' && (testRecipients.length ? <Field label="Test recipient" required><Select required value={testRecipient ? testContactId : ''} onChange={event => setTestContactId(event.target.value)}><Option value="">Choose a contact</Option>{testRecipients.map(person => <Option key={person.id} value={person.id}>{contactName(person)} · {person.phone}</Option>)}</Select></Field> : <Text tone="muted" size="sm">Record SMS permission for a contact in the Contacts tab to send a test.</Text>)}
+            <Inline><Button variant="secondary" disabled={!!busy || current.channel === 'sms' && !testRecipient} onClick={() => setConfirmingTest(true)}>{current.channel === 'sms' ? 'Send test SMS' : 'Send test email'}</Button></Inline>
+            {shownTest?.error && <Alert tone="danger" variant="inline">{shownTest.error}</Alert>}
+            {shownTest?.result && <StatusLine tone={deliveryStatus(shownTest.result.status) === 'error' ? 'danger' : 'success'}>Test to {shownTest.result.recipient || 'the test recipient'}: {statusLabel(shownTest.result.status)}{shownTest.result.providerId ? ` · Provider reference ${shownTest.result.providerId}` : ''}</StatusLine>}
+            <ConfirmDialog open={confirmingTest} onOpenChange={setConfirmingTest} title={current.channel === 'sms' ? 'Send test SMS?' : 'Send test email?'} description={`Send the last saved version of “${current.name}” to ${current.channel === 'sms' ? `${contactName(testRecipient)} (${testRecipient?.phone || 'no phone number'})` : 'your own email address'}. The draft stays unchanged.`} confirmLabel={current.channel === 'sms' ? 'Send test SMS' : 'Send test email'} acknowledgement={current.channel === 'sms' ? 'I understand the SMS provider may charge for this test message.' : undefined} onConfirm={sendTest}/>
+          </> : <Text tone="muted" size="sm">Test sends are available for email and SMS drafts.</Text>}
+        </Stack>}
         {validPreview && <Stack as="section" gap={4}>
           <AudienceSummary title="Audience readiness" scope={audienceMode === 'contacts' ? 'Chosen contacts' : audienceMode === 'tags' ? 'Contacts matching tags' : 'All contacts in this project'} channel={labels[draft.channel]} purpose={draft.channel === 'email' ? 'Transactional email' : 'Direct campaign'} counts={{ total: validPreview.audience?.total ?? null, eligible: validPreview.audience?.eligible ?? null, excluded: validPreview.audience?.excluded ?? null, unverified: validPreview.audience?.unverified ?? null }}/>
           {validPreview.audience?.unverified > 0 && <Alert tone="warning" variant="inline">{validPreview.audience.unverified} eligible email address{validPreview.audience.unverified === 1 ? " has" : "es have"} an unchecked or unavailable domain result. Check email domains in Contacts before sending. Domain checks do not verify individual mailboxes.</Alert>}

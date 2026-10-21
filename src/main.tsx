@@ -129,7 +129,7 @@ function Creative({ item, small = false }: { item: Row; small?: boolean }) { ret
 
 function App() {
   const [session, setSession] = useState<any>(null), [state, setState] = useState<State | null>(null), { toast } = useToast();
-  const inviteToken = new URLSearchParams(window.location.search).get('invite') || '', [inviteSignIn, setInviteSignIn] = useState(false);
+  const inviteToken = new URLSearchParams(window.location.search).get('invite') || '', [inviteSignIn, setInviteSignIn] = useState(Boolean(startupAuthError));
   const [navigation, setNavigation] = useState(() => readNavigation(window.location.search)), [query, setQuery] = useState(''), [tab, setTab] = useState('all');
   const { page, section } = navigation;
   const adsView = page === 'Ads manager' ? section : 'campaigns', publishingView = page === 'Publishing' ? section : 'posts', insightsView = page === 'Analytics' ? section : 'summary', directView = page === 'Direct campaigns' ? section : 'campaigns';
@@ -554,13 +554,31 @@ function App() {
 }
 function Select({ label, name, value, options }: { label: string; name: string; value: string; options: (string | string[])[] }) { return <AppSelect label={label} name={name} value={value} options={options.map(o => typeof o === 'string' ? [o, title(o)] : [o[0], o[1]])}/>; }
 function ConnectionEmpty({ onSettings, subject }: { onSettings: () => void; subject: string }) { return <Card><EmptyState icon="link" title={'Connect your ' + subject} description="Open Integrations to configure Zernio and map this project to your brand’s profile." action={<Button variant="primary" onClick={onSettings}>Open connection settings</Button>}/></Card>; }
+// Identity sign-in failures return as /?auth_error=<CODE> (plus any held invite). Only a known code selects a message, so
+// query text is never shown. The code is read once at startup and removed from the address; the invitation stays.
+const oidcSignInErrors: Record<string, string> = {
+  OIDC_INVITE_EMAIL_MISMATCH: 'This invitation is for a different email address. Sign in with the identity that uses the invited email.',
+  OIDC_NOT_PROVISIONED: 'This identity does not have access yet. Ask the instance operator for access or a workspace invitation.',
+  OIDC_EMAIL_UNVERIFIED: 'Your identity provider has not verified this email address. Verify it there, then sign in again.',
+  OIDC_ACCOUNT_EXISTS: 'An account already uses this email address, and single sign-on is not linked to it automatically. Sign in with your email and password.',
+  OIDC_RATE_LIMITED: 'Too many sign-in attempts. Wait a few minutes, then try again.',
+  OIDC_SIGN_IN_FAILED: 'Single sign-on could not be completed. It may have expired or already been used. Start again.',
+};
+function takeAuthError(location: Pick<Location, 'pathname' | 'search' | 'hash'>, history: Pick<History, 'state' | 'replaceState'>) {
+  const params = new URLSearchParams(location.search), code = params.get('auth_error');
+  if (code === null) return '';
+  params.delete('auth_error'); const query = params.toString();
+  history.replaceState(history.state, '', location.pathname + (query ? '?' + query : '') + location.hash);
+  return Object.hasOwn(oidcSignInErrors, code) ? oidcSignInErrors[code] : oidcSignInErrors.OIDC_SIGN_IN_FAILED;
+}
+let startupAuthError = takeAuthError(window.location, window.history);
 // Campaign adapter: the host-held setup token, sample opt-in and invitation continuation stay app-owned.
 function Auth({ session, inviteToken = '', error, busy, onSubmit }: { session: any; inviteToken?: string; error: string; busy: boolean; onSubmit: (data: any) => void }) {
-  const frame = { brand: <Brand product="Campaign" href="/"/>, label: 'Campaign sign in', eyebrow: 'YOUR WORKSPACE', error: error || undefined, busy, busyLabel: 'Signing in…',
+  const frame = { brand: <Brand product="Campaign" href="/"/>, label: 'Campaign sign in', eyebrow: 'YOUR WORKSPACE', error: error || startupAuthError || undefined, busy, busyLabel: 'Signing in…',
     aside: <AuthStory label="Campaign overview" eyebrow="CAMPAIGN MANAGEMENT" title="Plan. Publish." emphasis="Measure." lead="Manage social posts, advertising and campaign assets." channels={[{ icon: 'send', label: 'Social' }, { icon: 'target', label: 'Advertising' }, { icon: 'billboard', label: 'Out of home' }]} footnote="ten98 Campaign"/> };
   if (session.setupRequired) return <FirstUserSetupFlow {...frame} title="Create owner account" description="Create the owner account for this app." submitLabel="Create owner account" tokenLength={{ min: 32, max: 512 }} tokenHint="Ask the person running this app for the setup token." passwordPolicy={{ minLength: 12, maxLength: 128, hint: 'Use at least 12 characters.' }} sampleOptIn={{ label: 'Include a sample project to explore', defaultChecked: true }} onSubmit={({ name, token, email, password, sample }) => onSubmit({ name, token, email, password, sample })}/>;
   const oidcHref = '/api/auth/oidc/start' + (inviteToken ? '?invite=' + encodeURIComponent(inviteToken) : '');
-  return <SignInFlow {...frame} title="Sign in" description={session.sessionEnded ? 'Your sign-in session has ended. Sign in again to continue.' : 'Use your account to access your workspaces.'} submitLabel="Sign in" passwordPolicy={{ maxLength: 128 }} onSubmit={({ email, password }) => onSubmit({ email, password })} providers={session.oidcEnabled ? <OidcProviderButtons providers={[{ id: 'sso', name: 'Organization single sign-on', href: oidcHref }]} dividerLabel="or continue with"/> : undefined}/>;
+  return <SignInFlow {...frame} title="Sign in" description={session.sessionEnded ? 'Your sign-in session has ended. Sign in again to continue.' : 'Use your account to access your workspaces.'} submitLabel="Sign in" passwordPolicy={{ maxLength: 128 }} onSubmit={({ email, password }) => { startupAuthError = ''; onSubmit({ email, password }); }} providers={session.oidcEnabled ? <OidcProviderButtons providers={[{ id: 'sso', name: 'Organization single sign-on', href: oidcHref }]} dividerLabel="or continue with"/> : undefined}/>;
 }
 
 createRoot(document.getElementById('root')!).render(<AuthErrorBoundary fallback={{ brand: <Brand product="Campaign"/>, title: 'Page unavailable', message: 'This screen could not load. Reload the app to try again.', retryLabel: 'Reload app' }}><ToastProvider><App/></ToastProvider></AuthErrorBoundary>);

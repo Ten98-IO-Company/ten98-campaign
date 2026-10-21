@@ -11,7 +11,9 @@ import { AppBrand } from '@ten98/ui/app';
 const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
 const start = source.indexOf('function Auth({'), end = source.indexOf('\n}\n', start) + 2;
 const { code } = await transformWithOxc(source.slice(start, end), 'Auth.tsx', { jsx: { runtime: 'classic' } });
-const Auth = new Function('React', 'Brand', 'AuthStory', 'FirstUserSetupFlow', 'OidcProviderButtons', 'SignInFlow', code + '; return Auth;')(React, AppBrand, AuthStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow);
+// startupAuthError is the module-level message read once from ?auth_error at startup.
+const load = (startupAuthError = '') => new Function('React', 'Brand', 'AuthStory', 'FirstUserSetupFlow', 'OidcProviderButtons', 'SignInFlow', 'startupAuthError', code + '; return Auth;')(React, AppBrand, AuthStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow, startupAuthError);
+const Auth = load();
 
 test('owner setup keeps the host token, password policy and sample opt-in and submits only the setup fields', () => {
   let submitted;
@@ -38,4 +40,45 @@ test('sign-in submits credentials and keeps the invitation on the single sign-on
   screen.props.onSubmit({ email: 'member@example.test', password: 'secret' });
   assert.deepEqual(submitted, { email: 'member@example.test', password: 'secret' });
   assert.doesNotMatch(renderToStaticMarkup(Auth({ session: { setupRequired: false, oidcEnabled: false }, error: '', busy: false, onSubmit() {} })), /single sign-on/);
+});
+
+// The real startup reader and code map from main.tsx.
+const mapStart = source.indexOf('const oidcSignInErrors'), readerEnd = source.indexOf('\n}\n', source.indexOf('function takeAuthError(')) + 2;
+const { code: readerCode } = await transformWithOxc(source.slice(mapStart, readerEnd), 'AuthError.ts');
+const { oidcSignInErrors, takeAuthError } = mapStart < 0 ? {} : new Function(readerCode + '; return { oidcSignInErrors, takeAuthError };')();
+function returnTo(search, hash = '') {
+  const calls = [], history = { state: { campaignIndex: 3 }, replaceState: (...args) => calls.push(args) };
+  return { message: takeAuthError({ pathname: '/', search, hash }, history), calls };
+}
+
+test('each identity sign-in error code maps to its own readable message, and unknown codes are generic', () => {
+  const codes = ['OIDC_INVITE_EMAIL_MISMATCH', 'OIDC_NOT_PROVISIONED', 'OIDC_EMAIL_UNVERIFIED', 'OIDC_ACCOUNT_EXISTS', 'OIDC_RATE_LIMITED', 'OIDC_SIGN_IN_FAILED'];
+  const messages = codes.map(code => returnTo('?auth_error=' + code).message);
+  assert.equal(new Set(messages).size, codes.length);
+  for (const [index, message] of messages.entries()) { assert.ok(message.length > 30, codes[index]); assert.doesNotMatch(message, /OIDC_|auth_error/); }
+  assert.match(messages[0], /invitation/i); assert.match(messages[3], /email and password/i); assert.match(messages[4], /try again/i); assert.match(messages[5], /start again/i);
+  for (const search of ['?auth_error=%3Cb%3EInjected%3C%2Fb%3E', '?auth_error=', '?auth_error=constructor', '?auth_error=__proto__', '?auth_error=oidc_rate_limited']) assert.equal(returnTo(search).message, oidcSignInErrors.OIDC_SIGN_IN_FAILED, search);
+  assert.deepEqual(returnTo('?invite=' + 'A'.repeat(43)), { message: '', calls: [] }, 'Without auth_error the address is left alone.');
+});
+
+test('the startup reader removes auth_error from the address and keeps the invitation and other values', () => {
+  const invite = 'Ab_-'.repeat(10) + 'xyz';
+  assert.deepEqual(returnTo(`?auth_error=OIDC_INVITE_EMAIL_MISMATCH&invite=${invite}`).calls, [[{ campaignIndex: 3 }, '', '/?invite=' + invite]]);
+  assert.deepEqual(returnTo('?auth_error=OIDC_RATE_LIMITED').calls, [[{ campaignIndex: 3 }, '', '/']]);
+  assert.deepEqual(returnTo(`?project=p1&auth_error=X&auth_error=Y&invite=${invite}`, '#top').calls, [[{ campaignIndex: 3 }, '', `/?project=p1&invite=${invite}#top`]]);
+  assert.equal((source.match(/takeAuthError\(window\.location, window\.history\)/g) || []).length, 1, 'auth_error is read once, at startup.');
+  assert.match(source, /\[inviteSignIn, setInviteSignIn\] = useState\(Boolean\(startupAuthError\)\)/, 'A returned invitation opens the sign-in screen so the error is visible.');
+});
+
+test('the sign-in screen shows the startup error through SignInFlow, keeps the session notice and clears it on the next attempt', () => {
+  const message = oidcSignInErrors.OIDC_NOT_PROVISIONED, WithError = load(message);
+  const screen = WithError({ session: { setupRequired: false, oidcEnabled: true, sessionEnded: true }, inviteToken: 'A'.repeat(43), error: '', busy: false, onSubmit() {} });
+  assert.equal(screen.type, SignInFlow); assert.equal(screen.props.error, message);
+  assert.equal(screen.props.description, 'Your sign-in session has ended. Sign in again to continue.');
+  assert.ok(renderToStaticMarkup(screen).includes(message.replace(/'/g, '&#x27;')));
+  assert.equal(WithError({ session: { oidcEnabled: true }, error: '', busy: false, onSubmit() {} }).props.description, 'Use your account to access your workspaces.');
+  assert.equal(WithError({ session: { oidcEnabled: true }, error: 'Email or password is incorrect.', busy: false, onSubmit() {} }).props.error, 'Email or password is incorrect.');
+  let submitted; WithError({ session: { oidcEnabled: true }, error: '', busy: false, onSubmit: values => { submitted = values; } }).props.onSubmit({ email: 'member@example.test', password: 'secret' });
+  assert.deepEqual(submitted, { email: 'member@example.test', password: 'secret' });
+  assert.equal(WithError({ session: { oidcEnabled: true }, error: '', busy: true, onSubmit() {} }).props.error, undefined, 'A new attempt replaces the earlier identity error.');
 });
