@@ -4,18 +4,66 @@ import { AppField } from '@ten98/ui/app';
 import PostComposer, { PostVariantPreview } from './PostComposer';
 import { PLATFORM_RULES, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
 
-type Props = { request: (path: string, body?: any, validate?: (result: any) => void) => Promise<any>; post: any; canWrite: boolean; assets?: any[]; campaigns?: any[]; accounts?: any[]; onCancel?: () => void; onChanged?: () => void; onShortenLinks?: (values: Record<string, any>) => Promise<{ content: string; platformOverrides: Record<string, any> }> };
+type Props = { request: (path: string, body?: any, validate?: (result: any) => void) => Promise<any>; post: any; canWrite: boolean; assets?: any[]; campaigns?: any[]; accounts?: any[]; onCancel?: () => void; onChanged?: () => void; onShortenLinks?: (values: Record<string, any>) => Promise<{ content: string; platformOverrides: Record<string, any> }>; onRequestReview?: (path: string, body: { action: string; proposal: EditProposal }) => Promise<any> };
+type EditProposal = Record<string, unknown>;
+type AskReview = (action: string, proposal: EditProposal) => Promise<any>;
 const editPlatforms = ['twitter', 'discord', 'facebook', 'reddit', 'linkedin', 'telegram', 'pinterest', 'googlebusiness', 'youtube', 'slack'];
 const removePlatforms = ['threads', 'facebook', 'twitter', 'linkedin', 'youtube', 'pinterest', 'reddit', 'bluesky', 'googlebusiness', 'telegram'];
 const accountId = (item: any) => String(item.accountId?._id || item.accountId);
 const liveUrl = (value: string) => { try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password ? url.href : undefined; } catch { return undefined; } };
 const deliveryLabel = (item: any) => item.platform === 'tiktok' && (item.platformSpecificData?.isDraft === true || item.platformSpecificData?.draft === true) ? 'Handed to TikTok draft — finish in TikTok' : item.status || 'Not reported';
 const deliveryError = (item: any) => [typeof item.errorMessage === 'string' ? item.errorMessage : typeof item.error === 'string' ? item.error : typeof item.error?.message === 'string' ? item.error.message : '', typeof item.errorCategory === 'string' ? item.errorCategory : '', typeof item.errorSource === 'string' ? item.errorSource : ''].filter(Boolean).join(' · ');
-function YouTubeMetadata({ postId, copy, request, disabled, onAccepted }: { postId: string; copy: any; request: Props['request']; disabled: boolean; onAccepted: (result: any) => void }) {
+type EditReview = { status: 'required' | 'stale' | 'waiting' | 'pending' | 'approved'; proposal: EditProposal; error?: string };
+// The send's answer when the project requires publishing approval: this exact change needs an approved review first.
+const reviewStatus = (error: any): 'required' | 'stale' | null => error?.status === 403 && error.code === 'PUBLISHING_APPROVAL_REQUIRED' ? 'required' : error?.status === 409 && error.code === 'PUBLISHING_APPROVAL_STALE' ? 'stale' : null;
+// Holds a published-copy change whose send needs review and asks for review of exactly that proposal. The send itself
+// stays the existing confirmed one: once the review is approved, the same values go out again with confirmEdit.
+function useEditReview(postId: string, send?: (proposal: EditProposal) => Promise<any>) {
+  const [review, setReview] = useState<EditReview | null>(null), [busy, setBusy] = useState(false);
+  const scope = useRef(''), mounted = useRef(true), pending = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  function hold(error: unknown, proposal: EditProposal) {
+    const status = reviewStatus(error), key = JSON.stringify(proposal);
+    if (!status) return false;
+    scope.current = key;
+    // Sending before approval is answered "required" again; the change then reads as not approved yet.
+    setReview(previous => ({ status: status === 'required' && previous && ['pending', 'waiting'].includes(previous.status) && JSON.stringify(previous.proposal) === key ? 'waiting' : status, proposal }));
+    return true;
+  }
+  function clear() { scope.current = ''; setReview(null); }
+  async function ask() {
+    if (!send || !review || pending.current) return;
+    const held = review, key = JSON.stringify(held.proposal), current = () => mounted.current && scope.current === key;
+    pending.current = true; setBusy(true); setReview({ ...held, error: undefined });
+    try {
+      const result = await send(held.proposal), status = result?.item?.review?.status;
+      if (result?.item?.post?.id !== postId || !['pending', 'approved'].includes(status)) throw new Error('Campaign could not confirm the review. Check Approvals before asking again.');
+      if (current()) setReview({ status, proposal: held.proposal });
+    } catch (failure) { if (current()) setReview({ ...held, error: (failure as Error).message }); }
+    finally { pending.current = false; if (mounted.current) setBusy(false); }
+  }
+  return { review, busy, hold, clear, ask: send ? ask : undefined };
+}
+function EditReviewStatus({ review, busy, ask }: { review: EditReview | null; busy: boolean; ask?: () => void }) {
+  if (!review) return null;
+  if (review.status === 'pending') return <StatusLine tone="info">This change awaits review by an owner or administrator in Approvals. Send it again after the review is approved.</StatusLine>;
+  if (review.status === 'approved') return <StatusLine tone="success">This change is approved. Send it again to update the published copy.</StatusLine>;
+  const reason = review.status === 'stale' ? 'This change no longer matches its approved review: the post, its published copy or the change differs from what was approved.' : review.status === 'waiting' ? 'The review of this change is not approved yet. Wait for an owner or administrator to approve it, or ask again if the review was rejected.' : 'This project requires an owner or administrator to approve changes to published copies before they are sent.';
+  return <Stack gap={2}>
+    <Alert tone="warning" title="Review needed" actions={ask && <Button type="button" disabled={busy} onClick={ask}>Request review of this change</Button>}>{reason} {ask ? 'Request review of this exact change, then send it again once it is approved.' : 'This view cannot submit the change for review.'}</Alert>
+    {busy && <StatusLine busy>Submitting the change for review…</StatusLine>}{review.error && <Alert tone="danger">{review.error}</Alert>}
+  </Stack>;
+}
+function PublishedTextEdit({ postId, item, content, busy, askReview, onSend }: { postId: string; item: any; content: string; busy: boolean; askReview?: AskReview; onSend: (content: string, review: ReturnType<typeof useEditReview>) => void }) {
+  const review = useEditReview(postId, askReview && (proposal => askReview('social/edit-published', proposal)));
+  return <Stack as="form" onSubmit={event => { event.preventDefault(); onSend(String(new FormData(event.currentTarget as HTMLFormElement).get('content')), review); }} onInput={review.clear}><Stack as="fieldset" disabled={busy || review.busy} gap={3}><Field label={item.platform === 'youtube' ? 'Video description' : item.platform === 'pinterest' ? 'Pin description' : 'Published text'}><Textarea name="content" defaultValue={content} maxLength={item.platform === 'linkedin' ? 3000 : item.platform === 'pinterest' ? 800 : item.platform === 'slack' ? 4000 : 10000} required/></Field><Text tone="muted">Platform rules still apply. X requires Premium, a single tweet, and its editing window. Reddit titles and link posts cannot be changed. Pinterest needs API beta access. Media is unchanged.</Text><FormActions><Button type="submit" disabled={busy}>Update live text</Button></FormActions></Stack><EditReviewStatus review={review.review} busy={review.busy} ask={review.ask}/></Stack>;
+}
+function YouTubeMetadata({ postId, copy, request, askReview, disabled, onAccepted }: { postId: string; copy: any; request: Props['request']; askReview?: AskReview; disabled: boolean; onAccepted: (result: any) => void }) {
   const id = accountId(copy), videoId = copy.platformPostId, identity = JSON.stringify([postId, id, videoId]);
   const scope = useRef(identity), mounted = useRef(true), pending = useRef(false); scope.current = identity;
   const [review, setReview] = useState<any>(null), [busy, setBusy] = useState(false), [uncertain, setUncertain] = useState(false), [error, setError] = useState('');
   const [acceptance, setAcceptance] = useState<any>(null);
+  const editReview = useEditReview(postId, askReview && (proposal => askReview('social/update-metadata', proposal)));
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { setReview(null); setError(''); setUncertain(false); setAcceptance(null); }, [identity]);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -37,24 +85,27 @@ function YouTubeMetadata({ postId, copy, request, disabled, onAccepted }: { post
         if (result.operation?.status !== 'complete' || result.post?.id !== postId || !accepted || accepted.postId !== postId || accepted.accountId !== id || accepted.videoId !== videoId || JSON.stringify(accepted.requested) !== JSON.stringify(Object.fromEntries(fields.map(field => [field, body[field]]))) || !Array.isArray(accepted.updatedFields) || accepted.updatedFields.length !== fields.length || new Set(accepted.updatedFields).size !== fields.length || fields.some(field => !accepted.updatedFields.includes(field))) throw new Error('The metadata acceptance receipt could not be read. Review Provider receipts & recovery before another attempt.');
       };
       const result = await request('social/update-metadata', body, validate); validate(result);
-      if (current()) { setAcceptance({ ...result.metadataAcceptance, receiptId: result.operation.id }); setReview(null); onAccepted(result); }
+      if (current()) { setAcceptance({ ...result.metadataAcceptance, receiptId: result.operation.id }); setReview(null); editReview.clear(); onAccepted(result); }
     } catch (failure) {
       if (current()) {
         const problem = failure as Error & { status?: number; code?: string; operation?: { status?: string } };
+        const proposal = Object.fromEntries(Object.entries(body).filter(([key]) => !['postId', 'confirmEdit'].includes(key)));
+        if (editReview.hold(problem, proposal)) { setReview(null); setError(''); return; }
         if (problem.operation?.status !== 'failed' && (!problem.status || problem.status >= 500 || ['OPERATION_UNCERTAIN', 'OPERATION_REVIEWED'].includes(problem.code || '') || ['pending', 'uncertain'].includes(problem.operation?.status || ''))) setUncertain(true);
         setReview(null); setError(problem.message);
       }
     } finally { pending.current = false; if (current()) setBusy(false); }
   }
   if (typeof videoId !== 'string' || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) return <Text tone="muted">A published YouTube video ID is required for metadata changes. Refresh status or manage this video in YouTube Studio.</Text>;
-  return <Stack as="form" onSubmit={submit} onInput={() => setReview(null)}>
-    <Stack as="fieldset" disabled={disabled || busy || uncertain} gap={3}>
+  return <Stack as="form" onSubmit={submit} onInput={() => { setReview(null); editReview.clear(); }}>
+    <Stack as="fieldset" disabled={disabled || busy || uncertain || editReview.busy} gap={3}>
       <Heading level={4}>YouTube title and keyword tags</Heading><Text tone="muted">Enter replacement values for this copy only. These fields start empty because the current live values are unavailable. Other metadata stays omitted. Zernio’s acceptance receipt does not verify live values.</Text>
       <Checkbox name="changeTitle" label="Change video title"/><AppField label="Replacement video title" name="title" maxLength={100}/>
       <Checkbox name="changeTags" label="Replace keyword tags"/><AppField label="Replacement keyword tags, one per line" name="tags" multiline maxLength={1000}/><Text tone="muted">At most 100 characters per tag and 500 combined. Selecting tags with an empty list requests removal of all keyword tags. Unselected fields stay omitted.</Text>
       {review && <Card headingLevel={4} title="Review metadata request"><Stack gap={1}><Text>Account: {copy.accountId?.displayName || copy.accountId?.username || id} · {id}</Text><Text>Video ID: {videoId}</Text>{Object.hasOwn(review.body, 'title') && <Text>Replacement title: {review.body.title}</Text>}{Object.hasOwn(review.body, 'tags') && <Text>Replacement tags: {review.body.tags.length ? review.body.tags.join(', ') : 'Remove all keyword tags'}</Text>}<Text>Accepted values will remain unverified until checked in YouTube Studio.</Text></Stack></Card>}
       <FormActions><Button type="submit">{review ? 'Confirm metadata request' : 'Review metadata request'}</Button></FormActions>
     </Stack>
+    <EditReviewStatus review={editReview.review} busy={editReview.busy} ask={editReview.ask}/>
     {acceptance && <OperationResults title="Last metadata request" items={[{ id: identity, target: `YouTube ${id} · ${videoId}`, status: 'accepted', detail: 'Accepted by Zernio; live values unverified.', receipt: <>Fields: {acceptance.updatedFields.join(', ')}{acceptance.receiptId && <> · Receipt: {acceptance.receiptId}</>}</> }]}/>}
     {error && <Alert tone="danger">{error}</Alert>}{busy && <StatusLine busy>Sending the reviewed metadata request…</StatusLine>}{uncertain && <Text tone="warning">Another request is blocked here. Check YouTube Studio and Provider receipts & recovery before reopening this editor.</Text>}
   </Stack>;
@@ -69,9 +120,11 @@ function previewCopy(post: any, copy: any, assets: any[]) {
   };
 }
 
-export default function PostManagement({ request, post, canWrite, assets = [], campaigns = [], accounts = [], onCancel, onChanged, onShortenLinks }: Props) {
+export default function PostManagement({ request, post, canWrite, assets = [], campaigns = [], accounts = [], onCancel, onChanged, onShortenLinks, onRequestReview }: Props) {
   const requester = useRef(request); requester.current = request;
   const changed = useRef(onChanged); changed.current = onChanged;
+  // Review of a proposed change to a published copy; after approval the same values are sent with confirmEdit.
+  const askReview = onRequestReview && ((action: string, proposal: EditProposal) => onRequestReview('approvals/posts/' + encodeURIComponent(post.id) + '/request', { action, proposal }));
   const [current, setCurrent] = useState(post), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [replaceVariants, setReplaceVariants] = useState(false), [confirming, setConfirming] = useState<{ title: string; description: string; confirmLabel: string; danger?: boolean; run: () => Promise<void> }>();
   const copies = current.providerResults || [], editable = !current.providerDeletedAt && ['draft', 'scheduled', 'failed', 'cancelled'].includes(current.status) && !copies.some((item: any) => ['published', 'publishing'].includes(item.status));
@@ -81,10 +134,11 @@ export default function PostManagement({ request, post, canWrite, assets = [], c
   const accountCopiesReady = !ambiguousCopies && copies.every((item: any) => !copies.some((other: any) => other.platform === item.platform && JSON.stringify([other.customContent, other.customMedia, other.platformSpecificData]) !== JSON.stringify([item.customContent, item.customMedia, item.platformSpecificData])) || current.accountOverrides?.[accountId(item)]?.platform === item.platform);
   const seenCopies = new Map<string, string>(), divergentCopies = copies.some((item: any) => { const configuration = JSON.stringify([item.customContent, item.customMedia, item.platformSpecificData]), previous = seenCopies.get(item.platform); seenCopies.set(item.platform, configuration); return previous !== undefined && previous !== configuration; });
   useEffect(() => { let active = true; setCurrent(post); setBusy(true); setError(''); setNotice(''); requester.current('social/status?postId=' + encodeURIComponent(post.id)).then(async result => { if (active) { setCurrent(result.post); await changed.current?.(); } }).catch(err => { if (active) setError(err.message); }).finally(() => { if (active) setBusy(false); }); return () => { active = false; }; }, [post.id]);
-  async function act(path: string, body: any, message: string) {
+  // `held` takes a failure that its caller handles itself (a change that needs review).
+  async function act(path: string, body: any, message: string, held?: (error: unknown) => boolean) {
     setBusy(true); setError(''); setNotice('');
     try { const result = await requester.current(path, body); setCurrent(result.post); setNotice([message, ...(Array.isArray(result.validationWarnings) ? result.validationWarnings.filter((value: unknown) => typeof value === 'string') : [])].join(' ')); onChanged?.(); }
-    catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+    catch (err) { if (!held?.(err)) setError((err as Error).message); } finally { setBusy(false); }
   }
   async function update(values: Record<string, any>) {
     if (ambiguousCopies) throw new Error('This provider post repeats an account across destinations. Edit it in Zernio until each destination can be selected safely.');
@@ -116,8 +170,8 @@ export default function PostManagement({ request, post, canWrite, assets = [], c
       })}{!copies.length && !current.platforms?.length && <ContentPreview label="Post content" destination="No platform selected" provider="Campaign" text={String(current.content ?? '')}/>}</>}
       {canWrite && retryable && <FormActions><Button type="button" disabled={busy} onClick={() => setConfirming({ title: 'Retry the failed copies now?', description: 'Zernio will publish them immediately. Published and cancelled copies are skipped.', confirmLabel: 'Retry failed copies now', run: () => act('social/retry', { postId: post.id, confirmPublish: true }, 'Failed-copy retry submitted. Published copies are preserved. Refresh status for each account’s result.') })}>Retry failed copies now</Button></FormActions>}
       {canWrite && copies.filter((item: any) => copies.filter((other: any) => accountId(other) === accountId(item)).length === 1 && item.status === 'published' && (editPlatforms.includes(item.platform) || removePlatforms.includes(item.platform))).map((item: any) => <Disclosure key={accountId(item)} summary={'Manage published copy · ' + (item.accountId?.displayName || item.accountId?.username || item.platform)}><Stack gap={4}>
-        {item.platform === 'youtube' && <YouTubeMetadata key={post.id + ':' + accountId(item) + ':' + item.platformPostId} postId={post.id} copy={item} request={(path, body, validate) => requester.current(path, body, validate)} disabled={busy} onAccepted={result => { setCurrent(result.post); setNotice('Accepted by Zernio; live values unverified. Check YouTube Studio for the current title and keyword tags.'); onChanged?.(); }}/>}
-        {editPlatforms.includes(item.platform) && <Stack as="form" onSubmit={event => { event.preventDefault(); const content = String(new FormData(event.currentTarget as HTMLFormElement).get('content')); setConfirming({ title: 'Change the text of this live ' + item.platform + ' copy?', description: 'Existing media will stay in place.', confirmLabel: 'Update live text', run: () => act('social/edit-published', { postId: post.id, accountId: accountId(item), content, confirmEdit: true }, 'Published copy updated.') }); }}><Stack as="fieldset" disabled={busy} gap={3}><Field label={item.platform === 'youtube' ? 'Video description' : item.platform === 'pinterest' ? 'Pin description' : 'Published text'}><Textarea name="content" defaultValue={item.customContent ?? current.content ?? ''} maxLength={item.platform === 'linkedin' ? 3000 : item.platform === 'pinterest' ? 800 : item.platform === 'slack' ? 4000 : 10000} required/></Field><Text tone="muted">Platform rules still apply. X requires Premium, a single tweet, and its editing window. Reddit titles and link posts cannot be changed. Pinterest needs API beta access. Media is unchanged.</Text><FormActions><Button type="submit" disabled={busy}>Update live text</Button></FormActions></Stack></Stack>}
+        {item.platform === 'youtube' && <YouTubeMetadata key={post.id + ':' + accountId(item) + ':' + item.platformPostId} postId={post.id} copy={item} request={(path, body, validate) => requester.current(path, body, validate)} askReview={askReview} disabled={busy} onAccepted={result => { setCurrent(result.post); setNotice('Accepted by Zernio; live values unverified. Check YouTube Studio for the current title and keyword tags.'); onChanged?.(); }}/>}
+        {editPlatforms.includes(item.platform) && <PublishedTextEdit postId={post.id} item={item} content={item.customContent ?? current.content ?? ''} busy={busy} askReview={askReview} onSend={(content, review) => setConfirming({ title: 'Change the text of this live ' + item.platform + ' copy?', description: 'Existing media will stay in place.', confirmLabel: 'Update live text', run: async () => { let held = false; await act('social/edit-published', { postId: post.id, accountId: accountId(item), content, confirmEdit: true }, 'Published copy updated.', error => (held = review.hold(error, { accountId: accountId(item), content }))); if (!held) review.clear(); } })}/>}
         {removePlatforms.includes(item.platform) && <FormActions><Button variant="danger" type="button" disabled={busy} onClick={() => setConfirming({ title: 'Permanently remove this published ' + item.platform + ' copy?', description: 'This removes the live post and its engagement. YouTube deletion is permanent.', confirmLabel: 'Remove live copy', danger: true, run: () => act('social/unpublish', { postId: post.id, accountId: accountId(item), confirmRemoval: true }, 'Published copy removed.') })}>Remove live copy</Button></FormActions>}
       </Stack></Disclosure>)}
     </>}
