@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
-import type { Executor } from './database.ts';
+import { createStore, type Executor } from './database.ts';
 import { fail, IntegrationError, targetConfiguration, zernioClient, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
 import { queueList, reviewedQueue } from './zernio-queues.ts';
@@ -10,6 +10,8 @@ import { SOCIAL_UPDATE_FIELDS, socialUpdateProposal } from './integrations.ts';
 type ApprovalContext = Omit<OperationContext, 'project' | 'body'> & { project: ProviderRecord; body?: any };
 const administrators = new Set(['owner', 'admin']);
 const first = async (query: Promise<{ rows: unknown[] }>) => (await query).rows[0] as ProviderRecord | undefined;
+// Inside a transaction every read and write goes through it, never a second pool connection.
+const within = (context: ApprovalContext, tx: Executor): ApprovalContext => ({ ...context, db: tx, store: createStore(tx) });
 async function policy(db: Executor, projectId: string) {
   const row = await first(db.execute(sql`SELECT require_approval AS "requireApproval",updated_by AS "updatedBy",updated_at AS "updatedAt" FROM project_approval_policy WHERE project_id=${projectId}`));
   return row ? { ...row, requireApproval: Boolean(row.requireApproval) } : { requireApproval: false, updatedBy: null, updatedAt: null };
@@ -97,7 +99,7 @@ async function assertSelfApprovalAllowed(tx: Executor, projectId: string, userId
 // Council decision ten98-code-system#30 (Q2): with a proposal, a submitted post's review covers the post that
 // social/update would send (the provider copy merged with the proposal). The newest proposal supersedes pending reviews.
 async function requestProposal(context: ApprovalContext, post: ProviderRecord) {
-  const { project, user, db, store, body } = context;
+  const { project, user, db, body } = context;
   fields(body, ['proposal']); fields(body.proposal, SOCIAL_UPDATE_FIELDS);
   const proposed = await socialUpdateProposal(context, post, body.proposal), snapshot = await postSnapshot(context, proposed), hash = fingerprint(snapshot);
   if ((await policy(db, project.id)).requireApproval) approvalAccounts(proposed);
@@ -107,7 +109,7 @@ async function requestProposal(context: ApprovalContext, post: ProviderRecord) {
     if (current?.fingerprint === hash && (current.status === 'approved' || current.status === 'pending' && proposalOf(current))) return;
     await tx.execute(sql`UPDATE post_approval_reviews SET status='rejected',reviewed_at=${now},note=${'Superseded by a newer proposed update.'} WHERE project_id=${project.id} AND post_id=${post.id} AND status='pending'`);
     await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${randomUUID()}, ${project.id}, ${post.id}, ${hash}, ${JSON.stringify({ ...snapshot, proposal: body.proposal })}, 'pending', ${user.id}, ${now})`);
-    await store.activity(project.id, `Review of a proposed provider update requested by ${user.name || user.id}.`);
+    await createStore(tx).activity(project.id, `Review of a proposed provider update requested by ${user.name || user.id}.`);
   });
   return queueItem(context, post);
 }
@@ -175,15 +177,15 @@ export async function handleApprovals(context: ApprovalContext) {
       // The per-post lock serialises review requests, so parallel requests cannot open duplicate pending reviews.
       await db.transaction(async (tx: Executor) => {
         await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
-        const currentReview = await latest(tx, project.id, post.id);
+        const local = within(context, tx), currentReview = await latest(tx, project.id, post.id);
         // A review that changed for this same content (for example a parallel request just opened it) is the answer;
         // a review of other content, or a changed post, means the request is stale.
         const sameContent = currentReview?.fingerprint === hash && currentReview?.status !== 'rejected';
-        if (fingerprint(await postSnapshot(context, await localPost(context, post.id))) !== hash || ((currentReview?.id !== review?.id || currentReview?.status !== review?.status) && !sameContent)) fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before requesting review.');
+        if (fingerprint(await postSnapshot(local, await localPost(local, post.id))) !== hash || ((currentReview?.id !== review?.id || currentReview?.status !== review?.status) && !sameContent)) fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before requesting review.');
         if ((await policy(tx, project.id)).requireApproval) approvalAccounts(post);
         if (!currentReview || currentReview.fingerprint !== hash || currentReview.status === 'rejected') {
           await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${randomUUID()}, ${project.id}, ${post.id}, ${hash}, ${JSON.stringify(snapshot)}, 'pending', ${user.id}, ${new Date().toISOString()})`);
-          await store.activity(project.id, `Content review requested by ${user.name || user.id}.`);
+          await local.store.activity(project.id, `Content review requested by ${user.name || user.id}.`);
         }
       });
       send(200, { item: await queueItem(context, post, queue ? { ...queue, ready: true } : null) }); return true;

@@ -43,14 +43,14 @@ export async function handleNativeGoogleAds(context: NativeContext) {
   const prefix = `/api/projects/${encodeURIComponent(project.id)}/native-google-ads/`;
   if (!url.pathname.startsWith(prefix)) return false;
   const action = url.pathname.slice(prefix.length), env = { ...(context.config?.env || process.env) };
-  const mapped = async () => ((await db.execute(sql`SELECT customer_id FROM native_google_connections WHERE project_id=${project.id}`)).rows[0]?.customer_id || '') as string;
+  const mapped = async (executor: Executor = db) => ((await executor.execute(sql`SELECT customer_id FROM native_google_connections WHERE project_id=${project.id}`)).rows[0]?.customer_id || '') as string;
   const originalCustomer = await mapped(), connection = originalCustomer ? { customerId: originalCustomer } : undefined;
-  const assertCurrent = async () => { await context.assertIntegrationSettings?.(); if (await mapped() !== originalCustomer) throw new Error('Google customer mapping changed.'); };
+  const assertCurrent = async (executor: Executor = db) => { await context.assertIntegrationSettings?.(executor); if (await mapped(executor) !== originalCustomer) throw new Error('Google customer mapping changed.'); };
   // Mapping changes run under the project's lock (and the customer's when mapping one), so a parallel change of this
   // project's mapping re-checks it after this one commits and a customer cannot be assigned to two projects.
   const changeMapping = (customer: string, change: (tx: Executor) => Promise<unknown>) => db.transaction(async tx => {
     await advisoryLock(tx, 'native-google-connection:' + project.id); if (customer) await advisoryLock(tx, 'native-google-customer:' + customer);
-    await current(assertCurrent); await change(tx);
+    await current(() => assertCurrent(tx)); await change(tx);
   });
   const persistRefresh = context.persistNativeRefreshToken ? (expected: string, next: string) => context.persistNativeRefreshToken('googleAdsNative', expected, next) : undefined;
   try {

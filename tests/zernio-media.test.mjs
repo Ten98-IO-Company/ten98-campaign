@@ -6,14 +6,14 @@ import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createApp } from '../server/index.ts';
 import { MEDIA_DELIVERY_FIELDS } from '../server/zernio-media.ts';
-import { postgresSkip, testDatabase } from './postgres.mjs';
+import { postgresSkip, singleConnection, testDatabase } from './postgres.mjs';
 
 const appUrl = 'https://hosted-media.example.test', profileId = 'media-profile', storageHost = 'a'.repeat(32) + '.r2.cloudflarestorage.com';
 const until = async check => { for (let i = 0; i < 1000; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); } assert.fail('Synthetic upload did not reach the expected state'); };
 // Restart closes the app and opens another on the same injected database, so process-local grants and active
 // transfers are lost exactly as in a real process restart while durable attempt rows remain.
-async function fixture(t) {
-  const database = await testDatabase(t), dataDir = await mkdtemp(join(tmpdir(), 'ten98-zernio-media-')), originalFetch = globalThis.fetch, env = { ZERNIO_API_KEY: 'synthetic-media-key' }, calls = [], objects = new Map(), state = { counter: 0, storageCalls: 0, chunks: 0, bytes: 0, presignHook: null, validateHook: null, storageHook: null, chunkHook: null, grantHook: null, lostAck: false, invalidMetadata: null, socialPreflight: null, postWrites: 0, posts: new Map(), postReadHook: null };
+async function fixture(t, poolOptions) {
+  const database = await testDatabase(t, poolOptions), dataDir = await mkdtemp(join(tmpdir(), 'ten98-zernio-media-')), originalFetch = globalThis.fetch, env = { ZERNIO_API_KEY: 'synthetic-media-key' }, calls = [], objects = new Map(), state = { counter: 0, storageCalls: 0, chunks: 0, bytes: 0, presignHook: null, validateHook: null, storageHook: null, chunkHook: null, grantHook: null, lostAck: false, invalidMetadata: null, socialPreflight: null, postWrites: 0, posts: new Map(), postReadHook: null };
   let app, origin, cookie, projectId, base;
   const start = async () => { app = Object.assign(await createApp({ dataDir, appUrl, env, directScheduler: false, database }), { database, sql: database.sql }); await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); origin = `http://127.0.0.1:${app.server.address().port}`; };
   await start();
@@ -64,7 +64,8 @@ async function fixture(t) {
 }
 
 test('authenticated hosted upload streams exact bytes without storage credentials and saves one pending asset only after validation', { skip: postgresSkip }, async t => {
-  const f = await fixture(t);
+  // One pool connection: the prepare and save transactions must re-check access on their own connection.
+  const f = await fixture(t, singleConnection);
   try {
     const capabilities = await f.options(); assert.equal(capabilities.status, 200); assert.equal(capabilities.data.maxSize, 5_000_000_000); assert.ok(capabilities.data.formats.some(row => row.contentType === 'application/pdf'));
     const bytes = Buffer.alloc(600000, 0x71), attemptId = randomUUID(), input = { attemptId, size: bytes.length }, first = await f.prepare(input, 'stable-prepare-key'); assert.equal(first.status, 200, JSON.stringify(first.data)); let attempt = first.data.attempt; assert.equal(attempt.status, 'awaiting_upload'); assert.equal(attempt.projectId, f.projectId); assert.equal(attempt.id, attemptId); assert.equal(f.state.counter, 1);

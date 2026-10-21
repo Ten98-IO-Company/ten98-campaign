@@ -33,7 +33,13 @@ export function sqlHelper(pool) {
 }
 
 /** Returns { pool, db, url, sql } for a fresh migrated database; registers cleanup on the test context when given. */
-export async function testDatabase(t) {
+/**
+ * A pool of one connection: a transaction that waits for a second pool connection (instead of using its own) times
+ * out, as it would under load once every connection holds a transaction.
+ */
+export const singleConnection = { max: 1, connectionTimeoutMillis: 2000 };
+
+export async function testDatabase(t, poolOptions = {}) {
   if (!adminUrl) throw new Error('Set TEST_DATABASE_URL to run PostgreSQL tests.');
   const fingerprint = (await migrationSources()).map(source => source.checksum.slice(0, 8)).join('').slice(0, 40);
   const template = `campaign_template_${fingerprint}`, name = `campaign_test_${randomBytes(6).toString('hex')}`;
@@ -48,7 +54,7 @@ export async function testDatabase(t) {
     }
     await admin.query(`CREATE DATABASE ${name} TEMPLATE ${template}`);
   });
-  const opened = connect(databaseUrl(name)), connection = { ...opened, url: databaseUrl(name), sql: sqlHelper(opened.pool) };
+  const opened = connect(databaseUrl(name), poolOptions), connection = { ...opened, url: databaseUrl(name), sql: sqlHelper(opened.pool) };
   const close = async () => {
     await connection.pool.end().catch(() => undefined);
     const admin = new pg.Client({ connectionString: adminUrl });
@@ -59,8 +65,8 @@ export async function testDatabase(t) {
 }
 
 /** createApp on a fresh database; the app closes before its database is dropped. */
-export async function testApp(t, options = {}) {
-  const database = await testDatabase(), { createApp } = await import('../server/index.ts');
+export async function testApp(t, options = {}, poolOptions = {}) {
+  const database = await testDatabase(undefined, poolOptions), { createApp } = await import('../server/index.ts');
   let app;
   try { app = await createApp({ ...options, database: { pool: database.pool, db: database.db } }); }
   catch (error) { await database.close(); throw error; }

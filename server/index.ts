@@ -300,10 +300,11 @@ export async function createApp(options: AppOptions = {}) {
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
           const requestRevision = integrationSettings.revision;
           // One round trip per guard: the session, the actor's current role and the project's provider mappings.
+          // Inside a transaction, pass its executor: a second pool connection can starve the pool and reads outside the lock.
           // Errors keep their precedence: session ended, then project unavailable, then role changed, then credentials.
           type CurrentAccess = { session: boolean; role: string | null; zernio_profile_id: string | null; drive_folder_id: string | null; project: string | null };
-          const assertIntegrationSettings = async (): Promise<CurrentAccess> => {
-            const current = (await first<CurrentAccess>(db.execute(sql`SELECT EXISTS (SELECT 1 FROM sessions WHERE token = ${auth.sessionKey(req)} AND expires_at > ${Date.now()} AND user_id = ${user.id}) AS session,
+          const assertIntegrationSettings = async (executor: Executor = db): Promise<CurrentAccess> => {
+            const current = (await first<CurrentAccess>(executor.execute(sql`SELECT EXISTS (SELECT 1 FROM sessions WHERE token = ${auth.sessionKey(req)} AND expires_at > ${Date.now()} AND user_id = ${user.id}) AS session,
               (SELECT m.role FROM memberships m WHERE m.workspace_id = p.workspace_id AND m.user_id = ${user.id}) AS role, p.id AS project, p.zernio_profile_id, p.drive_folder_id
               FROM (SELECT 1) one LEFT JOIN projects p ON p.id = ${project.id}`)))!;
             if (!current.session) throw new HttpError(403, 'Your sign-in session ended. Sign in again.');
@@ -312,7 +313,7 @@ export async function createApp(options: AppOptions = {}) {
             if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.');
             return current;
           };
-          const context: RequestContext = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: async (expected: string | null) => { const current = await assertIntegrationSettings(); if (current.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: async (expected: string | null) => { const current = await assertIntegrationSettings(); if (current.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: async (collection: string, fields: ProviderRecord) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); await checkReferences(store, project.id, data); return data; } };
+          const context: RequestContext = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: async (expected: string | null, executor: Executor = db) => { const current = await assertIntegrationSettings(executor); if (current.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: async (expected: string | null, executor: Executor = db) => { const current = await assertIntegrationSettings(executor); if (current.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: async (collection: string, fields: ProviderRecord) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); await checkReferences(store, project.id, data); return data; } };
           context.assertPublishingApproval = (post: ProviderRecord) => assertPublishingApproval(context, post);
           context.persistNativeRefreshToken = async (provider: string, expected: string | undefined, next: string) => {
             await assertIntegrationSettings();

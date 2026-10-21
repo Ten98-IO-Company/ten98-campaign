@@ -21,8 +21,8 @@ export type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 export type Executor = Database | Transaction;
 export type Connection = { pool: pg.Pool; db: Database };
 
-export function connect(connectionString: string): Connection {
-  const pool = new pg.Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10000, statement_timeout: 10000 });
+export function connect(connectionString: string, options: pg.PoolConfig = {}): Connection {
+  const pool = new pg.Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10000, statement_timeout: 10000, ...options });
   pool.on('error', () => console.error('Database connection failed; check database availability.'));
   return { pool, db: drizzle(pool, { schema }) };
 }

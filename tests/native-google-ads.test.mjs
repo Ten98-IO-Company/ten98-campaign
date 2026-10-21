@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
-import { postgresSkip, testApp } from './postgres.mjs';
+import { postgresSkip, singleConnection, testApp } from './postgres.mjs';
 import { testNativeGoogleAds } from '../server/native-google-ads.ts';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -15,7 +15,8 @@ const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com',
 
 test('native Google Shopping uses an atomic paused resource graph, customer mapping, validation, report cursors and durable unconfirmed outcomes over HTTP', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-native-google-')), origin = 'http://127.0.0.1:3000';
-  const app = await testApp(t, { dataDir: directory, appUrl: origin, env: { ...env }, directScheduler: false }), originalFetch = globalThis.fetch, calls = [], creates = [], updates = [], customerId = '1234567890';
+  // One pool connection: the mapping transaction must re-check access on its own connection.
+  const app = await testApp(t, { dataDir: directory, appUrl: origin, env: { ...env }, directScheduler: false }, singleConnection), originalFetch = globalThis.fetch, calls = [], creates = [], updates = [], customerId = '1234567890';
   let cookie, projectId, badReceipt = false, readbackFailure = false, badReadbackStatus = false, mappingChange = false, foreignReport = false, sharedBudget = false, malformedReport = {};
   let lastCampaign = null, counter = 0, budgetPeriod = 'DAILY', biddingStrategy = 'MANUAL_CPC', badListing = {}, listingRows = 1, foreignListing = false, failCpcReadback = false;
   let updateHook, releaseUpdate, heldUpdate, timer, accountReadFailure;

@@ -44,7 +44,7 @@ export async function handleZernioMedia(context: OperationContext & { body: any;
   if (action && action !== 'options' && (!route || !uuid(route[1]))) return false;
   if (!(req.method === 'GET' && (action === 'options' || route && !route[2]) || req.method === 'POST' && (!action || route && ['recover', 'retry', 'cancel'].includes(route[2])) || req.method === 'PUT' && route?.[2] === 'content')) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available media upload controls.');
   if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'MEDIA_UPLOAD_PERMISSION_REQUIRED', 'Editing permission is required to manage hosted uploads.');
-  const check = async () => { try { await context.assertProjectMapping?.(profileId); } catch (error: any) { fail(error.status || 409, 'MEDIA_SCOPE_CHANGED', 'Project access, provider mapping or integration settings changed. Refresh before continuing.'); } };
+  const check = async (executor: Executor = db) => { try { await context.assertProjectMapping?.(profileId, executor); } catch (error: any) { fail(error.status || 409, 'MEDIA_SCOPE_CHANGED', 'Project access, provider mapping or integration settings changed. Refresh before continuing.'); } };
   await check(); for (const [id, grant] of grants) if (Date.parse(grant.uploadExpiresAt) <= Date.now()) grants.delete(id);
   const get = async (id: any, executor: Executor = db, lock = false) => { const row = (await executor.execute(sql`SELECT data FROM zernio_media_uploads WHERE id=${id} AND project_id=${project.id} AND user_id=${user.id} AND profile_id=${profileId}${lock ? sql` FOR UPDATE` : sql``}`)).rows[0] as ProviderRecord | undefined; if (!row) fail(404, 'MEDIA_UPLOAD_NOT_FOUND', 'This upload was not found in the current project and sign-in.'); return row.data; };
   // Completed and cancelled are terminal. The conditional write stops a concurrent cancel, transfer or completion from
@@ -111,7 +111,7 @@ export async function handleZernioMedia(context: OperationContext & { body: any;
         await advisoryLock(tx, 'media-uploads:' + JSON.stringify([project.id, user.id, profileId]));
         const open = (await tx.execute(sql`SELECT count(*) AS count FROM zernio_media_uploads WHERE project_id=${project.id} AND user_id=${user.id} AND profile_id=${profileId} AND data->>'status' NOT IN ('completed','cancelled') AND data->>'createdAt' > ${new Date(Date.now() - 3600000).toISOString()}`)).rows[0] as ProviderRecord;
         if (open.count >= 20) fail(429, 'MEDIA_UPLOAD_LIMIT', 'Finish or cancel existing uploads before preparing more files.');
-        await check(); await checkedAsset(attempt);
+        await check(tx); await checkedAsset(attempt, createStore(tx));
         return (await tx.execute(sql`INSERT INTO zernio_media_uploads (id, project_id, user_id, profile_id, asset_id, data) VALUES (${attempt.id}, ${project.id}, ${user.id}, ${profileId}, ${attempt.targetAssetId}, ${JSON.stringify(attempt)}) ON CONFLICT (id) DO NOTHING`)).rowCount;
       });
       if (inserted) prepared = await prepare(attempt);
@@ -167,7 +167,7 @@ export async function handleZernioMedia(context: OperationContext & { body: any;
       const records = createStore(tx);
       // The attempt row lock makes a concurrent cancel wait for this completion; the asset row lock keeps the reviewed
       // asset version from changing between its check and the delivery update.
-      await check(); const fresh = await get(attempt.id, tx, true); if (fresh.status === 'cancelled') return { attempt: await view(fresh, records) }; if (fresh.status === 'completed') return { attempt: await view(fresh, records) };
+      await check(tx); const fresh = await get(attempt.id, tx, true); if (fresh.status === 'cancelled') return { attempt: await view(fresh, records) }; if (fresh.status === 'completed') return { attempt: await view(fresh, records) };
       if (fresh.targetAssetId) await tx.execute(sql`SELECT id FROM records WHERE id=${fresh.targetAssetId} AND project_id=${project.id} FOR UPDATE`);
       const previous = await checkedAsset(fresh, records), delivery = { deliveryUrl: fresh.publicUrl, deliverySource: 'zernio', deliveryUploadedAt: fresh.uploadedAt, deliveryExpiresAt: fresh.expiresAt, deliveryKey: fresh.key, deliveryAttemptId: fresh.id, deliverySize: fresh.size, deliveryMimeType: canonicalMime(fresh.contentType), deliveryKind: fresh.kind, deliveryFilename: fresh.filename, approval: 'pending' };
       const asset = previous ? await records.update(project.id, 'assets', previous.id, delivery) : await records.create(project.id, 'assets', { name: fresh.filename.slice(0, 250), url: fresh.publicUrl, source: 'zernio', kind: fresh.kind, mimeType: canonicalMime(fresh.contentType), size: fresh.size, filename: fresh.filename, tags: [], ...delivery });

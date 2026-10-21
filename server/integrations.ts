@@ -678,7 +678,7 @@ function saveDriveFiles(db: any, projectId: any, files: any, assertMapping: any)
   return db.transaction(async (tx: Executor) => {
     // Serializes Drive saves per project: parallel syncs or uploads cannot both miss an existing driveId and create duplicates.
     await advisoryLock(tx, 'drive-assets:' + projectId);
-    await checkMapping(assertMapping);
+    await checkMapping(() => assertMapping(tx));
     const store = createStore(tx), assets = new Map(), saved: any[] = [];
     for (const asset of await store.list(projectId, 'assets')) if (asset.driveId && !assets.has(asset.driveId)) assets.set(asset.driveId, asset);
     for (const data of normalized) {
@@ -747,7 +747,7 @@ export async function handleIntegration(context: any) {
     if (path.startsWith('drive/')) {
       if (!env.GOOGLE_SERVICE_ACCOUNT_EMAIL || !env.GOOGLE_PRIVATE_KEY) fail(503, 'DRIVE_NOT_CONFIGURED', 'Configure a Google service account to connect Drive.');
       if (!project.driveFolderId || !/^[A-Za-z0-9_-]{5,200}$/.test(project.driveFolderId)) fail(409, 'DRIVE_NOT_MAPPED', 'Map a Drive folder to this project first.');
-      const folderId = project.driveFolderId, assertDrive = () => context.assertDriveMapping?.(folderId);
+      const folderId = project.driveFolderId, assertDrive = (executor?: Executor) => context.assertDriveMapping?.(folderId, executor);
       const driveRequest = (target: any, options: any) => request(target, options, 'Google Drive', assertDrive);
       if ((req.method === 'POST' && path === 'drive/sync') || (req.method === 'GET' && path === 'drive/files')) {
         const token = await driveToken(env); const files = []; let pageToken;

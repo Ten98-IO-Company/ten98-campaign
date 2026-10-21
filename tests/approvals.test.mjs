@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore } from '../server/database.ts';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from '../server/approvals.ts';
-import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
+import { blockWrites, postgresSkip, singleConnection, testDatabase } from './postgres.mjs';
 
 test('content approval policy binds current posts and creative to audited review requests and enforces role and project boundaries', { skip: postgresSkip }, async t => {
   const { db, pool, sql } = await testDatabase(t);
@@ -136,8 +136,8 @@ test('parallel review requests open one pending review and a parallel approve an
 });
 
 // Council decision ten98-code-system#30: self-review is refused unless the requester is the single active owner/admin.
-async function selfReviewFixture(t, members) {
-  const { db, pool, sql } = await testDatabase(t);
+async function selfReviewFixture(t, members, poolOptions) {
+  const { db, pool, sql } = await testDatabase(t, poolOptions);
   await pool.query("INSERT INTO users (id, name, email) VALUES ('blair','Blair Owner','blair@example.test'),('avery','Avery Admin','avery@example.test'),('casey','Casey Editor','casey@example.test'),('dana','Dana Admin','dana@example.test'),('abe','Abe Admin','abe@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A')");
   const addMember = (id, role) => pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', ['w', id, role]);
   for (const [id, role] of members) await addMember(id, role);
@@ -202,8 +202,8 @@ test('the self-approval exception counts active owners and administrators at rev
 });
 
 // Council decision ten98-code-system#30 (Q2 amendment): a submitted post takes a review of a proposed provider update.
-async function proposalFixture(t, members) {
-  const { db, pool, sql } = await testDatabase(t), originalFetch = globalThis.fetch;
+async function proposalFixture(t, members, poolOptions) {
+  const { db, pool, sql } = await testDatabase(t, poolOptions), originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
   await pool.query("INSERT INTO users (id, name, email) VALUES ('blair','Blair Owner','blair@example.test'),('avery','Avery Admin','avery@example.test'),('casey','Casey Editor','casey@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a','w','A','profile-a')");
   for (const [id, role] of members) await pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', ['w', id, role]);
@@ -270,4 +270,17 @@ test('approving a proposal follows the self-review rule and its single-administr
     assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.item.review.selfApproved, true);
     assert.deepEqual(await f.stored(requested.data.item.review.id), { status: 'approved', note: 'Checked the proposed update.', requested_by: 'blair', self_approved: true });
   });
+});
+
+test('review requests, proposals and decisions each run on their own transaction connection', { skip: postgresSkip }, async t => {
+  // With one pool connection, a transaction that also needs the pool (instead of its own connection) times out.
+  const local = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']], singleConnection);
+  await local.setPolicy('blair', true);
+  const reviewId = await local.request('casey');
+  assert.equal((await local.review('blair', reviewId)).status, 200);
+  assert.deepEqual(await local.stored(reviewId), { status: 'approved', self_approved: false });
+  const proposed = await proposalFixture(t, [['blair', 'owner'], ['casey', 'editor']], singleConnection);
+  const result = await proposed.request('casey', { proposal: { content: 'Proposed on one connection', mode: 'draft' } });
+  assert.equal(result.status, 200, JSON.stringify(result.data));
+  assert.equal((await proposed.review('blair', result.data.item.review.id)).status, 200);
 });

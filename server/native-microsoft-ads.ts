@@ -64,7 +64,7 @@ export async function handleMicrosoftAds(context: MicrosoftContext) {
   if (path === '/status' && req.method === 'GET') { const latest = mapping && (await db.execute(sql`SELECT data FROM microsoft_ad_reports WHERE project_id=${project.id} AND account_id=${mapping.accountId} ORDER BY seq DESC LIMIT 1`)).rows[0]; send(200, { configured: configured(env), mapping, latestReport: latest ? latest.data : null }); return true; }
   if (!['GET', 'POST'].includes(req.method!)) fail(405, 'MICROSOFT_METHOD_UNAVAILABLE', 'This Microsoft Advertising action is unavailable.');
   if (req.method === 'POST' && !['owner', 'admin', 'editor'].includes(role)) fail(403, 'MICROSOFT_WRITE_REQUIRED', 'Editing permission is required for Microsoft Advertising.');
-  const assertCurrent = async () => { await context.assertIntegrationSettings(); if (saved) { const current = await connection(); if (current?.account_id !== saved.account_id || current?.customer_id !== saved.customer_id) fail(409, 'MICROSOFT_MAPPING_CHANGED', 'The Microsoft account mapping changed. Refresh the project.'); } };
+  const assertCurrent = async (executor: Executor = db) => { await context.assertIntegrationSettings(executor); if (saved) { const current = await connection(executor); if (current?.account_id !== saved.account_id || current?.customer_id !== saved.customer_id) fail(409, 'MICROSOFT_MAPPING_CHANGED', 'The Microsoft account mapping changed. Refresh the project.'); } };
   if (path === '/connection' && req.method === 'POST') {
     if (!user.isOperator || !['owner', 'admin'].includes(role)) fail(403, 'MICROSOFT_MAPPING_FORBIDDEN', 'An instance operator with workspace administration access must approve this account.');
     fields(body, ['customerId', 'accountId', 'confirmed']); if (body.confirmed !== true) fail(400, 'MICROSOFT_CONFIRMATION_REQUIRED', 'Confirm this account belongs to the project before mapping it.');
@@ -76,7 +76,7 @@ export async function handleMicrosoftAds(context: MicrosoftContext) {
     // The project and account locks serialise parallel mappings, so each re-reads the mapping the other committed.
     await db.transaction(async tx => {
       await advisoryLock(tx, 'microsoft-ads-connection:' + project.id); await advisoryLock(tx, 'microsoft-ads-account:' + accountId);
-      await assertCurrent(); if ((await tx.execute(sql`SELECT project_id FROM microsoft_ad_connections WHERE account_id=${accountId} AND project_id<>${project.id}`)).rowCount) fail(409, 'MICROSOFT_ACCOUNT_ALREADY_MAPPED', 'This Microsoft account is already assigned to another project.');
+      await assertCurrent(tx); if ((await tx.execute(sql`SELECT project_id FROM microsoft_ad_connections WHERE account_id=${accountId} AND project_id<>${project.id}`)).rowCount) fail(409, 'MICROSOFT_ACCOUNT_ALREADY_MAPPED', 'This Microsoft account is already assigned to another project.');
       const current = await connection(tx); if (current && (current.account_id !== accountId || current.customer_id !== customerId)) fail(409, 'MICROSOFT_MAPPING_CHANGED', 'Another administrator mapped this project during verification.');
       await tx.execute(sql`INSERT INTO microsoft_ad_connections VALUES (${project.id}, ${customerId}, ${accountId}, ${JSON.stringify(data)}) ON CONFLICT (project_id) DO UPDATE SET data=excluded.data`);
     });

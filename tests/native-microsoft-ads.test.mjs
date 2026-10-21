@@ -4,12 +4,12 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { postgresSkip, testApp } from './postgres.mjs';
+import { postgresSkip, singleConnection, testApp } from './postgres.mjs';
 
 const input = { name: 'Native Microsoft search', dailyBudget: 20, maxCpc: 2, finalUrl: 'https://example.test/offer', headlines: ['Plan Better Campaigns', 'Coordinate Your Launch', 'See Campaign Performance'], descriptions: ['Plan and review campaign work in one place.', 'Bring channels and teams together for your next launch.'], keywords: ['campaign manager', 'campaign planning'], matchType: 'Exact', locationIds: ['190'], confirmed: true };
-async function fixture(t) {
+async function fixture(t, poolOptions) {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-microsoft-native-')), origin = 'https://campaign.example.test', env = { MICROSOFT_ADS_CLIENT_ID: 'fixture-client-id', MICROSOFT_ADS_CLIENT_SECRET: 'PRIVATE_CLIENT_SECRET', MICROSOFT_ADS_REFRESH_TOKEN: 'PRIVATE_REFRESH_TOKEN', MICROSOFT_ADS_DEVELOPER_TOKEN: 'PRIVATE_DEVELOPER_TOKEN' };
-  const app = await testApp(t, { dataDir, env, appUrl: origin, directScheduler: false }), originalFetch = globalThis.fetch, calls = [], state = { campaigns: [], groups: [], ads: [], keywords: [], locations: [], mode: '', hook: null };
+  const app = await testApp(t, { dataDir, env, appUrl: origin, directScheduler: false }, poolOptions), originalFetch = globalThis.fetch, calls = [], state = { campaigns: [], groups: [], ads: [], keywords: [], locations: [], mode: '', hook: null };
   let cookie, counter = 1000;
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
@@ -54,7 +54,8 @@ async function fixture(t) {
 }
 
 test('native Microsoft search creates a paused campaign with exact targeting, responsive assets and keywords, then verifies status, budget and scoped reporting', { skip: postgresSkip }, async t => {
-  const f = await fixture(t);
+  // One pool connection: the mapping transaction must re-check access on its own connection.
+  const f = await fixture(t, singleConnection);
   try {
     assert.equal((await f.request(f.prefix + '/status', 'GET', undefined, undefined, '')).status, 401); assert.equal((await f.request(f.prefix + '/status')).data.mapping, null); assert.equal(f.calls.length, 0);
     f.state.mode = 'foreign-account'; assert.equal((await f.request(f.prefix + '/connection', 'POST', { customerId: '10', accountId: '100', confirmed: true })).status, 502); f.state.mode = ''; await f.map();
