@@ -4,7 +4,7 @@ import { sql } from 'drizzle-orm';
 import type { Database, Executor } from './database.ts';
 import { sendSmsReply } from './direct-providers.ts';
 import { createContacts } from './contacts.ts';
-import { nextDeliveryStatus } from './direct-campaigns.ts';
+import { nextDeliveryStatus, smsStarted as started } from './direct-campaigns.ts';
 
 const phone = (value: any): value is string => typeof value === 'string' && /^\+[1-9]\d{6,14}$/.test(value);
 const sid = (value: any, prefix: string): value is string => typeof value === 'string' && new RegExp(`^${prefix}[a-fA-F0-9]{32}$`).test(value);
@@ -61,6 +61,7 @@ export function createSmsInbox({ db, env, appUrl, contacts = createContacts({ db
     });
     // STOP takes effect even if retaining the optional conversation subsequently fails.
     if (stopped(form)) await contacts.suppressSmsGlobally(recipient, 'Recipient opted out');
+    else if (started(form)) await contacts.liftSmsOptOut(recipient);
     const candidates = await resultRows(db.execute(sql`SELECT DISTINCT c.project_id FROM sms_conversations c JOIN sms_messages m ON m.conversation_id = c.id WHERE c.account_sid = ${accountSid} AND c.sender = ${sender} AND c.recipient = ${recipient} AND (${serviceSid}::text = '' OR c.service_sid = ${serviceSid}) AND m.provider_id IS NOT NULL AND m.data->>'direction' = 'outgoing' AND (${projectId || null}::text IS NULL OR c.project_id = ${projectId || null})`));
     return db.transaction(async tx => {
       const target = candidates.length === 1 ? candidates[0].project_id : null;

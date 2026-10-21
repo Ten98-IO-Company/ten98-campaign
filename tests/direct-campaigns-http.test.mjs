@@ -122,6 +122,44 @@ test('a scheduler tick reads only due campaigns and the next pending delivery, w
   } finally { await f.close(); }
 });
 
+test('a complaint recorded at Cloudflare before the first email send stops that send without a manual refresh', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const contact = await f.person(), campaign = await f.draft({ channel: 'email', emailPurpose: 'transactional', subject: 'Receipt for {{name}}', text: 'Your requested receipt.' });
+    assert.equal((await f.arm(campaign, 'send', { transactionalConfirmed: true })).data.campaign.status, 'scheduled');
+    f.setSuppressions([{ id: 'suppression-complaint', email: contact.email, reason: 'complaint', scope: { type: 'account' }, expires_at: null }]);
+    await f.app.direct.processPending({ now: Date.now() + 7200000 });
+    assert.equal(f.calls.filter(call => call.url.endsWith('/email/sending/send')).length, 0, 'No email reaches Cloudflare for a complained-about recipient.');
+    assert.equal(f.calls.filter(call => call.url.includes('/suppressions')).length, 1);
+    const detail = await f.request(f.path + `/campaigns/${campaign.id}`); assert.equal(detail.data.deliveries[0].status, 'suppressed');
+  } finally { await f.close(); }
+});
+
+test('a test send reaches only the user or one consented contact, once per key, and leaves the draft unchanged', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const consented = await f.person(), refused = await f.person({ name: 'No SMS', email: 'no-sms@example.com', phone: '+12025550124', consents: { email: true, sms: false, whatsapp: false } });
+    const sends = () => f.calls.filter(call => call.method === 'POST' && (call.url.endsWith('/Messages.json') || call.url.endsWith('/email/sending/send'))).length;
+    const test = (campaign, body, key = 'test-send-' + Math.random().toString(36).slice(2)) => f.request(f.path + `/campaigns/${campaign.id}/test`, 'POST', body, { headers: { 'Idempotency-Key': key } });
+    const sms = await f.draft();
+    assert.equal((await test(sms, { contactId: consented.id })).status, 400, 'An unconfirmed test sends nothing.');
+    assert.equal((await test(sms, { confirmed: true, contactId: refused.id })).data.error.code, 'INVALID_TEST_RECIPIENT');
+    assert.equal((await test(sms, { confirmed: true })).data.error.code, 'INVALID_TEST_RECIPIENT');
+    assert.equal(sends(), 0);
+    let result = await test(sms, { confirmed: true, contactId: consented.id }, 'test-send-sms-1'); assert.equal(result.status, 200, JSON.stringify(result.data));
+    assert.equal(result.data.test.recipient, consented.phone); assert.equal(sends(), 1);
+    assert.equal((await test(sms, { confirmed: true, contactId: consented.id }, 'test-send-sms-1')).status, 200); assert.equal(sends(), 1, 'A retried key sends nothing more.');
+    const mail = await f.draft({ channel: 'email', emailPurpose: 'transactional', subject: 'Receipt for {{name}}', text: 'Your requested receipt.' });
+    assert.equal((await test(mail, { confirmed: true, contactId: consented.id })).data.error.code, 'INVALID_TEST_RECIPIENT', 'Email tests go only to the signed-in user.');
+    result = await test(mail, { confirmed: true }); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.test.recipient, 'direct-owner@example.test');
+    const payload = JSON.parse(f.calls.filter(call => call.url.endsWith('/email/sending/send')).at(-1).body); assert.deepEqual(payload.to, ['direct-owner@example.test']); assert.match(payload.subject, /Receipt for QA owner/);
+    assert.equal(sends(), 2);
+    for (const draft of [sms, mail]) { const detail = await f.request(f.path + `/campaigns/${draft.id}`); assert.equal(detail.data.campaign.status, 'draft'); assert.equal(detail.data.deliveries.length, 0); }
+    for (let index = 0; index < 8; index++) assert.equal((await test(sms, { confirmed: true, contactId: consented.id })).status, 200);
+    assert.equal((await test(sms, { confirmed: true, contactId: consented.id })).data.error.code, 'TEST_SEND_LIMIT'); assert.equal(sends(), 10);
+  } finally { await f.close(); }
+});
+
 test('Cloudflare email enforces transactional purpose, reports true receipts, appends unsubscribe and preserves bounce suppressions', pg, async t => {
   const f = await fixture(t);
   try {

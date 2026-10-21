@@ -26,7 +26,7 @@ function cloudflare(env: ProviderRecord) {
   return { base: `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/email/sending`, headers: { Authorization: `Bearer ${env.CLOUDFLARE_EMAIL_API_TOKEN}`, 'Content-Type': 'application/json' } };
 }
 
-export async function sendDirect({ channel, campaign, contact, delivery = {}, env, appUrl, unsubscribeUrl, assertMapping }: ProviderRecord) {
+export async function sendDirect({ channel, campaign, contact, delivery = {}, env, project, appUrl, unsubscribeUrl, assertMapping }: ProviderRecord) {
   if (channel === 'sms') {
     const api = twilio(env);
     if (!phone(contact.phone)) fail(400, 'INVALID_RECIPIENT', 'SMS recipients need an international phone number, including + and country code.');
@@ -64,7 +64,8 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
     catch { fail(409, 'INVALID_UNSUBSCRIBE_URL', 'Email preferences require this app’s public HTTPS address.'); }
     body.text += `\n\nManage email preferences: ${url}`;
     if (body.html) body.html += `<p><a href="${url.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}">Manage email preferences</a></p>`;
-    body.headers = { 'List-Unsubscribe': `<${url}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' };
+    // List-ID (RFC 2919) names the project's list, so mail clients can identify and filter it.
+    body.headers = { 'List-Unsubscribe': `<${url}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click', ...(project?.id ? { 'List-ID': `<${project.id}.${new URL(appUrl).hostname}>` } : {}) };
   }
   const data = await providerRequest(`${api.base}/send`, { method: 'POST', headers: api.headers, body: JSON.stringify(body) }, 'Cloudflare Email Sending', assertMapping);
   const buckets = { delivered: 'delivered', permanent_bounces: 'failed', queued: 'queued', suppressed_recipients: 'suppressed' }, matches = [];

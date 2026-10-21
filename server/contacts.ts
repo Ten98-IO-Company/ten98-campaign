@@ -218,6 +218,23 @@ export function createContacts({ db }: { db: Database }) {
     await db.execute(sql`INSERT INTO direct_sms_suppressions VALUES (${hash(target)}, ${reason}, ${new Date().toISOString()}) ON CONFLICT (target_hash) DO NOTHING`);
     return { suppressed: true };
   }
+  // A signed START/UNSTOP is the recipient's own re-opt-in at the carrier: it lifts only the opt-out suppression a STOP
+  // wrote, never a manual or hard suppression, and restores no campaign consent (contacts keep sms consent off until a
+  // new consent source is recorded). Council decision ten98-code-system#35 Q3.
+  async function liftSmsOptOut(target: any): Promise<boolean> {
+    if (typeof target !== 'string' || !/^\+[1-9]\d{6,14}$/.test(target)) return false;
+    const reason = 'Recipient opted out', targetHash = hash(target);
+    return db.transaction(async tx => {
+      const global = await tx.execute(sql`DELETE FROM direct_sms_suppressions WHERE target_hash = ${targetHash} AND reason = ${reason}`);
+      // Projects copied the opt-out into their ledger and contact records; lift that same reason there, under each project's contacts lock.
+      const projects = [...new Set((await resultRows(tx.execute(sql`DELETE FROM direct_contact_suppressions WHERE channel = 'sms' AND target_hash = ${targetHash} AND reason = ${reason} RETURNING project_id`))).map(row => row.project_id as string))].sort();
+      for (const projectId of projects) {
+        await lockContacts(tx, projectId);
+        for (const record of (await list(projectId, tx)).filter(record => record.phone === target && record.suppression.sms?.reason === reason)) { delete record.suppression.sms; record.updatedAt = new Date().toISOString(); await persist(tx, record); }
+      }
+      return Boolean(global.rowCount || projects.length);
+    });
+  }
   async function assessDNS(projectId: string, ids: unknown, { resolver, assertAccess }: { resolver?: any; assertAccess?: () => unknown } = {}) {
     await assertAccess?.();
     if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some(id => typeof id !== 'string')) fail(400, 'Select between 1 and 100 contacts to check DNS.');
@@ -267,5 +284,5 @@ export function createContacts({ db }: { db: Database }) {
       return { checked: outcomes.size, contacts, notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' };
     });
   }
-  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressDestination, suppressSmsGlobally, smsSuppression, async remove(projectId: string, id: string) { return Boolean((await db.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount); } };
+  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string) { return Boolean((await db.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount); } };
 }
