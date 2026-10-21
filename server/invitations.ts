@@ -45,7 +45,7 @@ export async function handleInvitations(context: ProviderRecord) {
   if (!publicRoute && !teamRoute) return false;
   if (publicRoute) {
     if (!['GET', 'POST'].includes(req.method)) fail(405, 'This invitation action is unavailable.');
-    await auth.limit('invitation:' + req.method + ':' + (req.socket?.remoteAddress || 'local'), req.method === 'GET' ? 120 : 30);
+    await auth.limit('invitation:' + req.method + ':' + (auth.clientAddress(req) || 'local'), req.method === 'GET' ? 120 : 30);
     const token = publicRoute[1], invite = await find(db, token), existing = await account(db, invite.email), signedIn = user && existing && user.id === existing.id && user.email === invite.email;
     if (req.method === 'GET') {
       send(200, { invitation: { email: invite.email, role: invite.role, workspaceName: invite.workspace_name, expiresAt: new Date(invite.expires_at).toISOString() }, accountExists: Boolean(existing), requiresSignIn: Boolean(existing && !signedIn) });

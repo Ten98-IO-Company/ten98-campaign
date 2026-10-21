@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { createAuth, hashPassword } from '../server/auth.ts';
+import { createAuth, hashPassword, signInLimits } from '../server/auth.ts';
 import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
 
 const pg = { skip: postgresSkip };
@@ -61,6 +61,22 @@ test('parallel attempts cannot exceed a rate limit', pg, async t => {
   const outcomes = await Promise.all(attempts);
   assert.equal(outcomes.filter(outcome => outcome === 'allowed').length, 10); assert.equal(outcomes.filter(outcome => outcome === 429).length, 20);
   assert.equal((await db.$client.query("SELECT count FROM login_limits WHERE key = 'parallel'")).rows[0].count, 10);
+});
+
+test('parallel sign-ins cannot exceed the per-client or per-account limits', pg, async t => {
+  const { db, pool } = await testDatabase(t), config = { sessionSecret: 'sign-in-race-fixture-secret-32-characters', appUrl: 'https://campaign.example', trustedProxies: ['10.0.0.2'] }, auth = createAuth(db, config);
+  await auth.limit('warm-up', 10);
+  const attempt = (client, email) => auth.login({ headers: { 'x-forwarded-for': client }, socket: { remoteAddress: '10.0.0.2' } }, response(), { email, password: 'wrong password guess' }).then(() => 'allowed', error => error.status);
+  // Every attempt reads its buckets before any increment commits; only the single conditional upserts hold the lines.
+  const gate = await blockWrites(pool, 'login_limits');
+  const oneClient = Array.from({ length: signInLimits.client + 10 }, (_, index) => attempt('203.0.113.7', `spread-${index}@example.test`));
+  const oneAccount = Array.from({ length: signInLimits.account + 10 }, (_, index) => attempt(`192.0.2.${index}`, 'member@example.test'));
+  await gate.waiting(1); await gate.release();
+  const tally = outcomes => [outcomes.filter(outcome => outcome === 401).length, outcomes.filter(outcome => outcome === 429).length];
+  assert.deepEqual(tally(await Promise.all(oneClient)), [signInLimits.client, 10]); assert.deepEqual(tally(await Promise.all(oneAccount)), [signInLimits.account, 10]);
+  const counter = async key => (await db.$client.query('SELECT count FROM login_limits WHERE key = $1', [key])).rows[0].count;
+  assert.equal(await counter('ip:203.0.113.7'), signInLimits.client);
+  assert.equal(await counter('email:' + createHmac('sha256', config.sessionSecret).update('member@example.test').digest('hex')), signInLimits.account);
 });
 
 function oidcFixture(t, db, config) {

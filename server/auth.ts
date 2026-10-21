@@ -2,17 +2,21 @@ import { randomBytes, scrypt, timingSafeEqual, createHmac, createHash, randomUUI
 import { promisify } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { BlockList, isIP } from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sql } from 'drizzle-orm';
 import type { Database, Executor } from './database.ts';
 
-export interface AuthConfig { appUrl: string; sessionSecret: string; bootstrapToken?: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[] }
+export interface AuthConfig { appUrl: string; sessionSecret: string; bootstrapToken?: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[]; trustedProxies?: string[] }
 export interface PublicUser { id: string; name: string; email: string; isOperator: boolean }
 type UserRow = { id: string; name: string; email: string; password?: string | null; isOperator?: unknown; expiresAt?: number };
 type OidcFlow = { state: string; verifier: string; nonce: string; invite_hash: string | null };
 
 const derive = promisify(scrypt) as (password: string, salt: string, keylen: number, options: { N: number; maxmem: number }) => Promise<Buffer>;
 const maxAge = 7 * 86400, oidcWindow = 600, callbackPath = '/api/auth/oidc/callback';
+// Password sign-in attempts per 15 minutes. One client reaches at most 10 attempts per account in a window (20 across two
+// overlapping windows), so only failures from several clients can reach the account-wide limit.
+export const signInLimits = { client: 30, clientAccount: 10, account: 50 };
 export class HttpError extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } }
 export const publicUser = (user: UserRow | null | undefined): PublicUser | null => user ? { id: user.id, name: user.name, email: user.email, isOperator: Boolean(user.isOperator) } : null;
 function storedSecret(dataDir: string, provided: string | undefined, filename: string, label: string): string {
@@ -45,6 +49,26 @@ async function verify(password: string, encoded: string | null | undefined): Pro
 export function cookies(req: IncomingMessage): Record<string, string> {
   return Object.fromEntries((req.headers.cookie || '').split(';').map(part => part.trim().split(/=(.*)/s)).filter(part => part[0]).map(([key, value]) => [key, value || '']));
 }
+// Addresses compare and key in one form: IPv6 compressed and lowercased, IPv4-mapped IPv6 as IPv4; anything else is undefined.
+function canonicalAddress(value: string): string | undefined {
+  const version = value.includes('%') ? 0 : isIP(value);
+  if (version !== 6) return version ? value : undefined;
+  const address = new URL(`http://[${value}]`).hostname.slice(1, -1), mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(address);
+  if (!mapped) return address;
+  const [high, low] = [parseInt(mapped[1], 16), parseInt(mapped[2], 16)];
+  return [high >> 8, high & 255, low >> 8, low & 255].join('.');
+}
+const family = (address: string) => isIP(address) === 4 ? 'ipv4' : 'ipv6';
+/** Parses TRUSTED_PROXIES entries (IP addresses or CIDR ranges); an invalid entry stops startup. */
+export function trustedProxyList(entries: string[] = []): BlockList {
+  const list = new BlockList();
+  for (const entry of entries) {
+    const [value = '', bits, extra] = entry.split('/'), address = canonicalAddress(value), maximum = address && family(address) === 'ipv4' ? 32 : 128;
+    if (!address || extra !== undefined || (bits !== undefined && !(/^\d{1,3}$/.test(bits) && Number(bits) <= maximum))) throw new Error(`TRUSTED_PROXIES entry "${entry}" is not an IP address or CIDR range.`);
+    if (bits === undefined) list.addAddress(address, family(address)); else list.addSubnet(address, Number(bits), family(address));
+  }
+  return list;
+}
 const first = async <T>(query: Promise<{ rows: unknown[] }>): Promise<T | undefined> => (await query).rows[0] as T | undefined;
 // Lock order (issue #25): installation → workspaces → invitations → advisory (email:, oidc:) → users row.
 export const advisoryLock = (tx: Executor, key: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
@@ -56,7 +80,17 @@ export const memberRole = async (executor: Executor, workspaceId: string, userId
 type OpenIdClient = typeof import('openid-client');
 // The OIDC client loader is injectable so tests can exercise the real flow without an identity provider.
 export function createAuth(db: Database, config: AuthConfig, { openidClient = () => import('openid-client') }: { openidClient?: () => Promise<OpenIdClient> } = {}) {
-  const digest = (value: string) => createHmac('sha256', config.sessionSecret).update(value).digest('hex');
+  const digest = (value: string) => createHmac('sha256', config.sessionSecret).update(value).digest('hex'), proxies = trustedProxyList(config.trustedProxies);
+  const trusted = (address: string) => Boolean(canonicalAddress(address)) && proxies.check(address, family(address));
+  // X-Forwarded-For counts only when the socket peer is a trusted proxy. Walking from the right, the first hop that is not
+  // a trusted proxy is the client; a malformed hop is not trusted either, so the walk stops there.
+  function clientAddress(req: IncomingMessage): string {
+    const peer = req.socket?.remoteAddress || '', header = req.headers?.['x-forwarded-for'];
+    let client = canonicalAddress(peer) || peer;
+    if (!trusted(client) || !header) return client;
+    for (const hop of String(header).split(',').reverse()) { client = canonicalAddress(hop.trim()) || hop.trim().slice(0, 100); if (!trusted(client)) break; }
+    return client;
+  }
   // Cookies are shared across ports; include the configured origin so local instances can coexist.
   const scope = createHash('sha256').update(new URL(config.appUrl).origin).digest('hex').slice(0, 16), sessionName = 'ten98_session_' + scope, oidcName = 'ten98_oidc_' + scope, inviteName = 'ten98_oidc_invite_' + scope;
   function cookie(name: string, value: string, age = maxAge, path = '/') {
@@ -109,7 +143,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     return timingSafeEqual(Buffer.from(digest(value)), Buffer.from(stored)) ? token : '';
   }
   return {
-    user, establish, limit,
+    user, establish, limit, clientAddress,
     /** The stored key of this request's session cookie, or '' when it carries none, for guards that join on sessions. */
     sessionKey(req: IncomingMessage): string { const token = sessionToken(req); return token && /^[\w-]{43}$/.test(token) ? digest(token) : ''; },
     requireSetupProof(token: unknown): void {
@@ -137,12 +171,13 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       });
     },
     async login(req: IncomingMessage, res: ServerResponse, body: { email: string; password: string }): Promise<PublicUser | null> {
-      await limit('ip:' + req.socket.remoteAddress, 30); await limit('email:' + digest(body.email));
+      const client = clientAddress(req), account = body.email.toLowerCase(), clientAccount = 'client-email:' + digest(JSON.stringify([client, account]));
+      await limit('ip:' + client, signInLimits.client); await limit(clientAccount, signInLimits.clientAccount); await limit('email:' + digest(account), signInLimits.account);
       const found = await first<UserRow>(db.execute(sql`SELECT u.*, EXISTS (SELECT 1 FROM instance_operators o WHERE o.user_id = u.id) AS "isOperator" FROM users u WHERE email = ${body.email}`));
       if (!await verify(body.password, found?.password)) throw new HttpError(401, 'Email or password is incorrect.');
       return db.transaction(async tx => {
         if ((await lockUser(tx, found!.id))?.password !== found!.password) throw new HttpError(401, 'Your password changed. Sign in again.');
-        await tx.execute(sql`DELETE FROM login_limits WHERE key = ${'email:' + digest(body.email)}`);
+        await tx.execute(sql`DELETE FROM login_limits WHERE key = ${clientAccount}`);
         await establish(res, found!.id, req, tx); return publicUser(found);
       });
     },
@@ -154,7 +189,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     },
     async oidcStart(req: IncomingMessage, res: ServerResponse): Promise<void> {
       if (!config.oidcEnabled || !(await db.execute(sql`SELECT id FROM users LIMIT 1`)).rowCount) throw new HttpError(400, 'Identity sign-in is unavailable.');
-      await limit('oidc:' + req.socket.remoteAddress, 30);
+      await limit('oidc:' + clientAddress(req), 30);
       const { client, provider } = await oidc();
       const invite = new URL(req.url || '/api/auth/oidc/start', config.appUrl).searchParams.get('invite');
       if (invite && !/^[A-Za-z0-9_-]{43}$/.test(invite)) throw new HttpError(400, 'Use a valid invitation link before signing in.');

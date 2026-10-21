@@ -132,7 +132,7 @@ export async function createApp(options: AppOptions = {}) {
   if (!['on', 'off'].includes(directScheduler)) throw new Error('DIRECT_SCHEDULER must be on or off.');
   const { pool, db } = options.database || getDatabase(env.DATABASE_URL), store = createStore(db);
   await assertSchema(pool);
-  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean) };
+  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean), trustedProxies: (env.TRUSTED_PROXIES || '').split(',').map(value => value.trim()).filter(Boolean) };
   config.oidcEnabled = Boolean(config.oidcIssuer && config.oidcClientId);
   if (!await claimed(db)) config.bootstrapToken = bootstrapToken(dataDir, env.BOOTSTRAP_TOKEN);
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
@@ -189,7 +189,7 @@ export async function createApp(options: AppOptions = {}) {
           return send(200, { user: publicUser(current), setupRequired: !await claimed(db), oidcEnabled: config.oidcEnabled, ...(sessionEnded ? { sessionEnded: true } : {}) });
         }
         if (path === '/api/auth/setup' && req.method === 'POST') {
-          await auth.limit('setup:' + req.socket.remoteAddress, 10);
+          await auth.limit('setup:' + auth.clientAddress(req), 10);
           if (await claimed(db)) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
           auth.requireSetupProof(body.token);
           const name = text(body.name, 'Name'), mail = email(body.email), hash = await hashPassword(password(body.password));
