@@ -1,16 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { handleZernioBlogs } from '../server/zernio-blogs.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp, testDatabase } from './postgres.mjs';
 
 // Contract: cached official Zernio OpenAPI 1.295.0 Blogs; WordPress scheduling
 // requires native future status and an exact publication time, without a content write.
-function fixture(platform = 'wordpress', db = new DatabaseSync(':memory:')) {
+async function fixture(t, platform = 'wordpress', db) {
+  db ??= (await testDatabase(t)).db;
   const profileId = 'profile-a', accountId = platform + '-account', blogId = platform === 'wordpress' ? '91' : '327';
   const account = { _id: accountId, profileId, platform, username: 'site.example.test', platformUserId: 'native-site', displayName: 'Brand site', isActive: true };
   const blog = { id: blogId, platform, title: 'Brand journal', handle: 'journal', token: 'never-expose' };
@@ -45,170 +46,160 @@ function fixture(platform = 'wordpress', db = new DatabaseSync(':memory:')) {
   return { db, state, account, calls, request, accountId, blogId, route, writes: () => calls.filter(call => call.method !== 'GET'), async reviewBody() { const result = await request(route); assert.equal(result.status, 200, JSON.stringify(result)); return { title: 'Reviewed draft', bodyHtml: '<p>Raw <strong>HTML</strong></p>', version: result.data.version, confirmCreate: true }; } };
 }
 
-test('blogs browse scoped provider IDs, normalize read-only articles and preserve opaque pagination', async () => {
+test('blogs browse scoped provider IDs, normalize read-only articles and preserve opaque pagination', { skip: postgresSkip }, async t => {
   for (const platform of ['wordpress', 'shopify']) {
-    const f = fixture(platform);
-    try {
-      const accounts = await f.request('accounts', { role: 'viewer' }); assert.equal(accounts.status, 200); assert.deepEqual(accounts.data.accounts, [{ id: f.accountId, platform, name: 'Brand site', isActive: true, needsReconnection: false }]);
-      const blogs = await f.request(f.accountId); assert.equal(blogs.status, 200); assert.equal(blogs.data.blogs[0].id, f.blogId);
-      const detail = await f.request(f.route); assert.equal(detail.status, 200); assert.match(detail.data.version, /^[a-f0-9]{64}$/);
-      const list = await f.request(`${f.route}/articles?limit=1&cursor=${encodeURIComponent('opaque:+/= cursor')}`); assert.equal(list.status, 200); assert.equal(list.data.articles[0].blogId, f.blogId);
-      assert.deepEqual(f.calls.findLast(call => call.path.endsWith('/articles')).query, { limit: 1, cursor: 'opaque:+/= cursor' });
-      const article = await f.request(`${f.route}/articles/561`); assert.equal(article.status, 200); assert.equal(article.data.article.bodyHtml, '<p>Original draft</p>'); assert.equal(article.data.article.status, platform === 'wordpress' ? 'draft' : null);
-      assert.equal(JSON.stringify([accounts, blogs, detail, list, article]).includes('never-expose'), false); assert.equal(f.writes().length, 0);
-      f.state.articles = []; f.state.nextCursor = 'next:2'; const next = await f.request(`${f.route}/articles`); assert.deepEqual(next.data, { articles: [], nextCursor: 'next:2' });
-    } finally { f.db.close(); }
+    const f = await fixture(t, platform);
+    const accounts = await f.request('accounts', { role: 'viewer' }); assert.equal(accounts.status, 200); assert.deepEqual(accounts.data.accounts, [{ id: f.accountId, platform, name: 'Brand site', isActive: true, needsReconnection: false }]);
+    const blogs = await f.request(f.accountId); assert.equal(blogs.status, 200); assert.equal(blogs.data.blogs[0].id, f.blogId);
+    const detail = await f.request(f.route); assert.equal(detail.status, 200); assert.match(detail.data.version, /^[a-f0-9]{64}$/);
+    const list = await f.request(`${f.route}/articles?limit=1&cursor=${encodeURIComponent('opaque:+/= cursor')}`); assert.equal(list.status, 200); assert.equal(list.data.articles[0].blogId, f.blogId);
+    assert.deepEqual(f.calls.findLast(call => call.path.endsWith('/articles')).query, { limit: 1, cursor: 'opaque:+/= cursor' });
+    const article = await f.request(`${f.route}/articles/561`); assert.equal(article.status, 200); assert.equal(article.data.article.bodyHtml, '<p>Original draft</p>'); assert.equal(article.data.article.status, platform === 'wordpress' ? 'draft' : null);
+    assert.equal(JSON.stringify([accounts, blogs, detail, list, article]).includes('never-expose'), false); assert.equal(f.writes().length, 0);
+    f.state.articles = []; f.state.nextCursor = 'next:2'; const next = await f.request(`${f.route}/articles`); assert.deepEqual(next.data, { articles: [], nextCursor: 'next:2' });
   }
 });
 
-test('only reviewed explicit create actions send forced-draft title and HTML, with readback and exact replay', async () => {
+test('only reviewed explicit create actions send forced-draft title and HTML, with readback and exact replay', { skip: postgresSkip }, async t => {
   for (const platform of ['wordpress', 'shopify']) {
-    const f = fixture(platform);
-    try {
-      const body = await f.reviewBody(), action = `${f.route}/create`, key = 'create-reviewed-key';
-      const result = await f.request(action, { method: 'POST', body, key, role: 'editor' }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.accountId, f.accountId); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.article.isPublished, false); assert.equal(result.data.article.publishedAt, null); assert.equal(result.data.blog.id, f.blogId);
-      assert.deepEqual(f.writes()[0].body, { title: body.title, bodyHtml: body.bodyHtml, isPublished: false });
-      const replay = await f.request(action, { method: 'POST', body, key }); assert.deepEqual(replay, result); assert.equal(f.writes().length, 1);
-      assert.equal(JSON.stringify(result).includes('never-expose'), false);
-      assert.equal((await f.request(action, { method: 'POST', body: { ...body, title: 'Different' }, key })).data.error.code, 'IDEMPOTENCY_CONFLICT');
-      assert.equal((await f.request(`${f.route}/articles/561`, { method: 'POST', body })).status, 405); assert.equal((await f.request(`${f.route}/articles/561`, { method: 'PATCH', body })).status, 405); assert.equal(f.writes().length, 1);
-    } finally { f.db.close(); }
+    const f = await fixture(t, platform);
+    const body = await f.reviewBody(), action = `${f.route}/create`, key = 'create-reviewed-key';
+    const result = await f.request(action, { method: 'POST', body, key, role: 'editor' }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.accountId, f.accountId); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.article.isPublished, false); assert.equal(result.data.article.publishedAt, null); assert.equal(result.data.blog.id, f.blogId);
+    assert.deepEqual(f.writes()[0].body, { title: body.title, bodyHtml: body.bodyHtml, isPublished: false });
+    const replay = await f.request(action, { method: 'POST', body, key }); assert.deepEqual(replay, result); assert.equal(f.writes().length, 1);
+    assert.equal(JSON.stringify(result).includes('never-expose'), false);
+    assert.equal((await f.request(action, { method: 'POST', body: { ...body, title: 'Different' }, key })).data.error.code, 'IDEMPOTENCY_CONFLICT');
+    assert.equal((await f.request(`${f.route}/articles/561`, { method: 'POST', body })).status, 405); assert.equal((await f.request(`${f.route}/articles/561`, { method: 'PATCH', body })).status, 405); assert.equal(f.writes().length, 1);
   }
 });
 
-test('scope, roles, inactive/revoked connections, malformed queries and unreviewed payloads fail before creation', async () => {
-  const f = fixture();
-  try {
-    const body = await f.reviewBody(), action = `${f.route}/create`;
-    assert.equal((await f.request(action, { method: 'POST', body, role: 'viewer' })).status, 403);
-    for (const bad of [{ ...body, profileId: 'other' }, { ...body, isPublished: true }, { ...body, publishDate: '2027-01-01T00:00:00Z' }, { ...body, status: 'draft' }, { ...body, confirmCreate: false }, { ...body, title: ' ' }, { ...body, title: 'New\nTitle' }, { ...body, bodyHtml: {} }, { ...body, version: '' }]) assert.equal((await f.request(action, { method: 'POST', body: bad })).status, 400);
-    for (const query of ['?limit=0', '?limit=51', '?limit=1.1', '?limit=1&limit=2', '?cursor=', '?profileId=other', '?cursor=a&cursor=b']) assert.equal((await f.request(f.accountId + query)).status, 400, query);
-    assert.equal((await f.request('accounts?profileId=other')).status, 400); assert.equal((await f.request(f.route + '?limit=2')).status, 400); assert.equal((await f.request(`${f.accountId}/not-numeric`)).status, 400); assert.equal((await f.request('foreign')).status, 403);
-    f.account.isActive = false; assert.equal((await f.request(f.accountId)).status, 409); assert.equal((await f.request('accounts')).data.accounts[0].isActive, false); f.account.isActive = true;
-    f.account.needsReconnection = true; assert.equal((await f.request(action, { method: 'POST', body })).status, 409); f.account.needsReconnection = false;
-    f.account.profileId = 'other'; assert.equal((await f.request(f.accountId)).status, 403); assert.equal(f.writes().length, 0);
-  } finally { f.db.close(); }
+test('scope, roles, inactive/revoked connections, malformed queries and unreviewed payloads fail before creation', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  const body = await f.reviewBody(), action = `${f.route}/create`;
+  assert.equal((await f.request(action, { method: 'POST', body, role: 'viewer' })).status, 403);
+  for (const bad of [{ ...body, profileId: 'other' }, { ...body, isPublished: true }, { ...body, publishDate: '2027-01-01T00:00:00Z' }, { ...body, status: 'draft' }, { ...body, confirmCreate: false }, { ...body, title: ' ' }, { ...body, title: 'New\nTitle' }, { ...body, bodyHtml: {} }, { ...body, version: '' }]) assert.equal((await f.request(action, { method: 'POST', body: bad })).status, 400);
+  for (const query of ['?limit=0', '?limit=51', '?limit=1.1', '?limit=1&limit=2', '?cursor=', '?profileId=other', '?cursor=a&cursor=b']) assert.equal((await f.request(f.accountId + query)).status, 400, query);
+  assert.equal((await f.request('accounts?profileId=other')).status, 400); assert.equal((await f.request(f.route + '?limit=2')).status, 400); assert.equal((await f.request(`${f.accountId}/not-numeric`)).status, 400); assert.equal((await f.request('foreign')).status, 403);
+  f.account.isActive = false; assert.equal((await f.request(f.accountId)).status, 409); assert.equal((await f.request('accounts')).data.accounts[0].isActive, false); f.account.isActive = true;
+  f.account.needsReconnection = true; assert.equal((await f.request(action, { method: 'POST', body })).status, 409); f.account.needsReconnection = false;
+  f.account.profileId = 'other'; assert.equal((await f.request(f.accountId)).status, 403); assert.equal(f.writes().length, 0);
 });
 
-test('blog and article envelopes, nested identities, duplicate rows and malformed pagination fail closed', async () => {
-  const f = fixture('shopify');
-  try {
-    for (const override of [{ platform: 'wordpress', blogs: [f.state.blog], nextCursor: null }, { platform: 'shopify', accountId: 'foreign', blogs: [f.state.blog], nextCursor: null }, { platform: 'shopify', blogs: [{ ...f.state.blog, profileId: 'other' }], nextCursor: null }, { platform: 'shopify', blogs: [f.state.blog, f.state.blog], nextCursor: null }, { platform: 'shopify', blogs: [f.state.blog] }]) {
-      f.state.onCall = call => call.path.endsWith('/blogs') ? override : undefined; assert.equal((await f.request(f.accountId)).status, 502);
-    }
-    f.state.onCall = null;
-    for (const change of [{ blogId: '999' }, { id: 'not-numeric' }, { platform: 'wordpress' }, { accountId: 'foreign' }, { profileId: 'foreign' }, { bodyHtml: {} }, { isPublished: 'false' }, { publishedAt: 'bad-date' }]) {
-      f.state.article = { ...f.state.articles[0], ...change }; assert.equal((await f.request(`${f.route}/articles/561`)).status, 502, JSON.stringify(change));
-    }
-    f.state.nextCursor = 'same'; assert.equal((await f.request(`${f.route}/articles?cursor=same`)).status, 502);
-  } finally { f.db.close(); }
+test('blog and article envelopes, nested identities, duplicate rows and malformed pagination fail closed', { skip: postgresSkip }, async t => {
+  const f = await fixture(t, 'shopify');
+  for (const override of [{ platform: 'wordpress', blogs: [f.state.blog], nextCursor: null }, { platform: 'shopify', accountId: 'foreign', blogs: [f.state.blog], nextCursor: null }, { platform: 'shopify', blogs: [{ ...f.state.blog, profileId: 'other' }], nextCursor: null }, { platform: 'shopify', blogs: [f.state.blog, f.state.blog], nextCursor: null }, { platform: 'shopify', blogs: [f.state.blog] }]) {
+    f.state.onCall = call => call.path.endsWith('/blogs') ? override : undefined; assert.equal((await f.request(f.accountId)).status, 502);
+  }
+  f.state.onCall = null;
+  for (const change of [{ blogId: '999' }, { id: 'not-numeric' }, { platform: 'wordpress' }, { accountId: 'foreign' }, { profileId: 'foreign' }, { bodyHtml: {} }, { isPublished: 'false' }, { publishedAt: 'bad-date' }]) {
+    f.state.article = { ...f.state.articles[0], ...change }; assert.equal((await f.request(`${f.route}/articles/561`)).status, 502, JSON.stringify(change));
+  }
+  f.state.nextCursor = 'same'; assert.equal((await f.request(`${f.route}/articles?cursor=same`)).status, 502);
 });
 
-test('review versions detect renamed blogs, replaced native sites and mapping changes across reads', async () => {
-  const f = fixture();
-  try {
-    let body = await f.reviewBody(); f.state.blog.title = 'Renamed blog'; assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body })).data.error.code, 'BLOG_CHANGED');
-    body = await f.reviewBody(); f.account.platformUserId = 'other-site'; assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body })).status, 409); assert.equal(f.writes().length, 0);
-    f.state.onCall = call => { if (call.path.endsWith('/blogs')) f.account.username = 'replaced.example.test'; }; assert.equal((await f.request(f.accountId)).status, 409);
-    f.state.onCall = call => { if (call.path.endsWith('/blogs')) f.state.mappingChanged = true; }; assert.equal((await f.request(f.accountId)).status, 409);
-  } finally { f.db.close(); }
+test('review versions detect renamed blogs, replaced native sites and mapping changes across reads', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  let body = await f.reviewBody(); f.state.blog.title = 'Renamed blog'; assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body })).data.error.code, 'BLOG_CHANGED');
+  body = await f.reviewBody(); f.account.platformUserId = 'other-site'; assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body })).status, 409); assert.equal(f.writes().length, 0);
+  f.state.onCall = call => { if (call.path.endsWith('/blogs')) f.account.username = 'replaced.example.test'; }; assert.equal((await f.request(f.accountId)).status, 409);
+  f.state.onCall = call => { if (call.path.endsWith('/blogs')) f.state.mappingChanged = true; }; assert.equal((await f.request(f.accountId)).status, 409);
 });
 
-test('missing stable site identity allows reading but prevents unverifiable draft creation', async () => {
-  const f = fixture();
-  try {
-    for (const nativeIdentity of [undefined, '', ' \t ']) {
-      f.account.platformUserId = nativeIdentity;
-      const body = await f.reviewBody();
-      assert.equal((await f.request(`${f.route}/articles`)).status, 200);
-      const result = await f.request(`${f.route}/create`, { method: 'POST', body });
-      assert.equal(result.status, 409); assert.equal(result.data.error.code, 'BLOG_SITE_IDENTITY_UNAVAILABLE');
-      assert.equal(result.data.operation.status, 'failed'); assert.equal(f.writes().length, 0);
-    }
-  } finally { f.db.close(); }
+test('missing stable site identity allows reading but prevents unverifiable draft creation', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  for (const nativeIdentity of [undefined, '', ' \t ']) {
+    f.account.platformUserId = nativeIdentity;
+    const body = await f.reviewBody();
+    assert.equal((await f.request(`${f.route}/articles`)).status, 200);
+    const result = await f.request(`${f.route}/create`, { method: 'POST', body });
+    assert.equal(result.status, 409); assert.equal(result.data.error.code, 'BLOG_SITE_IDENTITY_UNAVAILABLE');
+    assert.equal(result.data.operation.status, 'failed'); assert.equal(f.writes().length, 0);
+  }
 });
 
-test('existing scheduled, public, private and pending articles remain readable but create receipts cannot claim them as drafts', async () => {
+test('existing scheduled, public, private and pending articles remain readable but create receipts cannot claim them as drafts', { skip: postgresSkip }, async t => {
   for (const change of [{ status: 'future', publishDate: '2027-01-01T00:00:00Z' }, { status: 'publish', isPublished: true, publishedAt: '2026-10-19T09:00:00Z' }, { status: 'private' }, { status: 'pending' }]) {
-    const f = fixture();
-    try {
-      f.state.article = { ...f.state.article, ...change }; assert.equal((await f.request(`${f.route}/articles/561`)).status, 200);
-      const body = await f.reviewBody(); f.state.receipt = { platform: 'wordpress', article: f.state.article };
-      const result = await f.request(`${f.route}/create`, { method: 'POST', body }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(f.writes().length, 1);
-    } finally { f.db.close(); }
+    const f = await fixture(t);
+    f.state.article = { ...f.state.article, ...change }; assert.equal((await f.request(`${f.route}/articles/561`)).status, 200);
+    const body = await f.reviewBody(); f.state.receipt = { platform: 'wordpress', article: f.state.article };
+    const result = await f.request(`${f.route}/create`, { method: 'POST', body }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(f.writes().length, 1);
   }
-  const f = fixture('shopify');
-  try { const body = await f.reviewBody(); f.state.receipt = { platform: 'shopify', article: { ...f.state.article, publishedAt: '2027-01-01T00:00:00Z' } }; assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body })).data.operation.status, 'uncertain'); }
-  finally { f.db.close(); }
+  const f = await fixture(t, 'shopify');
+  const body = await f.reviewBody(); f.state.receipt = { platform: 'shopify', article: { ...f.state.article, publishedAt: '2027-01-01T00:00:00Z' } }; assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body })).data.operation.status, 'uncertain');
 });
 
-test('lost acknowledgement is durable across same-key replay, changed bodies, new keys and native-site connection aliases', async () => {
-  const f = fixture();
-  try {
-    const body = await f.reviewBody(), action = `${f.route}/create`, key = 'lost-acknowledgement'; f.state.postError = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'Lost acknowledgement', true);
-    const result = await f.request(action, { method: 'POST', body, key }); assert.equal(result.data.operation.status, 'uncertain');
-    assert.equal((await f.request(action, { method: 'POST', body, key })).status, 409);
-    assert.equal((await f.request(action, { method: 'POST', body: { ...body, title: 'Changed draft' } })).status, 409);
-    const alias = fixture('wordpress', f.db); alias.account._id = 'alias-account'; alias.accountId = 'alias-account'; alias.account.username = 'renamed-site.example.test';
-    // The alias uses another app route but the same documented native site/blog identity.
-    alias.state.onCall = call => {
-      if (call.path === '/accounts/alias-account/blogs/91') return { platform: 'wordpress', blog: alias.state.blog };
-      if (call.path === '/accounts/alias-account/blogs/91/articles') assert.fail('Alias must not resend a create');
-    };
-    const reviewed = await alias.request('alias-account/91'); assert.equal(reviewed.status, 200);
-    const blocked = await alias.request('alias-account/91/create', { method: 'POST', body: { ...body, version: reviewed.data.version }, projectId: 'project-alias' }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED');
-    assert.equal(f.writes().length, 1); assert.equal(alias.writes().length, 0);
-  } finally { f.db.close(); }
+test('lost acknowledgement is durable across same-key replay, changed bodies, new keys and native-site connection aliases', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  const body = await f.reviewBody(), action = `${f.route}/create`, key = 'lost-acknowledgement'; f.state.postError = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'Lost acknowledgement', true);
+  const result = await f.request(action, { method: 'POST', body, key }); assert.equal(result.data.operation.status, 'uncertain');
+  assert.equal((await f.request(action, { method: 'POST', body, key })).status, 409);
+  assert.equal((await f.request(action, { method: 'POST', body: { ...body, title: 'Changed draft' } })).status, 409);
+  const alias = await fixture(t, 'wordpress', f.db); alias.account._id = 'alias-account'; alias.accountId = 'alias-account'; alias.account.username = 'renamed-site.example.test';
+  // The alias uses another app route but the same documented native site/blog identity.
+  alias.state.onCall = call => {
+    if (call.path === '/accounts/alias-account/blogs/91') return { platform: 'wordpress', blog: alias.state.blog };
+    if (call.path === '/accounts/alias-account/blogs/91/articles') assert.fail('Alias must not resend a create');
+  };
+  const reviewed = await alias.request('alias-account/91'); assert.equal(reviewed.status, 200);
+  const blocked = await alias.request('alias-account/91/create', { method: 'POST', body: { ...body, version: reviewed.data.version }, projectId: 'project-alias' }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED');
+  assert.equal(f.writes().length, 1); assert.equal(alias.writes().length, 0);
 });
 
-test('receipt or exact readback mismatch and post-write access loss preserve an uncertain operation without resend', async () => {
+test('receipt or exact readback mismatch and post-write access loss preserve an uncertain operation without resend', { skip: postgresSkip }, async t => {
   for (const scenario of ['receipt-scope', 'receipt-account', 'receipt-body', 'receipt-published-missing', 'readback-scope', 'readback-content', 'readback-unavailable', 'revoked', 'mapping']) {
-    const f = fixture();
-    try {
-      const body = await f.reviewBody(); let written = false;
-      f.state.onCall = call => {
-        if (call.method === 'POST') {
-          written = true;
-          if (scenario === 'mapping') f.state.mappingChanged = true;
-          if (scenario === 'revoked') f.account.needsReconnection = true;
-          if (scenario === 'receipt-scope') return { platform: 'shopify', article: f.state.article };
-          if (scenario === 'receipt-account') return { platform: 'wordpress', accountId: 'foreign', article: f.state.article };
-          if (scenario === 'receipt-body') return { platform: 'wordpress', article: { ...f.state.article, bodyHtml: null } };
-          if (scenario === 'receipt-published-missing') { const article = { ...f.state.article }; delete article.publishedAt; return { platform: 'wordpress', article }; }
-        }
-        if (written && call.path.endsWith('/articles/561')) {
-          if (scenario === 'readback-unavailable') throw new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'Read unavailable');
-          if (scenario === 'readback-scope') return { platform: 'wordpress', article: { ...f.state.article, blogId: '999' } };
-          if (scenario === 'readback-content') return { platform: 'wordpress', article: { ...f.state.article, bodyHtml: '<p>Different content</p>' } };
-        }
-      };
-      const result = await f.request(`${f.route}/create`, { method: 'POST', body, key: 'receipt-mismatch-key' }); assert.equal(result.status, 409, scenario); assert.equal(result.data.operation.status, 'uncertain', scenario); assert.equal(f.writes().length, 1);
-      f.state.mappingChanged = false; f.account.needsReconnection = false; f.state.onCall = null;
-      assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body: { ...body, title: 'Changed' } })).status, 409); assert.equal(f.writes().length, 1);
-    } finally { f.db.close(); }
+    const f = await fixture(t);
+    const body = await f.reviewBody(); let written = false;
+    f.state.onCall = call => {
+      if (call.method === 'POST') {
+        written = true;
+        if (scenario === 'mapping') f.state.mappingChanged = true;
+        if (scenario === 'revoked') f.account.needsReconnection = true;
+        if (scenario === 'receipt-scope') return { platform: 'shopify', article: f.state.article };
+        if (scenario === 'receipt-account') return { platform: 'wordpress', accountId: 'foreign', article: f.state.article };
+        if (scenario === 'receipt-body') return { platform: 'wordpress', article: { ...f.state.article, bodyHtml: null } };
+        if (scenario === 'receipt-published-missing') { const article = { ...f.state.article }; delete article.publishedAt; return { platform: 'wordpress', article }; }
+      }
+      if (written && call.path.endsWith('/articles/561')) {
+        if (scenario === 'readback-unavailable') throw new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'Read unavailable');
+        if (scenario === 'readback-scope') return { platform: 'wordpress', article: { ...f.state.article, blogId: '999' } };
+        if (scenario === 'readback-content') return { platform: 'wordpress', article: { ...f.state.article, bodyHtml: '<p>Different content</p>' } };
+      }
+    };
+    const result = await f.request(`${f.route}/create`, { method: 'POST', body, key: 'receipt-mismatch-key' }); assert.equal(result.status, 409, scenario); assert.equal(result.data.operation.status, 'uncertain', scenario); assert.equal(f.writes().length, 1);
+    f.state.mappingChanged = false; f.account.needsReconnection = false; f.state.onCall = null;
+    assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body: { ...body, title: 'Changed' } })).status, 409); assert.equal(f.writes().length, 1);
   }
 });
 
-test('a concurrent alias is blocked while the original create is pending, and definite rejections can be reviewed afresh', async () => {
-  const f = fixture();
-  try {
-    const body = await f.reviewBody(); let release, started;
-    const hold = new Promise(resolve => { release = resolve; }), pending = new Promise(resolve => { started = resolve; });
-    f.state.onCall = async call => { if (call.method === 'POST') { started(); await hold; } };
-    const original = f.request(`${f.route}/create`, { method: 'POST', body }); await pending;
-    assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body: { ...body, title: 'Concurrent draft' } })).status, 409);
-    release(); assert.equal((await original).data.operation.status, 'complete'); assert.equal(f.writes().length, 1);
-    f.state.onCall = null; f.state.postError = new IntegrationError(400, 'PROVIDER_REJECTED', 'Permission denied');
-    assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body: { ...body, title: 'Rejected draft' } })).data.operation.status, 'failed');
-    f.state.postError = null; assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body: { ...body, title: 'Fresh manual draft' } })).data.operation.status, 'complete');
-    assert.equal(f.writes().length, 3);
-  } finally { f.db.close(); }
+test('a concurrent alias is blocked while the original create is pending, and definite rejections can be reviewed afresh', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  const body = await f.reviewBody(); let release, started;
+  const hold = new Promise(resolve => { release = resolve; }), pending = new Promise(resolve => { started = resolve; });
+  f.state.onCall = async call => { if (call.method === 'POST') { started(); await hold; } };
+  const original = f.request(`${f.route}/create`, { method: 'POST', body }); await pending;
+  assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body: { ...body, title: 'Concurrent draft' } })).status, 409);
+  release(); assert.equal((await original).data.operation.status, 'complete'); assert.equal(f.writes().length, 1);
+  f.state.onCall = null; f.state.postError = new IntegrationError(400, 'PROVIDER_REJECTED', 'Permission denied');
+  assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body: { ...body, title: 'Rejected draft' } })).data.operation.status, 'failed');
+  f.state.postError = null; assert.equal((await f.request(`${f.route}/create`, { method: 'POST', body: { ...body, title: 'Fresh manual draft' } })).data.operation.status, 'complete');
+  assert.equal(f.writes().length, 3);
 });
 
-test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH, fresh reviews and one durable native-article fence', async () => {
+test('a parallel same-key draft create reaches the provider once', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  const body = await f.reviewBody(), key = 'parallel-create-key'; let release, started;
+  const hold = new Promise(resolve => { release = resolve; }), pending = new Promise(resolve => { started = resolve; });
+  // The first create is held at the provider, so the duplicate arrives while its receipt is still pending.
+  f.state.onCall = async call => { if (call.method === 'POST') { started(); await hold; } };
+  const results = await Promise.all([f.request(`${f.route}/create`, { method: 'POST', body, key }), pending.then(async () => { const duplicate = await f.request(`${f.route}/create`, { method: 'POST', body, key }); release(); return duplicate; })]);
+  assert.deepEqual(results.map(result => result.data.error?.code ?? result.data.operation.status), ['complete', 'OPERATION_UNCERTAIN']);
+  assert.equal(f.calls.filter(call => call.method === 'POST' && call.path === `/accounts/${f.accountId}/blogs/${f.blogId}/articles`).length, 1);
+});
+
+test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH, fresh reviews and one durable native-article fence', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-blog-edit-')), origin = 'http://127.0.0.1:3000';
   const appOptions = { dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'blog-http-fixture-key' } }, originalFetch = globalThis.fetch;
-  let app = createApp(appOptions);
+  const first = await testApp(t, appOptions), { sql } = first, database = { pool: first.database.pool, db: first.database.db }; let app = first;
   const profileId = 'blog-http-profile', calls = [], articles = new Map();
   const accounts = ['wordpress', 'shopify'].map(platform => ({ _id: platform + '-account', profileId, platform, platformUserId: platform + '-native-site', username: 'site.example.test', isActive: true }));
   const blogs = { wordpress: { id: '91', platform: 'wordpress', title: 'WP journal', handle: 'journal' }, shopify: { id: '327', platform: 'shopify', title: 'Store journal', handle: 'journal' } };
@@ -247,7 +238,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     }
     const setupBody = { token: app.config.bootstrapToken, name: 'Blog QA', email: 'blog-qa@example.test', password: 'a long local blog fixture password', sample: false };
     const setup = await request('/api/auth/setup', { body: setupBody }); assert.equal(setup.status, 201); ownerCookie = setup.cookie; projectId = setup.data.projectId;
-    app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, projectId);
+    await sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', profileId, projectId);
     const route = (article, accountId = article.platform + '-account') => `/api/projects/${projectId}/integrations/blogs/${accountId}/${article.blogId}/articles/${article.id}`;
     const review = async article => { const result = await request(route(article)); assert.equal(result.status, 200, JSON.stringify(result)); assert.match(result.data.version, /^[a-f0-9]{64}$/); return { title: 'Reviewed title', bodyHtml: '<p>Reviewed <strong>HTML</strong></p>', version: result.data.version, confirmUpdate: true }; };
     const publicationReview = async (article, action, accountId) => { const result = await request(route(article, accountId)); assert.equal(result.status, 200, JSON.stringify(result)); return { version: result.data.version, [action === 'schedule' ? 'confirmSchedule' : action === 'cancel-schedule' ? 'confirmCancelSchedule' : action === 'publish' ? 'confirmPublish' : 'confirmUnpublish']: true }; };
@@ -291,7 +282,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     assert.equal((await request(route(missingReadyProof) + '/update', { body: missingReadyBody })).data.error.code, 'BLOG_ARTICLE_CHANGED'); assert.equal(writes().length, missingReadyCount); providerHook = undefined;
     for (const scenario of ['receipt-missing-date', 'receipt-missing-published', 'receipt-null-published', 'receipt-time-drift', 'receipt-state', 'receipt-null-html', 'receipt-empty-title', 'both-time-drift', 'readback-missing-date', 'readback-time-drift', 'readback-content', 'lost-ack', 'post-write-access']) {
       const current = addPublished(), reviewed = await review(current), key = 'published-content-uncertain-' + scenario, count = writes().length; let written = false;
-      providerHook = (call, result) => {
+      providerHook = async (call, result) => {
         if (call.method === 'PATCH') {
           written = true;
           if (scenario === 'receipt-missing-date') delete result.article.publishDate;
@@ -303,7 +294,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
           if (scenario === 'receipt-empty-title') result.article.title = '';
           if (scenario === 'both-time-drift') { current.publishedAt = '2026-10-18T09:00:01Z'; result.article.publishedAt = current.publishedAt; }
           if (scenario === 'lost-ack') throw new Error('Published content acknowledgement lost');
-          if (scenario === 'post-write-access') app.db.prepare("UPDATE memberships SET role='viewer'").run();
+          if (scenario === 'post-write-access') await sql.run("UPDATE memberships SET role='viewer'");
           return Response.json(result);
         }
         if (written && call.method === 'GET' && call.url.pathname.endsWith('/articles/' + current.id)) {
@@ -313,7 +304,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
           return Response.json(result);
         }
       };
-      const result = await request(route(current) + '/update', { body: reviewed, key }); providerHook = undefined; app.db.prepare("UPDATE memberships SET role='owner'").run();
+      const result = await request(route(current) + '/update', { body: reviewed, key }); providerHook = undefined; await sql.run("UPDATE memberships SET role='owner'");
       assert.equal(result.status, 409, scenario + JSON.stringify(result)); assert.equal(result.data.operation.status, 'uncertain', scenario); assert.equal(writes().length, count + 1);
       assert.equal((await request(route(current) + '/update', { body: reviewed, key })).data.error.code, 'OPERATION_UNCERTAIN');
       const blocked = await request(route(current) + '/unpublish', { body: await publicationReview(current, 'unpublish') }); assert.equal(blocked.status, 409); assert.equal(writes().length, count + 1);
@@ -348,8 +339,8 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     assert.equal((await request(route(article, 'foreign') + '/update', { body })).status, 403);
     const account = accounts[0]; account.profileId = 'foreign-profile'; assert.equal((await request(route(article) + '/update', { body })).status, 403); account.profileId = profileId;
     delete account.platformUserId; const missingIdentity = await review(article); assert.equal((await request(route(article) + '/update', { body: missingIdentity })).data.error.code, 'BLOG_SITE_IDENTITY_UNAVAILABLE'); account.platformUserId = 'wordpress-native-site';
-    app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(route(article) + '/update', { body })).status, 403); app.db.prepare("UPDATE memberships SET role='editor'").run();
-    assert.equal((await request(route(article) + '/update', { body: await review(article) })).status, 200); app.db.prepare("UPDATE memberships SET role='owner'").run();
+    await sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await request(route(article) + '/update', { body })).status, 403); await sql.run("UPDATE memberships SET role='editor'");
+    assert.equal((await request(route(article) + '/update', { body: await review(article) })).status, 200); await sql.run("UPDATE memberships SET role='owner'");
     assert.equal(writes().length, initialWrites + 1);
 
     for (const publishedMode of [false, true]) for (const scenario of ['between-reads', 'role', 'mapping', 'credentials', 'session', 'native-site', 'revoked']) {
@@ -358,20 +349,20 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
         if (fired || call.method !== 'GET' || !call.url.pathname.endsWith('/articles/' + current.id)) return;
         fired = true;
         if (scenario === 'between-reads') current.bodyHtml = '<p>Concurrent edit before dispatch</p>';
-        if (scenario === 'role') app.db.prepare("UPDATE memberships SET role='admin'").run();
-        if (scenario === 'mapping') app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('changed-profile', projectId);
+        if (scenario === 'role') await sql.run("UPDATE memberships SET role='admin'");
+        if (scenario === 'mapping') await sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'changed-profile', projectId);
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-fixture-key-' + publishedMode } } })).status, 200);
-        if (scenario === 'session') app.db.prepare('DELETE FROM sessions').run();
+        if (scenario === 'session') await sql.run('DELETE FROM sessions');
         if (scenario === 'native-site') account.platformUserId = 'replaced-native-site';
         if (scenario === 'revoked') account.needsReconnection = true;
       };
       const result = await request(route(current) + '/update', { body: reviewed }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, count, scenario); providerHook = undefined;
-      app.db.prepare("UPDATE memberships SET role='owner'").run(); app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, projectId); account.platformUserId = 'wordpress-native-site'; account.needsReconnection = false;
+      await sql.run("UPDATE memberships SET role='owner'"); await sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', profileId, projectId); account.platformUserId = 'wordpress-native-site'; account.needsReconnection = false;
       if (scenario === 'session') { const login = await request('/api/auth/login', { body: { email: setupBody.email, password: setupBody.password } }); assert.equal(login.status, 200); ownerCookie = login.cookie; }
     }
     for (const scenario of ['missing-receipt', 'malformed-receipt', 'receipt-account', 'receipt-article', 'receipt-scheduled', 'receipt-missing-publication', 'readback-content', 'readback-scope', 'readback-unavailable', 'lost-ack', 'post-write-access']) {
       const current = addArticle('shopify'), reviewed = await review(current), count = writes().length; let written = false;
-      providerHook = (call, result) => {
+      providerHook = async (call, result) => {
         if (call.method === 'PATCH') {
           written = true;
           if (scenario === 'missing-receipt') return Response.json({ platform: 'shopify' });
@@ -381,7 +372,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
           if (scenario === 'receipt-scheduled') return Response.json({ ...result, article: { ...result.article, publishedAt: '2027-01-01T00:00:00Z' } });
           if (scenario === 'receipt-missing-publication') { delete result.article.publishedAt; return Response.json(result); }
           if (scenario === 'lost-ack') throw new Error('Lost remote acknowledgement');
-          if (scenario === 'post-write-access') app.db.prepare("UPDATE memberships SET role='viewer'").run();
+          if (scenario === 'post-write-access') await sql.run("UPDATE memberships SET role='viewer'");
         }
         if (written && call.method === 'GET' && call.url.pathname.endsWith('/articles/' + current.id)) {
           if (scenario === 'readback-content') return Response.json({ ...result, article: { ...result.article, bodyHtml: reviewed.bodyHtml + ' ' } });
@@ -390,14 +381,14 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
         }
       };
       const key = 'uncertain-http-' + scenario, result = await request(route(current) + '/update', { body: reviewed, key }); assert.equal(result.status, 409, scenario + JSON.stringify(result)); assert.equal(result.data.operation.status, 'uncertain', scenario); assert.equal(writes().length, count + 1);
-      providerHook = undefined; app.db.prepare("UPDATE memberships SET role='owner'").run();
+      providerHook = undefined; await sql.run("UPDATE memberships SET role='owner'");
       assert.equal((await request(route(current) + '/update', { body: reviewed, key })).status, 409); assert.equal((await request(route(current) + '/update', { body: { ...await review(current), title: 'Fresh key changed body' } })).status, 409);
       const alias = { ...accounts[1], _id: 'shopify-alias-' + scenario, username: 'renamed-site.example.test' }; accounts.push(alias);
       const aliasDetail = await request(route(current, alias._id)); assert.equal(aliasDetail.status, 200);
       const blocked = await request(route(current, alias._id) + '/update', { body: { ...reviewed, version: aliasDetail.data.version, title: 'Alias edit' } }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, count + 1);
       if (scenario === 'lost-ack') {
-        const originalProject = projectId, workspaceId = app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id;
-        app.db.prepare('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)').run('alias-project', workspaceId, 'Alias site', 'alias-profile');
+        const originalProject = projectId, workspaceId = (await sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
+        await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'alias-project', workspaceId, 'Alias site', 'alias-profile');
         const other = { ...alias, _id: 'cross-project-alias', profileId: 'alias-profile' }; accounts.push(other); projectId = 'alias-project';
         const detail = await request(route(current, other._id)); assert.equal(detail.status, 200);
         assert.equal((await request(route(current, other._id) + '/update', { body: { ...reviewed, version: detail.data.version } })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, count + 1); projectId = originalProject;
@@ -410,6 +401,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     const pendingDetail = await request(route(pendingArticle, pendingAlias._id)), pendingWrites = writes().length;
     const concurrent = await request(route(pendingArticle, pendingAlias._id) + '/update', { body: { ...pendingBody, version: pendingDetail.data.version } });
     release(); assert.equal(concurrent.data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal((await pendingRequest).status, 200); assert.equal(writes().length, pendingWrites); providerHook = undefined;
+    assert.equal(calls.filter(call => call.method === 'PATCH' && call.url.pathname.endsWith('/articles/' + pendingArticle.id)).length, 1);
     const raced = addArticle('shopify'), racedBody = await review(raced), raceAlias = { ...accounts[1], _id: 'final-read-race-alias' }; accounts.push(raceAlias);
     const aliasReview = await request(route(raced, raceAlias._id)); let releaseRead, reachedRead, articleReads = 0;
     const finalReadHeld = new Promise(resolve => { reachedRead = resolve; }), finalReadRelease = new Promise(resolve => { releaseRead = resolve; });
@@ -462,9 +454,9 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     for (const action of ['publish', 'unpublish']) {
       const current = addArticle('wordpress'); if (action === 'unpublish') { current.status = 'publish'; current.isPublished = true; current.publishedAt = '2026-10-18T09:00:00Z'; }
       const body = await publicationReview(current, action), count = writes().length;
-      app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(route(current) + '/' + action, { body })).status, 403); app.db.prepare("UPDATE memberships SET role='owner'").run();
-      let changed = false; providerHook = call => { if (!changed && call.method === 'GET' && call.url.pathname.endsWith('/articles/' + current.id)) { changed = true; app.db.prepare("UPDATE memberships SET role='editor'").run(); } };
-      assert.equal((await request(route(current) + '/' + action, { body })).status, 403); providerHook = undefined; app.db.prepare("UPDATE memberships SET role='owner'").run(); assert.equal(writes().length, count);
+      await sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await request(route(current) + '/' + action, { body })).status, 403); await sql.run("UPDATE memberships SET role='owner'");
+      let changed = false; providerHook = async call => { if (!changed && call.method === 'GET' && call.url.pathname.endsWith('/articles/' + current.id)) { changed = true; await sql.run("UPDATE memberships SET role='editor'"); } };
+      assert.equal((await request(route(current) + '/' + action, { body })).status, 403); providerHook = undefined; await sql.run("UPDATE memberships SET role='owner'"); assert.equal(writes().length, count);
     }
     const scheduled = addArticle('wordpress'), scheduledContent = [scheduled.title, scheduled.bodyHtml];
     const scheduleBody = async (article, publishDate, accountId) => ({ ...await publicationReview(article, 'schedule', accountId), publishDate });
@@ -496,7 +488,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
       const valid = action === 'schedule' ? invalidBody : await publicationReview(invalidSchedule, action);
       for (const extra of [{ title: 'Overwrite' }, { bodyHtml: 'Overwrite' }, { isPublished: false }, { status: 'future' }, { confirmPublish: true }, { version: 'bad' }, { [action === 'schedule' ? 'confirmSchedule' : 'confirmCancelSchedule']: false }, ...(action === 'cancel-schedule' ? [{ publishDate: invalidBody.publishDate }] : [])]) assert.equal((await request(route(invalidSchedule) + '/' + action, { body: { ...valid, ...extra } })).status, 400);
       for (const method of ['GET', 'PATCH', 'PUT', 'DELETE']) assert.equal((await request(route(invalidSchedule) + '/' + action, { method })).status, 405);
-      app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(route(invalidSchedule) + '/' + action, { body: valid })).status, 403); app.db.prepare("UPDATE memberships SET role='owner'").run();
+      await sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await request(route(invalidSchedule) + '/' + action, { body: valid })).status, 403); await sql.run("UPDATE memberships SET role='owner'");
       const shopify = addArticle('shopify'), unsupported = await request(route(shopify) + '/' + action, { body: action === 'schedule' ? await scheduleBody(shopify, invalidBody.publishDate) : await publicationReview(shopify, action) }); assert.equal(unsupported.status, 409); assert.equal(unsupported.data.error.code, 'BLOG_SCHEDULING_UNSUPPORTED');
     }
     assert.equal((await request(route(invalidSchedule) + '/cancel-schedule', { body: await publicationReview(invalidSchedule, 'cancel-schedule') })).data.error.code, 'BLOG_SCHEDULED_ARTICLE_REQUIRED');
@@ -514,7 +506,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
       for (const scenario of ['missing-receipt', 'foreign-receipt', 'wrong-article', 'wrong-time', 'missing-published-at', 'wrong-state', 'wrong-readback', 'lost-ack', 'post-write-access']) {
         const current = addArticle('wordpress'); if (action === 'cancel-schedule') Object.assign(current, { status: 'future', publishDate: '2099-12-01T00:00:00Z' });
         const body = action === 'schedule' ? await scheduleBody(current, invalidBody.publishDate) : await publicationReview(current, action), key = 'schedule-uncertain-' + action + '-' + scenario, count = writes().length; let written = false;
-        providerHook = (call, result) => {
+        providerHook = async (call, result) => {
           if (call.method === 'PATCH') {
             written = true;
             if (scenario === 'missing-receipt') return Response.json({ platform: 'wordpress' });
@@ -524,11 +516,11 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
             if (scenario === 'missing-published-at') { delete result.article.publishedAt; return Response.json(result); }
             if (scenario === 'wrong-state') return Response.json({ ...result, article: { ...result.article, status: 'pending' } });
             if (scenario === 'lost-ack') throw new Error('Schedule acknowledgement lost');
-            if (scenario === 'post-write-access') app.db.prepare("UPDATE memberships SET role='viewer'").run();
+            if (scenario === 'post-write-access') await sql.run("UPDATE memberships SET role='viewer'");
           }
           if (written && scenario === 'wrong-readback' && call.method === 'GET' && call.url.pathname.endsWith('/articles/' + current.id)) return Response.json({ ...result, article: { ...result.article, blogId: '999' } });
         };
-        const result = await request(route(current) + '/' + action, { body, key }); assert.equal(result.status, 409, action + scenario + JSON.stringify(result)); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(writes().length, count + 1); providerHook = undefined; app.db.prepare("UPDATE memberships SET role='owner'").run();
+        const result = await request(route(current) + '/' + action, { body, key }); assert.equal(result.status, 409, action + scenario + JSON.stringify(result)); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(writes().length, count + 1); providerHook = undefined; await sql.run("UPDATE memberships SET role='owner'");
         assert.equal((await request(route(current) + '/' + action, { body, key })).data.error.code, 'OPERATION_UNCERTAIN');
         const alias = { ...accounts[0], _id: 'schedule-alias-' + action + '-' + scenario }; accounts.push(alias);
         for (const next of ['update', 'publish', 'unpublish', 'schedule', 'cancel-schedule']) {
@@ -544,11 +536,11 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     const countBeforeScheduleRace = writes().length, waitingSchedule = request(route(scheduleRace) + '/schedule', { body: scheduleRaceBody }); await scheduleReadHeld;
     const lostScheduleKey = 'schedule-restart-lost-ack'; assert.equal((await request(route(scheduleRace, scheduleAlias._id) + '/schedule', { body: scheduleAliasBody, key: lostScheduleKey })).data.operation.status, 'uncertain'); releaseScheduleRead();
     assert.equal((await waitingSchedule).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforeScheduleRace + 1); providerHook = undefined;
-    const scheduleOriginalProject = projectId, scheduleWorkspaceId = app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id;
-    app.db.prepare('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)').run('schedule-alias-project', scheduleWorkspaceId, 'Schedule alias site', 'alias-profile');
+    const scheduleOriginalProject = projectId, scheduleWorkspaceId = (await sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
+    await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'schedule-alias-project', scheduleWorkspaceId, 'Schedule alias site', 'alias-profile');
     const scheduleProjectAlias = { ...scheduleAlias, _id: 'schedule-cross-project-alias', profileId: 'alias-profile' }; accounts.push(scheduleProjectAlias); projectId = 'schedule-alias-project';
     assert.equal((await request(route(scheduleRace, scheduleProjectAlias._id) + '/cancel-schedule', { body: await publicationReview(scheduleRace, 'cancel-schedule', scheduleProjectAlias._id) })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforeScheduleRace + 1); projectId = scheduleOriginalProject;
-    await app.close(); app = createApp(appOptions); await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
+    await app.close(); app = await createApp({ ...appOptions, database }); await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
     assert.equal((await request(route(scheduleRace, scheduleAlias._id) + '/schedule', { body: scheduleAliasBody, key: lostScheduleKey })).data.error.code, 'OPERATION_UNCERTAIN');
     assert.equal((await request(route(scheduleRace) + '/cancel-schedule', { body: await publicationReview(scheduleRace, 'cancel-schedule') })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforeScheduleRace + 1);
     const racePublication = addArticle('shopify'), raceBody = await publicationReview(racePublication, 'publish'), publicationAlias = { ...accounts[1], _id: 'publication-final-read-alias' }; accounts.push(publicationAlias);
@@ -559,12 +551,12 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     const lostPublicationKey = 'publication-restart-lost-ack';
     assert.equal((await request(route(racePublication, publicationAlias._id) + '/publish', { body: aliasBody, key: lostPublicationKey })).data.operation.status, 'uncertain'); releasePublicationRead();
     assert.equal((await waitingPublication).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforePublicationRace + 1); providerHook = undefined;
-    const originalProject = projectId, workspaceId = app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id;
-    app.db.prepare('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)').run('publication-alias-project', workspaceId, 'Publication alias site', 'alias-profile');
+    const originalProject = projectId, workspaceId = (await sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
+    await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'publication-alias-project', workspaceId, 'Publication alias site', 'alias-profile');
     const projectAlias = { ...publicationAlias, _id: 'publication-cross-project-alias', profileId: 'alias-profile' }; accounts.push(projectAlias); projectId = 'publication-alias-project';
     const crossProjectBody = await publicationReview(racePublication, 'unpublish', projectAlias._id);
     assert.equal((await request(route(racePublication, projectAlias._id) + '/unpublish', { body: crossProjectBody })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforePublicationRace + 1); projectId = originalProject;
-    await app.close(); app = createApp(appOptions); await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
+    await app.close(); app = await createApp({ ...appOptions, database }); await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
     assert.equal((await request(route(racePublication, publicationAlias._id) + '/publish', { body: aliasBody, key: lostPublicationKey })).data.error.code, 'OPERATION_UNCERTAIN');
     const restartBody = await publicationReview(racePublication, 'unpublish');
     assert.equal((await request(route(racePublication) + '/unpublish', { body: restartBody })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforePublicationRace + 1);
@@ -581,16 +573,16 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     for (const next of ['update', 'unpublish', 'publish', 'schedule', 'cancel-schedule']) {
       Object.assign(publicRace, next === 'publish' || next === 'schedule' ? { status: 'draft', isPublished: false, publishedAt: null, publishDate: null } : next === 'cancel-schedule' ? { status: 'future', isPublished: false, publishedAt: null, publishDate: '2099-12-01T00:00:00Z' } : publicState);
       const detail = await request(route(publicRace, publicAlias._id)), nextBody = next === 'update' ? { ...publicRaceBody, title: 'Different alias content', version: detail.data.version } : next === 'schedule' ? { version: detail.data.version, confirmSchedule: true, publishDate: '2099-12-02T00:00:00Z' } : { version: detail.data.version, [next === 'publish' ? 'confirmPublish' : next === 'unpublish' ? 'confirmUnpublish' : 'confirmCancelSchedule']: true };
-      const blocked = await request(route(publicRace, publicAlias._id) + '/' + next, { body: nextBody }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT', next); assert.equal(blocked.data.operation.status, 'failed', next); assert.notEqual(blocked.data.operation.id, app.db.prepare('SELECT id FROM integration_operations WHERE request_key=?').get(publicLostKey).id); assert.equal(writes().length, publicRaceCount + 1);
+      const blocked = await request(route(publicRace, publicAlias._id) + '/' + next, { body: nextBody }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT', next); assert.equal(blocked.data.operation.status, 'failed', next); assert.notEqual(blocked.data.operation.id, (await sql.get('SELECT id FROM integration_operations WHERE request_key=?', publicLostKey)).id); assert.equal(writes().length, publicRaceCount + 1);
     }
     Object.assign(publicRace, publicState);
     const publicOriginalProject = projectId;
-    app.db.prepare('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)').run('public-content-alias-project', workspaceId, 'Public content alias site', 'alias-profile');
+    await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'public-content-alias-project', workspaceId, 'Public content alias site', 'alias-profile');
     const publicProjectAlias = { ...publicAlias, _id: 'public-content-cross-project-alias', profileId: 'alias-profile' }; accounts.push(publicProjectAlias); projectId = 'public-content-alias-project';
     assert.equal((await request(route(publicRace, publicProjectAlias._id) + '/unpublish', { body: await publicationReview(publicRace, 'unpublish', publicProjectAlias._id) })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, publicRaceCount + 1); projectId = publicOriginalProject;
-    await app.close(); app = createApp(appOptions); await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
+    await app.close(); app = await createApp({ ...appOptions, database }); await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
     assert.equal((await request(route(publicRace, publicAlias._id) + '/update', { body: publicAliasBody, key: publicLostKey })).data.error.code, 'OPERATION_UNCERTAIN');
     const publicRestartReview = await review(publicRace);
     assert.equal((await request(route(publicRace) + '/update', { body: publicRestartReview })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, publicRaceCount + 1);
-  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; if (app !== first) await app.close(); await rm(directory, { recursive: true, force: true }); }
 });

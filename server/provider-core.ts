@@ -10,7 +10,7 @@ import type { Database, Executor } from './database.ts';
 export type ProviderRecord = Record<string, any>;
 export type MappingCheck = (() => void | Promise<void>) | undefined;
 export type ZernioApi = (path: string, query?: Record<string, unknown>, body?: unknown, idempotencyKey?: string, method?: string, observeReceipt?: (result: ProviderRecord) => void) => Promise<ProviderRecord>;
-export interface PostStore { get(projectId: string, collection: string, id: string): ProviderRecord | null; list(projectId: string, collection: string): ProviderRecord[]; update(projectId: string, collection: string, id: string, data: Record<string, unknown>): ProviderRecord | null }
+export interface PostStore { get(projectId: string, collection: string, id: string): Promise<ProviderRecord | null>; list(projectId: string, collection: string): Promise<ProviderRecord[]>; update(projectId: string, collection: string, id: string, data: Record<string, unknown>): Promise<ProviderRecord | null> }
 export interface OperationContext { db: Database; project: { id: string }; req: { method?: string; headers: IncomingHttpHeaders }; url: URL; body?: unknown; [key: string]: any }
 export interface OperationOutcome { status: number; data: ProviderRecord }
 type RestrictionCheck = ReturnType<typeof validatePostForPlatforms>;
@@ -378,7 +378,7 @@ export async function savePostSnapshot(store: PostStore, projectId: string, post
   assertPostResult(remote, post.zernioProfileId, { id: post.externalId, targets });
   // Creation receipts can omit the submitted platform configuration; retain the draft until a full status read.
   const model = source.externalId && Array.isArray(remote.platforms) && remote.platforms.every(target => target.platform && target.accountId) ? await remotePostModel(store, projectId, post, remote) : {};
-  const current = store.get(projectId, 'posts', post.id);
+  const current = await store.get(projectId, 'posts', post.id);
   if (current && canonical(current) !== canonical(source)) throw new IntegrationError(409, 'POST_CHANGED', 'The post changed during the provider request. Refresh it before continuing and review any unconfirmed provider action.', true);
   const updated = await store.update(projectId, 'posts', post.id, { ...model, ...(Object.hasOwn(remote, 'tags') ? { tags: normalizePostTags(remote.tags, { preserve: true }) } : {}), status: localStatus(remote.status), providerStatus: remote.status, ...(Array.isArray(remote.platforms) ? { providerResults: redact(remote.platforms) } : {}), ...(typeof remote.content === 'string' ? { content: remote.content } : {}), ...(remote.publishedAt ? { publishedAt: remote.publishedAt } : {}), ...extra });
   if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The local post was removed while the provider accepted this action. Reconcile the provider outcome.', true);

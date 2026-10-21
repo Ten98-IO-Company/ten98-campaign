@@ -41,7 +41,10 @@ test('social write receipts reject malformed or cross-account acknowledgements b
       records.set(post.id, post);
       remote = { ...valid, status: post.status, content: post.content, platforms: valid.platforms.map(copy => ({ ...copy, status: 'failed' })) };
       acknowledgement = { ...valid, ...failure };
-      const result = await invoke(action, post, `confirmation-${sequence}`);
+      const beforeWrite = writes.length, result = await invoke(action, post, `confirmation-${sequence}`);
+      // The write must reach the provider exactly once, so the uncertainty comes from judging its acknowledgement,
+      // not from a local failure before the send.
+      assert.equal(writes.length, beforeWrite + 1, `${action}: ${JSON.stringify(failure)} must send one provider write`);
       assert.equal(result.status, 409, `${action}: ${JSON.stringify(failure)}`);
       assert.equal(result.data.operation.status, 'uncertain');
       assert.deepEqual(records.get(post.id), post, 'Untrusted acknowledgement fields must not replace the local draft or account copies.');

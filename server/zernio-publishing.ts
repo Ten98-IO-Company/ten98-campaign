@@ -1,7 +1,7 @@
-import type { DatabaseSync } from 'node:sqlite';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 import { createHash } from 'node:crypto';
-import { fail, reportObject as object, IntegrationError, operation, scopedAccounts, requireAccount, mediaUrl } from './provider-core.ts';
+import { sql } from 'drizzle-orm';
+import { fail, reportObject as object, IntegrationError, operation, claimFence, releaseFence, scopedAccounts, requireAccount, mediaUrl } from './provider-core.ts';
 
 const token = (value: any) => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
 const text = (value: any) => value == null || typeof value === 'string' && value.length <= 20000;
@@ -71,8 +71,8 @@ export async function handleZernioPublishing(context: OperationContext & { body:
   context.send(200, projectLookup(response, accountId, profileId, match[2], subreddit)); return true;
 }
 
-function publishingToolsAccess(context: OperationContext & { body: any }, profileId: any) {
-  try { context.assertProjectMapping?.(profileId); context.assertIntegrationSettings?.(); }
+async function publishingToolsAccess(context: OperationContext & { body: any }, profileId: any) {
+  try { await context.assertProjectMapping?.(profileId); await context.assertIntegrationSettings?.(); }
   catch (error: any) { fail([403, 404].includes(error.status) ? 403 : 409, 'PUBLISHING_ACCESS_CHANGED', 'Your project access or connection changed. Refresh the publishing choices.'); }
 }
 function publishingToolsIdentity(account: any, platform: any): ProviderRecord {
@@ -122,13 +122,13 @@ async function publishingTools(context: OperationContext & { body: any }, api: Z
   if (resource === 'instagram-audio-lookup' && !/^\d{1,30}$/.test(audioId || '')) fail(400, 'INVALID_INSTAGRAM_AUDIO_ID', 'Enter a numeric audio ID of up to 30 digits.');
   if (resource === 'tiktok-commercial-music' && params.has('countryCode')) { if (!/^[A-Za-z]{2}$/.test(params.get('countryCode')!)) fail(400, 'INVALID_TIKTOK_COUNTRY', 'Enter a two-letter country code or leave it empty for the global chart.'); query.countryCode = params.get('countryCode')!.toUpperCase(); }
   if (resource === 'tiktok-locations') { const value = params.get('query'); if (!value?.trim() || value.length > 100 || /[\u0000-\u001f\u007f]/.test(value)) fail(400, 'INVALID_TIKTOK_LOCATION_QUERY', 'Enter a place search of 1 to 100 characters.'); query.query = value; }
-  publishingToolsAccess(context, profileId);
-  const account = await publishingAccount(api, profileId, accountId, platform); publishingToolsAccess(context, profileId);
+  await publishingToolsAccess(context, profileId);
+  const account = await publishingAccount(api, profileId, accountId, platform); await publishingToolsAccess(context, profileId);
   const before: ProviderRecord = publishingToolsIdentity(account, platform);
   if (resource.startsWith('instagram-audio') && before.loginMethod !== 'facebook_login') fail(422, 'INSTAGRAM_AUDIO_REQUIRES_FACEBOOK_LOGIN', 'Reconnect Instagram using Facebook Login to load its audio catalog.');
   const endpoint = resource === 'gmb-locations' ? resource : platform === 'tiktok' ? `tiktok/${resource.slice('tiktok-'.length)}` : resource === 'instagram-audio-lookup' ? `instagram/audio/${audioId}` : `instagram/${resource.slice('instagram-'.length)}`;
-  const response = await api(`/accounts/${encodeURIComponent(accountId)}/${endpoint}`, query); publishingToolsAccess(context, profileId);
-  const fresh = await publishingAccount(api, profileId, accountId, platform); publishingToolsAccess(context, profileId);
+  const response = await api(`/accounts/${encodeURIComponent(accountId)}/${endpoint}`, query); await publishingToolsAccess(context, profileId);
+  const fresh = await publishingAccount(api, profileId, accountId, platform); await publishingToolsAccess(context, profileId);
   if (publishingToolsIdentity(fresh, platform).identity !== before.identity) fail(409, 'PUBLISHING_ACCOUNT_CHANGED', 'The connected account changed. Reload its publishing choices.');
   if (!object(response)) invalid(); lookupScope(response, accountId, profileId, platform);
   const result: ProviderRecord = { accountId, platform, ...(platform === 'instagram' ? { loginMethod: before.loginMethod } : {}) };
@@ -185,14 +185,10 @@ async function libraryAccount(api: ZernioApi, profileId: any, accountId: any, ac
   if (account.platformUserId != null && !token(account.platformUserId)) libraryInvalid();
   return account;
 }
-function externalTable(db: DatabaseSync) {
-  db.exec('CREATE TABLE IF NOT EXISTS zernio_external_post_references(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,native_account_id TEXT NOT NULL,platform_post_id TEXT NOT NULL,data TEXT NOT NULL,campaign_id TEXT REFERENCES records(id) ON DELETE SET NULL,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,profile_id,account_id,native_account_id,platform_post_id))');
-}
-function referenceScope(context: OperationContext & { body: any }, profileId: any, account: any) { return [context.project.id, profileId, account._id, account.platformUserId || '']; }
-function references(context: OperationContext & { body: any }, profileId: any, account: any) {
-  externalTable(context.db);
+async function references(context: OperationContext & { body: any }, profileId: any, account: any) {
   // ponytail: show the newest 250 local references per account; paginate this separate local index when projects outgrow it. Provider history is already paginated.
-  return context.db.prepare('SELECT data,campaign_id,updated_at FROM zernio_external_post_references WHERE project_id=? AND profile_id=? AND account_id=? AND native_account_id=? ORDER BY updated_at DESC,platform_post_id LIMIT 250').all(...referenceScope(context, profileId, account)).map((row: any) => ({ ...JSON.parse(row.data), campaignId: row.campaign_id || '', campaignName: row.campaign_id ? context.store.get(context.project.id, 'campaigns', row.campaign_id)?.name || '' : '', importedAt: row.updated_at }));
+  const rows = (await context.db.execute(sql`SELECT data, campaign_id, updated_at FROM zernio_external_post_references WHERE project_id=${context.project.id} AND profile_id=${profileId} AND account_id=${account._id} AND native_account_id=${account.platformUserId || ''} ORDER BY updated_at DESC, platform_post_id LIMIT 250`)).rows as ProviderRecord[];
+  return Promise.all(rows.map(async row => ({ ...row.data, campaignId: row.campaign_id || '', campaignName: row.campaign_id ? (await context.store.get(context.project.id, 'campaigns', row.campaign_id))?.name || '' : '', importedAt: row.updated_at })));
 }
 async function postLibrary(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, match: any) {
   let accountId; try { accountId = decodeURIComponent(match[1]); } catch { fail(400, 'INVALID_ACCOUNT', 'Choose a valid connected account.'); }
@@ -203,7 +199,7 @@ async function postLibrary(context: OperationContext & { body: any }, api: Zerni
   const page = params.get('page') || '1'; if (!/^[1-9]\d{0,5}$/.test(page)) fail(400, 'INVALID_POST_LIBRARY_PAGE', 'Choose a valid post library page.');
   const account = await libraryAccount(api, profileId, accountId, !['external-references', 'external-remove'].includes(task));
   const envelope = { accountId, platform: account.platform, accountName: account.displayName || account.username || account.platform };
-  if (task === 'external-references') { context.send(200, { ...envelope, references: references(context, profileId, account), limit: 250 }); return true; }
+  if (task === 'external-references') { context.send(200, { ...envelope, references: await references(context, profileId, account), limit: 250 }); return true; }
   if (task === 'posts' || task === 'external-posts') {
     if (task === 'posts' && account.platform === 'googlebusiness') fail(422, 'POST_LIST_UNSUPPORTED', 'Use synced history or import a Google Business post by its URL or ID.');
     const live = task === 'posts', response = await api(live ? `/accounts/${encodeURIComponent(accountId)}/posts` : '/posts', live ? {} : { profileId, accountId, source: 'external', page: Number(page), limit: 25 });
@@ -223,13 +219,13 @@ async function postLibrary(context: OperationContext & { body: any }, api: Zerni
   if (!object(body) || Object.keys(body).some(key => !(task === 'external-remove' ? ['postId', 'confirmed'] : ['postId', 'url', 'campaignId']).includes(key))) fail(400, 'INVALID_POST_LIBRARY_FIELDS', 'Use only the post URL or ID and campaign shown in this form.');
   if (task === 'external-remove') {
     if (!token(body.postId) || body.confirmed !== true) fail(400, 'POST_REFERENCE_CONFIRMATION_REQUIRED', 'Confirm removal of this local post reference.');
-    const outcome = await operation(context, async () => { context.assertProjectMapping?.(profileId); externalTable(context.db); context.db.prepare('DELETE FROM zernio_external_post_references WHERE project_id=? AND profile_id=? AND account_id=? AND native_account_id=? AND platform_post_id=?').run(...referenceScope(context, profileId, account), body.postId); return { removed: true, platformPostId: body.postId }; }, ['external-post', accountId, body.postId]); context.send(outcome.status, outcome.data); return true;
+    const outcome = await operation(context, async () => { await context.assertProjectMapping?.(profileId); await context.db.execute(sql`DELETE FROM zernio_external_post_references WHERE project_id=${context.project.id} AND profile_id=${profileId} AND account_id=${account._id} AND native_account_id=${account.platformUserId || ''} AND platform_post_id=${body.postId}`); return { removed: true, platformPostId: body.postId }; }, ['external-post', accountId, body.postId]); context.send(outcome.status, outcome.data); return true;
   }
   const postUrl = typeof body.url === 'string' ? body.url.trim() : body.url;
   if (Boolean(postUrl) === Boolean(body.postId) || body.postId !== undefined && !token(body.postId) || body.url !== undefined && (typeof body.url !== 'string' || body.url.length > 8192)) fail(400, 'POST_LOCATOR_REQUIRED', 'Provide one post URL or native platform post ID.');
   const locator = body.postId ? { postId: body.postId } : { url: postUrl };
   if (locator.url && !(account.platform === 'linkedin' && /^urn:li:(share|ugcPost):\d+$/.test(locator.url))) { try { const url = new URL(locator.url); if (url.protocol !== 'https:' || url.username || url.password || !url.hostname.includes('.') || url.hostname.includes(':') || /^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.)/i.test(url.hostname) || /^(172\.(1[6-9]|2\d|3[01])\.)/.test(url.hostname) || /\.(local|internal)$/.test(url.hostname)) throw new Error(); } catch { fail(400, 'INVALID_POST_URL', 'Use a public HTTPS post URL, or a LinkedIn share or ugcPost URN.'); } }
-  const campaignId = body.campaignId ?? ''; if (typeof campaignId !== 'string' || campaignId && (!token(campaignId) || !context.store.get(context.project.id, 'campaigns', campaignId))) fail(400, 'CAMPAIGN_OUTSIDE_PROJECT', 'Choose a campaign in this project.');
+  const campaignId = body.campaignId ?? ''; if (typeof campaignId !== 'string' || campaignId && (!token(campaignId) || !await context.store.get(context.project.id, 'campaigns', campaignId))) fail(400, 'CAMPAIGN_OUTSIDE_PROJECT', 'Choose a campaign in this project.');
   const outcome = await operation(context, async key => {
     const before = await libraryAccount(api, profileId, accountId); if ((before.platformUserId || '') !== (account.platformUserId || '') || before.platform !== account.platform) fail(409, 'POST_ACCOUNT_CHANGED', 'The connected publishing account changed. Reload the library.');
     const response = await api('/posts/sync-external', {}, { accountId, ...locator }, key);
@@ -239,14 +235,14 @@ async function postLibrary(context: OperationContext & { body: any }, api: Zerni
       const post = response.found ? libraryPost(response.post, account, profileId, false, true) : null;
       if (post && locator.postId && post.platformPostId !== locator.postId) libraryInvalid(true);
       const after = await libraryAccount(api, profileId, accountId); if ((after.platformUserId || '') !== (account.platformUserId || '') || after.platform !== account.platform) fail(409, 'POST_ACCOUNT_CHANGED', 'The connected publishing account changed after the import. Review provider outcomes.', true);
-      context.assertProjectMapping?.(profileId);
+      await context.assertProjectMapping?.(profileId);
       let savedCampaignId = campaignId;
       if (post) {
-        externalTable(context.db);
-        if (!Object.hasOwn(body, 'campaignId')) savedCampaignId = (context.db.prepare('SELECT campaign_id FROM zernio_external_post_references WHERE project_id=? AND profile_id=? AND account_id=? AND native_account_id=? AND platform_post_id=?').get(...referenceScope(context, profileId, account), post.platformPostId) as ProviderRecord | undefined)?.campaign_id || '';
-        if (savedCampaignId && !context.store.get(context.project.id, 'campaigns', savedCampaignId)) fail(409, 'CAMPAIGN_CHANGED', 'The campaign was removed while importing. Review the provider outcome and import again without that campaign.', true);
-        context.db.prepare('INSERT INTO zernio_external_post_references VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id,profile_id,account_id,native_account_id,platform_post_id) DO UPDATE SET data=excluded.data,campaign_id=excluded.campaign_id,updated_at=excluded.updated_at').run(...referenceScope(context, profileId, account), post.platformPostId, JSON.stringify(post), savedCampaignId || null, new Date().toISOString());
-        context.store.activity(context.project.id, 'Imported a published platform post as an external campaign reference.');
+        const nativeAccountId = account.platformUserId || '';
+        if (!Object.hasOwn(body, 'campaignId')) savedCampaignId = ((await context.db.execute(sql`SELECT campaign_id FROM zernio_external_post_references WHERE project_id=${context.project.id} AND profile_id=${profileId} AND account_id=${account._id} AND native_account_id=${nativeAccountId} AND platform_post_id=${post.platformPostId}`)).rows[0] as ProviderRecord | undefined)?.campaign_id || '';
+        if (savedCampaignId && !await context.store.get(context.project.id, 'campaigns', savedCampaignId)) fail(409, 'CAMPAIGN_CHANGED', 'The campaign was removed while importing. Review the provider outcome and import again without that campaign.', true);
+        await context.db.execute(sql`INSERT INTO zernio_external_post_references (project_id, profile_id, account_id, native_account_id, platform_post_id, data, campaign_id, updated_at) VALUES (${context.project.id}, ${profileId}, ${account._id}, ${nativeAccountId}, ${post.platformPostId}, ${JSON.stringify(post)}, ${savedCampaignId || null}, ${new Date().toISOString()}) ON CONFLICT (project_id, profile_id, account_id, native_account_id, platform_post_id) DO UPDATE SET data=excluded.data, campaign_id=excluded.campaign_id, updated_at=excluded.updated_at`);
+        await context.store.activity(context.project.id, 'Imported a published platform post as an external campaign reference.');
       }
       return { ...envelope, found: response.found, post, campaignId: savedCampaignId, synced: { postsFound: response.synced.postsFound, postsSynced: response.synced.postsSynced, skipped: response.synced.skipped === true }, imported: Boolean(post) };
     } catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
@@ -255,7 +251,7 @@ async function postLibrary(context: OperationContext & { body: any }, api: Zerni
 
 async function managementSnapshot(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, accountId: any, resource: any): Promise<ProviderRecord> {
   const [platform, field] = resources[resource];
-  publishingToolsAccess(context, profileId);
+  await publishingToolsAccess(context, profileId);
   const account = await publishingAccount(api, profileId, accountId, platform);
   const accountVersion = digest([profileId, publishingToolsIdentity(account, platform).identity]);
   if (platform === 'reddit' && account.isActive !== true) fail(409, 'DESTINATION_ACCOUNT_UNAVAILABLE', 'Choose an active Reddit account before changing its default.');
@@ -263,20 +259,18 @@ async function managementSnapshot(context: OperationContext & { body: any }, api
   if (response.hasMore === true || response.pagination?.hasMore === true) fail(503, 'DESTINATION_CENSUS_INCOMPLETE', 'A complete destination list could not be verified. Use the provider dashboard.');
   const result = projectLookup(response, accountId, profileId, resource, undefined, true), rows = [...result[field]].sort((a, b) => a.id.localeCompare(b.id));
   const fresh = await publishingAccount(api, profileId, accountId, platform);
-  publishingToolsAccess(context, profileId);
+  await publishingToolsAccess(context, profileId);
   if (digest([profileId, publishingToolsIdentity(fresh, platform).identity]) !== accountVersion) fail(409, 'DESTINATION_ACCOUNT_CHANGED', 'The connected publishing account changed. Reload its destinations.');
   const output: ProviderRecord = { accountId, platform, accountVersion, [field]: rows, ...(platform === 'youtube' ? { defaultPlaylistId: result.defaultPlaylistId, defaultReported: Object.hasOwn(response, 'defaultPlaylistId') } : platform === 'reddit' ? { defaultSubreddit: result.defaultSubreddit, defaultReported: typeof response.defaultSubreddit === 'string' } : { defaultBoardId: null, defaultReported: false }), accountName: account.displayName || account.username || platform };
   return { ...output, version: digest({ profileId, accountId, platform, accountVersion, platformUserId: account.platformUserId ?? null, rows, defaultPlaylistId: output.defaultPlaylistId ?? null, ...(platform === 'reddit' ? { defaultSubreddit: output.defaultSubreddit, defaultPresent: Object.hasOwn(response, 'defaultSubreddit') } : {}), defaultReported: output.defaultReported }), nativeAccountId: account.platformUserId ?? null };
 }
 async function destinationMutation(context: OperationContext & { body: any }, resource: any, run: any) {
-  const db = context.db;
-  db.exec('CREATE TABLE IF NOT EXISTS zernio_destination_mutations(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
   return operation(context, async key => {
-    const old = db.prepare('SELECT o.status FROM zernio_destination_mutations m LEFT JOIN integration_operations o ON o.project_id=m.project_id AND o.request_key=m.request_key WHERE m.resource=?').get(resource) as ProviderRecord | undefined;
-    if (old && (!old.status || ['pending', 'uncertain'].includes(old.status))) fail(409, 'DESTINATION_PREVIOUS_OUTCOME_UNRESOLVED', 'This new action was not sent. Review the previous destination action in provider outcomes first.');
-    db.prepare('INSERT INTO zernio_destination_mutations VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, context.project.id, key);
-    try { const result = await run(key); db.prepare('DELETE FROM zernio_destination_mutations WHERE resource=? AND project_id=? AND request_key=?').run(resource, context.project.id, key); return result; }
-    catch (error: any) { if (error instanceof IntegrationError && !error.uncertain) db.prepare('DELETE FROM zernio_destination_mutations WHERE resource=? AND project_id=? AND request_key=?').run(resource, context.project.id, key); throw error; }
+    // One change per destination resource at a time; an unresolved earlier change keeps the fence held.
+    const fence = ['zernio_destination_mutations', resource, context.project.id, key] as const;
+    if (!await claimFence(context.db, ...fence)) fail(409, 'DESTINATION_PREVIOUS_OUTCOME_UNRESOLVED', 'This new action was not sent. Review the previous destination action in provider outcomes first.');
+    try { const result = await run(key); await releaseFence(context.db, ...fence); return result; }
+    catch (error: any) { if (error instanceof IntegrationError && !error.uncertain) await releaseFence(context.db, ...fence); throw error; }
   }, ['publishing-destinations', resource]);
 }
 async function manageDestinations(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, match: any) {
@@ -310,7 +304,7 @@ async function manageDestinations(context: OperationContext & { body: any }, api
     const current = await managementSnapshot(context, api, profileId, accountId, resource);
     if (current.version !== before.version) fail(409, 'DESTINATION_REVIEW_CHANGED', 'The account or destination settings changed while preparing this action. Reload and review them again.');
     const account = await publishingAccount(api, profileId, accountId, platform); if ((account.platformUserId ?? null) !== before.nativeAccountId || before.accountVersion !== digest([profileId, publishingToolsIdentity(account, platform).identity])) fail(409, 'DESTINATION_ACCOUNT_CHANGED', 'The connected channel changed. Reload its destinations before continuing.');
-    publishingToolsAccess(context, profileId);
+    await publishingToolsAccess(context, profileId);
     const response = await api(`/accounts/${encodeURIComponent(accountId)}/${resource}`, {}, payload, key, task === 'create' ? 'POST' : 'PUT');
     try {
       lookupScope(response, accountId, profileId, platform);

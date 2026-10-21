@@ -9,11 +9,11 @@ import React from 'react';
 import * as designSystem from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-async function fixture() {
+async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-queue-')), originalFetch = globalThis.fetch, origin = 'https://queue.example.test', calls = [], queues = [], remotePosts = new Map();
-  const app = createApp({ dataDir, env: { ZERNIO_API_KEY: 'synthetic-queue-key' }, appUrl: origin, directScheduler: false }); let hook, sequence = 0;
+  const app = await testApp(t, { dataDir, env: { ZERNIO_API_KEY: 'synthetic-queue-key' }, appUrl: origin, directScheduler: false }); let hook, sequence = 0;
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
     assert.equal(url.hostname, 'zernio.com'); assert.equal(options.redirect, 'error'); assert.equal(options.headers.Authorization, 'Bearer synthetic-queue-key');
@@ -52,11 +52,11 @@ async function fixture() {
   await request(project, 'PATCH', { zernioProfileId: 'queue-profile' }); const path = project + '/integrations/queues';
   const list = async () => (await request(path)).data;
   const create = async name => { const current = await list(); return request(path + '/create', 'POST', { name, timezone: 'America/New_York', slots: [{ dayOfWeek: 1, time: '09:00' }], active: true, expectedListVersion: current.version }); };
-  return { app, path, project, calls, queues, remotePosts, request, list, create, setHook(value) { hook = value; }, writes: () => calls.filter(row => row.method !== 'GET' && !row.url.pathname.includes('/tools/validate/')), async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
+  return { app, path, project, calls, queues, remotePosts, request, list, create, setHook(value) { hook = value; }, writes: () => calls.filter(row => row.method !== 'GET' && !row.url.pathname.includes('/tools/validate/')), async close() { globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
 }
 
-test('queue lifecycle scopes profile, enforces edit snapshots, manages defaults and previews offset-aware slots', async () => {
-  const f = await fixture();
+test('queue lifecycle scopes profile, enforces edit snapshots, manages defaults and previews offset-aware slots', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const first = await f.create('Morning'); assert.equal(first.status, 200, JSON.stringify(first.data)); assert.equal(first.data.queue.isDefault, true);
     const second = await f.create('Evening'); assert.equal(second.data.queue.isDefault, false); const row = second.data.queue;
@@ -70,16 +70,16 @@ test('queue lifecycle scopes profile, enforces edit snapshots, manages defaults 
     assert.equal((await f.request(`${f.path}/${row._id}/update`, 'POST', body)).status, 400); assert.equal((await f.request(`${f.path}/foreign/delete`, 'POST', { confirmDelete: 'foreign', expectedVersion: row.version })).status, 403); assert.equal(f.writes().length, beforeInvalid);
     const reshuffled = await f.request(`${f.path}/${row._id}/update`, 'POST', { ...body, confirmReshuffle: true }); assert.equal(reshuffled.data.reshuffledCount, 2);
     const removed = await f.request(`${f.path}/${row._id}/delete`, 'POST', { expectedVersion: reshuffled.data.queue.version, confirmDelete: row._id }); assert.equal(removed.status, 200); assert.equal(removed.data.queues.length, 1); assert.equal(removed.data.queues[0].isDefault, true);
-    f.app.db.prepare("UPDATE memberships SET role='editor'").run(); const beforeEditor = f.calls.length; assert.equal((await f.request(`${f.path}/create`, 'POST', {})).status, 403); assert.equal(f.calls.length, beforeEditor); assert.equal((await f.request(f.path)).status, 200);
+    await f.app.sql.run("UPDATE memberships SET role='editor'"); const beforeEditor = f.calls.length; assert.equal((await f.request(`${f.path}/create`, 'POST', {})).status, 403); assert.equal(f.calls.length, beforeEditor); assert.equal((await f.request(f.path)).status, 200);
   } finally { await f.close(); }
 });
 
-test('queue creation protects ambiguous writes and accepted responses followed by failed confirmation', async () => {
-  const f = await fixture();
+test('queue creation protects ambiguous writes and accepted responses followed by failed confirmation', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const list = await f.list(), body = { name: 'Unknown creation', timezone: 'UTC', slots: [{ dayOfWeek: 0, time: '10:00' }], active: true, expectedListVersion: list.version }, key = randomUUID();
     f.setHook((url, options) => url.pathname.endsWith('/queue/slots') && options.method === 'POST' ? Response.json({ success: true, schedule: { _id: 'ambiguous', profileId: 'foreign-profile' } }) : undefined);
-    const uncertain = await f.request(`${f.path}/create`, 'POST', body, key); assert.equal(uncertain.data.operation.status, 'uncertain'); const count = f.writes().length;
+    const uncertain = await f.request(`${f.path}/create`, 'POST', body, key); assert.equal(uncertain.data.operation.status, 'uncertain'); const count = f.writes().length; assert.equal(count, 1, 'The ambiguous queue creation reached the provider exactly once.');
     assert.equal((await f.request(`${f.path}/create`, 'POST', body, key)).status, 409); const nextBody = { ...body, name: 'Another creation' }, blockedKey = randomUUID(), blocked = await f.request(`${f.path}/create`, 'POST', nextBody, blockedKey); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, uncertain.data.operation.id); assert.equal(f.writes().length, count);
     const operationId = uncertain.data.operation.id; await f.request(`${f.project}/operations/${operationId}/review`, 'POST', { resolution: 'not_applied', confirmChecked: true, note: 'Synthetic provider did not persist this invalid receipt.', reference: 'queue-fixture-check' });
     f.setHook(undefined); const closed = await f.request(`${f.path}/create`, 'POST', nextBody, blockedKey); assert.equal(closed.data.error.code, 'OPERATION_NOT_SENT'); assert.deepEqual(closed.data.operation, blocked.data.operation); assert.equal(f.writes().length, count); const good = await f.request(`${f.path}/create`, 'POST', nextBody); assert.equal(good.status, 200, JSON.stringify(good.data));
@@ -89,8 +89,8 @@ test('queue creation protects ambiguous writes and accepted responses followed b
   } finally { await f.close(); }
 });
 
-test('approved local posts enqueue through the shared publisher with a locked provider queue intent', async () => {
-  const f = await fixture();
+test('approved local posts enqueue through the shared publisher with a locked provider queue intent', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const queue = (await f.create('Approved launch')).data.queue;
     assert.equal((await f.request(`${f.project}/approvals/policy`, 'POST', { requireApproval: true })).status, 200);
@@ -108,8 +108,8 @@ test('approved local posts enqueue through the shared publisher with a locked pr
   } finally { await f.close(); }
 });
 
-test('required approval and explicit recipients are rechecked after the final queue read', async () => {
-  const f = await fixture();
+test('required approval and explicit recipients are rechecked after the final queue read', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const queue = (await f.create('Policy race')).data.queue;
     for (const action of ['request', 'review', 'publish']) {
@@ -131,14 +131,14 @@ test('required approval and explicit recipients are rechecked after the final qu
       assert.equal(result.status, 409, JSON.stringify(result.data));
       assert.equal(result.data.error.code, 'APPROVAL_ACCOUNTS_REQUIRED');
       assert.equal(f.writes().length, before, 'No provider post is created after approval becomes required.');
-      const review = f.app.db.prepare('SELECT status FROM post_approval_reviews WHERE post_id=? ORDER BY rowid DESC LIMIT 1').get(post.id);
+      const review = await f.app.sql.get('SELECT status FROM post_approval_reviews WHERE post_id=? ORDER BY seq DESC LIMIT 1', post.id);
       assert.equal(review?.status, action === 'review' ? 'pending' : undefined, 'The race cannot create or approve a review.');
     }
   } finally { await f.close(); }
 });
 
-test('queue edits stale approvals and a queue change during provider validation blocks post dispatch', async () => {
-  const f = await fixture();
+test('queue edits stale approvals and a queue change during provider validation blocks post dispatch', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const queue = (await f.create('Race queue')).data.queue;
     const created = await f.request(`${f.project}/posts`, 'POST', { content: 'Queue changed during validation', platforms: ['facebook'], accounts: ['facebook-queue-account'], queueId: queue._id, queueVersion: queue.version, status: 'draft' }); const post = created.data.record;
@@ -154,8 +154,8 @@ test('queue edits stale approvals and a queue change during provider validation 
   } finally { await f.close(); }
 });
 
-test('a lost queued-post acknowledgement blocks a sibling publish control from sending the same saved post twice', async () => {
-  const f = await fixture();
+test('a lost queued-post acknowledgement blocks a sibling publish control from sending the same saved post twice', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const queue = (await f.create('Acknowledgement safety')).data.queue;
     const post = (await f.request(`${f.project}/posts`, 'POST', { content: 'Only one queued send', platforms: ['facebook'], accounts: ['facebook-queue-account'], queueId: queue._id, queueVersion: queue.version, status: 'draft' })).data.record;
@@ -165,8 +165,8 @@ test('a lost queued-post acknowledgement blocks a sibling publish control from s
   } finally { await f.close(); }
 });
 
-test('assigned queue posts refresh, reschedule, cancel, retry failures and edit live text without retaining enqueue intent', async () => {
-  const f = await fixture();
+test('assigned queue posts refresh, reschedule, cancel, retry failures and edit live text without retaining enqueue intent', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const queue = (await f.create('Lifecycle queue')).data.queue;
     async function enqueue(content) { const post = (await f.request(`${f.project}/posts`, 'POST', { content, platforms: ['facebook'], accounts: ['facebook-queue-account'], queueId: queue._id, queueVersion: queue.version, status: 'draft' })).data.record; const accepted = await f.request(`${f.project}/integrations/social/publish`, 'POST', { postId: post.id }); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); return accepted.data.post; }
@@ -184,8 +184,8 @@ test('assigned queue posts refresh, reschedule, cancel, retry failures and edit 
   } finally { await f.close(); }
 });
 
-test('queue approval cards show verified weekly timing and block stale approval without hiding ordinary drafts on provider failure', async () => {
-  const f = await fixture();
+test('queue approval cards show verified weekly timing and block stale approval without hiding ordinary drafts on provider failure', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const queue = (await f.create('Visible launch queue')).data.queue;
     const queued = (await f.request(`${f.project}/posts`, 'POST', { content: 'Queue review', platforms: ['facebook'], queueId: queue._id, queueVersion: queue.version })).data.record;

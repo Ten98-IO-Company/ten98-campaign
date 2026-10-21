@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { IntegrationError, fail, operation, reportObject as object } from './provider-core.ts';
+import { IntegrationError, claimFence, fail, operation, releaseFence, reportObject as object } from './provider-core.ts';
 import type { OperationContext, ZernioApi } from './provider-core.ts';
 import { supportedWebhookEvents } from './webhooks.ts';
 
@@ -55,14 +55,11 @@ export async function handleWebhookSettings(context: OperationContext & { body: 
   }
   if (task !== 'create' && !/^[a-f\d]{64}$/.test(body.expectedVersion || '')) fail(400, 'WEBHOOK_REVIEW_REQUIRED', 'Refresh and review this webhook before changing it.');
   if (task === 'redeliver' && !text(body.eventId, 200)) fail(400, 'INVALID_EVENT', 'Choose a failed delivery from this webhook.');
-  db.exec('CREATE TABLE IF NOT EXISTS zernio_webhook_mutations(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
   const resource = version({ callback, profileId });
   // A reviewed synthetic test can be deliberately run again; the shared resource fence still blocks unresolved attempts.
   const operationContext = task === 'test' ? { ...context, body: { ...body, testAttempt: req.headers['idempotency-key'] } } : context;
   const outcome = await operation(operationContext, async key => {
-    const old = db.prepare('SELECT o.status FROM zernio_webhook_mutations m LEFT JOIN integration_operations o ON o.project_id=m.project_id AND o.request_key=m.request_key WHERE m.resource=?').get(resource) as any;
-    if (old && (!old.status || ['pending', 'uncertain'].includes(old.status))) fail(409, 'WEBHOOK_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous webhook action in provider outcomes before making another change.');
-    db.prepare('INSERT INTO zernio_webhook_mutations VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, project.id, key);
+    if (!await claimFence(db, 'zernio_webhook_mutations', resource, project.id, key)) fail(409, 'WEBHOOK_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous webhook action in provider outcomes before making another change.');
     let uncertain = false, dispatched = false, accepted = false;
     try {
       const before = await read(), current = before.find((row: any) => row.id === webhookId);
@@ -86,7 +83,7 @@ export async function handleWebhookSettings(context: OperationContext & { body: 
       uncertain = accepted || dispatched && (!(error instanceof IntegrationError) || error.uncertain);
       if (uncertain) throw new IntegrationError(409, 'WEBHOOK_NOT_CONFIRMED', 'Review the provider outcome before trying this action again.', true);
       throw error;
-    } finally { if (!uncertain) db.prepare('DELETE FROM zernio_webhook_mutations WHERE resource=? AND project_id=? AND request_key=?').run(resource, project.id, key); }
+    } finally { if (!uncertain) await releaseFence(db, 'zernio_webhook_mutations', resource, project.id, key); }
   }, `webhook:${resource}`);
   send(outcome.status, outcome.data); return true;
 }

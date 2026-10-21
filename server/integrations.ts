@@ -1095,7 +1095,7 @@ export async function handleIntegration(context: any) {
       const postId = identifier(body.postId, 'post ID');
       const outcome = await operation(context, async key => {
         const post = await store.get(project.id, 'posts', postId), remote = await scopedPost(api, profileId, post, ['social/edit-published', 'social/update-metadata'].includes(path) || path === 'social/update' && body.mode === 'scheduled', path === 'social/update-metadata' ? identifier(body.accountId, 'account ID') : undefined), endpoint = `/posts/${encodeURIComponent(post.externalId)}`;
-        if (['social/update', 'social/edit-published', 'social/update-metadata'].includes(path)) assertRecyclingSeedEditable(remote, context);
+        if (['social/update', 'social/edit-published', 'social/update-metadata'].includes(path)) await assertRecyclingSeedEditable(remote, context);
         if (sample(post)) fail(400, 'SAMPLE_RECORD', 'Sample posts cannot be sent to live providers.');
         if (path === 'social/cancel') {
           if (body.confirmCancellation !== true) fail(400, 'CANCELLATION_CONFIRMATION_REQUIRED', 'Confirm removal of this unpublished provider record.');
@@ -1220,7 +1220,7 @@ export async function handleIntegration(context: any) {
             if (!['published', 'partial'].includes(snapshot.status) || selected.length !== 1 || selected[0].platform !== 'youtube' || selected[0].status !== 'published' || selected[0].removedFromPlatformAt || selected[0].platformPostId !== videoId) throw new IntegrationError(409, 'YOUTUBE_COPY_CHANGED', 'The selected published YouTube video could not be confirmed. Refresh and review its identity before continuing.', uncertain);
           };
           assertCopy(remote);
-          const fresh = await scopedPost(api, profileId, post, true, accountId); assertCopy(fresh); assertRecyclingSeedEditable(fresh, context); context.assertProviderPostEdit?.();
+          const fresh = await scopedPost(api, profileId, post, true, accountId); assertCopy(fresh); await assertRecyclingSeedEditable(fresh, context); context.assertProviderPostEdit?.();
           if (canonical(store.get(project.id, 'posts', post.id)) !== canonical(post)) fail(409, 'POST_CHANGED', 'The local post changed. Refresh and review it before continuing.');
           const result = await api(endpoint + '/update-metadata', {}, { platform: 'youtube', accountId, ...metadata }, key);
           if (!reportObject(result) || result.success !== true || !Array.isArray(result.updatedFields) || result.updatedFields.length !== requestedFields.length || new Set(result.updatedFields).size !== requestedFields.length || requestedFields.some(field => !result.updatedFields.includes(field)) || [['platform', 'youtube'], ['accountId', accountId], ['postId', post.externalId], ['videoId', videoId]].some(([field, expected]) => Object.hasOwn(result, field) && result[field] !== expected)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the selected YouTube metadata fields and scope. Review the provider outcome before another attempt.', true);

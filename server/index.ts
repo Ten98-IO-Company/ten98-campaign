@@ -368,7 +368,7 @@ export async function createApp(options: AppOptions = {}) {
   // An injected database belongs to the caller; the shared pool closes with the app.
   const release = async () => { await draining; if (!options.database) await closeDatabase(); };
   return { server, db, pool, store, config, webhooks, direct, smsInbox, links, close: async () => {
-    closeMediaUploads(db); clearInterval(directTimer); clearInterval(webhookTimer); direct.close(); await direct.idle();
+    closeMediaUploads(); clearInterval(directTimer); clearInterval(webhookTimer); direct.close(); await direct.idle();
     if (server.listening) await new Promise<void>((resolveClose, reject) => { server.close(error => error ? reject(error) : resolveClose()); server.closeIdleConnections(); });
     await release();
   } };

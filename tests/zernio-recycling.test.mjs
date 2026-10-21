@@ -8,12 +8,12 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
 const config = () => ({ enabled: true, gap: 2, gapFreq: 'week', startDate: '2070-01-01T09:00:00.000Z', expireCount: 5, expireDate: null, contentVariations: ['First campaign caption', 'Second campaign caption'] });
-async function fixture() {
+async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-recycling-')), originalFetch = globalThis.fetch, origin = 'https://recycling.example.test', calls = [], accounts = ['facebook', 'twitter', 'youtube', 'tiktok'].map(platform => ({ _id: `${platform}-recycle`, platform, profileId: 'recycle-profile', isActive: true })), remotePosts = new Map(); let hook;
-  const app = createApp({ dataDir, appUrl: origin, env: { ZERNIO_API_KEY: 'synthetic-recycling-key' }, directScheduler: false });
+  const app = await testApp(t, { dataDir, appUrl: origin, env: { ZERNIO_API_KEY: 'synthetic-recycling-key' }, directScheduler: false });
   const remote = { _id: 'provider-seed', profileId: 'recycle-profile', content: 'Original campaign caption', status: 'published', publishedAt: '2026-10-01T09:00:00Z', mediaItems: [], platforms: [{ platform: 'facebook', accountId: 'facebook-recycle', status: 'published', customContent: 'Separate Facebook caption', platformSpecificData: { firstComment: 'A reviewed first comment' } }, { platform: 'twitter', accountId: 'twitter-recycle', status: 'published' }] }; remotePosts.set(remote._id, remote);
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
@@ -40,14 +40,14 @@ async function fixture() {
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); const base = `http://127.0.0.1:${app.server.address().port}`; let cookie;
   async function request(path, method = 'GET', body, key = randomUUID()) { const response = await originalFetch(base + '/api' + path, { method, headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Idempotency-Key': key }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] }; }
   const setup = await request('/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Recycling owner', email: 'recycling@example.test', password: 'synthetic recycling fixture passphrase', sample: false }); cookie = setup.cookie; const projectId = setup.data.projectId, project = `/projects/${projectId}`; await request(project, 'PATCH', { zernioProfileId: 'recycle-profile' });
-  const local = app.store.create(projectId, 'posts', { content: remote.content, platforms: ['facebook', 'twitter'], accounts: ['facebook-recycle', 'twitter-recycle'], status: 'published', externalId: remote._id, zernioProfileId: 'recycle-profile', mediaItems: [], providerResults: remote.platforms }), path = `${project}/integrations/recycling/posts/${local.id}`;
+  const local = await app.store.create(projectId, 'posts', { content: remote.content, platforms: ['facebook', 'twitter'], accounts: ['facebook-recycle', 'twitter-recycle'], status: 'published', externalId: remote._id, zernioProfileId: 'recycle-profile', mediaItems: [], providerResults: remote.platforms }), path = `${project}/integrations/recycling/posts/${local.id}`;
   const detail = async () => (await request(path)).data;
   const review = async (configuration = config()) => request(path + '/review', 'POST', { configuration, expectedFingerprint: (await detail()).fingerprint, confirmReview: true });
-  return { app, calls, remote, remotePosts, accounts, local, path, project, projectId, request, detail, review, setHook(value) { hook = value; }, writes: () => calls.filter(row => row.method === 'PUT'), async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
+  return { app, calls, remote, remotePosts, accounts, local, path, project, projectId, request, detail, review, setHook(value) { hook = value; }, writes: () => calls.filter(row => row.method === 'PUT'), async close() { globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
 }
 
-test('reviewed recurring publication updates only recycling, verifies all account content, reads copies and stops without deleting them', async () => {
-  const f = await fixture();
+test('reviewed recurring publication updates only recycling, verifies all account content, reads copies and stops without deleting them', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     assert.equal((await f.request(`${f.project}/integrations/recycling`)).data.posts.length, 1); const before = await f.detail(); assert.equal(before.canEnable, true); assert.equal(before.recycling.recycleCount, null); assert.equal(before.copies[0].content, 'Separate Facebook caption'); assert.equal(before.copies[0].options.firstComment, 'A reviewed first comment');
     const reviewed = await f.review(); assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data)); assert.equal(f.writes().length, 0, 'Review must never enable an upstream cycle.');
@@ -62,29 +62,29 @@ test('reviewed recurring publication updates only recycling, verifies all accoun
   } finally { await f.close(); }
 });
 
-test('recycling rejects unsupported platforms, generated seeds, invalid dates/variations, changed options and stale asset approvals', async () => {
-  const f = await fixture();
+test('recycling rejects unsupported platforms, generated seeds, invalid dates/variations, changed options and stale asset approvals', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     for (const patch of [{ gap: 0 }, { gapFreq: 'day' }, { startDate: '2070-02-31T09:00:00Z' }, { startDate: '2070-01-01 09:00' }, { expireDate: '2069-01-01T09:00:00Z' }, { expireCount: 0 }, { contentVariations: ['Only one'] }, { contentVariations: ['x'.repeat(25001), 'Second'] }]) assert.ok([400, 422].includes((await f.review({ ...config(), ...patch })).status), 'Reject malformed interval, time or variation settings.');
     for (const platform of ['youtube', 'tiktok']) { const original = f.remote.platforms; f.remote.platforms = [{ platform, accountId: `${platform}-recycle`, status: 'published' }]; assert.equal((await f.review()).status, 422); f.remote.platforms = original; }
     f.remote.recycledFromPostId = 'original-parent'; assert.equal((await f.detail()).canEnable, false); assert.equal((await f.review()).status, 422); delete f.remote.recycledFromPostId;
     const first = await f.review(); f.remote.platforms[0].platformSpecificData.firstComment = 'Changed after review'; const stale = await f.request(f.path + '/apply', 'POST', { reviewId: first.data.review.id }); assert.equal(stale.status, 409); assert.equal(stale.data.error.code, 'RECYCLING_REVIEW_CHANGED'); assert.equal(f.writes().length, 0);
-    const asset = f.app.store.create(f.projectId, 'assets', { name: 'Approved creative', kind: 'image', approval: 'approved', deliveryUrl: 'https://cdn.example.test/image.jpg', modifiedTime: '2026-10-18T10:00:00Z' }); f.app.store.update(f.projectId, 'posts', f.local.id, { assetId: asset.id });
-    await f.request(`${f.project}/approvals/policy`, 'POST', { requireApproval: true }); const approved = await f.review(); assert.equal(approved.status, 200, JSON.stringify(approved.data)); f.app.store.update(f.projectId, 'assets', asset.id, { approval: 'pending' });
+    const asset = await f.app.store.create(f.projectId, 'assets', { name: 'Approved creative', kind: 'image', approval: 'approved', deliveryUrl: 'https://cdn.example.test/image.jpg', modifiedTime: '2026-10-18T10:00:00Z' }); await f.app.store.update(f.projectId, 'posts', f.local.id, { assetId: asset.id });
+    await f.request(`${f.project}/approvals/policy`, 'POST', { requireApproval: true }); const approved = await f.review(); assert.equal(approved.status, 200, JSON.stringify(approved.data)); await f.app.store.update(f.projectId, 'assets', asset.id, { approval: 'pending' });
     assert.equal((await f.request(f.path + '/apply', 'POST', { reviewId: approved.data.review.id })).status, 409); assert.equal((await f.review()).data.error.code, 'RECYCLING_ASSET_APPROVAL_REQUIRED'); assert.equal(f.writes().length, 0);
-    f.app.db.prepare("UPDATE memberships SET role='editor'").run(); assert.equal((await f.review()).status, 403); assert.equal((await f.request(f.path + '/stop', 'POST', { expectedFingerprint: (await f.detail()).fingerprint, confirmStop: true })).status, 403);
+    await f.app.sql.run("UPDATE memberships SET role='editor'"); assert.equal((await f.review()).status, 403); assert.equal((await f.request(f.path + '/stop', 'POST', { expectedFingerprint: (await f.detail()).fingerprint, confirmStop: true })).status, 403);
   } finally { await f.close(); }
 });
 
-test('recurring review includes account-specific assets and blocks independent account times', async () => {
-  const f = await fixture();
+test('recurring review includes account-specific assets and blocks independent account times', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
-    const asset = f.app.store.create(f.projectId, 'assets', { name: 'Account creative', kind: 'image', approval: 'pending', deliveryUrl: 'https://cdn.example.test/account.jpg' });
-    f.app.store.update(f.projectId, 'posts', f.local.id, { accountOverrides: { 'facebook-recycle': { platform: 'facebook', assetId: asset.id } } });
+    const asset = await f.app.store.create(f.projectId, 'assets', { name: 'Account creative', kind: 'image', approval: 'pending', deliveryUrl: 'https://cdn.example.test/account.jpg' });
+    await f.app.store.update(f.projectId, 'posts', f.local.id, { accountOverrides: { 'facebook-recycle': { platform: 'facebook', assetId: asset.id } } });
     await f.request(`${f.project}/approvals/policy`, 'POST', { requireApproval: true });
     assert.ok((await f.detail()).assets.some(row => row.id === asset.id && row.approval === 'pending'));
     assert.equal((await f.review()).data.error.code, 'RECYCLING_ASSET_APPROVAL_REQUIRED');
-    f.app.store.update(f.projectId, 'assets', asset.id, { approval: 'approved' });
+    await f.app.store.update(f.projectId, 'assets', asset.id, { approval: 'approved' });
     f.remote.platforms[0].scheduledFor = '2070-01-01T11:00:00Z';
     assert.equal((await f.detail()).canEnable, false);
     assert.equal((await f.review()).data.error.code, 'RECYCLING_UNAVAILABLE');
@@ -92,28 +92,40 @@ test('recurring review includes account-specific assets and blocks independent a
   } finally { await f.close(); }
 });
 
-test('full scoped history enforces ten active cycles, rejects incomplete counts and does not mistake a copied post for a new seed', async () => {
-  const f = await fixture();
+test('full scoped history enforces ten active cycles, rejects incomplete counts and does not mistake a copied post for a new seed', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     for (let index = 0; index < 10; index++) f.remotePosts.set(`active-${index}`, { ...structuredClone(f.remote), _id: `active-${index}`, recycling: config() });
     assert.equal((await f.review()).data.error.code, 'RECYCLING_CAPACITY'); f.remotePosts.delete('active-9'); assert.equal((await f.review()).status, 200);
     f.setHook(url => url.pathname.endsWith('/posts') ? Response.json({ posts: [], pagination: { page: 1, limit: 500, total: 9, pages: 1 } }) : undefined); assert.equal((await f.review()).status, 502); f.setHook(undefined);
     const reviewed = await f.review(); f.remote.recycling = { ...config(), recycleCount: 1, nextRecycleAt: '2070-01-15T09:00:00Z' }; assert.equal((await f.request(f.path + '/apply', 'POST', { reviewId: reviewed.data.review.id })).status, 409, 'A changed live cycle invalidates the reviewed prior state.');
-    const storedCopy = f.app.store.create(f.projectId, 'posts', { ...f.local, id: undefined, externalId: 'copied-provider-id' }); f.remotePosts.set('copied-provider-id', { ...structuredClone(f.remote), _id: 'copied-provider-id', recycledFromPostId: f.remote._id });
+    const storedCopy = await f.app.store.create(f.projectId, 'posts', { ...f.local, id: undefined, externalId: 'copied-provider-id' }); f.remotePosts.set('copied-provider-id', { ...structuredClone(f.remote), _id: 'copied-provider-id', recycledFromPostId: f.remote._id });
     assert.equal((await f.request(`${f.project}/integrations/recycling/posts/${storedCopy.id}`)).data.canEnable, false);
   } finally { await f.close(); }
 });
 
-test('an accepted recycling change with an unreadable receipt stays uncertain and cannot mint another automatic publishing plan', async () => {
-  const f = await fixture();
+test('an accepted recycling change with an unreadable receipt stays uncertain and cannot mint another automatic publishing plan', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const reviewed = await f.review(); f.setHook((url, method, body) => { if (method === 'PUT') { f.remote.recycling = body.recycling; return Response.json({ post: { ...f.remote, _id: 'wrong-post' } }); } });
-    const key = randomUUID(), result = await f.request(f.path + '/apply', 'POST', { reviewId: reviewed.data.review.id }, key); assert.equal(result.data.operation.status, 'uncertain'); const sent = f.writes().length;
+    const key = randomUUID(), result = await f.request(f.path + '/apply', 'POST', { reviewId: reviewed.data.review.id }, key); assert.equal(result.data.operation.status, 'uncertain'); const sent = f.writes().length; assert.equal(sent, 1, 'The accepted recycling update reached the provider exactly once.');
     assert.equal((await f.request(f.path + '/apply', 'POST', { reviewId: reviewed.data.review.id }, key)).status, 409); assert.equal((await f.request(f.path + '/apply', 'POST', { reviewId: reviewed.data.review.id })).status, 409); assert.equal(f.writes().length, sent);
     f.setHook(undefined); const newReview = await f.review(); assert.equal(newReview.status, 200); const blockedKey = randomUUID(), blocked = await f.request(f.path + '/apply', 'POST', { reviewId: newReview.data.review.id }, blockedKey); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id); assert.equal(f.writes().length, sent);
     assert.equal((await f.request(`${f.project}/operations/${result.data.operation.id}/review`, 'POST', { resolution: 'applied', confirmChecked: true, note: 'Synthetic provider confirms the original recycling settings were applied.', reference: 'provider-seed' })).status, 200);
     const closed = await f.request(f.path + '/apply', 'POST', { reviewId: newReview.data.review.id }, blockedKey); assert.equal(closed.data.error.code, 'OPERATION_NOT_SENT'); assert.deepEqual(closed.data.operation, blocked.data.operation); assert.equal(f.writes().length, sent);
     const fresh = await f.review({ ...config(), gap: 3 }); assert.equal(fresh.status, 200); assert.equal((await f.request(f.path + '/apply', 'POST', { reviewId: fresh.data.review.id })).status, 200, 'After explicit operator reconciliation, only a fresh reviewed intent may change the active cycle.'); assert.equal(f.writes().length, sent + 1);
+  } finally { await f.close(); }
+});
+
+test('parallel duplicate recycling applies under one action key send one provider update', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  try {
+    const reviewed = await f.review(); assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+    const key = randomUUID(), body = { reviewId: reviewed.data.review.id };
+    const results = await Promise.all([f.request(f.path + '/apply', 'POST', body, key), f.request(f.path + '/apply', 'POST', body, key)]);
+    assert.equal(f.writes().length, 1, 'The key lock lets only one duplicate send the recycling update.');
+    assert.ok(results.some(row => row.status === 200 && row.data.operation?.status === 'complete'), JSON.stringify(results.map(row => row.data)));
+    assert.ok(results.every(row => row.status === 200 || row.data.error?.code === 'OPERATION_UNCERTAIN'), JSON.stringify(results.map(row => row.data)));
   } finally { await f.close(); }
 });
 
@@ -128,23 +140,23 @@ test('recycling UI preserves uncertain keys and never silently replaces a review
   const html = renderToStaticMarkup(React.createElement(SettingsValue, { value: { firstComment: '<reviewed>', nested: { enabled: false, labels: ['one', 'two'] } } })); assert.match(html, /&lt;reviewed&gt;/); assert.match(html, /Off/); assert.match(html, /<dl>/); assert.doesNotMatch(html, /<pre>|<script>/);
 });
 
-test('ordinary scheduled-source and published-copy edits require stopping an enabled recurring plan first', async () => {
+test('ordinary scheduled-source and published-copy edits require stopping an enabled recurring plan first', { skip: postgresSkip }, async t => {
   for (const action of ['update', 'edit-published']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       if (action === 'update') { f.remote.status = 'scheduled'; f.remote.scheduledFor = '2070-01-01T08:00:00Z'; f.remote.platforms = f.remote.platforms.map(row => ({ ...row, status: 'scheduled' })); }
       const reviewed = await f.review(); assert.equal(reviewed.status, 200); assert.equal((await f.request(f.path + '/apply', 'POST', { reviewId: reviewed.data.review.id })).status, 200);
-      f.app.db.prepare("UPDATE memberships SET role='editor'").run(); const before = f.calls.filter(row => row.method !== 'GET' && !row.url.pathname.includes('/tools/validate')).length;
+      await f.app.sql.run("UPDATE memberships SET role='editor'"); const before = f.calls.filter(row => row.method !== 'GET' && !row.url.pathname.includes('/tools/validate')).length;
       const body = action === 'update' ? { postId: f.local.id, content: 'Changed automatic source', mode: 'scheduled', scheduledAt: '2070-01-01T08:00:00Z' } : { postId: f.local.id, accountId: 'facebook-recycle', content: 'Changed published account caption', confirmEdit: true };
       const rejected = await f.request(`${f.project}/integrations/social/${action}`, 'POST', body); assert.equal(rejected.status, 409, JSON.stringify(rejected.data)); assert.equal(rejected.data.error.code, 'RECYCLING_SOURCE_EDIT_REQUIRES_STOP'); assert.equal(f.calls.filter(row => row.method !== 'GET' && !row.url.pathname.includes('/tools/validate')).length, before);
-      f.app.db.prepare("UPDATE memberships SET role='owner'").run(); assert.equal((await f.request(f.path + '/stop', 'POST', { expectedFingerprint: (await f.detail()).fingerprint, confirmStop: true })).status, 200);
-      f.app.db.prepare("UPDATE memberships SET role='editor'").run(); const changed = await f.request(`${f.project}/integrations/social/${action}`, 'POST', body); assert.equal(changed.status, 200, JSON.stringify(changed.data)); assert.equal(f.remote.recycling.enabled, false);
+      await f.app.sql.run("UPDATE memberships SET role='owner'"); assert.equal((await f.request(f.path + '/stop', 'POST', { expectedFingerprint: (await f.detail()).fingerprint, confirmStop: true })).status, 200);
+      await f.app.sql.run("UPDATE memberships SET role='editor'"); const changed = await f.request(`${f.project}/integrations/social/${action}`, 'POST', body); assert.equal(changed.status, 200, JSON.stringify(changed.data)); assert.equal(f.remote.recycling.enabled, false);
     } finally { await f.close(); }
   }
 });
 
-test('in-flight source edits serialize with recurring changes and their completed content invalidates older reviews', async () => {
-  const f = await fixture(); let release;
+test('in-flight source edits serialize with recurring changes and their completed content invalidates older reviews', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); let release;
   try {
     f.remote.status = 'scheduled'; f.remote.scheduledFor = '2070-01-01T08:00:00Z'; f.remote.platforms = f.remote.platforms.map(row => ({ ...row, status: 'scheduled' })); const reviewed = await f.review(); assert.equal(reviewed.status, 200);
     let entered; const paused = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; }); let held = false;
@@ -156,9 +168,9 @@ test('in-flight source edits serialize with recurring changes and their complete
   } finally { release?.(); await f.close(); }
 });
 
-test('uncertain source and recurring writes block each other until explicit operator reconciliation', async () => {
+test('uncertain source and recurring writes block each other until explicit operator reconciliation', { skip: postgresSkip }, async t => {
   for (const unknown of ['source', 'recycling']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       const reviewed = await f.review(); f.setHook((url, method, body) => { if (unknown === 'source' ? url.pathname.endsWith('/edit') : method === 'PUT' && body.recycling) throw new Error('Synthetic accepted write may still become visible later'); });
       const editBody = { postId: f.local.id, accountId: 'facebook-recycle', content: 'Uncertain source caption', confirmEdit: true };

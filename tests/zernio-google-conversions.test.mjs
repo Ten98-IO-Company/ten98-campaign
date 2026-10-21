@@ -6,14 +6,14 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { transformWithOxc } from 'vite';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import * as designSystem from '@ten98/ui';
 
-async function fixture() {
+async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-google-conversions-')), origin = 'https://conversions.example.test', originalFetch = globalThis.fetch, calls = [];
-  const app = createApp({ dataDir: directory, appUrl: origin, env: { ZERNIO_API_KEY: 'synthetic-conversions-key' }, directScheduler: false }), accountId = 'google-connection', adAccountId = '1234567890', profileId = 'conversion-profile';
+  const app = await testApp(t, { dataDir: directory, appUrl: origin, env: { ZERNIO_API_KEY: 'synthetic-conversions-key' }, directScheduler: false }), accountId = 'google-connection', adAccountId = '1234567890', profileId = 'conversion-profile';
   const state = { hook: null, stale: false, cachedAt: '2026-10-18T10:00:00Z', sequence: 200, actions: [{ id: '101', name: 'Website inquiry', type: 'WEBPAGE', status: 'ENABLED', category: 'SUBMIT_LEAD_FORM', origin: 'WEBSITE', primaryForGoal: true, countingType: 'ONE_PER_CLICK', defaultValue: 0, defaultCurrency: 'AED', alwaysUseDefaultValue: false, clickThroughLookbackWindowDays: 30, viewThroughLookbackWindowDays: 1, tagSnippets: [{ type: 'WEBPAGE', pageFormat: 'HTML', globalSiteTag: '<script>syntheticGlobalTag()</script>', eventSnippet: '<script>syntheticConversion()</script>' }], privateToken: 'never-return' }, { id: '102', name: 'Purchase', type: 'UPLOAD_CLICKS', status: 'ENABLED', category: 'PURCHASE', origin: 'WEBSITE', primaryForGoal: false, tagSnippets: [] }], goals: [{ category: 'SUBMIT_LEAD_FORM', origin: 'WEBSITE', biddable: true }, { category: 'PURCHASE', origin: 'WEBSITE', biddable: false }], custom: [{ id: '301', name: 'Qualified inquiries', status: 'ENABLED', conversionActionIds: ['101'] }], campaign: { campaignId: '401', goalConfigLevel: 'CUSTOMER', customConversionGoalId: null, goals: [{ category: 'SUBMIT_LEAD_FORM', origin: 'WEBSITE', biddable: true }, { category: 'PURCHASE', origin: 'WEBSITE', biddable: false }] } };
   const snapshot = value => ({ customerId: adAccountId, cachedAt: state.cachedAt, stale: state.stale, ...value }), customerGoals = () => state.goals.map(row => ({ ...row, conversionActions: state.actions.filter(item => item.status !== 'REMOVED' && item.category === row.category && item.origin === row.origin).map(({ id, name, status, primaryForGoal }) => ({ id, name, status, primaryForGoal })) }));
   globalThis.fetch = async (target, options = {}) => {
@@ -40,14 +40,14 @@ async function fixture() {
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); const base = `http://127.0.0.1:${app.server.address().port}/api`; let cookie;
   async function request(path, body, key = randomUUID(), authenticated = true) { const result = await originalFetch(base + path, { method: body === undefined ? 'GET' : 'POST', headers: { Origin: origin, ...(cookie && authenticated ? { Cookie: cookie } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Idempotency-Key': key }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: result.status, data: await result.json(), cookie: result.headers.get('set-cookie')?.split(';')[0] }; }
   const setup = await request('/auth/setup', { token: app.config.bootstrapToken, name: 'Conversion owner', email: 'conversions@example.test', password: 'Synthetic conversions fixture passphrase!', sample: false }); cookie = setup.cookie; const project = '/projects/' + setup.data.projectId;
-  app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, setup.data.projectId);
+  await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', profileId, setup.data.projectId);
   const route = project + '/integrations/google-conversions/' + accountId, query = '?adAccountId=' + adAccountId;
   const get = name => request(route + '/' + name + query), save = async (name, snapshotName, settings, extra = {}, key) => { const data = (await get(snapshotName)).data; return request(route + '/' + name, { adAccountId, expectedVersion: data.version, confirmChange: true, settings, ...extra }, key); };
-  return { app, state, calls, accountId, adAccountId, project, route, query, request, get, save, writes: () => calls.filter(row => row.method !== 'GET'), async close() { await app.close(); globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); } };
+  return { app, state, calls, accountId, adAccountId, project, route, query, request, get, save, writes: () => calls.filter(row => row.method !== 'GET'), async close() { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); } };
 }
 
-test('authenticated Google conversion reads verify project/customer/campaign scope and project only typed settings and inert snippets', async () => {
-  const f = await fixture();
+test('authenticated Google conversion reads verify project/customer/campaign scope and project only typed settings and inert snippets', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     assert.equal((await f.request(f.route + '/actions' + f.query, undefined, undefined, false)).status, 401);
     for (const resource of ['actions', 'goals', 'custom-goals', 'campaigns/401']) { const result = await f.get(resource); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.customerId, f.adAccountId); assert.equal(result.data.stale, false); assert.match(result.data.version, /^[a-f0-9]{64}$/); assert.equal(JSON.stringify(result.data).includes('privateToken'), false); }
@@ -59,8 +59,8 @@ test('authenticated Google conversion reads verify project/customer/campaign sco
   } finally { await f.close(); }
 });
 
-test('website action create/update/remove/restore and account-goal changes use every typed setting and exact request receipts', async () => {
-  const f = await fixture();
+test('website action create/update/remove/restore and account-goal changes use every typed setting and exact request receipts', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const settings = { type: 'WEBPAGE', name: 'Created website action', category: 'PURCHASE', countingType: 'MANY_PER_CLICK', defaultValue: 12.5, defaultCurrency: 'AED', alwaysUseDefaultValue: false, clickThroughLookbackWindowDays: 45, viewThroughLookbackWindowDays: 7, primaryForGoal: true }, before = (await f.get('actions')).data, body = { adAccountId: f.adAccountId, expectedVersion: before.version, confirmChange: true, settings }, key = randomUUID();
     const created = await f.request(f.route + '/actions/create', body, key); assert.equal(created.status, 200, JSON.stringify(created.data)); assert.equal(created.data.operation.status, 'complete'); for (const [name, value] of Object.entries(settings)) assert.equal(created.data.action[name], value);
@@ -73,8 +73,8 @@ test('website action create/update/remove/restore and account-goal changes use e
   } finally { await f.close(); }
 });
 
-test('custom goals and campaign overrides verify referenced actions and goals, preserve native path contracts and confirm removal readback', async () => {
-  const f = await fixture();
+test('custom goals and campaign overrides verify referenced actions and goals, preserve native path contracts and confirm removal readback', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     let actions = (await f.get('actions')).data;
     const created = await f.save('custom-goals/create', 'custom-goals', { name: 'Custom inquiry and purchase', conversionActionIds: ['102', '101'] }, { expectedActionsVersion: actions.version }); assert.equal(created.status, 200, JSON.stringify(created.data)); const id = created.data.goal.id;
@@ -93,8 +93,8 @@ test('custom goals and campaign overrides verify referenced actions and goals, p
   } finally { await f.close(); }
 });
 
-test('stale/changed snapshots, malformed scope/freshness/receipts and viewer or changed-role writes fail closed', async () => {
-  const f = await fixture();
+test('stale/changed snapshots, malformed scope/freshness/receipts and viewer or changed-role writes fail closed', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const initial = (await f.get('actions')).data, body = { adAccountId: f.adAccountId, expectedVersion: initial.version, confirmChange: true, settings: { name: 'Reviewed change' } };
     f.state.actions[0].name = 'Changed outside this review'; assert.equal((await f.request(f.route + '/actions/101/update', body)).status, 409); f.state.actions[0].name = initial.actions.find(row => row.id === '101').name;
@@ -103,31 +103,31 @@ test('stale/changed snapshots, malformed scope/freshness/receipts and viewer or 
       f.state.hook = (url, options) => url.pathname.endsWith('/ads/conversions/actions') && options.method === 'GET' ? Response.json({ customerId: f.adAccountId, stale: false, cachedAt: null, actions: f.state.actions, ...invalid }) : undefined;
       assert.equal((await f.get('actions')).status, 502); assert.equal((await f.request(f.route + '/actions/101/update', body)).status, 502);
     }
-    f.state.hook = null; f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await f.request(f.route + '/actions/101/update', body)).status, 403); assert.equal((await f.get('actions')).status, 200);
-    f.app.db.prepare("UPDATE memberships SET role='editor'").run(); let changed = false; f.state.hook = (url, options) => { if (!changed && url.pathname.endsWith('/ads/conversions/actions') && options.method === 'GET') { changed = true; f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); } }; assert.equal((await f.request(f.route + '/actions/101/update', body)).status, 403); assert.equal(f.writes().length, 0);
+    f.state.hook = null; await f.app.sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await f.request(f.route + '/actions/101/update', body)).status, 403); assert.equal((await f.get('actions')).status, 200);
+    await f.app.sql.run("UPDATE memberships SET role='editor'"); let changed = false; f.state.hook = async (url, options) => { if (!changed && url.pathname.endsWith('/ads/conversions/actions') && options.method === 'GET') { changed = true; await f.app.sql.run("UPDATE memberships SET role='viewer'"); } }; assert.equal((await f.request(f.route + '/actions/101/update', body)).status, 403); assert.equal(f.writes().length, 0);
   } finally { await f.close(); }
 });
 
-test('unknown writes retain one global customer fence across changed bodies, sibling connections and projects until explicit outcome review', async () => {
-  const f = await fixture();
+test('unknown writes retain one global customer fence across changed bodies, sibling connections and projects until explicit outcome review', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const before = (await f.get('actions')).data, body = { adAccountId: f.adAccountId, expectedVersion: before.version, confirmChange: true, settings: { type: 'WEBPAGE', name: 'Unknown creation' } }, key = randomUUID();
     f.state.hook = (url, options) => url.pathname.endsWith('/ads/conversions/actions') && options.method === 'POST' ? Response.json({ action: { id: null } }, { status: 201 }) : undefined;
     const unknown = await f.request(f.route + '/actions/create', body, key); assert.equal(unknown.status, 409); assert.equal(unknown.data.operation.status, 'uncertain');
     const again = await f.request(f.route + '/actions/create', body, key); assert.equal(again.status, 409); assert.equal(f.writes().length, 1);
     for (const route of [f.route, f.route + '-2']) { const blocked = await f.request(route + '/actions/create', { ...body, settings: { ...body.settings, name: 'Changed body' } }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, unknown.data.operation.id); assert.equal(f.writes().length, 1); }
-    const other = await f.request('/workspaces', { name: 'Separate Google customer project' }); assert.equal(other.status, 201); f.app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('conversion-profile-2', other.data.projectId);
+    const other = await f.request('/workspaces', { name: 'Separate Google customer project' }); assert.equal(other.status, 201); await f.app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'conversion-profile-2', other.data.projectId);
     const otherRoute = `/projects/${other.data.projectId}/integrations/google-conversions/${f.accountId}-3`, otherRead = await f.request(otherRoute + '/actions' + f.query); assert.equal(otherRead.status, 200);
     const crossProject = await f.request(otherRoute + '/actions/create', { ...body, expectedVersion: otherRead.data.version }, key); assert.equal(crossProject.status, 409); assert.equal(crossProject.data.error.code, 'GOOGLE_CONVERSION_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(crossProject.data.operation.status, 'failed'); assert.equal(JSON.stringify(crossProject.data).includes(f.project.slice('/projects/'.length)), false);
     assert.equal(f.writes().length, 1);
     const response = await f.request(f.project + '/operations/' + unknown.data.operation.id + '/review', { resolution: 'not_applied', confirmChecked: true, note: 'Synthetic provider fixture confirmed no conversion resource persisted.', reference: 'synthetic-no-write' }); assert.equal(response.status, 200, JSON.stringify(response.data)); f.state.hook = null;
-    const fresh = await f.request(f.route + '/actions/create', body); assert.equal(fresh.status, 200, JSON.stringify(fresh.data)); assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM zernio_google_conversion_mutations').get().n, 0);
+    const fresh = await f.request(f.route + '/actions/create', body); assert.equal(fresh.status, 200, JSON.stringify(fresh.data)); assert.equal((await f.app.sql.get('SELECT count(*) AS n FROM zernio_google_conversion_mutations')).n, 0);
   } finally { await f.close(); }
 });
 
-test('every mutation family rechecks provider connection ownership and customer availability after its reviewed preflight read', async () => {
+test('every mutation family rechecks provider connection ownership and customer availability after its reviewed preflight read', { skip: postgresSkip }, async t => {
   for (const resource of ['actions', 'goals', 'custom-goals', 'campaigns/401']) for (const change of ['profile', 'selectable']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       const before = (await f.get(resource)).data; let moved = false;
       f.state.hook = (url, options) => {
@@ -142,9 +142,9 @@ test('every mutation family rechecks provider connection ownership and customer 
   }
 });
 
-test('write receipts and custom-goal readbacks cannot certify an existing resource, foreign customer or unconfirmed settings', async () => {
+test('write receipts and custom-goal readbacks cannot certify an existing resource, foreign customer or unconfirmed settings', { skip: postgresSkip }, async t => {
   for (const scenario of ['existing-action', 'foreign-created-action', 'action-ack', 'goal-ack', 'existing-custom', 'remove-readback', 'campaign-ack']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       const actions = (await f.get('actions')).data;
       f.state.hook = (url, options, body) => {
