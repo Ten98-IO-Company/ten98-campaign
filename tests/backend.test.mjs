@@ -6,12 +6,12 @@ import { join } from 'node:path';
 import { randomUUID, createHmac } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('local auth, CSRF, workspace isolation, roles, validated CRUD and session expiry', async () => {
+test('local auth, CSRF, workspace isolation, roles, validated CRUD and session expiry', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-campaign-test-'));
   const distDir = join(dataDir, 'dist'); await mkdir(distDir); await writeFile(join(distDir, 'index.html'), '<!doctype html><title>Campaign</title>'); await writeFile(join(dataDir, 'secret.txt'), 'private-marker');
-  const origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, env: {}, appUrl: origin, distDir });
+  const origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir, env: {}, appUrl: origin, distDir });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`;
   let ownerCookie, viewerCookie;
@@ -39,9 +39,9 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: setup.email, password: 'wrong password' } })).status, 401);
     const login = await request('/api/auth/login', { method: 'POST', body: { email: setup.email, password: setup.password } });
     assert.equal(login.status, 200); ownerCookie = login.cookie;
-    const provision = spawnSync(process.execPath, [fileURLToPath(new URL('../server/cli.ts', import.meta.url)), 'create-user'], { input: JSON.stringify({ name: 'Viewer', email: 'viewer@example.com', password: setup.password }), env: { ...process.env, DATA_DIR: dataDir }, encoding: 'utf8' });
+    const provision = spawnSync(process.execPath, [fileURLToPath(new URL('../server/cli.ts', import.meta.url)), 'create-user'], { input: JSON.stringify({ name: 'Viewer', email: 'viewer@example.com', password: setup.password }), env: { ...process.env, DATABASE_URL: app.database.url }, encoding: 'utf8' });
     assert.equal(provision.status, 0, provision.stderr); assert.equal(provision.stdout.includes(setup.password), false);
-    const viewerId = app.db.prepare('SELECT id FROM users WHERE email=?').get('viewer@example.com').id;
+    const viewerId = (await app.sql.get('SELECT id FROM users WHERE email=?', 'viewer@example.com')).id;
     viewerCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'viewer@example.com', password: setup.password } })).cookie;
     assert.equal((await request('/api/session', { cookie: viewerCookie })).data.user.isOperator, false);
     assert.equal((await request(`/api/state?projectId=${projectId}`, { cookie: viewerCookie })).status, 404);
@@ -90,24 +90,24 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request(`/api/workspaces/${workspaceId}/members/${state.user.id}`, { method: 'DELETE' })).status, 409);
     assert.equal((await request(`/api/workspaces/${workspaceId}/members/${viewerId}`, { method: 'DELETE' })).status, 200);
     assert.equal((await request(`/api/state?projectId=${projectId}`, { cookie: viewerCookie })).status, 404);
-    const grant = spawnSync(process.execPath, [fileURLToPath(new URL('../server/cli.ts', import.meta.url)), 'grant-operator'], { input: JSON.stringify({ email: 'viewer@example.com' }), env: { ...process.env, DATA_DIR: dataDir }, encoding: 'utf8' });
+    const grant = spawnSync(process.execPath, [fileURLToPath(new URL('../server/cli.ts', import.meta.url)), 'grant-operator'], { input: JSON.stringify({ email: 'viewer@example.com' }), env: { ...process.env, DATABASE_URL: app.database.url }, encoding: 'utf8' });
     assert.equal(grant.status, 0, grant.stderr);
     assert.equal((await request('/api/session', { cookie: viewerCookie })).data.user.isOperator, true);
     assert.equal((await request(`/api/projects/${newWorkspace.projectId}`, { method: 'PATCH', body: { zernioProfileId: 'operator-approved-profile' }, cookie: viewerCookie })).status, 200);
     assert.equal((await request(`/api/projects/${projectId}`, { method: 'PATCH', body: { zernioProfileId: 'still-unavailable' }, cookie: viewerCookie })).status, 404);
     const digest = value => createHmac('sha256', app.config.sessionSecret).update(value).digest('hex');
-    app.db.prepare('INSERT INTO oidc_flows VALUES(?,?,?,?,?)').run(digest('test-state'), digest('test-browser'), 'verifier', 'nonce', Date.now() + 60000);
+    await app.sql.run('INSERT INTO oidc_flows VALUES(?,?,?,?,?)', digest('test-state'), digest('test-browser'), 'verifier', 'nonce', Date.now() + 60000);
     assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=wrong-browser' })).status, 400);
-    assert.equal(app.db.prepare('SELECT count(*) AS count FROM oidc_flows').get().count, 1);
-    app.db.prepare('UPDATE oidc_flows SET expires_at=0').run();
+    assert.equal((await app.sql.get('SELECT count(*) AS count FROM oidc_flows')).count, 1);
+    await app.sql.run('UPDATE oidc_flows SET expires_at=0');
     assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).status, 400);
-    app.db.prepare('UPDATE oidc_flows SET expires_at=?').run(Date.now() + 60000);
+    await app.sql.run('UPDATE oidc_flows SET expires_at=?', Date.now() + 60000);
     assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).status, 400);
-    assert.equal(app.db.prepare('SELECT count(*) AS count FROM oidc_flows').get().count, 0);
+    assert.equal((await app.sql.get('SELECT count(*) AS count FROM oidc_flows')).count, 0);
     assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).status, 400);
-    app.db.prepare('UPDATE sessions SET expires_at=0').run();
+    await app.sql.run('UPDATE sessions SET expires_at=0');
     assert.equal((await request('/api/state')).status, 401);
     for (let i = 0; i < 10; i++) await request('/api/auth/login', { method: 'POST', body: { email: 'absent@example.com', password: 'bad' } });
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: 'absent@example.com', password: 'bad' } })).status, 429);
-  } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
 });

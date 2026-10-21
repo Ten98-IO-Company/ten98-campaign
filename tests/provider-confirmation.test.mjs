@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { handleIntegration } from '../server/integrations.ts';
 import { providerRequest } from '../server/provider-core.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
-test('social write receipts reject malformed or cross-account acknowledgements before changing local posts', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, records = new Map(), writes = [];
+test('social write receipts reject malformed or cross-account acknowledgements before changing local posts', { skip: postgresSkip }, async t => {
+  const { db, sql } = await testDatabase(t), originalFetch = globalThis.fetch, records = new Map(), writes = [];
   const project = { id: 'confirmation-project', zernioProfileId: 'confirmation-profile' };
   const account = { _id: 'confirmation-account', profileId: project.zernioProfileId, platform: 'facebook' };
   const store = {
@@ -50,14 +50,14 @@ test('social write receipts reject malformed or cross-account acknowledgements b
       assert.equal((await invoke(action, post, `confirmation-retry-${sequence}`)).status, 409);
       assert.equal(writes.length, beforeRetry, 'Fresh action keys cannot repeat an unconfirmed provider write.');
       // This fixture never applies its acknowledgement; reconcile before the next independent malformed-receipt case.
-      db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE id=?").run(result.data.operation.id);
+      await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE id=?", result.data.operation.id);
     }
     for (const platforms of [[{ platform: 'facebook', status: 'published' }], [{ accountId: account._id, status: 'pending' }], [{ platform: 'facebook', accountId: { _id: account._id }, status: 'published' }]]) {
       const post = { id: `minimal-${++sequence}`, content: 'Documented minimal acknowledgement', platforms: ['facebook'], accounts: [account._id], status: 'draft' };
       records.set(post.id, post); acknowledgement = { ...valid, profileId: { _id: project.zernioProfileId }, platforms };
       assert.equal((await invoke('publish', post, `confirmation-minimal-${sequence}`)).status, 200, 'Minimal acknowledgements need not repeat both platform and account ID.');
     }
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test('the shared provider boundary rejects JSON primitives with write uncertainty intact', async () => {

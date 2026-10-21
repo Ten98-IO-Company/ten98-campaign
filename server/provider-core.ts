@@ -3,12 +3,12 @@ import { createHash, createSign, randomUUID } from 'node:crypto';
 import { readResponseText } from '@ten98/runtime';
 import { buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostTags, validPostInstant, resolveVariant, validatePostForPlatforms, wireMediaItems, assetDeliveryIssue } from '../shared/social-posts.ts';
 import type { IncomingHttpHeaders } from 'node:http';
-import type { DatabaseSync } from 'node:sqlite';
+import { sql } from 'drizzle-orm';
 import type { Database } from './database.ts';
 
 // Provider and stored records are untrusted JSON; every reader below validates the fields it consumes.
 export type ProviderRecord = Record<string, any>;
-export type MappingCheck = (() => void) | undefined;
+export type MappingCheck = (() => void | Promise<void>) | undefined;
 export type ZernioApi = (path: string, query?: Record<string, unknown>, body?: unknown, idempotencyKey?: string, method?: string, observeReceipt?: (result: ProviderRecord) => void) => Promise<ProviderRecord>;
 export interface PostStore { get(projectId: string, collection: string, id: string): ProviderRecord | null; list(projectId: string, collection: string): ProviderRecord[]; update(projectId: string, collection: string, id: string, data: Record<string, unknown>): ProviderRecord | null }
 export interface OperationContext { db: Database; project: { id: string }; req: { method?: string; headers: IncomingHttpHeaders }; url: URL; body?: unknown; [key: string]: any }
@@ -35,8 +35,8 @@ export function canonical(value: any): string {
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
   return JSON.stringify(value);
 }
-export function checkMapping(check: MappingCheck, uncertain: unknown = false): void {
-  try { check?.(); } catch (error: any) { if (!uncertain && [403, 404].includes(error.status)) throw new IntegrationError(error.status, 'PROJECT_ACCESS_CHANGED', 'Your project access changed. Refresh before continuing.'); throw new IntegrationError(409, 'PROJECT_CONNECTION_CHANGED', uncertain ? 'The project connection changed after the provider received this action. Reconcile the previous connection.' : 'The project connection changed. Reload this project before continuing.', uncertain); }
+export async function checkMapping(check: MappingCheck, uncertain: unknown = false): Promise<void> {
+  try { await check?.(); } catch (error: any) { if (!uncertain && [403, 404].includes(error.status)) throw new IntegrationError(error.status, 'PROJECT_ACCESS_CHANGED', 'Your project access changed. Refresh before continuing.'); throw new IntegrationError(409, 'PROJECT_CONNECTION_CHANGED', uncertain ? 'The project connection changed after the provider received this action. Reconcile the previous connection.' : 'The project connection changed. Reload this project before continuing.', uncertain); }
 }
 async function providerJson(response: Response, signal: AbortSignal, allowEmpty = false): Promise<any> {
   const body = await readResponseText(response, { maxBytes: 8 * 1024 * 1024, signal, preserveBOM: true });
@@ -45,7 +45,7 @@ async function providerJson(response: Response, signal: AbortSignal, allowEmpty 
 export async function providerRequest(url: string | URL, options: RequestInit = {}, provider = 'Zernio', assertMapping?: MappingCheck, observeReceipt?: (result: ProviderRecord) => void): Promise<ProviderRecord> {
   const target = new URL(url);
   if (target.protocol !== 'https:' || !['zernio.com', 'www.googleapis.com', 'oauth2.googleapis.com', 'googleads.googleapis.com', 'login.microsoftonline.com', 'clientcenter.api.bingads.microsoft.com', 'campaign.api.bingads.microsoft.com', 'reporting.api.bingads.microsoft.com', 'api.twilio.com', 'api.cloudflare.com'].includes(target.hostname)) fail(500, 'INVALID_PROVIDER', 'The provider endpoint is invalid.');
-  checkMapping(assertMapping);
+  await checkMapping(assertMapping);
   const signal = AbortSignal.timeout(['/api/v1/ads/create', '/api/v1/ads/boost'].includes(target.pathname) ? 180000 : 20000);
   let response: Response;
   try { response = await fetch(target, { ...options, redirect: 'error', signal }); }
@@ -55,7 +55,7 @@ export async function providerRequest(url: string | URL, options: RequestInit = 
     let providerCode: string | number | undefined; const privateReply: { privateReplyConsumed?: boolean; privateReplyOutcome?: string } = {};
     if (target.hostname === 'zernio.com' && response.status === 404 && (options.method || 'GET') === 'GET' && /^\/api\/v1\/commerce\/products\/[^/]+$/.test(target.pathname)) {
       try { const result = await providerJson(response, signal); if (result && typeof result === 'object' && !Array.isArray(result) && ['product_not_found', 'account_not_found'].includes(result.code)) providerCode = result.code; } catch { /* An unreadable or unrecognized absence never proves deletion. */ }
-      checkMapping(assertMapping);
+      await checkMapping(assertMapping);
     }
     if (target.hostname === 'zernio.com' && /^\/api\/v1\/inbox\/comments\/[^/]+\/[^/]+\/private-reply$/.test(target.pathname)) {
       try {
@@ -68,7 +68,7 @@ export async function providerRequest(url: string | URL, options: RequestInit = 
     if (target.hostname === 'api.twilio.com') { try { const result = await providerJson(response, signal); if (Number.isSafeInteger(result?.code) && result.code >= 10000 && result.code <= 99999) providerCode = result.code; } catch { /* Preserve the sanitized rejection when the error body is unreadable. */ } }
     throw Object.assign(new IntegrationError(status, response.status === 429 ? 'PROVIDER_RATE_LIMIT' : 'PROVIDER_REJECTED', `${provider} ${response.status === 429 ? 'rate limit reached. Try again later.' : 'could not complete this request. Check the connection and request details.'}`, (response.status >= 500 || [408, 409].includes(response.status)) && options.method && options.method !== 'GET'), { providerStatus: response.status, ...privateReply, ...(providerCode === undefined ? {} : { providerCode }) });
   }
-  if (response.status === 204) { checkMapping(assertMapping, options.method && options.method !== 'GET'); return {}; }
+  if (response.status === 204) { await checkMapping(assertMapping, options.method && options.method !== 'GET'); return {}; }
   let result: ProviderRecord;
   try {
     result = await providerJson(response, signal, response.status === 200 && target.hostname === 'zernio.com' && ((/^\/api\/v1\/accounts\/[^/]+\/telegram-commands$/.test(target.pathname) && ['PUT', 'DELETE'].includes(options.method!)) || (/^\/api\/v1\/accounts\/[^/]+\/slack-settings$/.test(target.pathname) && options.method === 'PATCH')));
@@ -76,7 +76,7 @@ export async function providerRequest(url: string | URL, options: RequestInit = 
   } catch { throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', `${provider} returned an unreadable response.`, options.method && options.method !== 'GET'); }
   try { observeReceipt?.(result); }
   catch { throw new IntegrationError(502, 'PROVIDER_REFERENCE_NOT_RECORDED', 'The provider response could not be recorded.', options.method && options.method !== 'GET'); }
-  checkMapping(assertMapping, options.method && options.method !== 'GET');
+  await checkMapping(assertMapping, options.method && options.method !== 'GET');
   return result;
 }
 export function zernioClient(key: string, assertMapping?: MappingCheck): ZernioApi {
@@ -129,35 +129,33 @@ export async function operation(context: OperationContext, action: (key: string)
   if (typeof key !== 'string' || !/^[A-Za-z0-9._:-]{8,200}$/.test(key)) fail(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Send a unique Idempotency-Key header for this action.');
   const receiptOnly = url.searchParams.has('check');
   if (receiptOnly && (url.searchParams.getAll('check').length !== 1 || url.searchParams.get('check') !== '1' || [...url.searchParams.keys()].some(name => name !== 'check'))) fail(400, 'INVALID_OUTCOME_CHECK', 'Use the exact retained action to check its outcome.');
-  db.exec(`CREATE TABLE IF NOT EXISTS integration_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, request_key TEXT NOT NULL, request_hash TEXT NOT NULL, status TEXT NOT NULL, response TEXT, http_status INTEGER, created_at TEXT NOT NULL, action_path TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', UNIQUE(project_id, request_key))`);
-  const columns = new Set(db.prepare('PRAGMA table_info(integration_operations)').all().map(column => column.name as string));
-  for (const name of ['action_path', 'run_id', 'resource_key']) if (!columns.has(name)) db.exec(`ALTER TABLE integration_operations ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
-  db.exec('CREATE INDEX IF NOT EXISTS integration_operations_resource ON integration_operations(project_id,resource_key,status)');
-  if (!operation.active.has(db)) operation.active.set(db, new Set());
-  const active = operation.active.get(db)!;
   const hash = createHash('sha256').update(canonical({ method: req.method, path: url.pathname, body })).digest('hex');
-  const existing = db.prepare('SELECT * FROM integration_operations WHERE project_id = ? AND request_key = ?').get(project.id, key) as ProviderRecord | undefined;
-  if (existing) {
-    if (existing.request_hash !== hash) fail(409, 'IDEMPOTENCY_CONFLICT', 'This action key belongs to a different request.');
-    if (existing.status === 'uncertain' || existing.status === 'pending') fail(409, 'OPERATION_UNCERTAIN', 'The provider outcome needs reconciliation. This action cannot be retried automatically.');
-    if (existing.status.startsWith('reviewed-')) return { status: 409, data: { operation: { id: existing.id, status: existing.status }, error: { code: 'OPERATION_REVIEWED', message: 'This action key is closed after an operator review. Reuse of this key cannot send another provider request.' } } };
-    return { status: existing.http_status, data: JSON.parse(existing.response) };
-  }
-  if (receiptOnly) fail(409, 'OPERATION_OUTCOME_UNAVAILABLE', 'No matching local receipt was found. The original action is retained. Review the provider before explicitly preparing a new action.');
-  const blockedHash = db.prepare("SELECT id FROM integration_operations WHERE project_id = ? AND request_hash = ? AND status IN ('pending', 'uncertain', 'reviewed-applied')").get(project.id, hash);
-  // ponytail: one process owns this SQLite connection; use database resource locks before running multiple server processes.
   const resource = resourceKey ? canonical([project.id, resourceKey]) : null;
-
-  const id = randomUUID();
   const known = new Set(['products', 'collections', 'rename', 'price', 'deactivate', 'activate', 'store', 'blogs', 'articles', 'create', 'google-conversions', 'actions', 'goals', 'custom-goals', 'remove', 'contacts', 'fields', 'bulk', 'subscription', 'link', 'unlink', 'set', 'clear', 'recycling', 'posts', 'apply', 'stop', 'review', 'leads', 'forms', 'import', 'archive', 'test-leads', 'whatsapp-templates', 'templates', 'library', 'connections', 'credentials', 'code', 'react', 'unreact', 'thread-control', 'accept','queues', 'preview', 'accounts', 'health', 'reconnect', 'disconnect', 'bluesky-settings', 'telegram-commands', 'slack-settings', 'discord-settings', 'webhook-subscription', 'measurement', 'tags', 'diagnostics', 'ad-accounts', 'admin', 'profile', 'groups','native-google-ads', 'microsoft-ads', 'shopping', 'cpc', 'keywords', 'keyword', 'bidding', 'negatives', 'google', 'planner', 'ideas', 'history', 'targeting', 'search-terms', 'reports', 'report', 'download', 'mapping', 'validate', 'budget', 'integrations', 'social', 'publish', 'schedule', 'cancel-schedule', 'update', 'cancel', 'retry', 'status', 'edit-published', 'update-metadata', 'unpublish', 'ads', 'copy', 'copy-review', 'copy-status', 'create', 'boost', 'ad-status', 'edit', 'adset', 'campaign', 'drive', 'upload', 'calendar', 'events', 'sync', 'connection', 'connect', 'openai-ads', 'ooh', 'bookings', 'submit', 'inbox', 'conversations', 'messages', 'comments', 'private-reply', 'webhook-settings', 'redeliver', 'test', 'thread', 'reviews', 'reply', 'read', 'hide', 'unhide', 'delete', 'like', 'unlike', 'moderate', 'delete-reply']);
   const actionPath = `${req.method} ${url.pathname.replace(/^\/api\/projects\/[^/]+/, '').split('/').map(part => !part || known.has(part) ? part : ':id').join('/')}`;
-  const unresolved = resource && db.prepare("SELECT id,status FROM integration_operations WHERE project_id=? AND status IN ('pending','uncertain') AND (resource_key=? OR resource_key='')").get(project.id, resource);
-  const blocked = blockedHash || unresolved || resource && active.has(resource);
-  // A blocked key is terminal: a later outcome check must never turn into its first provider request.
-  const notSent = blocked ? { status: 409, data: { operation: { id, status: 'failed' }, error: { code: 'OPERATION_NOT_SENT', message: 'No provider request was sent. An earlier action needs review or is still running. Resolve its outcome, then refresh and explicitly review a new action.' } } } : null;
-  db.prepare('INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id, resource_key, response, http_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, project.id, key, hash, notSent ? 'failed' : 'pending', new Date().toISOString(), actionPath, operation.runId, resource || canonical([project.id, null]), notSent ? JSON.stringify(notSent.data) : null, notSent?.status ?? null);
-  if (notSent) return notSent;
-  active.add(id); if (resource) active.add(resource);
+  // Claim the receipt atomically. The key lock makes a parallel retry of the same key see this receipt, and the
+  // resource lock makes a parallel action on the same provider resource see this one pending; neither can send twice.
+  const id = randomUUID();
+  const claim = await db.transaction(async tx => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'operation-key:' + JSON.stringify([project.id, key])}, 0))`);
+    if (resource) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'operation-resource:' + resource}, 0))`);
+    const existing = (await tx.execute(sql`SELECT * FROM integration_operations WHERE project_id = ${project.id} AND request_key = ${key}`)).rows[0] as ProviderRecord | undefined;
+    if (existing) {
+      if (existing.request_hash !== hash) fail(409, 'IDEMPOTENCY_CONFLICT', 'This action key belongs to a different request.');
+      if (existing.status === 'uncertain' || existing.status === 'pending') fail(409, 'OPERATION_UNCERTAIN', 'The provider outcome needs reconciliation. This action cannot be retried automatically.');
+      if (existing.status.startsWith('reviewed-')) return { outcome: { status: 409, data: { operation: { id: existing.id, status: existing.status }, error: { code: 'OPERATION_REVIEWED', message: 'This action key is closed after an operator review. Reuse of this key cannot send another provider request.' } } } };
+      return { outcome: { status: existing.http_status, data: JSON.parse(existing.response) } };
+    }
+    if (receiptOnly) fail(409, 'OPERATION_OUTCOME_UNAVAILABLE', 'No matching local receipt was found. The original action is retained. Review the provider before explicitly preparing a new action.');
+    const blockedHash = (await tx.execute(sql`SELECT id FROM integration_operations WHERE project_id = ${project.id} AND request_hash = ${hash} AND status IN ('pending', 'uncertain', 'reviewed-applied')`)).rowCount;
+    const unresolved = resource && (await tx.execute(sql`SELECT id FROM integration_operations WHERE project_id = ${project.id} AND status IN ('pending','uncertain') AND (resource_key = ${resource} OR resource_key = '')`)).rowCount;
+    // A blocked key is terminal: a later outcome check must never turn into its first provider request.
+    const notSent = blockedHash || unresolved ? { status: 409, data: { operation: { id, status: 'failed' }, error: { code: 'OPERATION_NOT_SENT', message: 'No provider request was sent. An earlier action needs review or is still running. Resolve its outcome, then refresh and explicitly review a new action.' } } } : null;
+    await tx.execute(sql`INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, run_id, resource_key, response, http_status) VALUES (${id}, ${project.id}, ${key}, ${hash}, ${notSent ? 'failed' : 'pending'}, ${new Date().toISOString()}, ${actionPath}, ${operation.runId}, ${resource || canonical([project.id, null])}, ${notSent ? JSON.stringify(notSent.data) : null}, ${notSent?.status ?? null})`);
+    return { outcome: notSent };
+  });
+  if (claim.outcome) return claim.outcome;
+  operation.active.add(id);
   try {
     let outcome: OperationOutcome;
     try { outcome = { status: 200, data: { operation: { id, status: 'complete' }, ...await action(key) } }; }
@@ -165,13 +163,14 @@ export async function operation(context: OperationContext, action: (key: string)
       const uncertain = !(error instanceof IntegrationError) || error.uncertain;
       outcome = { status: uncertain ? 409 : (error as IntegrationError).status, data: { operation: { id, status: uncertain ? 'uncertain' : 'failed' }, error: { code: uncertain ? 'OPERATION_UNCERTAIN' : (error as IntegrationError).code, message: uncertain ? 'The provider outcome needs reconciliation. Check the provider before making another attempt.' : (error as IntegrationError).message } } };
     }
-    const updated = db.prepare("UPDATE integration_operations SET status = ?, response = ?, http_status = ? WHERE id = ? AND status = 'pending'").run(outcome.data.operation.status, JSON.stringify(outcome.data), outcome.status, id);
-    if (!updated.changes) fail(409, 'OPERATION_REVIEWED', 'This action was closed by an operator review. Its review and original receipt were preserved.');
+    const updated = await db.execute(sql`UPDATE integration_operations SET status = ${outcome.data.operation.status}, response = ${JSON.stringify(outcome.data)}, http_status = ${outcome.status} WHERE id = ${id} AND status = 'pending'`);
+    if (!updated.rowCount) fail(409, 'OPERATION_REVIEWED', 'This action was closed by an operator review. Its review and original receipt were preserved.');
     return outcome;
-  } finally { active.delete(id); if (resource) active.delete(resource); }
+  } finally { operation.active.delete(id); }
 }
-// Process-local state: active resource locks per connection and this process's run identity.
-operation.active = new WeakMap<DatabaseSync, Set<string>>();
+// Process-local state: operation ids whose provider call is running in this process, and this process's run identity.
+// Exclusion between requests comes from the pending receipt under the claim locks, not from this set.
+operation.active = new Set<string>();
 operation.runId = randomUUID();
 export function mediaUrl(value: unknown): string {
   let url!: URL;

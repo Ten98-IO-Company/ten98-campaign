@@ -37,7 +37,7 @@ function list(db: DatabaseSync, table: string, projectId: string): ProviderRecor
 function saveBooking(db: DatabaseSync, projectId: string, booking: ProviderRecord) { db.prepare('INSERT INTO project_ooh_bookings VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE project_ooh_bookings.project_id=excluded.project_id').run(booking.id, projectId, JSON.stringify(booking)); return booking; }
 function canRetryCancellation(db: DatabaseSync, projectId: string, booking: ProviderRecord) {
   const id = booking.cancellationOperationId;
-  if (booking.stage !== 'cancellation-requested' || !id || operation.active?.get(db)?.has(id) || !db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operation_reviews'").get()) return false;
+  if (booking.stage !== 'cancellation-requested' || !id || operation.active.has(id) || !db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operation_reviews'").get()) return false;
   return Boolean(db.prepare("SELECT o.id FROM integration_operations o JOIN integration_operation_reviews r ON r.operation_id=o.id AND r.project_id=o.project_id WHERE o.id=? AND o.project_id=? AND o.status='reviewed-not-applied' AND r.resolution='not_applied' AND o.action_path='POST /ooh/bookings/:id/cancel'").get(id, projectId));
 }
 function coordinate(value: unknown, limit: number) { return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= limit ? value : null; }

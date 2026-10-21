@@ -119,7 +119,7 @@ async function discoverMetaCampaigns(context: any, api: any, profileId: any, acc
     if (page >= pages) {
       await advertiser(); const current = await selected();
       if (['_id', 'platform', 'platformUserId', 'platformId', 'isActive', 'needsReconnection'].some(field => (current[field] ?? null) !== (account[field] ?? null))) fail(409, 'ACCOUNT_UNAVAILABLE', 'The Meta connection changed. Refresh before discovering campaigns again.');
-      checkMapping(() => context.assertProjectMapping?.(profileId));
+      await checkMapping(() => context.assertProjectMapping?.(profileId));
       return { accountId, adAccountId, campaigns, complete: true };
     }
   }
@@ -361,7 +361,7 @@ async function campaignPreflight(context: any, api: any, profileId: any, campaig
   if (adSetReference(current.accountId) !== accountId || adSetReference(current.platformAdAccountId) !== adAccountId || expected && !same(expected)) fail(409, 'CAMPAIGN_SCOPE_CHANGED', 'The advertising account changed. Refresh before continuing.');
   const freshAccount = requireAccount(await scopedAccounts(api, profileId), accountId!);
   if (!CREATE_CONNECTIONS[platform]?.includes(freshAccount.platform) || freshAccount.isActive !== true || freshAccount.needsReconnection === true || ['_id', 'platform', 'platformUserId', 'platformId', 'isActive', 'needsReconnection'].some(field => (freshAccount[field] ?? null) !== (account[field] ?? null))) fail(409, 'ACCOUNT_UNAVAILABLE', 'The advertising connection changed. Refresh before continuing.');
-  checkMapping(() => context.assertProjectMapping?.(profileId));
+  await checkMapping(() => context.assertProjectMapping?.(profileId));
   return { ...scope, campaign: current, account: freshAccount, advertiser: advertisers[0] };
 }
 async function adSetPreflight(context: any, api: any, profileId: any, campaignId: any, platform: any, adSetId: any, expected?: any) {
@@ -873,7 +873,7 @@ export async function handleIntegration(context: any) {
       const outcome = await operation(context, async key => {
         const current = await copySnapshot(context, api, profileId, body.campaignId, body.platform);
         if (current.version !== body.version || current.version !== snapshot.version || current.resource !== snapshot.resource) fail(409, 'CAMPAIGN_COPY_REVIEW_CHANGED', 'The campaign or advertising connection changed since your review. Refresh before copying.');
-        checkMapping(() => context.assertProjectMapping?.(profileId));
+        await checkMapping(() => context.assertProjectMapping?.(profileId));
         transaction(db, () => {
           if (!copyState(context, current, profileId).canCopy) fail(409, 'CAMPAIGN_COPY_ALREADY_REPORTED', 'Check the previous copy or resolve its provider outcome before copying again.');
           db.prepare('INSERT INTO zernio_campaign_copy_claims(resource,project_id,request_key) VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(current.resource, project.id, key);
@@ -1293,7 +1293,7 @@ export async function handleIntegration(context: any) {
           editableAd(body, current);
           reviewed = rsaCreativeReview(await api(`/ads/${encodeURIComponent(ad._id)}`, { live: true }), current, profileId);
           outgoing = reviewedRsaPayload(payload, reviewed, body.expectedCreativeVersion, body);
-          checkMapping(() => context.assertProjectMapping?.(profileId));
+          await checkMapping(() => context.assertProjectMapping?.(profileId));
         }
         const result = await api(`/ads/${encodeURIComponent(ad._id)}${path === 'ads/ad-status' ? '/status' : ''}`, {}, outgoing, key, 'PUT');
         if (path === 'ads/ad-status') { if (String(result.configuredStatus || '').toUpperCase() !== body.status.toUpperCase()) throw new IntegrationError(502, 'AD_STATUS_NOT_CONFIRMED', 'The ad switch was not confirmed by the provider.', true); }
