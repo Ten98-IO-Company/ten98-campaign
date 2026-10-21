@@ -179,6 +179,7 @@ test('import-sqlite copies every table with ids, json text, flags, blobs and ins
   assert.deepEqual((await pool.query('SELECT id, sample FROM activity ORDER BY id')).rows, [{ id: 'act-1', sample: true }, { id: 'act-2', sample: false }]);
   assert.deepEqual((await pool.query('SELECT id, archived FROM campaign_links ORDER BY id')).rows, [{ id: 'l1', archived: false }, { id: 'l2', archived: true }]);
   assert.equal((await pool.query('SELECT require_approval FROM project_approval_policy')).rows[0].require_approval, true);
+  assert.equal((await pool.query('SELECT require_ad_approval FROM project_approval_policy')).rows[0].require_ad_approval, true, 'An imported project requiring post approval also requires ad spend approval, as the migration does.');
   assert.deepEqual((await pool.query("SELECT nonce, ciphertext, tag FROM integration_settings WHERE provider = 'zernio'")).rows[0], { nonce: Buffer.from('000102030405060708090a0b', 'hex'), ciphertext: Buffer.from('deadbeef00ff', 'hex'), tag: Buffer.from('0f0e0d0c0b0a09080706050403020100', 'hex') });
   assert.deepEqual((await pool.query('SELECT id, status, response, http_status, action_path, run_id, resource_key FROM integration_operations ORDER BY id')).rows, [
     { id: 'op-1', status: 'complete', response: '{"id":"post-9","status":"scheduled"}', http_status: 201, action_path: '/posts', run_id: 'run-1', resource_key: 'post:r1' },

@@ -254,6 +254,8 @@ export async function importSqlite(pool: pg.Pool, file: string): Promise<ImportS
       }
 
       for (const current of plans) await verify(client, source, current);
+      // Migration 0007 copies post approval into ad spend approval for existing rows; an import arrives after it, so copy here too.
+      await client.query('UPDATE project_approval_policy SET require_ad_approval = require_approval');
       if ((await client.query('SELECT claimed FROM installation WHERE id = 1')).rows[0]?.claimed !== summary.claimed) throw new ImportError('Verification failed for installation. The import was rolled back.');
       await client.query('COMMIT');
       return summary;
