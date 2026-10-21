@@ -2,13 +2,13 @@ import { randomBytes, scrypt, timingSafeEqual, createHmac, createHash, randomUUI
 import { promisify } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BlockList, isIP } from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sql } from 'drizzle-orm';
+import { parseTrustedProxies, resolveClientAddress } from '@ten98/runtime';
 import type { Database, Executor } from './database.ts';
 import { joinInvitation, lockInvitation } from './invitations.ts';
 
-export interface AuthConfig { appUrl: string; sessionSecret: string; bootstrapToken?: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[]; trustedProxies?: string[] }
+export interface AuthConfig { appUrl: string; sessionSecret: string; bootstrapToken?: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[]; trustedProxies?: string | string[] }
 export interface PublicUser { id: string; name: string; email: string; isOperator: boolean }
 type UserRow = { id: string; name: string; email: string; password?: string | null; isOperator?: unknown; expiresAt?: number };
 type OidcFlow = { state: string; verifier: string; nonce: string; invite_hash: string | null };
@@ -50,26 +50,6 @@ async function verify(password: string, encoded: string | null | undefined): Pro
 export function cookies(req: IncomingMessage): Record<string, string> {
   return Object.fromEntries((req.headers.cookie || '').split(';').map(part => part.trim().split(/=(.*)/s)).filter(part => part[0]).map(([key, value]) => [key, value || '']));
 }
-// Addresses compare and key in one form: IPv6 compressed and lowercased, IPv4-mapped IPv6 as IPv4; anything else is undefined.
-function canonicalAddress(value: string): string | undefined {
-  const version = value.includes('%') ? 0 : isIP(value);
-  if (version !== 6) return version ? value : undefined;
-  const address = new URL(`http://[${value}]`).hostname.slice(1, -1), mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(address);
-  if (!mapped) return address;
-  const [high, low] = [parseInt(mapped[1], 16), parseInt(mapped[2], 16)];
-  return [high >> 8, high & 255, low >> 8, low & 255].join('.');
-}
-const family = (address: string) => isIP(address) === 4 ? 'ipv4' : 'ipv6';
-/** Parses TRUSTED_PROXIES entries (IP addresses or CIDR ranges); an invalid entry stops startup. */
-export function trustedProxyList(entries: string[] = []): BlockList {
-  const list = new BlockList();
-  for (const entry of entries) {
-    const [value = '', bits, extra] = entry.split('/'), address = canonicalAddress(value), maximum = address && family(address) === 'ipv4' ? 32 : 128;
-    if (!address || extra !== undefined || (bits !== undefined && !(/^\d{1,3}$/.test(bits) && Number(bits) <= maximum))) throw new Error(`TRUSTED_PROXIES entry "${entry}" is not an IP address or CIDR range.`);
-    if (bits === undefined) list.addAddress(address, family(address)); else list.addSubnet(address, Number(bits), family(address));
-  }
-  return list;
-}
 const first = async <T>(query: Promise<{ rows: unknown[] }>): Promise<T | undefined> => (await query).rows[0] as T | undefined;
 // Lock order (issue #25): installation → workspaces → invitations → advisory (email:, oidc:) → users row.
 export const advisoryLock = (tx: Executor, key: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
@@ -81,17 +61,11 @@ export const memberRole = async (executor: Executor, workspaceId: string, userId
 type OpenIdClient = typeof import('openid-client');
 // The OIDC client loader is injectable so tests can exercise the real flow without an identity provider.
 export function createAuth(db: Database, config: AuthConfig, { openidClient = () => import('openid-client') }: { openidClient?: () => Promise<OpenIdClient> } = {}) {
-  const digest = (value: string) => createHmac('sha256', config.sessionSecret).update(value).digest('hex'), proxies = trustedProxyList(config.trustedProxies);
-  const trusted = (address: string) => Boolean(canonicalAddress(address)) && proxies.check(address, family(address));
-  // X-Forwarded-For counts only when the socket peer is a trusted proxy. Walking from the right, the first hop that is not
-  // a trusted proxy is the client; a malformed hop is not trusted either, so the walk stops there.
-  function clientAddress(req: IncomingMessage): string {
-    const peer = req.socket?.remoteAddress || '', header = req.headers?.['x-forwarded-for'];
-    let client = canonicalAddress(peer) || peer;
-    if (!trusted(client) || !header) return client;
-    for (const hop of String(header).split(',').reverse()) { client = canonicalAddress(hop.trim()) || hop.trim().slice(0, 100); if (!trusted(client)) break; }
-    return client;
-  }
+  const digest = (value: string) => createHmac('sha256', config.sessionSecret).update(value).digest('hex');
+  const proxies = (() => { try { return parseTrustedProxies([config.trustedProxies ?? ''].flat().join(',')); } catch { throw new Error('TRUSTED_PROXIES must be a comma-separated list of IP addresses or CIDR ranges.'); } })();
+  // The shared resolver ignores X-Forwarded-For unless the peer is a trusted proxy. It returns null when the address is
+  // unknown (an invalid peer, or a missing, malformed or all-trusted chain behind a trusted proxy); those share one bucket.
+  const clientAddress = (req: IncomingMessage): string => resolveClientAddress(req.socket?.remoteAddress, req.headers?.['x-forwarded-for'] as string | undefined, proxies) ?? 'unknown';
   // Cookies are shared across ports; include the configured origin so local instances can coexist.
   const scope = createHash('sha256').update(new URL(config.appUrl).origin).digest('hex').slice(0, 16), sessionName = 'ten98_session_' + scope, oidcName = 'ten98_oidc_' + scope, inviteName = 'ten98_oidc_invite_' + scope;
   function cookie(name: string, value: string, age = maxAge, path = '/') {

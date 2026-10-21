@@ -8,33 +8,26 @@ function response() {
   return { headers: {}, status: null, setHeader(name, value) { this.headers[name] = value; }, getHeader(name) { return this.headers[name]; }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers); }, end() {} };
 }
 const request = (peer, forwarded) => ({ headers: forwarded === undefined ? {} : { 'x-forwarded-for': forwarded }, socket: { remoteAddress: peer } });
-const addressOf = (trustedProxies, peer, forwarded) => createAuth(undefined, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies }).clientAddress(request(peer, forwarded));
 
-test('an untrusted peer is keyed on its socket address whatever X-Forwarded-For says', () => {
-  assert.equal(addressOf([], '198.51.100.50', '203.0.113.7'), '198.51.100.50');
-  assert.equal(addressOf(['10.0.0.2'], '198.51.100.50', '203.0.113.7, 10.0.0.2'), '198.51.100.50');
-  assert.equal(addressOf(['10.0.0.2'], '::ffff:198.51.100.50', '203.0.113.7'), '198.51.100.50');
+// Address parsing belongs to @ten98/runtime; these cases check which per-client bucket a failed sign-in charges.
+test('sign-in limits charge the client a trusted proxy reports and otherwise the socket peer', pg, async t => {
+  const { db } = await testDatabase(t), auth = createAuth(db, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies: '10.0.0.0/8, 2001:db8:ffff::/48' });
+  const cases = [
+    ['198.51.100.50', '203.0.113.7', 'ip:198.51.100.50'], // untrusted peer: the header is ignored
+    ['::ffff:198.51.100.51', '203.0.113.7', 'ip:198.51.100.51'], // IPv4-mapped peer keyed as IPv4
+    ['10.0.0.2', '192.0.2.1, 203.0.113.7', 'ip:203.0.113.7'], // trusted peer: right-most untrusted hop
+    ['10.1.2.3', '192.0.2.200, 203.0.113.8, 2001:db8:ffff::5, 10.9.9.9', 'ip:203.0.113.8'], // chain of trusted proxies
+    ['::ffff:10.0.0.2', '2001:DB8::9', 'ip:2001:db8::9'],
+    ['10.0.0.2', undefined, 'ip:unknown'], ['10.0.0.2', '203.0.113.9, not-an-address', 'ip:unknown'], // unknown clients share one conservative bucket
+  ];
+  for (const [peer, forwarded] of cases) await assert.rejects(auth.login(request(peer, forwarded), response(), { email: 'nobody@example.test', password: 'wrong password guess' }), error => error.status === 401);
+  const { rows } = await db.$client.query("SELECT key FROM login_limits WHERE key LIKE 'ip:%' ORDER BY key");
+  assert.deepEqual(rows.map(row => row.key), [...new Set(cases.map(([, , key]) => key))].sort());
 });
 
-test('a trusted peer is keyed on the right-most hop that is not a trusted proxy', () => {
-  assert.equal(addressOf(['10.0.0.2'], '10.0.0.2', '192.0.2.1, 203.0.113.7'), '203.0.113.7');
-  assert.equal(addressOf(['10.0.0.2'], '::ffff:10.0.0.2', '203.0.113.7'), '203.0.113.7', 'an IPv4-mapped peer matches its IPv4 entry');
-  assert.equal(addressOf(['10.0.0.2'], '10.0.0.2', '::FFFF:203.0.113.7'), '203.0.113.7');
-  assert.equal(addressOf(['10.0.0.2'], '10.0.0.2', '2001:DB8:0:0::1'), '2001:db8::1');
-  assert.equal(addressOf(['10.0.0.2'], '10.0.0.2'), '10.0.0.2', 'without the header the proxy is the client');
-  assert.equal(addressOf(['10.0.0.2'], '10.0.0.2', '203.0.113.7, not-an-address'), 'not-an-address', 'a malformed hop is untrusted and ends the walk');
-});
-
-test('a chain of trusted proxies is walked to the first untrusted hop', () => {
-  const chain = ['10.0.0.0/8', '2001:db8:ffff::/48', '192.0.2.10'];
-  assert.equal(addressOf(chain, '10.1.2.3', '192.0.2.200, 203.0.113.7, 2001:db8:ffff::5, 192.0.2.10, 10.9.9.9'), '203.0.113.7');
-  assert.equal(addressOf(chain, '2001:db8:ffff::1', '198.51.100.9, ::ffff:10.0.0.4'), '198.51.100.9');
-  assert.equal(addressOf(chain, '10.1.2.3', '10.0.0.5, 192.0.2.10'), '10.0.0.5', 'when every hop is trusted the left-most one is the client');
-});
-
-test('TRUSTED_PROXIES accepts only IP addresses and CIDR ranges', () => {
-  for (const entry of ['proxy.example', '10.0.0.0/33', '2001:db8::/129', '10.0.0.0/8/1', '10.0.0.0/', '256.0.0.1']) {
-    assert.throws(() => addressOf([entry], '10.0.0.2'), /TRUSTED_PROXIES/, entry);
+test('an invalid TRUSTED_PROXIES setting stops startup', () => {
+  for (const value of ['proxy.example', '10.0.0.0/33', ['10.0.0.2', '2001:db8::/129']]) {
+    assert.throws(() => createAuth(undefined, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies: value }), /TRUSTED_PROXIES must be/);
   }
 });
 
