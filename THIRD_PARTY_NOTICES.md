@@ -9,7 +9,14 @@ The following projects inform the advertising and unified inbox (messages, comme
 - [zernio-dev/ads-dashboard](https://github.com/zernio-dev/ads-dashboard) at commit [4386edd](https://github.com/zernio-dev/ads-dashboard/tree/4386eddc9a35c2b93c392d8523d148b0f95a62eb), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/ads-dashboard/blob/4386eddc9a35c2b93c392d8523d148b0f95a62eb/LICENSE).
 - [zernio-dev/unified-inbox](https://github.com/zernio-dev/unified-inbox) at commit [3d62be1](https://github.com/zernio-dev/unified-inbox/tree/3d62be18923df6fa22fa01037a2057254553206d), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/unified-inbox/blob/3d62be18923df6fa22fa01037a2057254553206d/LICENSE).
 
-Their source files are not copied into this application. Zernio calls are implemented independently with Node.js built-ins and `fetch`. The workspace/project hierarchy and purple visual palette also follow the local ten98-monitor project (MIT, copyright 2026 ten98-monitor contributors), inspected as reference rather than copied source.
+The publishing/scheduling and content-approval workflows are compared against these references (ten98-code-system#29):
+
+- [zernio-dev/latewiz](https://github.com/zernio-dev/latewiz) at commit [28dd018](https://github.com/zernio-dev/latewiz/tree/28dd018063b955769de11f881acd03bb64c61cd4), copyright (c) 2024 Late — [MIT license](https://github.com/zernio-dev/latewiz/blob/28dd018063b955769de11f881acd03bb64c61cd4/LICENSE). Publishing and scheduling. It needs a Zernio key to run, so Campaign compares it at source level only.
+- [pendpost/pendpost](https://github.com/pendpost/pendpost) at commit [42ac77b](https://github.com/pendpost/pendpost/tree/42ac77b29f7720a912bdce1507b16a2a56fca74f), copyright (c) 2026 Nomadik GmbH — [MIT license](https://github.com/pendpost/pendpost/blob/42ac77b29f7720a912bdce1507b16a2a56fca74f/LICENSE). Content approvals. Disclosed differences, not parity:
+  - Editing an approved post keeps it approved in pendpost. It sets `editedSinceApproval`, and the scheduler skips flagged posts. Campaign instead invalidates the review when a post or its referenced asset changes.
+  - Pendpost's "no self-approval" rule compares a caller-supplied string, so it is a user-experience rule, not authorization. Campaign keeps its own server-side role and membership authorization for reviews.
+
+Campaign ports selected behaviour from these references, adapted to its own stack. Each ported helper carries a provenance comment naming the reference, commit and file; whole source files are not copied. Zernio calls are implemented independently with Node.js built-ins and `fetch`. The workspace/project hierarchy and purple visual palette also follow the local ten98-monitor project (MIT, copyright 2026 ten98-monitor contributors), inspected as reference rather than copied source.
 
 ## Direct dependencies
 
