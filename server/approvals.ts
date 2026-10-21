@@ -130,9 +130,12 @@ export async function handleApprovals(context: ApprovalContext) {
       await db.transaction(async (tx: Executor) => {
         await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
         const currentReview = await latest(tx, project.id, post.id);
-        if (fingerprint(await postSnapshot(context, await localPost(context, post.id))) !== hash || currentReview?.id !== review?.id || currentReview?.status !== review?.status) fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before requesting review.');
+        // A review that changed for this same content (for example a parallel request just opened it) is the answer;
+        // a review of other content, or a changed post, means the request is stale.
+        const sameContent = currentReview?.fingerprint === hash && currentReview?.status !== 'rejected';
+        if (fingerprint(await postSnapshot(context, await localPost(context, post.id))) !== hash || ((currentReview?.id !== review?.id || currentReview?.status !== review?.status) && !sameContent)) fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before requesting review.');
         if ((await policy(tx, project.id)).requireApproval) approvalAccounts(post);
-        if (!review || review.fingerprint !== hash || review.status === 'rejected') {
+        if (!currentReview || currentReview.fingerprint !== hash || currentReview.status === 'rejected') {
           await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${randomUUID()}, ${project.id}, ${post.id}, ${hash}, ${JSON.stringify(snapshot)}, 'pending', ${user.id}, ${new Date().toISOString()})`);
           await store.activity(project.id, `Content review requested by ${user.name || user.id}.`);
         }

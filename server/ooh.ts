@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
+import { sql } from 'drizzle-orm';
+import { advisoryLock } from './auth.ts';
 import { IntegrationError, fail, operation, reportObject as object } from './provider-core.ts';
 import type { OperationContext, ProviderRecord } from './provider-core.ts';
-import { transaction } from './database.ts';
+import { createStore, type Database, type Executor } from './database.ts';
 
 // Contracts: https://docs.broadsign.com/broadsign-platform/en/Documentation_Gteed_Campaigns/g-c-new-campaign-rest.html
 // API-key auth: https://docs.broadsign.com/broadsign-platform/en/Documentation_Settings/settings-api-keys.html
@@ -24,43 +25,70 @@ function dates(body: ProviderRecord) {
   for (const key of ['startDate', 'endDate']) if (typeof body[key] !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(body[key]) || !Number.isFinite(Date.parse(body[key])) || new Date(body[key]).toISOString().slice(0, 10) !== body[key]) fail(400, 'INVALID_OOH_DATES', 'Use valid start and end dates.');
   if (body.endDate < body.startDate || Date.parse(body.endDate) - Date.parse(body.startDate) >= 366 * 86400000) fail(400, 'INVALID_OOH_DATES', 'Use an ordered booking period of at most 366 days, including both dates.');
 }
-function initialize(db: DatabaseSync) {
-  db.exec(`CREATE TABLE IF NOT EXISTS project_ooh_connections(project_id TEXT PRIMARY KEY,provider TEXT NOT NULL,external_scope_id TEXT NOT NULL,config_public TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS project_ooh_inventory(project_id TEXT NOT NULL,screen_id INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(project_id,screen_id));
-    CREATE TABLE IF NOT EXISTS project_ooh_bookings(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,data TEXT NOT NULL);`);
+const PENDING_CANCELLATION = ['cancellation-requested', 'cancelling', 'cancelled'];
+type StoredBooking = { data: ProviderRecord; snapshot: string };
+async function mapping(db: Executor, projectId: string): Promise<ProviderRecord | null> {
+  const row = (await db.execute(sql`SELECT provider, external_scope_id, config_public FROM project_ooh_connections WHERE project_id=${projectId}`)).rows[0] as ProviderRecord | undefined;
+  return row ? { provider: row.provider, domainId: Number(row.external_scope_id), ...row.config_public } : null;
 }
-function mapping(db: DatabaseSync, projectId: string): ProviderRecord | null {
-  const row = db.prepare('SELECT * FROM project_ooh_connections WHERE project_id=?').get(projectId) as ProviderRecord | undefined;
-  return row ? { provider: row.provider, domainId: Number(row.external_scope_id), ...JSON.parse(row.config_public) } : null;
+async function list(db: Executor, table: string, projectId: string): Promise<ProviderRecord[]> {
+  return (await db.execute(sql`SELECT data FROM ${sql.identifier(table)} WHERE project_id=${projectId} ORDER BY seq DESC`)).rows.map((row: any) => row.data);
 }
-function list(db: DatabaseSync, table: string, projectId: string): ProviderRecord[] { return db.prepare(`SELECT data FROM ${table} WHERE project_id=? ORDER BY rowid DESC`).all(projectId).map((row: any) => JSON.parse(row.data)); }
-function saveBooking(db: DatabaseSync, projectId: string, booking: ProviderRecord) { db.prepare('INSERT INTO project_ooh_bookings VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE project_ooh_bookings.project_id=excluded.project_id').run(booking.id, projectId, JSON.stringify(booking)); return booking; }
-function canRetryCancellation(db: DatabaseSync, projectId: string, booking: ProviderRecord) {
+async function hasBookings(db: Executor, projectId: string) { return Boolean((await db.execute(sql`SELECT 1 FROM project_ooh_bookings WHERE project_id=${projectId} LIMIT 1`)).rowCount); }
+// `data` is json, which keeps its stored text verbatim, so `snapshot` is exactly the JSON.stringify that wrote it.
+async function storedBooking(db: Executor, projectId: string, id: string, forUpdate = false): Promise<StoredBooking | undefined> {
+  return (await db.execute(sql`SELECT data, data::text AS snapshot FROM project_ooh_bookings WHERE id=${id} AND project_id=${projectId}${forUpdate ? sql` FOR UPDATE` : sql``}`)).rows[0] as StoredBooking | undefined;
+}
+async function saveBooking(db: Executor, projectId: string, booking: ProviderRecord) {
+  await db.execute(sql`INSERT INTO project_ooh_bookings (id, project_id, data) VALUES (${booking.id}, ${projectId}, ${JSON.stringify(booking)}) ON CONFLICT (id) DO UPDATE SET data=excluded.data WHERE project_ooh_bookings.project_id=excluded.project_id`);
+  return booking;
+}
+// Compare-and-save in one statement: the write lands only while the stored booking is still `snapshot`, so a stage
+// change committed by a concurrent request (such as a cancellation claimed during a provider call) is never overwritten.
+async function replaceBooking(db: Executor, projectId: string, booking: ProviderRecord, snapshot: string) {
+  return Boolean((await db.execute(sql`UPDATE project_ooh_bookings SET data=${JSON.stringify(booking)} WHERE id=${booking.id} AND project_id=${projectId} AND data::text=${snapshot}`)).rowCount);
+}
+// Applies provider-confirmed fields to the latest stored booking under its row lock, so a receipt or stage that another
+// request committed while this one awaited Broadsign is kept rather than replaced by this request's older copy.
+function patchBooking(db: Database, projectId: string, id: string, patch: (latest: ProviderRecord) => ProviderRecord | void) {
+  return db.transaction(async tx => {
+    const latest = (await storedBooking(tx, projectId, id, true) as StoredBooking).data;
+    const changes = patch(latest);
+    if (changes) { Object.assign(latest, changes); await saveBooking(tx, projectId, latest); }
+    return latest;
+  });
+}
+async function canRetryCancellation(db: Executor, projectId: string, booking: ProviderRecord) {
   const id = booking.cancellationOperationId;
-  if (booking.stage !== 'cancellation-requested' || !id || operation.active.has(id) || !db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operation_reviews'").get()) return false;
-  return Boolean(db.prepare("SELECT o.id FROM integration_operations o JOIN integration_operation_reviews r ON r.operation_id=o.id AND r.project_id=o.project_id WHERE o.id=? AND o.project_id=? AND o.status='reviewed-not-applied' AND r.resolution='not_applied' AND o.action_path='POST /ooh/bookings/:id/cancel'").get(id, projectId));
+  if (booking.stage !== 'cancellation-requested' || !id || operation.active.has(id)) return false;
+  return Boolean((await db.execute(sql`SELECT o.id FROM integration_operations o JOIN integration_operation_reviews r ON r.operation_id=o.id AND r.project_id=o.project_id WHERE o.id=${id} AND o.project_id=${projectId} AND o.status='reviewed-not-applied' AND r.resolution='not_applied' AND o.action_path='POST /ooh/bookings/:id/cancel'`)).rowCount);
 }
 function coordinate(value: unknown, limit: number) { return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= limit ? value : null; }
 function screenView(screen: ProviderRecord) {
   return { id: Number(screen.id), name: String(screen.name || screen.id).slice(0, 250), location: String(screen.address || '').slice(0, 500), resolution: String(screen.resolution || '').slice(0, 80), latitude: coordinate(screen.lat, 90), longitude: coordinate(screen.long, 180), syncedAt: new Date().toISOString() };
 }
-function placementRecords({ db, store, project }: ProviderRecord, booking: ProviderRecord) {
-  const inventory = list(db, 'project_ooh_inventory', project.id), existing = store.list(project.id, 'placements');
-  return transaction(db, () => booking.screenIds.map((screenId: number) => {
-    const screen = inventory.find((item: ProviderRecord) => item.id === screenId);
-    if (!screen) fail(409, 'OOH_SYNC_REQUIRED', 'Sync the approved provider locations before updating the campaign plan.');
-    const data = { source: 'broadsign', externalId: String(booking.proposalId), proposalItemId: booking.lineItemId, screenId, bookingId: booking.id, providerStatus: Number(booking.providerStatus), name: `${booking.name} · ${screen.name}`.slice(0, 250), type: booking.inventoryType === 'digital' ? 'digital' : 'billboard', location: screen.location || screen.name, locationSource: 'provider', latitude: screen.latitude, longitude: screen.longitude, startDate: booking.startDate, endDate: booking.endDate, status: PLACEMENT_STATUS[booking.providerStatus], cost: null, currency: null };
-    // Broadsign reports the quote for the whole line item, not a per-screen cost or currency breakdown.
-    const previous = existing.find((item: ProviderRecord) => item.source === 'broadsign' && item.externalId === data.externalId && item.proposalItemId === data.proposalItemId && item.screenId === screenId);
-    return previous ? store.update(project.id, 'placements', previous.id, data) : store.create(project.id, 'placements', data);
-  }));
+function placementRecords({ db, project }: ProviderRecord, booking: ProviderRecord): Promise<ProviderRecord[]> {
+  return (db as Database).transaction(async tx => {
+    // Parallel reports or cancellations of one project would each miss the other's new placement and create duplicates.
+    await advisoryLock(tx, 'ooh:placements:' + project.id);
+    const store = createStore(tx), inventory = await list(tx, 'project_ooh_inventory', project.id), existing = await store.list(project.id, 'placements'), records: ProviderRecord[] = [];
+    for (const screenId of booking.screenIds as number[]) {
+      const screen = inventory.find((item: ProviderRecord) => item.id === screenId);
+      if (!screen) fail(409, 'OOH_SYNC_REQUIRED', 'Sync the approved provider locations before updating the campaign plan.');
+      const data = { source: 'broadsign', externalId: String(booking.proposalId), proposalItemId: booking.lineItemId, screenId, bookingId: booking.id, providerStatus: Number(booking.providerStatus), name: `${booking.name} · ${screen.name}`.slice(0, 250), type: booking.inventoryType === 'digital' ? 'digital' : 'billboard', location: screen.location || screen.name, locationSource: 'provider', latitude: screen.latitude, longitude: screen.longitude, startDate: booking.startDate, endDate: booking.endDate, status: PLACEMENT_STATUS[booking.providerStatus], cost: null, currency: null };
+      // Broadsign reports the quote for the whole line item, not a per-screen cost or currency breakdown.
+      const previous = existing.find((item: ProviderRecord) => item.source === 'broadsign' && item.externalId === data.externalId && item.proposalItemId === data.proposalItemId && item.screenId === screenId);
+      records.push((previous ? await store.update(project.id, 'placements', previous.id, data) : await store.create(project.id, 'placements', data)) as ProviderRecord);
+    }
+    return records;
+  });
 }
 async function provider(env: ProviderRecord, path: string, body?: any, method = body === undefined ? 'GET' : 'POST'): Promise<ProviderRecord> {
   const base: string | undefined = HOSTS[env.BROADSIGN_ENVIRONMENT || 'sandbox'];
   if (!base) fail(503, 'INVALID_OOH_ENVIRONMENT', 'BROADSIGN_ENVIRONMENT must be sandbox or production.');
   if (!env.BROADSIGN_API_KEY) fail(503, 'OOH_NOT_CONFIGURED', 'Configure the Broadsign API key on the server.');
   const writing = method !== 'GET';
-  try { env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed. Refresh this project before continuing.'); }
+  try { await env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed. Refresh this project before continuing.'); }
   let response;
   try { response = await fetch(`${base}${path}`, { method, headers: { Authorization: `Broadsign ${env.BROADSIGN_API_KEY}`, Accept: 'application/json', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'error', signal: AbortSignal.timeout(20000) }); }
   catch { fail(502, 'OOH_UNAVAILABLE', 'Broadsign did not confirm the request.', writing); }
@@ -69,14 +97,14 @@ async function provider(env: ProviderRecord, path: string, body?: any, method = 
     // Booking and cancellation acknowledge success without a JSON contract; scoped GETs verify their actual state.
     if (method === 'POST' && (path.endsWith('/cancel') || path.startsWith('/api/v1/proposal/book_proposal/'))) {
       await response.body?.cancel();
-      try { env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', true); }
+      try { await env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', true); }
       return {};
     }
     const reader = response.body!.getReader(), chunks: Uint8Array[] = []; let size = 0;
     for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > 2 * 1024 * 1024) { await reader.cancel(); throw new Error(); } chunks.push(next.value); }
     const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (!object(result)) fail(502, 'INVALID_OOH_RESPONSE', 'Broadsign returned an invalid response.', writing);
-    try { env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', writing); }
+    try { await env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', writing); }
     return result;
   } catch (error: any) { if (error instanceof IntegrationError) throw error; fail(502, 'INVALID_OOH_RESPONSE', 'Broadsign returned an unreadable response.', writing); }
 }
@@ -90,8 +118,8 @@ async function verifyDomain(env: ProviderRecord, connection: ProviderRecord) {
   const current = result?.user || result;
   if (Number(current?.domain_id) !== connection.domainId) fail(403, 'OOH_DOMAIN_MISMATCH', 'The Broadsign account does not match this project’s approved domain.');
 }
-function requireMapping(db: DatabaseSync, projectId: string, env: ProviderRecord) {
-  const connection = mapping(db, projectId);
+async function requireMapping(db: Executor, projectId: string, env: ProviderRecord) {
+  const connection = await mapping(db, projectId);
   if (!connection) fail(409, 'OOH_NOT_MAPPED', 'An instance operator must map Broadsign inventory to this project.');
   if (connection.environment !== (env.BROADSIGN_ENVIRONMENT || 'sandbox')) fail(409, 'OOH_ENVIRONMENT_CHANGED', 'The server environment changed. An operator must approve a new mapping.');
   return connection;
@@ -126,34 +154,44 @@ export async function handleOoh(context: OperationContext & { body: ProviderReco
   if (!url.pathname.startsWith(prefix)) return false;
   const path = url.pathname.slice(prefix.length), env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) };
   try {
-    initialize(db);
     if (!['owner', 'admin', 'editor', 'viewer'].includes(role)) fail(403, 'OOH_PROJECT_ACCESS_REQUIRED', 'Project membership is required.');
     if (!['GET', 'POST'].includes(req.method!)) fail(405, 'METHOD_NOT_ALLOWED', 'This OOH action does not support that method.');
     if (req.method === 'POST' && !WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this action.');
     if (path === 'status' && req.method === 'GET') {
-      send(200, { configured: Boolean(env.BROADSIGN_API_KEY), environment: env.BROADSIGN_ENVIRONMENT || 'sandbox', connection: mapping(db, project.id), rawProofOfPlay: false }); return true;
+      send(200, { configured: Boolean(env.BROADSIGN_API_KEY), environment: env.BROADSIGN_ENVIRONMENT || 'sandbox', connection: await mapping(db, project.id), rawProofOfPlay: false }); return true;
     }
     if (path === 'connection' && req.method === 'POST') {
       if (!user?.isOperator || !['owner', 'admin'].includes(role)) fail(403, 'OPERATOR_PERMISSION_REQUIRED', 'Only an instance operator who administers this workspace can map provider inventory.');
       fields(body, ['domainId', 'clientId', 'clientName', 'screenIds']);
       if (!Array.isArray(body.screenIds) || !body.screenIds.length || body.screenIds.length > 100) fail(400, 'INVALID_OOH_SCREENS', 'Approve between 1 and 100 screen IDs.');
       const connection = { provider: 'broadsign', domainId: integer(body.domainId, 'domain ID'), clientId: text(body.clientId, 'client ID'), clientName: text(body.clientName, 'client name'), screenIds: [...new Set(body.screenIds.map((id: unknown) => integer(id, 'screen ID')))].sort((a, b) => a - b), environment: env.BROADSIGN_ENVIRONMENT || 'sandbox' };
-      const current = mapping(db, project.id);
-      if (current && JSON.stringify(current) !== JSON.stringify(connection) && list(db, 'project_ooh_bookings', project.id).length) fail(409, 'OOH_MAPPING_IN_USE', 'Bookings exist for this mapping. Use a new project for a different provider scope.');
+      const current = await mapping(db, project.id);
+      if (current && JSON.stringify(current) !== JSON.stringify(connection) && await hasBookings(db, project.id)) fail(409, 'OOH_MAPPING_IN_USE', 'Bookings exist for this mapping. Use a new project for a different provider scope.');
       await verifyDomain(env, connection);
-      if (list(db, 'project_ooh_bookings', project.id).length && JSON.stringify(mapping(db, project.id)) !== JSON.stringify(connection)) fail(409, 'OOH_MAPPING_IN_USE', 'A booking was started for this mapping. Use a new project for a different provider scope.');
-      for (const other of db.prepare('SELECT project_id,external_scope_id,config_public FROM project_ooh_connections WHERE project_id<>?').all(project.id) as ProviderRecord[]) {
-        const approved = JSON.parse(other.config_public);
-        if (Number(other.external_scope_id) === connection.domainId && approved.environment === connection.environment && approved.screenIds.some((id: number) => connection.screenIds.includes(id))) fail(409, 'OOH_SCREEN_ALREADY_MAPPED', 'A screen is already assigned to another project.');
-      }
-      if (JSON.stringify(mapping(db, project.id)) === JSON.stringify(connection)) { send(200, { connection }); return true; }
-      db.prepare('INSERT INTO project_ooh_connections VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET external_scope_id=excluded.external_scope_id,config_public=excluded.config_public').run(project.id, 'broadsign', String(connection.domainId), JSON.stringify({ clientId: connection.clientId, clientName: connection.clientName, screenIds: connection.screenIds, environment: connection.environment }));
-      db.prepare('DELETE FROM project_ooh_inventory WHERE project_id=?').run(project.id);
-      store?.activity(project.id, 'Approved Broadsign project inventory mapping.'); send(200, { connection }); return true;
+      const changed = await db.transaction(async tx => {
+        // The global lock serialises mappings across projects, so two projects cannot both pass the shared-screen check.
+        // The project lock orders this remap against booking drafts and inventory syncs, which re-check the mapping under it.
+        await advisoryLock(tx, 'ooh:connections'); await advisoryLock(tx, 'ooh:mapping:' + project.id);
+        if (await hasBookings(tx, project.id) && JSON.stringify(await mapping(tx, project.id)) !== JSON.stringify(connection)) fail(409, 'OOH_MAPPING_IN_USE', 'A booking was started for this mapping. Use a new project for a different provider scope.');
+        for (const other of (await tx.execute(sql`SELECT project_id, external_scope_id, config_public FROM project_ooh_connections WHERE project_id<>${project.id}`)).rows as ProviderRecord[]) {
+          const approved = other.config_public;
+          if (Number(other.external_scope_id) === connection.domainId && approved.environment === connection.environment && approved.screenIds.some((id: number) => connection.screenIds.includes(id))) fail(409, 'OOH_SCREEN_ALREADY_MAPPED', 'A screen is already assigned to another project.');
+        }
+        if (JSON.stringify(await mapping(tx, project.id)) === JSON.stringify(connection)) return false;
+        await tx.execute(sql`INSERT INTO project_ooh_connections (project_id, provider, external_scope_id, config_public) VALUES (${project.id}, 'broadsign', ${String(connection.domainId)}, ${JSON.stringify({ clientId: connection.clientId, clientName: connection.clientName, screenIds: connection.screenIds, environment: connection.environment })}) ON CONFLICT (project_id) DO UPDATE SET external_scope_id=excluded.external_scope_id, config_public=excluded.config_public`);
+        await tx.execute(sql`DELETE FROM project_ooh_inventory WHERE project_id=${project.id}`);
+        return true;
+      });
+      if (changed) await store?.activity(project.id, 'Approved Broadsign project inventory mapping.');
+      send(200, { connection }); return true;
     }
-    if (path === 'inventory' && req.method === 'GET') { send(200, { inventory: list(db, 'project_ooh_inventory', project.id) }); return true; }
-    if (path === 'bookings' && req.method === 'GET') { send(200, { bookings: list(db, 'project_ooh_bookings', project.id).map((booking: ProviderRecord) => ({ ...booking, canRetryCancellation: canRetryCancellation(db, project.id, booking) })) }); return true; }
-    const connection = requireMapping(db, project.id, env);
+    if (path === 'inventory' && req.method === 'GET') { send(200, { inventory: await list(db, 'project_ooh_inventory', project.id) }); return true; }
+    if (path === 'bookings' && req.method === 'GET') {
+      const bookings: ProviderRecord[] = [];
+      for (const booking of await list(db, 'project_ooh_bookings', project.id)) bookings.push({ ...booking, canRetryCancellation: await canRetryCancellation(db, project.id, booking) });
+      send(200, { bookings }); return true;
+    }
+    const connection = await requireMapping(db, project.id, env);
     if (path === 'sync' && req.method === 'POST') {
       fields(body, []); await verifyDomain(env, connection); const inventory: ProviderRecord[] = [];
       // ponytail: up to 100 approved screens per project; add a paged background sync for larger networks.
@@ -162,11 +200,14 @@ export async function handleOoh(context: OperationContext & { body: ProviderReco
         if (Number(screen?.id) !== id || (screen.domain_id !== undefined && Number(screen.domain_id) !== connection.domainId)) fail(502, 'INVALID_OOH_RESPONSE', 'Broadsign returned a screen outside the approved inventory.');
         inventory.push(screenView(screen));
       }
-      if (JSON.stringify(mapping(db, project.id)) !== JSON.stringify(connection)) fail(409, 'OOH_MAPPING_CHANGED', 'The approved inventory mapping changed during sync. Reload before continuing.');
-      db.exec('BEGIN IMMEDIATE');
-      try { db.prepare('DELETE FROM project_ooh_inventory WHERE project_id=?').run(project.id); for (const screen of inventory) db.prepare('INSERT INTO project_ooh_inventory VALUES(?,?,?)').run(project.id, screen.id, JSON.stringify(screen)); db.exec('COMMIT'); }
-      catch (error) { db.exec('ROLLBACK'); throw error; }
-      store?.activity(project.id, `Synced ${inventory.length} approved Broadsign screens.`); send(200, { inventory }); return true;
+      await db.transaction(async tx => {
+        // The mapping lock keeps a concurrent remap, which clears inventory, from interleaving with this replacement.
+        await advisoryLock(tx, 'ooh:mapping:' + project.id);
+        if (JSON.stringify(await mapping(tx, project.id)) !== JSON.stringify(connection)) fail(409, 'OOH_MAPPING_CHANGED', 'The approved inventory mapping changed during sync. Reload before continuing.');
+        await tx.execute(sql`DELETE FROM project_ooh_inventory WHERE project_id=${project.id}`);
+        for (const screen of inventory) await tx.execute(sql`INSERT INTO project_ooh_inventory (project_id, screen_id, data) VALUES (${project.id}, ${screen.id}, ${JSON.stringify(screen)})`);
+      });
+      await store?.activity(project.id, `Synced ${inventory.length} approved Broadsign screens.`); send(200, { inventory }); return true;
     }
     if (path === 'bookings' && req.method === 'POST') {
       fields(body, ['name', 'screenIds', 'startDate', 'endDate', 'slotDuration', 'price', 'inventoryType']); dates(body);
@@ -174,101 +215,116 @@ export async function handleOoh(context: OperationContext & { body: ProviderReco
       if (!['digital', 'static'].includes(body.inventoryType)) fail(400, 'INVALID_OOH_TYPE', 'Choose digital screens or static faces.');
       if (!Array.isArray(body.screenIds) || !body.screenIds.length || body.screenIds.length > 100 || body.screenIds.some((id: number) => !connection.screenIds.includes(id))) fail(403, 'OOH_SCREEN_OUTSIDE_PROJECT', 'Choose approved project screens.');
       const screenIds = [...new Set(body.screenIds)];
-      const inventory = list(db, 'project_ooh_inventory', project.id);
+      const inventory = await list(db, 'project_ooh_inventory', project.id);
       if (screenIds.some((id: number) => !inventory.some((screen: ProviderRecord) => screen.id === id))) fail(409, 'OOH_SYNC_REQUIRED', 'Sync the approved inventory before drafting a booking.');
       if (!Number.isSafeInteger(body.slotDuration) || body.slotDuration < 1 || body.slotDuration > 120) fail(400, 'INVALID_OOH_DURATION', 'Use an ad duration between 1 and 120 seconds.');
       if (typeof body.price !== 'number' || !Number.isFinite(body.price) || body.price < 0 || body.price > 1000000000) fail(400, 'INVALID_OOH_PRICE', 'Enter a nonnegative quote in the provider account’s currency.');
       await verifyDomain(env, connection);
+      // The resource key serialises identical drafts sent under different keys, so only one can create a paid proposal.
       const result = await operation(context, async () => {
-        if (JSON.stringify(mapping(db, project.id)) !== JSON.stringify(connection)) fail(409, 'OOH_MAPPING_CHANGED', 'The approved provider mapping changed. Reload before drafting a booking.');
-        const booking = saveBooking(db, project.id, { id: randomUUID(), name, screenIds, startDate: body.startDate, endDate: body.endDate, slotDuration: body.slotDuration, inventoryType: body.inventoryType, price: body.price, proposalId: null, lineItemId: null, providerStatus: 1, stage: 'creating', createdAt: new Date().toISOString() });
+        const booking = await db.transaction(async tx => {
+          // The mapping lock orders this booking against a concurrent remap, which refuses to change a mapping in use.
+          await advisoryLock(tx, 'ooh:mapping:' + project.id);
+          if (JSON.stringify(await mapping(tx, project.id)) !== JSON.stringify(connection)) fail(409, 'OOH_MAPPING_CHANGED', 'The approved provider mapping changed. Reload before drafting a booking.');
+          return saveBooking(tx, project.id, { id: randomUUID(), name, screenIds, startDate: body.startDate, endDate: body.endDate, slotDuration: body.slotDuration, inventoryType: body.inventoryType, price: body.price, proposalId: null, lineItemId: null, providerStatus: 1, stage: 'creating', createdAt: new Date().toISOString() });
+        });
         let proposal: ProviderRecord;
         try { proposal = await provider(env, '/api/v1/proposal', { name, description: `Campaign manager project ${project.id}`, price: body.price, discount: 0, client_id: connection.clientId, client_name: connection.clientName }); }
-        catch (error) { if (error instanceof IntegrationError && !error.uncertain) db.prepare('DELETE FROM project_ooh_bookings WHERE project_id=? AND id=?').run(project.id, booking.id); throw error; }
+        catch (error) { if (error instanceof IntegrationError && !error.uncertain) await db.execute(sql`DELETE FROM project_ooh_bookings WHERE project_id=${project.id} AND id=${booking.id}`); throw error; }
         if (!Number.isSafeInteger(proposal.id) || proposal.id < 1 || Number(proposal.domain_id) !== connection.domainId || String(proposal.client_id) !== connection.clientId) fail(502, 'INVALID_OOH_RESPONSE', 'The new provider proposal could not be identified within this project.', true);
-        booking.proposalId = proposal.id; booking.stage = 'proposal-created'; saveBooking(db, project.id, booking);
+        booking.proposalId = proposal.id; booking.stage = 'proposal-created'; await saveBooking(db, project.id, booking);
         try {
         const item = await provider(env, '/api/v1/proposal/add_screens', { name, price: body.price, status: 1, screens: screenIds, package_id: null, proposal_id: proposal.id, multiplier: Math.round((Date.parse(body.endDate) - Date.parse(body.startDate)) / 86400000) + 1, start_date: body.startDate, end_date: body.endDate, start_time: '00:00:00', end_time: '23:59:59', flight_duration: 1, flight_type: 0, dow_mask: 127, slot_duration: body.slotDuration, saturation: 1, filters: [], bs_saturation: 1, available_only: false, deployed_only: false, mode: [{ type: 'ppl', values: { bs_saturation: 1, saturation: 1 }, active: true }], inventory_type: body.inventoryType, is_preemptible: false });
         if (!Number.isSafeInteger(item.id) || item.id < 1 || Number(item.proposal_id) !== booking.proposalId || typeof item.price !== 'number' || !Number.isFinite(item.price) || item.price < 0) fail(502, 'INVALID_OOH_RESPONSE', 'The new provider line item or quote could not be identified.', true);
-        booking.lineItemId = item.id; booking.price = item.price; booking.stage = 'draft'; saveBooking(db, project.id, booking);
-        store?.activity(project.id, 'Created a saved OOH proposal in Broadsign.'); return { booking };
+        booking.lineItemId = item.id; booking.price = item.price; booking.stage = 'draft'; await saveBooking(db, project.id, booking);
+        await store?.activity(project.id, 'Created a saved OOH proposal in Broadsign.'); return { booking };
         } catch { fail(409, 'OOH_PARTIAL_DRAFT', 'A provider proposal was created but its line item needs reconciliation in Broadsign. Do not create it again automatically.', true); }
-      }); send(result.status, result.data); return true;
+      }, ['ooh-draft', body]); send(result.status, result.data); return true;
     }
     const route = path.match(/^bookings\/([^/]+)\/(availability|submit|report|cancel)$/);
     if (route) {
-      const row = db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(route[1], project.id) as ProviderRecord | undefined;
+      const row = await storedBooking(db, project.id, route[1]);
       if (!row) fail(404, 'OOH_BOOKING_NOT_FOUND', 'This booking does not belong to this project.');
-      const booking = JSON.parse(row.data);
+      const booking = row.data;
       if (!booking.lineItemId) fail(409, 'OOH_INCOMPLETE_DRAFT', 'This draft was only partly created. Reconcile it in Broadsign before continuing.');
       await verifyDomain(env, connection);
       if (route[2] === 'availability' && req.method === 'GET') {
         const result = await availability(env, connection, booking);
-        if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== row.data) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the availability check. Refresh before continuing.');
-        booking.providerStatus = result.providerStatus; saveBooking(db, project.id, booking);
-        send(200, { ...result, placements: placementRecords(context, booking) }); return true;
+        booking.providerStatus = result.providerStatus;
+        if (!await replaceBooking(db, project.id, booking, row.snapshot)) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the availability check. Refresh before continuing.');
+        send(200, { ...result, placements: await placementRecords(context, booking) }); return true;
       }
       if (route[2] === 'report' && req.method === 'GET') {
         const { proposal, item } = await checkedProposal(env, connection, booking, true);
-        if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== row.data) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the delivery check. Refresh before continuing.');
         const report = { actualImpressions: typeof item.actual_impressions === 'number' && Number.isFinite(item.actual_impressions) && item.actual_impressions >= 0 ? item.actual_impressions : null, actualPlays: typeof item.actual_repetitions === 'number' && Number.isFinite(item.actual_repetitions) && item.actual_repetitions >= 0 ? item.actual_repetitions : null, updatedAt: typeof item.performance_update_tm === 'string' ? item.performance_update_tm.slice(0, 100) : null, rawProofOfPlay: false };
-        Object.assign(booking, { providerStatus: Number(proposal.status), report, ...([12, 14, 15].includes(Number(proposal.status)) ? { stage: Number(proposal.status) === 12 ? 'cancelled' : Number(proposal.status) === 14 ? 'ended' : 'cancelling' } : {}) }); saveBooking(db, project.id, booking); send(200, { booking, report, placements: placementRecords(context, booking) }); return true;
+        Object.assign(booking, { providerStatus: Number(proposal.status), report, ...([12, 14, 15].includes(Number(proposal.status)) ? { stage: Number(proposal.status) === 12 ? 'cancelled' : Number(proposal.status) === 14 ? 'ended' : 'cancelling' } : {}) });
+        if (!await replaceBooking(db, project.id, booking, row.snapshot)) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the delivery check. Refresh before continuing.');
+        send(200, { booking, report, placements: await placementRecords(context, booking) }); return true;
       }
       if (route[2] === 'cancel' && req.method === 'POST') {
         fields(body, ['confirmCancellation']);
         if (body.confirmCancellation !== true) fail(400, 'OOH_CANCELLATION_CONFIRMATION_REQUIRED', 'Confirm cancellation under the media provider’s terms. Refunds and charges are not determined by this app.');
-        const result = await operation(context, async () => {
+        const result = await operation(context, async key => {
           // Re-read inside the durable operation so concurrent requests cannot reuse a stale local stage.
-          const current = JSON.parse((db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id) as ProviderRecord).data);
+          const current = (await storedBooking(db, project.id, booking.id) as StoredBooking).data;
           const { proposal } = await checkedProposal(env, connection, current, true), before = Number(proposal.status);
           if ([12, 15].includes(before)) {
-            Object.assign(current, { providerStatus: before, stage: before === 12 ? 'cancelled' : 'cancelling' }); saveBooking(db, project.id, current);
-            return { booking: current, cancellation: { requested: true, confirmed: before === 12 }, placements: placementRecords(context, current) };
+            const updated = await patchBooking(db, project.id, booking.id, () => ({ providerStatus: before, stage: before === 12 ? 'cancelled' : 'cancelling' }));
+            return { booking: updated, cancellation: { requested: true, confirmed: before === 12 }, placements: await placementRecords(context, updated) };
           }
-          if (['cancellation-requested', 'cancelling', 'cancelled'].includes(current.stage) && !canRetryCancellation(db, project.id, current)) fail(409, 'OOH_CANCELLATION_PENDING', 'A cancellation was already requested. Refresh the delivery report or review Broadsign before taking another action.');
+          if (PENDING_CANCELLATION.includes(current.stage) && !await canRetryCancellation(db, project.id, current)) fail(409, 'OOH_CANCELLATION_PENDING', 'A cancellation was already requested. Refresh the delivery report or review Broadsign before taking another action.');
           if (![3, 9, 10, 11].includes(before)) fail(409, 'OOH_NOT_CANCELLABLE', 'Only submitted, booked, or live proposals can be cancelled here. Review saved or ended proposals in Broadsign.');
-          const latest = JSON.parse((db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id) as ProviderRecord).data);
-          if (['cancellation-requested', 'cancelling', 'cancelled'].includes(latest.stage) && !canRetryCancellation(db, project.id, latest)) fail(409, 'OOH_CANCELLATION_PENDING', 'A cancellation was already requested. Refresh its provider status before continuing.');
-          // This synchronous receipt blocks another local cancellation while the provider request is in flight.
-          const previousCancellation = { stage: current.stage, cancellationOperationId: current.cancellationOperationId, cancellationRequestedAt: current.cancellationRequestedAt };
-          const receipt = db.prepare("SELECT id FROM integration_operations WHERE project_id=? AND request_key=? AND status='pending'").get(project.id, req.headers['idempotency-key'] as string) as ProviderRecord | undefined;
-          if (!receipt) fail(409, 'OOH_CANCELLATION_RECEIPT_REQUIRED', 'A durable cancellation receipt is required before contacting Broadsign.');
-          current.providerStatus = before; current.stage = 'cancellation-requested'; current.cancellationOperationId = receipt.id; current.cancellationRequestedAt = new Date().toISOString(); saveBooking(db, project.id, current);
-          try { await provider(env, `/api/v1/proposal/proposal_item/${current.lineItemId}/cancel`, undefined, 'POST'); }
+          // Claim the cancellation under the booking's row lock: two parallel cancellations both pass the check above,
+          // but only the first to lock sees no pending request and records its receipt; the other then fails before Broadsign.
+          const { claimed, previousCancellation } = await db.transaction(async tx => {
+            const latest = (await storedBooking(tx, project.id, booking.id, true) as StoredBooking).data;
+            if (PENDING_CANCELLATION.includes(latest.stage) && !await canRetryCancellation(tx, project.id, latest)) fail(409, 'OOH_CANCELLATION_PENDING', 'A cancellation was already requested. Refresh its provider status before continuing.');
+            const previousCancellation = { stage: latest.stage, cancellationOperationId: latest.cancellationOperationId, cancellationRequestedAt: latest.cancellationRequestedAt };
+            const receipt = (await tx.execute(sql`SELECT id FROM integration_operations WHERE project_id=${project.id} AND request_key=${key} AND status='pending'`)).rows[0] as ProviderRecord | undefined;
+            if (!receipt) fail(409, 'OOH_CANCELLATION_RECEIPT_REQUIRED', 'A durable cancellation receipt is required before contacting Broadsign.');
+            latest.providerStatus = before; latest.stage = 'cancellation-requested'; latest.cancellationOperationId = receipt.id; latest.cancellationRequestedAt = new Date().toISOString();
+            return { claimed: await saveBooking(tx, project.id, latest), previousCancellation };
+          });
+          try { await provider(env, `/api/v1/proposal/proposal_item/${claimed.lineItemId}/cancel`, undefined, 'POST'); }
           catch (error) {
-            if (error instanceof IntegrationError && !error.uncertain) { Object.assign(current, previousCancellation); saveBooking(db, project.id, current); }
+            // A definitive rejection restores the previous stage and receipt, unless another request already replaced this claim.
+            if (error instanceof IntegrationError && !error.uncertain) await patchBooking(db, project.id, booking.id, latest => latest.cancellationOperationId === claimed.cancellationOperationId ? previousCancellation : undefined);
             throw error;
           }
           let checked: { proposal: ProviderRecord; item: ProviderRecord };
-          try { checked = await checkedProposal(env, connection, current, true); }
+          try { checked = await checkedProposal(env, connection, claimed, true); }
           catch { fail(409, 'OOH_CANCELLATION_UNCONFIRMED', 'Broadsign accepted the cancellation request, but its latest state could not be read. Reconcile it before retrying.', true); }
           const actual = Number(checked.proposal.status);
-          Object.assign(current, { providerStatus: actual, stage: actual === 12 ? 'cancelled' : actual === 14 ? 'ended' : actual === 15 ? 'cancelling' : 'cancellation-requested' }); saveBooking(db, project.id, current);
-          const placements = placementRecords(context, current);
-          store?.activity(project.id, actual === 12 ? 'Broadsign confirmed an OOH cancellation.' : 'Requested an OOH cancellation; awaiting Broadsign confirmation.');
-          return { booking: current, cancellation: { requested: true, confirmed: actual === 12 }, placements };
+          const updated = await patchBooking(db, project.id, booking.id, () => ({ providerStatus: actual, stage: actual === 12 ? 'cancelled' : actual === 14 ? 'ended' : actual === 15 ? 'cancelling' : 'cancellation-requested' }));
+          const placements = await placementRecords(context, updated);
+          await store?.activity(project.id, actual === 12 ? 'Broadsign confirmed an OOH cancellation.' : 'Requested an OOH cancellation; awaiting Broadsign confirmation.');
+          return { booking: updated, cancellation: { requested: true, confirmed: actual === 12 }, placements };
         }); send(result.status, result.data); return true;
       }
       if (route[2] === 'submit' && req.method === 'POST') {
         fields(body, ['confirmBooking']);
         if (body.confirmBooking !== true) fail(400, 'OOH_CONFIRMATION_REQUIRED', 'Explicitly confirm this paid booking before submission.');
+        // The resource key serialises submissions of this booking under different keys: a parallel one sees this receipt
+        // pending and is not sent, so Broadsign receives one booking request.
         const result = await operation(context, async () => {
           if (booking.stage !== 'draft') fail(409, 'OOH_ALREADY_SUBMITTED', 'This proposal has already been submitted or requires reconciliation.');
           const available = await availability(env, connection, booking);
           if (available.availability !== 'available') fail(409, 'OOH_UNAVAILABLE', 'The requested inventory is not available for booking.');
-          if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== row.data) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the availability check. Refresh before continuing.');
+          if ((await storedBooking(db, project.id, booking.id))?.snapshot !== row.snapshot) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the availability check. Refresh before continuing.');
           await provider(env, `/api/v1/proposal/book_proposal/${booking.proposalId}`, {});
-          if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== row.data) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during submission. Review the provider outcome before continuing.', true);
-          booking.stage = 'submitted'; saveBooking(db, project.id, booking);
+          booking.stage = 'submitted';
+          if (!await replaceBooking(db, project.id, booking, row.snapshot)) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during submission. Review the provider outcome before continuing.', true);
           const submittedSnapshot = JSON.stringify(booking);
           let proposal;
           try { ({ proposal } = await checkedProposal(env, connection, booking, true)); }
           catch { fail(409, 'OOH_STATUS_UNCONFIRMED', 'The provider accepted a booking request but its final status needs reconciliation in Broadsign.', true); }
-          if (db.prepare('SELECT data FROM project_ooh_bookings WHERE id=? AND project_id=?').get(booking.id, project.id)?.data !== submittedSnapshot) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the delivery check. Review the provider outcome before continuing.', true);
+          if ((await storedBooking(db, project.id, booking.id))?.snapshot !== submittedSnapshot) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the delivery check. Review the provider outcome before continuing.', true);
           if (![3, 9, 10, 11].includes(Number(proposal.status))) fail(502, 'OOH_STATUS_UNCONFIRMED', 'Broadsign did not confirm booking submission. Reconcile the proposal before retrying.', true);
-          booking.providerStatus = Number(proposal.status); saveBooking(db, project.id, booking); const placements = placementRecords(context, booking);
-          store?.activity(project.id, 'Submitted an OOH proposal for Broadsign booking.'); return { booking, placements };
-        }); send(result.status, result.data); return true;
+          booking.providerStatus = Number(proposal.status);
+          if (!await replaceBooking(db, project.id, booking, submittedSnapshot)) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the delivery check. Review the provider outcome before continuing.', true);
+          const placements = await placementRecords(context, booking);
+          await store?.activity(project.id, 'Submitted an OOH proposal for Broadsign booking.'); return { booking, placements };
+        }, ['ooh-submit', booking.id]); send(result.status, result.data); return true;
       }
     }
     fail(404, 'OOH_ACTION_NOT_FOUND', 'This OOH action was not found.');

@@ -110,6 +110,8 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   }
   return {
     user, establish, limit,
+    /** The stored key of this request's session cookie, or '' when it carries none, for guards that join on sessions. */
+    sessionKey(req: IncomingMessage): string { const token = sessionToken(req); return token && /^[\w-]{43}$/.test(token) ? digest(token) : ''; },
     requireSetupProof(token: unknown): void {
       if (typeof token !== 'string' || !token.length || token.length > 512 || !config.bootstrapToken || !timingSafeEqual(Buffer.from(digest(token)), Buffer.from(digest(config.bootstrapToken)))) throw new HttpError(403, 'The setup token is not valid. Obtain it from the application host.');
     },
