@@ -99,8 +99,9 @@ test('YouTube metadata malformed, scoped-away and lost receipts stay uncertain a
 const management = await readFile(new URL('../src/PostManagement.tsx', import.meta.url), 'utf8');
 const submitSource = stripTypeScriptTypes(management.slice(management.indexOf('async function submit('), management.indexOf("  if (typeof videoId !== 'string'")));
 function metadataUi() {
-  const state = { review: null, busy: false, uncertain: false, error: '', disabled: false, calls: [], accepted: [], pending: { current: false }, mounted: { current: true }, scope: { current: 'metadata-view' }, identity: 'metadata-view', postId: 'local', id: 'channel', videoId: 'aaaaaaaaaaa' };
+  const state = { review: null, busy: false, uncertain: false, error: '', disabled: false, calls: [], accepted: [], pending: { current: false }, held: [], cleared: 0, mounted: { current: true }, scope: { current: 'metadata-view' }, identity: 'metadata-view', postId: 'local', id: 'channel', videoId: 'aaaaaaaaaaa' };
   state.request = async (path, body) => { state.calls.push({ path, body }); return { operation: { status: 'complete' }, post: { id: state.postId }, metadataAcceptance: { postId: state.postId, accountId: state.id, videoId: state.videoId, requested: Object.fromEntries(['title', 'tags'].filter(key => Object.hasOwn(body, key)).map(key => [key, body[key]])), updatedFields: ['title', 'tags'].filter(key => Object.hasOwn(body, key)) } }; };
+  state.editReview = { hold: (error, proposal) => ['PUBLISHING_APPROVAL_REQUIRED', 'PUBLISHING_APPROVAL_STALE'].includes(error.code) && state.held.push({ code: error.code, proposal }) > 0, clear: () => { state.cleared++; } };
   state.submit = async fields => {
     const context = { ...state, normalizePostTags, FormData: class { constructor(form) { this.form = form; } has(key) { return Object.hasOwn(this.form, key); } get(key) { return this.form[key] ?? null; } }, setReview: value => { state.review = value; }, setBusy: value => { state.busy = value; }, setUncertain: value => { state.uncertain = value; }, setError: value => { state.error = value; }, setAcceptance: value => { state.acceptance = value; }, onAccepted: value => state.accepted.push(value) };
     return new Function(...Object.keys(context), `return (${submitSource});`)(...Object.values(context))({ preventDefault() {}, currentTarget: fields });
@@ -122,7 +123,23 @@ test('YouTube UI requires fresh field and video review, preserves omission, and 
   const pending = metadataUi(); let finish;
   const acceptedRequest = pending.request; pending.request = (...args) => new Promise(resolve => { finish = async () => resolve(await acceptedRequest(...args)); });
   await pending.submit(title); const first = pending.submit(title); await pending.submit(title); assert.equal(pending.pending.current, true); pending.scope.current = 'closed'; await finish(); await first; assert.equal(pending.calls.length, 1); assert.equal(pending.accepted.length, 0);
-  assert.match(management, /onInput=\{\(\) => setReview\(null\)\}/); assert.match(management, /Accepted by Zernio; live values unverified/);
+  assert.match(management, /onInput=\{\(\) => \{ setReview\(null\); editReview\.clear\(\); \}\}/); assert.match(management, /Accepted by Zernio; live values unverified/);
+});
+
+test('YouTube UI holds an unapproved metadata change for review of exactly the values it sends', async () => {
+  for (const [status, code] of [[403, 'PUBLISHING_APPROVAL_REQUIRED'], [409, 'PUBLISHING_APPROVAL_STALE']]) {
+    const f = metadataUi(), fields = { changeTitle: 'on', title: 'Reviewed', changeTags: 'on', tags: 'launch\nvideo' }, approved = f.request;
+    f.request = async (path, body) => { f.calls.push({ path, body }); throw Object.assign(new Error('Approval needed.'), { status, code }); };
+    await f.submit(fields); await f.submit(fields);
+    assert.equal(f.calls.length, 1); assert.deepEqual(f.held, [{ code, proposal: { accountId: 'channel', videoId: 'aaaaaaaaaaa', title: 'Reviewed', tags: ['launch', 'video'] } }]);
+    assert.equal(f.error, '', 'the review step replaces the generic error'); assert.equal(f.uncertain, false); assert.equal(f.review, null);
+    // Once approved, the same values go out through the unchanged confirmed send.
+    f.request = approved;
+    await f.submit(fields); await f.submit(fields);
+    assert.deepEqual(f.calls[1], { path: 'social/update-metadata', body: { postId: 'local', accountId: 'channel', videoId: 'aaaaaaaaaaa', confirmEdit: true, title: 'Reviewed', tags: ['launch', 'video'] } }); assert.equal(f.accepted.length, 1); assert.equal(f.cleared, 1);
+  }
+  const other = metadataUi(); other.request = async () => { throw Object.assign(new Error('Owner or administrator required.'), { status: 403, code: 'APPROVED_PROVIDER_EDIT_RESTRICTED' }); };
+  await other.submit({ changeTitle: 'on', title: 'T' }); await other.submit({ changeTitle: 'on', title: 'T' }); assert.equal(other.error, 'Owner or administrator required.'); assert.deepEqual(other.held, []);
 });
 
 test('YouTube UI malformed acceptance scope does not clear the draft and requires recovery', async () => {
