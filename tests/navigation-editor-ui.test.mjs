@@ -289,14 +289,12 @@ test('inbox-only drafts register native unload protection, show an accessible co
   const ui = app('https://campaign.example/?view=inbox&project=a'); ui.inboxDraftChanged(true);
   const cleanup = ui.warnOnUnload(); let prevented = 0; const event = { preventDefault() { prevented++; } }; ui.unload(event);
   assert.equal(prevented, 1); assert.equal(event.returnValue, ''); cleanup(); ui.unload(event); assert.equal(prevented, 1);
-  let open = false; const discardDialogRef = { current: { get open() { return open; }, showModal() { open = true; }, close() { open = false; } } };
-  const start = source.indexOf('    const dialog = discardDialogRef.current;'), end = source.indexOf('\n  }, [discardPrompt]);', start);
-  const showPrompt = prompt => new Function('discardDialogRef', 'discardPrompt', source.slice(start, end))(discardDialogRef, prompt);
-  ui.signOut(); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []); showPrompt(ui.discardPrompt); assert.equal(open, true);
-  ui.keepEditing(); showPrompt(ui.discardPrompt); assert.equal(open, false); assert.equal(ui.inboxDirty, true);
+  ui.signOut(); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []);
+  ui.keepEditing(); assert.equal(ui.discardPrompt, false); assert.equal(ui.inboxDirty, true);
   ui.api = async path => { ui.calls.push(path); return { user: null }; }; ui.signOut(); ui.discardChanges(); await tick();
   assert.deepEqual(ui.calls, ['/auth/logout', '/session']); assert.equal(ui.inboxDirty, false); assert.equal(ui.state, null);
-  assert.match(source, /<dialog ref=\{discardDialogRef\}[^>]*role="alertdialog"[^>]*aria-labelledby="discard-title"[^>]*aria-describedby="discard-description"/);
+  // The prompt is the library's accessible ConfirmDialog, opened by discardPrompt and cancelled into keepEditing.
+  assert.match(source, /<ConfirmDialog open=\{discardPrompt\} onOpenChange=\{open => \{ if \(!open\) keepEditing\(\); \}\} danger title="Discard unsaved changes\?"[^>]*onConfirm=\{discardChanges\}/);
   assert.match(source, /onDraftChange=\{inboxDraftChanged\}/); assert.match(source, /Discard and switch/);
 });
 
