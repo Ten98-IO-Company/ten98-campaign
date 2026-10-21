@@ -13,7 +13,7 @@ test('Campaign imports shared suite components and styles instead of defining du
   const [main, composer, details, styles] = await Promise.all(['main.tsx', 'AdComposer.tsx', 'AdDetails.tsx', 'styles.css'].map(source));
   assert.match(main, /AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppStat as Stat, AppSelect.*from '@ten98\/ui\/app'/);
   assert.doesNotMatch(main, /^function (?:Icon|Empty|Stat|Field)\(/m);
-  assert.match(composer, /import \{ AppField as Field \} from '@ten98\/ui\/app'/);
+  assert.match(composer, /import \{ AppField \} from '@ten98\/ui\/app'/);
   assert.doesNotMatch(composer, /^function Field\(/m);
   assert.match(details, /import \{ AppField \} from '@ten98\/ui\/app'/);
   assert.match(styles, /@import '@ten98\/ui\/app-tokens\.css';/);
