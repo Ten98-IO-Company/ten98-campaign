@@ -9,7 +9,7 @@ const when = (value: string) => new Date(value).toLocaleString();
 const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 function link(value?: string) { try { const url = new URL(value || ''); return url.protocol === 'https:' && !url.username && !url.password ? url.href : ''; } catch { return ''; } }
 // Reviewed text keeps its line breaks without native pre-wrap markup.
-const lines = (text: unknown) => String(text ?? '').split('\n').map((line, index) => <Text key={index}>{line || ' '}</Text>);
+const lines = (text: unknown) => <Text preserveWhitespace>{String(text ?? '')}</Text>;
 const options = (platform: string, values: Record<string, unknown>) => Object.entries(values).map(([key, value]) => ({ key, term: PLATFORM_RULES[platform]?.options.find((option: any) => option.key === key)?.label || key, description: value && typeof value === 'object' ? <CodeBlock code={JSON.stringify(value, null, 2)} label={key} wrap/> : <Stack gap={0}>{lines(typeof value === 'boolean' ? value ? 'On' : 'Off' : String(value))}</Stack> }));
 
 export default function ContentApprovals({ projectId, role, request, onChanged }: Props) {

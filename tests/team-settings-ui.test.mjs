@@ -41,4 +41,5 @@ test('administrators only invite and manage editors and viewers', () => {
   const html = renderToStaticMarkup(tree);
   assert.match(html, /aria-label="Role for Eli Editor"/); assert.doesNotMatch(html, /aria-label="Role for Olive Owner"/);
   assert.doesNotMatch(html, /<option value="owner"/);
+  assert.equal(tree.props.roleLabels.owner, 'Owner'); assert.match(html, />Owner</); assert.doesNotMatch(html, />owner</, 'Read-only rows show the label, not the raw role.');
 });

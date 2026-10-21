@@ -4,7 +4,7 @@ import { Alert, Badge, Button, Card, ConfirmDialog, DescriptionList, Disclosure,
 type Props = { projectId: string; canWrite: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onSaved: (collection: string) => void; onOpenAdDraft?: (draft: Record<string, any>) => void };
 const label: Record<string, string> = { campaigns: 'Campaign draft', posts: 'Social post draft', placements: 'OOH booking draft', ads: 'Ad creative draft' };
 // Model and draft text keeps its line breaks without native pre-wrap markup.
-const lines = (text: unknown) => String(text).split('\n').map((line, index) => <Text key={index}>{line || '\u00a0'}</Text>);
+const lines = (text: unknown) => <Text preserveWhitespace>{String(text)}</Text>;
 export default function CampaignAgent({ projectId, canWrite, request, onSaved, onOpenAdDraft }: Props) {
   const [status, setStatus] = useState<any>(null), [runs, setRuns] = useState<any[]>([]), [message, setMessage] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [confirming, setConfirming] = useState<any>(null);
   const key = useRef<{ input: string; value: string } | null>(null), active = useRef(true), path = `/projects/${projectId}/agent`;
