@@ -1061,11 +1061,11 @@ export async function handleIntegration(context: any) {
         if (current.status === 'scheduled' && Date.parse(payload.scheduledFor) <= Date.now()) fail(409, 'SCHEDULE_PASSED', 'This scheduled time has passed. Choose a new time before scheduling the post.');
         await assertTikTokCreatorRestrictions(api, payload, Object.values(postRestrictions(post, payload.platforms.map((item: any) => item.platform), assets, payload.platforms).variants).flatMap(variant => variant.mediaItems));
         assertPostRestrictions(await providerPostValidation(api, payload));
-        context.assertPublishingApproval?.(publishingPost);
+        await context.assertPublishingApproval?.(publishingPost);
         if ([payload.scheduledFor, ...(payload.platforms || []).map((target: any) => target.scheduledFor)].filter(Boolean).some(time => Date.parse(time) <= Date.now())) fail(409, 'SCHEDULE_PASSED', 'A scheduled time passed during the provider checks. Choose future times before submitting.');
         if (post.queueId) await applyQueueIntent(api, profileId, post, payload);
         validateRemotePayload(payload, await postAssets(store, project.id, post), post);
-        context.assertPublishingApproval?.(publishingPost);
+        await context.assertPublishingApproval?.(publishingPost);
         const result = await api('/posts', {}, payload, key);
         assertPostResult(result.post, profileId, { targets: payload.platforms });
         assertQueueReceipt(result.post, post, profileId);
@@ -1106,7 +1106,7 @@ export async function handleIntegration(context: any) {
           return { post: updated, provider: { id: post.externalId, status: 'cancelled', deleted: true } };
         }
         if (path === 'social/update') {
-          context.assertProviderPostEdit?.();
+          await context.assertProviderPostEdit?.();
           if (!['draft', 'scheduled', 'failed', 'cancelled'].includes(remote.status) || remote.platforms.some((item: any) => ['published', 'publishing'].includes(item.status))) fail(409, 'POST_NOT_EDITABLE', 'Only unpublished posts can be rescheduled or changed here.');
           const content = body.content === undefined ? remote.content ?? post.content ?? '' : body.content;
           if (typeof content !== 'string' || content.length > 100000) fail(400, 'INVALID_CONTENT', 'Use a caption of at most 100,000 characters.');
@@ -1143,7 +1143,7 @@ export async function handleIntegration(context: any) {
             await assertTikTokCreatorRestrictions(api, checkPayload, Object.values(postRestrictions(changed, changed.platforms, assets, checkPayload.platforms, providerOwnedMediaUrls).variants).flatMap(variant => variant.mediaItems));
             const validation = await providerPostValidation(api, { ...checkPayload, scheduledFor: scheduledAt, timezone: 'UTC' }, { assets, providerOwnedMediaUrls }); assertPostRestrictions(validation); validationWarnings = [...new Set(validation.warnings.map(item => item.message))];
           }
-          context.assertProviderPostEdit?.();
+          await context.assertProviderPostEdit?.();
           if (body.mode === 'scheduled' && [payload.scheduledFor, ...checkPayload.platforms.map((target: any) => target.scheduledFor)].filter(Boolean).some(time => Date.parse(time) <= Date.now())) fail(409, 'SCHEDULE_PASSED', 'A scheduled time passed during the provider checks. Choose future times before submitting.');
           if (body.mode === 'scheduled') validateRemotePayload(checkPayload, await postAssets(store, project.id, changed), changed, providerPostMediaUrls(await scopedPost(api, profileId, post, true)));
           const result = await api(endpoint, {}, payload, key, 'PUT');
@@ -1178,7 +1178,7 @@ export async function handleIntegration(context: any) {
           if (retryState(latest) !== retryState(remote)) fail(409, 'POST_CHANGED', 'The provider post changed during the retry checks. Refresh its status and review every account before retrying.');
           const latestAccounts = await scopedAccounts(api, profileId);
           if (failed.some((item: any) => requireAccount(latestAccounts, String(item.accountId?._id || item.accountId)).isActive === false)) fail(409, 'ACCOUNT_UNAVAILABLE', 'A failed publishing account needs reconnection before retrying.');
-          context.assertPublishingApproval?.(model);
+          await context.assertPublishingApproval?.(model);
           validateRemotePayload(payload, currentAssets, model, providerPostMediaUrls(latest));
           const result = await api(endpoint + '/retry', {}, {}, key);
           assertPostResult(result.post, profileId, { id: post.externalId, targets: remote.platforms });
@@ -1200,7 +1200,7 @@ export async function handleIntegration(context: any) {
         if (matches.length > 1) fail(409, 'AMBIGUOUS_POST_DESTINATIONS', 'This account has multiple destinations on the post. Manage each copy in Zernio until it can be identified separately here.');
         if (!target || target.status !== 'published') fail(403, 'POST_ACCOUNT_NOT_PUBLISHED', 'Choose a published copy belonging to this project.');
         if (path === 'social/update-metadata') {
-          context.assertProviderPostEdit?.();
+          await context.assertProviderPostEdit?.();
           if (target.platform !== 'youtube') fail(422, 'POST_ACTION_UNSUPPORTED', 'Published metadata changes are available for YouTube videos.');
           if (body.confirmEdit !== true) fail(400, 'POST_ACTION_CONFIRMATION_REQUIRED', 'Review and confirm the selected YouTube metadata changes.');
           const videoId = identifier(body.videoId, 'YouTube video ID'), metadata: any = {};
@@ -1220,7 +1220,7 @@ export async function handleIntegration(context: any) {
             if (!['published', 'partial'].includes(snapshot.status) || selected.length !== 1 || selected[0].platform !== 'youtube' || selected[0].status !== 'published' || selected[0].removedFromPlatformAt || selected[0].platformPostId !== videoId) throw new IntegrationError(409, 'YOUTUBE_COPY_CHANGED', 'The selected published YouTube video could not be confirmed. Refresh and review its identity before continuing.', uncertain);
           };
           assertCopy(remote);
-          const fresh = await scopedPost(api, profileId, post, true, accountId); assertCopy(fresh); await assertRecyclingSeedEditable(fresh, context); context.assertProviderPostEdit?.();
+          const fresh = await scopedPost(api, profileId, post, true, accountId); assertCopy(fresh); await assertRecyclingSeedEditable(fresh, context); await context.assertProviderPostEdit?.();
           if (canonical(store.get(project.id, 'posts', post.id)) !== canonical(post)) fail(409, 'POST_CHANGED', 'The local post changed. Refresh and review it before continuing.');
           const result = await api(endpoint + '/update-metadata', {}, { platform: 'youtube', accountId, ...metadata }, key);
           if (!reportObject(result) || result.success !== true || !Array.isArray(result.updatedFields) || result.updatedFields.length !== requestedFields.length || new Set(result.updatedFields).size !== requestedFields.length || requestedFields.some(field => !result.updatedFields.includes(field)) || [['platform', 'youtube'], ['accountId', accountId], ['postId', post.externalId], ['videoId', videoId]].some(([field, expected]) => Object.hasOwn(result, field) && result[field] !== expected)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the selected YouTube metadata fields and scope. Review the provider outcome before another attempt.', true);
@@ -1234,14 +1234,14 @@ export async function handleIntegration(context: any) {
           return { post: updated, metadataAcceptance: { postId, accountId, videoId, requested: metadata, updatedFields: result.updatedFields, message: 'Accepted by Zernio; live values unverified.' }, provider: { id: post.externalId, status: confirmed.status, accountId, action: 'metadata-accepted' } };
         }
         const editing = path === 'social/edit-published', supported = editing ? ['twitter', 'discord', 'facebook', 'reddit', 'linkedin', 'telegram', 'pinterest', 'googlebusiness', 'youtube', 'slack'] : ['threads', 'facebook', 'twitter', 'linkedin', 'youtube', 'pinterest', 'reddit', 'bluesky', 'googlebusiness', 'telegram'];
-        if (editing) context.assertProviderPostEdit?.();
+        if (editing) await context.assertProviderPostEdit?.();
         if (!supported.includes(target.platform)) fail(422, 'POST_ACTION_UNSUPPORTED', 'This platform does not support this action through Zernio. Use its native dashboard.');
         if (body[editing ? 'confirmEdit' : 'confirmRemoval'] !== true) fail(400, 'POST_ACTION_CONFIRMATION_REQUIRED', editing ? 'Confirm the text change to this published copy.' : 'Confirm permanent removal of this published copy.');
         const payload: any = { platform: target.platform, accountId, ...(editing ? { content: text(body.content, 'post content', 100000) } : {}) }; let validationWarnings = [];
         if (editing) {
           const checkPayload = remoteRestrictionPayload(post, { ...remote, platforms: [{ ...target, customContent: payload.content }] }), assets = await postAssets(store, project.id, post), providerOwnedMediaUrls = providerPostMediaUrls(remote);
           validateRemotePayload(checkPayload, assets, post, providerOwnedMediaUrls); const validation = await providerPostValidation(api, checkPayload, { assets, providerOwnedMediaUrls }); assertPostRestrictions(validation); validationWarnings = [...new Set(validation.warnings.map(item => item.message))];
-          context.assertProviderPostEdit?.();
+          await context.assertProviderPostEdit?.();
           validateRemotePayload(checkPayload, await postAssets(store, project.id, post), post, providerPostMediaUrls(await scopedPost(api, profileId, post, true)));
         }
         const result = await api(endpoint + (editing ? '/edit' : '/unpublish'), {}, payload, key);
