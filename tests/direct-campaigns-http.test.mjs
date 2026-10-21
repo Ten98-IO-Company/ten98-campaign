@@ -5,14 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac, randomUUID } from 'node:crypto';
 import { estimateSms, createDirectCampaigns } from '../server/direct-campaigns.ts';
-import { postgresSkip, testApp } from './postgres.mjs';
+import { postgresSkip, singleConnection, testApp } from './postgres.mjs';
 
 const pg = { skip: postgresSkip };
 
-async function fixture(t) {
+async function fixture(t, poolOptions) {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-direct-')), origin = 'https://campaign.example.test';
   const env = { TWILIO_ACCOUNT_SID: 'AC' + '1'.repeat(32), TWILIO_AUTH_TOKEN: 'test-twilio-secret', TWILIO_FROM_NUMBER: '+12025550100', CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32), CLOUDFLARE_EMAIL_API_TOKEN: 'test-cloudflare-token', CLOUDFLARE_EMAIL_FROM_ADDRESS: 'receipts@example.com', ZERNIO_API_KEY: 'test-zernio-key' };
-  const app = await testApp(t, { dataDir, env, appUrl: origin, directScheduler: false }), originalFetch = globalThis.fetch;
+  const app = await testApp(t, { dataDir, env, appUrl: origin, directScheduler: false }, poolOptions), originalFetch = globalThis.fetch;
   const calls = [], messages = new Map(), broadcasts = new Map(); let hook, suppressions = [], emailMode = 'queued', cookie;
   const json = data => new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
   globalThis.fetch = async (target, options = {}) => {
@@ -89,6 +89,17 @@ test('SMS campaigns persist schedules, deduplicate sends, validate audiences, de
     const updated = (await f.request(f.path + '/contacts')).data.contacts.find(item => item.id === contact.id); assert.equal(updated.consents.sms, false); assert.ok(updated.suppression.sms);
     const next = await f.draft(); assert.equal((await f.arm(next)).status, 400, 'Opt-outs exclude future campaigns.');
     assert.deepEqual(estimateSms('a'.repeat(161)), { encoding: 'GSM-7', units: 161, segments: 2 }); assert.equal(estimateSms('€'.repeat(81)).segments, 2); assert.equal(estimateSms('😀'.repeat(36)).encoding, 'UCS-2'); assert.equal(estimateSms('😀'.repeat(36)).segments, 2);
+  } finally { await f.close(); }
+});
+
+test('scheduling a campaign re-checks its preview on the queuing transaction, without a second connection', pg, async t => {
+  // One pool connection: a preview read through the pool inside the queuing transaction would time out. The sending
+  // worker is left out because its lease transaction deliberately works on other connections.
+  const f = await fixture(t, singleConnection);
+  try {
+    await f.person(); const campaign = await f.draft();
+    const scheduled = await f.arm(campaign, 'schedule'); assert.equal(scheduled.status, 200, JSON.stringify(scheduled.data)); assert.equal(scheduled.data.campaign.status, 'scheduled');
+    assert.equal(scheduled.data.deliveries.length, 1); assert.equal(f.messages.size, 0, 'Scheduling sends nothing.');
   } finally { await f.close(); }
 });
 
