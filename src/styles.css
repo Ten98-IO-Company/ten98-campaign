@@ -51,25 +51,13 @@
 .ad-details ul{padding-left:20px;font-size:12px;line-height:1.7;margin-bottom:20px}
 @media(max-width:760px){.ad-details{padding:20px}.ad-details .button{white-space:normal}.ad-details>.panel-heading{flex-wrap:wrap}}
 
-.auth-split{display:grid;align-items:stretch;grid-template-columns:minmax(0,1fr) minmax(0,1fr);background:var(--color-surface)}
-.auth-story{min-width:0}
-.auth-channels{flex-wrap:wrap;color:light-dark(#736081,var(--color-text-muted))}
-.auth-split>.auth-form{display:flex;align-items:center;justify-content:center;min-width:0;max-width:none;margin:0;padding:45px;border:0;border-radius:0}
-.auth-split .auth-form h2{font-size:27px;letter-spacing:-1px;color:light-dark(#755a85,var(--color-text))}
-@media(max-width:1200px){.auth-story,.auth-split>.auth-form{padding:35px}}
-@media(max-width:960px){.auth-split{grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr)}.auth-story,.auth-split>.auth-form{padding:30px}}
-@media(max-width:760px){
-  .auth-split{grid-template-columns:minmax(0,1fr);align-content:start}
-  .auth-split>.auth-form{padding:35px 25px 45px}
-  .auth-split .auth-form h2{font-size:25px}
-}
 
 /* Keep Campaign's native wrapping and authentication geometry across shared breakpoints. */
 .button{overflow-wrap:normal}
 .auth-form{display:block}
 @media(max-width:1200px){.auth-form{padding:35px}}
 @media(max-width:960px){.auth-form{padding:30px}}
-@media(max-width:760px){.auth-form{padding:24px}.auth-story{padding:25px 25px 30px}}
+@media(max-width:760px){.auth-form{padding:24px}}
 
 /* Native-only surfaces and controls share the same roles in every theme. */
 .direct-contact-picker{background:var(--color-surface);border-color:var(--color-border)}

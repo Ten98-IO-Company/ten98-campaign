@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppEmpty as Empty, AppStat as Stat, AppSelect } from '@ten98/ui/app';
-import { AppStateScreen, AuthErrorBoundary } from '@ten98/ui';
+import { AppStateScreen, AuthErrorBoundary, AuthStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow } from '@ten98/ui';
 import './styles.css';
 import AdComposer from './AdComposer';
 import SocialAnalytics from './SocialAnalytics';
@@ -525,14 +525,13 @@ function App() {
 }
 function Select({ label, name, value, options }: { label: string; name: string; value: string; options: (string | string[])[] }) { return <AppSelect label={label} name={name} value={value} options={options.map(o => typeof o === 'string' ? [o, title(o)] : [o[0], o[1]])}/>; }
 function ConnectionEmpty({ onSettings, subject }: { onSettings: () => void; subject: string }) { return <section className="panel"><Empty icon="link" title={'Connect your ' + subject} action={<button className="button primary" onClick={onSettings}>Open connection settings <Icon name="arrow" size={15}/></button>}>Open Integrations to configure Zernio and map this project to your brand’s profile.</Empty></section>; }
+// Campaign adapter: the host-held setup token, sample opt-in and invitation continuation stay app-owned.
 function Auth({ session, inviteToken = '', error, busy, onSubmit }: { session: any; inviteToken?: string; error: string; busy: boolean; onSubmit: (data: any) => void }) {
-  return <main className="auth-shell auth-split">
-    <section className="auth-story" aria-label="Campaign overview">
-      <Brand product="Campaign" href="/"/>
-      <div><span className="eyebrow">CAMPAIGN MANAGEMENT</span><h1>Plan. <br/>Publish. <br/><em>Measure.</em></h1><p>Manage social posts, advertising and campaign assets.</p><div className="auth-channels"><span><Icon name="send"/>Social</span><span><Icon name="target"/>Advertising</span><span><Icon name="billboard"/>Out of home</span></div></div>
-      <small>ten98 Campaign</small><div className="auth-orbit" aria-hidden="true"/>
-    </section>
-    <section className="auth-form"><div className="auth-form-inner"><div className="eyebrow">YOUR WORKSPACE</div><h2>{session.setupRequired ? 'Create owner account' : 'Sign in'}</h2><p>{session.setupRequired ? 'Create the owner account for this app.' : 'Use your account to access your workspaces.'}</p><form onSubmit={e => { e.preventDefault(); const values: any = Object.fromEntries(new FormData(e.currentTarget)); values.sample = values.sample === 'on'; onSubmit(values); }}>{session.setupRequired && <><Field label="Your name" name="name" autoComplete="name" required maxLength={120}/><Field label="Setup token" name="token" type="password" autoComplete="off" required minLength={32} maxLength={512}/><p className="field-help">Ask the person running this app for the setup token.</p></>}<Field label="Email address" name="email" type="email" autoComplete="username" required/><Field label="Password" name="password" type="password" autoComplete={session.setupRequired ? 'new-password' : 'current-password'} required minLength={session.setupRequired ? 12 : 1} maxLength={128}/>{session.setupRequired && <><small className="field-help">Use at least 12 characters.</small><label className="checkbox-label"><input type="checkbox" name="sample" defaultChecked/>Include a sample project to explore</label></>}{error && <p className="form-error" role="alert">{error}</p>}<button className="button primary full" disabled={busy}>{busy ? 'Signing in…' : session.setupRequired ? 'Create owner account' : 'Sign in'}<Icon name="arrow" size={16}/></button></form>{session.oidcEnabled && <><div className="or-divider">or continue with</div><a className="button full" href={'/api/auth/oidc/start' + (inviteToken ? '?invite=' + encodeURIComponent(inviteToken) : '')}><Icon name="lock" size={16}/>Organization single sign-on</a></>}</div></section></main>;
+  const frame = { brand: <Brand product="Campaign" href="/"/>, label: 'Campaign sign in', eyebrow: 'YOUR WORKSPACE', error: error || undefined, busy, busyLabel: 'Signing in…',
+    aside: <AuthStory label="Campaign overview" eyebrow="CAMPAIGN MANAGEMENT" title="Plan. Publish." emphasis="Measure." lead="Manage social posts, advertising and campaign assets." channels={[{ icon: 'send', label: 'Social' }, { icon: 'target', label: 'Advertising' }, { icon: 'billboard', label: 'Out of home' }]} footnote="ten98 Campaign"/> };
+  if (session.setupRequired) return <FirstUserSetupFlow {...frame} title="Create owner account" description="Create the owner account for this app." submitLabel="Create owner account" tokenLength={{ min: 32, max: 512 }} tokenHint="Ask the person running this app for the setup token." passwordPolicy={{ minLength: 12, maxLength: 128, hint: 'Use at least 12 characters.' }} sampleOptIn={{ label: 'Include a sample project to explore', defaultChecked: true }} onSubmit={({ name, token, email, password, sample }) => onSubmit({ name, token, email, password, sample })}/>;
+  const oidcHref = '/api/auth/oidc/start' + (inviteToken ? '?invite=' + encodeURIComponent(inviteToken) : '');
+  return <SignInFlow {...frame} title="Sign in" description="Use your account to access your workspaces." submitLabel="Sign in" passwordPolicy={{ maxLength: 128 }} onSubmit={({ email, password }) => onSubmit({ email, password })} providers={session.oidcEnabled ? <OidcProviderButtons providers={[{ id: 'sso', name: 'Organization single sign-on', href: oidcHref }]} dividerLabel="or continue with"/> : undefined}/>;
 }
 
 createRoot(document.getElementById('root')!).render(<AuthErrorBoundary fallback={{ brand: <Brand product="Campaign"/>, title: 'Page unavailable', message: 'This screen could not load. Reload the app to try again.', retryLabel: 'Reload app' }}><App/></AuthErrorBoundary>);
