@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppEmpty as Empty, AppStat as Stat, AppSelect } from '@ten98/ui/app';
-import { AppStateScreen, AuthErrorBoundary, AuthStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow } from '@ten98/ui';
+import { AppStateScreen, AuthErrorBoundary, AuthStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow, WorkspaceOnboarding } from '@ten98/ui';
 import './styles.css';
 import AdComposer from './AdComposer';
 import SocialAnalytics from './SocialAnalytics';
@@ -425,9 +425,8 @@ function App() {
   }
   async function publish(post: Row) { await run(async () => { await integrate('social/publish', { postId: post.id }); await reload(); }, 'Submitted to Zernio. Check the post status for delivery.'); }
   async function loadRemote(key: string, path: string) { const id = state!.projectId; return run(async () => { const result = await integrate(path); if (activeProject.current === id) setRemote((r: any) => ({ ...r, [key]: result })); return result; }); }
-  async function createWorkspace(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (pendingWork.current) return;
-    const name = String(new FormData(event.currentTarget).get('name') || '');
+  async function createWorkspace(name: string) {
+    if (pendingWork.current) return;
     await run(async () => { const result = await api('/workspaces', 'POST', { name }); await reload(result.projectId); });
   }
   function exportReport() {
@@ -436,10 +435,10 @@ function App() {
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' })); const a = document.createElement('a'); a.href = url; a.download = 'ten98-campaign-report.csv'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   if (!session) return <AppStateScreen state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading Campaign…'}/>;
-  if (inviteToken && !(inviteSignIn && !session.user)) return <AcceptInvitation key={inviteToken + ':' + (session.user?.id || '')} token={inviteToken} request={api} onAccepted={() => { window.location.assign('/'); }} onSignIn={() => { setInviteSignIn(true); if (session.user) run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); }); }}/>;
+  if (inviteToken && !(inviteSignIn && !session.user)) return <AcceptInvitation key={inviteToken + ':' + (session.user?.id || '')} token={inviteToken} signedInEmail={session.user?.email} request={api} onAccepted={() => { window.location.assign('/'); }} onSignIn={() => { setInviteSignIn(true); if (session.user) run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); }); }}/>;
   if (!session.user) return <Auth session={session} inviteToken={inviteToken} error={error} busy={busy} onSubmit={async values => { await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
   if (!state) return <AppStateScreen state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading your campaigns…'} onRetry={error ? () => run(() => reload()) : undefined}/>;
-  if (!state.projectId || !project) return <main className="auth-shell"><section className="auth-form"><div className="auth-form-inner"><Brand product="Campaign" href="/"/><h1>Workspace access</h1><p>Signed in as {state.user.email}.</p><h2>No project access yet.</h2><p>Ask a workspace owner for an invitation, refresh after access is granted, or create your own workspace.</p>{error && <p className="alert" role="alert">{error}</p>}<form onSubmit={createWorkspace}><fieldset disabled={busy}><Field label="Workspace name" name="name" required maxLength={120} placeholder="Your team or organization"/><button className="button primary full">{busy ? 'Creating workspace…' : 'Create workspace'}</button></fieldset></form><div className="button-wrap"><button className="button" disabled={busy} onClick={() => run(() => reload(''))}>Refresh access</button><button className="button" disabled={busy} onClick={() => run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); setState(null); })}>Sign out</button></div><AccountSettings request={api} onChanged={() => { run(() => reload('')); }}/></div></section></main>;
+  if (!state.projectId || !project) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} label="Workspace access" email={state.user.email} subheading="No project access yet." help="Ask a workspace owner for an invitation, refresh after access is granted, or create your own workspace." error={error || undefined} busy={busy} onSubmit={({ name }) => createWorkspace(name)} onRefresh={() => run(() => reload(''))} signOut={{ onClick: () => run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); setState(null); }) }}><AccountSettings request={api} onChanged={() => { run(() => reload('')); }}/></WorkspaceOnboarding>;
   const campaigns = filtered(state.campaigns).filter(c => tab === 'all' || c.status === tab);
   const currencyCampaigns = state.campaigns.filter(c => (c.currency || 'AED') === currency);
   const currentCurrency = currencyCampaigns.filter(c => c.budgetType !== 'daily');

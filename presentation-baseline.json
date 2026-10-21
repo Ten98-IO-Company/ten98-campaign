@@ -1,8 +1,4 @@
 {
-  "src/AcceptInvitation.tsx": {
-    "element": 29,
-    "styling": 13
-  },
   "src/AccountSettings.tsx": {
     "element": 36,
     "styling": 13
@@ -194,7 +190,7 @@
   },
   "src/main.tsx": {
     "stylesheet": 1,
-    "element": 493,
-    "styling": 241
+    "element": 479,
+    "styling": 233
   }
 }

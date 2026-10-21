@@ -11,7 +11,7 @@ import { hashPassword } from '../server/auth.ts';
 test('failed no-project refresh and workspace readback remain visible through the actual app handlers', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), context = {
     state: { projectId: null, projects: [] }, navigationRef: { current: {} }, writeNavigation() {}, loadVersion: { current: 0 }, activeProject: { current: '' }, pendingWork: { current: 0 }, inboxDraft: { current: { dirty: false, revision: 0 } },
-    setLoading() {}, setState() {}, setBusy() {}, setNotice() {}, errors: [], FormData: class { get() { return 'My campaign team'; } },
+    setLoading() {}, setState() {}, setBusy() {}, setNotice() {}, errors: [],
   };
   let failRead = false, creates = 0;
   context.api = async (path) => {
@@ -27,7 +27,7 @@ test('failed no-project refresh and workspace readback remain visible through th
   await context.reload(''); failRead = true;
   await context.run(() => context.reload(''));
   assert.match(context.errors.at(-1), /Workspace connection lost/);
-  await context.createWorkspace({ preventDefault() {}, currentTarget: {} });
+  await context.createWorkspace('My campaign team');
   assert.equal(creates, 1); assert.match(context.errors.at(-1), /Workspace connection lost/); assert.equal(context.pendingWork.current, 0);
 });
 
@@ -50,11 +50,11 @@ test('an account without project access can create its workspace through the act
     app.db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(userId, 'New member', 'new-member@example.test', await hashPassword('new member fixture password'));
     await api('/auth/login', 'POST', { email: 'new-member@example.test', password: 'new member fixture password' });
     const empty = await api('/state'); assert.equal(empty.projectId, null); assert.deepEqual(empty.projects, []); assert.deepEqual(empty.workspaces, []);
-    const pendingWork = { current: 0 }, opened = [], context = { pendingWork, FormData: class { get() { return 'My campaign team'; } }, run: async work => { pendingWork.current++; try { return await work(); } finally { pendingWork.current--; } }, api, reload: async id => opened.push(await api('/state?projectId=' + encodeURIComponent(id))) };
+    const pendingWork = { current: 0 }, opened = [], context = { pendingWork, run: async work => { pendingWork.current++; try { return await work(); } finally { pendingWork.current--; } }, api, reload: async id => opened.push(await api('/state?projectId=' + encodeURIComponent(id))) };
     const create = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(handler)});`)(...Object.values(context));
-    await create({ preventDefault() {}, currentTarget: {} });
+    await create('My campaign team');
     assert.equal(opened.length, 1); assert.equal(opened[0].workspaces[0].name, 'My campaign team'); assert.equal(opened[0].workspaces[0].role, 'owner');
     assert.equal(opened[0].projects.length, 1); assert.equal(opened[0].projects[0].id, opened[0].projectId); assert.notEqual(opened[0].projectId, existing.projectId); assert.deepEqual(opened[0].campaigns, []);
-    pendingWork.current = 1; await create({ preventDefault() {}, currentTarget: {} }); assert.equal((await api('/state')).workspaces.length, 1, 'An in-flight action must not create a second workspace.');
+    pendingWork.current = 1; await create('My campaign team'); assert.equal((await api('/state')).workspaces.length, 1, 'An in-flight action must not create a second workspace.');
   } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
 });
