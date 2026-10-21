@@ -125,6 +125,9 @@ export async function createApp(options: AppOptions = {}) {
   const parsed = new URL(appUrl);
   if (!['https:', 'http:'].includes(parsed.protocol) || parsed.origin !== appUrl || parsed.username || parsed.password || (parsed.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname))) throw new Error('APP_URL must be an HTTPS origin, or HTTP loopback for local use.');
   if (env.OIDC_ISSUER && env.OIDC_CLIENT_ID) oidcEndpoint(env.OIDC_ISSUER, { issuer: true });
+  // DIRECT_SCHEDULER=off starts the app without sending due direct campaigns (for example to verify an upgrade before
+  // switching traffic). Any other value than on/off refuses to start, so a typo cannot leave sending enabled.
+  if (env.DIRECT_SCHEDULER !== undefined && !['on', 'off'].includes(env.DIRECT_SCHEDULER)) throw new Error('DIRECT_SCHEDULER must be on or off.');
   const { pool, db } = options.database || getDatabase(env.DATABASE_URL), store = createStore(db);
   await assertSchema(pool);
   const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean) };
@@ -136,7 +139,7 @@ export async function createApp(options: AppOptions = {}) {
   const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts });
   await direct.attachSmsInbox(smsInbox);
   const links = createLinks({ db, appUrl });
-  const directTimer = options.directScheduler === false ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
+  const directTimer = options.directScheduler === false || env.DIRECT_SCHEDULER === 'off' ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
   const webhooks = createWebhookService({ db, contacts: direct.contacts, env });
   // One drain at a time; close() waits for the one in flight before the pool ends.
   let draining: Promise<void> | undefined;
@@ -172,7 +175,8 @@ export async function createApp(options: AppOptions = {}) {
         if (/^\/api\/webhooks\/twilio\/(?:inbound(?:\/[\w-]+)?|status\/[\w-]+)$/.test(path) && req.method === 'POST') { await direct.receiveTwilio({ rawBody: await readRawBody(req, 65536), headers: req.headers, url }); res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' }); return res.end('<Response/>'); }
         const unsubscribe = path.match(/^\/api\/direct\/unsubscribe\/([A-Za-z0-9_.-]+)$/);
         if (unsubscribe && ['GET', 'POST'].includes(req.method!)) { if (req.method === 'POST') await readRawBody(req, 4096); const html = await direct.handleUnsubscribe(unsubscribe[1], req.method!); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Email preferences</title><main>' + html + '</main></html>'); }
-        if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
+        // Readiness includes PostgreSQL, so the Compose healthcheck and deploy verification fail while the database is down.
+        if (path === '/api/health' && req.method === 'GET') return (await db.execute(sql`SELECT 1`).then(() => true, () => false)) ? send(200, { ok: true }) : send(503, { ok: false, error: 'The database is unavailable.' });
         if (mutating && req.headers.origin !== appUrl) throw new HttpError(403, 'A matching Origin header is required.');
         const body = mutating && req.method !== 'DELETE' && !rawMediaContent ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : /^\/api\/projects\/[^/]+\/(?:posts(?:\/[^/]+)?|integrations\/social\/(?:validate|update)|direct\/(?:contacts\/import|campaigns(?:\/[^/]+)?))$/.test(path) ? 2 * 1024 * 1024 : 65536) : {};
         if (path === '/api/session' && req.method === 'GET') {
