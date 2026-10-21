@@ -216,20 +216,20 @@ test('queue enqueue requires inline review of the exact saved post and queue sna
   const projectPath = '/projects/one', approvalRequired = true;
   const enqueueReviewKey = new Function('projectPath', 'approvalRequired', `return (${stripTypeScriptTypes(source.slice(keyStart, enqueueStart))});`)(projectPath, approvalRequired);
   let item = { post: { id: 'post-one', content: 'Reviewed caption', accounts: ['facebook-one'], queueId: 'queue-one', queueVersion: 'v1' }, status: 'approved', assets: [] }, queue = { _id: 'queue-one', name: 'Weekly launch', active: true, version: 'v1', slots: [{ dayOfWeek: 1, time: '09:00' }] }, enqueueReviews = {}, calls = 0;
-  const start = source.indexOf('    <div className="settings-panel"><h3>Saved posts ready for queues'), end = source.indexOf('\n  </section>;', start);
+  const start = source.indexOf('    <Stack as="section" gap={3}><Heading level={3} size="sm">Saved posts ready for queues'), end = source.indexOf("\n    <ConfirmDialog open={confirming?.kind === 'reshuffle'}", start);
   const { code } = await transformWithOxc(`const render = () => (${source.slice(start, end).trim()});`, 'QueueEnqueueReview.tsx', { jsx: { runtime: 'classic' } });
   const review = value => { enqueueReviews = typeof value === 'function' ? value(enqueueReviews) : value; };
-  function render(loaded = true, localPosts = [item]) { const context = { React, loaded, localPosts, queues: [queue], approvalRequired, enqueueReviewKey, enqueueReviews, setEnqueueReviews: review, canWrite: true, busy: false, onOpenApprovals: null, onEditPost: null, enqueue() {} }; return new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)); }
+  function render(loaded = true, localPosts = [item]) { const context = { React, ...designSystem, loaded, localPosts, queues: [queue], approvalRequired, enqueueReviewKey, enqueueReviews, setEnqueueReviews: review, canWrite: true, busy: false, onOpenApprovals: null, onEditPost: null, enqueue() {} }; return new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)); }
   const all = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(all)];
   const submit = async () => {
     const context = { canWrite: true, queues: [queue], approvalRequired, enqueueReviews, enqueueReviewKey, projectPath, action: async run => run(), write: async () => { calls++; return { post: { scheduledAt: '2070-01-01T09:00:00Z' } }; }, current: () => true, setPosts() {}, setNotice() {}, setError() {}, onChanged: null, load: async () => {} };
     return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(enqueueStart, enqueueEnd))});`)(...Object.values(context))(item);
   };
   assert.doesNotMatch(renderToStaticMarkup(render(false, [])), /No unsent local posts/); assert.match(renderToStaticMarkup(render(true, [])), /No unsent local posts/);
-  let markup = renderToStaticMarkup(render()); assert.match(markup, /reserves its next free slot and publishes the post/); assert.match(markup, /disabled=""[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 0);
-  all(render()).find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange({ target: { checked: true } });
-  markup = renderToStaticMarkup(render()); assert.match(markup, /checked=""/); assert.doesNotMatch(markup, /disabled=""[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 1);
-  for (const changed of [{ ...item, post: { ...item.post, content: 'Changed after review' } }, { ...item, assets: [{ id: 'asset-one', approval: 'pending' }] }]) { const original = item; item = changed; markup = renderToStaticMarkup(render()); assert.doesNotMatch(markup, /checked=""/); assert.match(markup, /disabled=""[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 1); item = original; }
+  let markup = renderToStaticMarkup(render()); assert.match(markup, /reserves its next free slot and publishes the post/); assert.match(markup, /aria-disabled="true"[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 0);
+  all(render()).find(node => node.type === designSystem.Checkbox).props.onChange({ target: { checked: true } });
+  markup = renderToStaticMarkup(render()); assert.match(markup, /checked=""/); assert.doesNotMatch(markup, /aria-disabled="true"[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 1);
+  for (const changed of [{ ...item, post: { ...item.post, content: 'Changed after review' } }, { ...item, assets: [{ id: 'asset-one', approval: 'pending' }] }]) { const original = item; item = changed; markup = renderToStaticMarkup(render()); assert.doesNotMatch(markup, /checked=""/); assert.match(markup, /aria-disabled="true"[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 1); item = original; }
   queue = { ...queue, version: 'v2' }; item = { ...item, post: { ...item.post, queueVersion: 'v2' } }; markup = renderToStaticMarkup(render()); assert.doesNotMatch(markup, /checked=""/); await submit(); assert.equal(calls, 1, 'Confirmation must not follow a newly reviewed queue version.');
   assert.doesNotMatch(source.slice(enqueueStart, enqueueEnd), /window\.confirm/);
 });
