@@ -8,7 +8,6 @@
 
 /* Tables rendered by the library, except the review table. */
 :where(table:not(.t98-review-table)) tr:last-child td{border-bottom:0}
-:where(table:not(.t98-review-table)) td:last-child{width:30px;padding-left:5px;padding-right:15px}
 :where(table:not(.t98-review-table)) tr:hover td{background:var(--color-surface-raised)}
 @media(max-width:1200px){th,td{padding-left:16px;padding-right:16px}}
 
