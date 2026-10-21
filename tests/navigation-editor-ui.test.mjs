@@ -145,7 +145,7 @@ function app(href = 'https://campaign.example/?view=overview&project=a', initial
     run: async work => { try { return await work(); } catch (error) { if (error.name !== 'AbortError') context.error = error.message; } },
   };
   const invoke = (name, ...args) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(declaration(name))});`)(...Object.values(context))(...args);
-  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'keepEditing', 'discardChanges', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'signOut', 'submitForm']) context[name] = (...args) => invoke(name, ...args);
+  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'keepEditing', 'discardChanges', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'signOut', 'submitForm', 'saveEditor']) context[name] = (...args) => invoke(name, ...args);
   const popStart = source.indexOf('    const onPop = () =>'), popEnd = source.indexOf('\n  }, [state, draftDirty]);', popStart);
   context.listen = () => new Function(...Object.keys(context), `return (${stripTypeScriptTypes('function listen(){' + source.slice(popStart, popEnd) + '}')})();`)(...Object.values(context));
   const unloadStart = source.indexOf('    if (!(draftDirty && modal) && !inboxDirty) return;'), unloadEnd = source.indexOf('\n  }, [draftDirty, modal, inboxDirty]);', unloadStart);
@@ -321,7 +321,7 @@ test('actual project and workspace creation completion guards inbox drafts befor
       if (outcome === 'failure') throw new Error('Created project read failed');
       return path === '/state' ? { ...created, projectId: 'a' } : scoped.promise;
     };
-    const saving = ui.submitForm({ preventDefault() {}, currentTarget: { name: 'New team' } });
+    const saving = ui.saveEditor({ name: 'New team' });
     if (outcome === 'new-draft') ui.inboxDraftChanged(true);
     creation.resolve(kind === 'project' ? { project: { id: 'new' } } : { projectId: 'new' }); await saving;
     ui.syncModal(); assert.equal(ui.modalRef.current, null); assert.equal(ui.discardPrompt, true, 'Closing the saved creation modal must retain the switch confirmation.');

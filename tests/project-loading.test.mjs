@@ -42,7 +42,7 @@ test('completed saves and deletes refresh their project without closing a newer 
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
   for (const [start, end, type, args] of [
     ['async function savePost(', '  async function remove(', 'post', [{ content: 'Original post' }]],
-    ['async function submitForm(', '  async function savePost(', 'workspace', [{ preventDefault() {}, currentTarget: {} }]],
+    ['async function saveEditor(', '  async function savePost(', 'workspace', [{}]],
     ['async function remove(', '  async function clearSampleData(', 'post', ['posts', { id: 'original', name: 'Original' }]],
   ]) {
     const modal = { type, item: type === 'post' ? { id: 'original' } : undefined }, modalRef = { current: modal }, closed = [], reloads = [];
