@@ -675,13 +675,15 @@ test('parallel paused copies of one native campaign from two projects send one p
 // Two different action keys for one identical request in one project rely on the receipt's request-hash check. In
 // PostgreSQL that check only excludes a parallel duplicate once operation() serialises claims per request hash.
 test('parallel identical ad creations with different action keys send one paid request', { skip: postgresSkip }, async t => {
-  const database = await testDatabase(t); let creates = 0;
+  const database = await testDatabase(t); let creates = 0, releaseCreate;
+  // The first paid create stays in flight at the provider until the duplicate has answered, as a real slow provider would.
+  const createHeld = new Promise(resolve => { releaseCreate = resolve; });
   const originalFetch = globalThis.fetch; t.after(() => { globalThis.fetch = originalFetch; });
   globalThis.fetch = async target => {
     const url = new URL(target); let result;
     if (url.pathname === '/api/v1/accounts') result = { accounts: [{ _id: 'metaads', profileId: 'hash-profile', platform: 'metaads', isActive: true }] };
     else if (url.pathname === '/api/v1/ads/accounts') result = { accounts: [{ id: 'act_123', currency: 'AED', selectable: true }] };
-    else if (url.pathname === '/api/v1/ads/create') { creates++; result = { ad: { _id: 'remote-ad-' + creates, platformCampaignId: 'native-' + creates, platform: 'facebook', status: 'paused' } }; }
+    else if (url.pathname === '/api/v1/ads/create') { creates++; await createHeld; result = { ad: { _id: 'remote-ad-' + creates, platformCampaignId: 'native-' + creates, platform: 'facebook', status: 'paused' } }; }
     else throw new Error('Unexpected provider request ' + url.pathname);
     return Response.json(result);
   };
@@ -690,6 +692,10 @@ test('parallel identical ad creations with different action keys send one paid r
   const blocked = await blockWrites(database.pool, 'integration_operations');
   const pending = [invoke('parallel-create-a'), invoke('parallel-create-b')];
   await blocked.waiting(2); await blocked.release();
+  // Release once one request has answered or a second create reached the provider (which would be the duplicate send).
+  let settled = false; for (const request of pending) request.then(() => { settled = true; });
+  for (const deadline = Date.now() + 10000; !settled && creates < 2 && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 10));
+  releaseCreate();
   const results = await Promise.all(pending);
   assert.deepEqual(results.map(result => result.status).sort(), [200, 409], JSON.stringify(results));
   assert.equal(creates, 1, 'Two parallel identical paid creations must send exactly one provider request.');
