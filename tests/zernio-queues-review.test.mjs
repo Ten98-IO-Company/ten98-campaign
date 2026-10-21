@@ -61,3 +61,17 @@ test('stale, unreviewed and slotless status changes explain what to do', async (
   assert.ok(body.includes('catch (failure) { throw statusProblem(failure as Error & { code?: string }); }'));
   assert.ok(source.includes("disabled={busy || !row.active && !row.slots.length"), 'A queue without slots cannot be activated from the list.');
 });
+
+test('Pause and Activate wait while the open queue has unsaved edits, so the editor draft is never replaced', () => {
+  const helpers = ['draftOf', 'unsavedEdits'].map(name => source.match(new RegExp(`^const ${name} = .+;$`, 'm'))[0]).join('\n');
+  const { draftOf, unsavedEdits } = new Function(stripTypeScriptTypes(helpers) + '; return { draftOf, unsavedEdits };')();
+  const row = { _id: 'q', name: 'Morning', timezone: 'Asia/Kolkata', slots: [{ dayOfWeek: 1, time: '09:00' }], active: true, isDefault: false, version: 'v' };
+  assert.equal(unsavedEdits(row, draftOf(row), false), false, 'A freshly opened queue has no unsaved edits.');
+  assert.equal(unsavedEdits(null, draftOf(row), true), false, 'Creating a queue never blocks the list.');
+  for (const change of [{ name: 'Evening' }, { timezone: 'UTC' }, { active: false }, { slots: [{ dayOfWeek: 2, time: '09:00' }] }]) assert.equal(unsavedEdits(row, { ...draftOf(row), ...change }, false), true, JSON.stringify(change));
+  assert.equal(unsavedEdits(row, draftOf(row), true), true, 'Pending default or reschedule choices count as edits.');
+  assert.ok(source.includes('const editing = unsavedEdits(selected, draft, makeDefault || reshuffle)'));
+  assert.ok(source.includes("disabled={busy || !row.active && !row.slots.length || selected?._id === row._id && editing}"), 'The edited row cannot be paused or activated until its edits are saved or discarded.');
+  assert.ok(source.includes('function choose(row: Queue | null) { setSelected(row); setDraft(row ? draftOf(row) : blank());'));
+  assert.ok(source.includes('{editing && <Button variant="secondary" onClick={() => choose(selected)}>Discard changes</Button>}'));
+});
