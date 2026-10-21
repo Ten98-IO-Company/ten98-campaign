@@ -224,6 +224,11 @@ export async function handleApprovals(context: ApprovalContext) {
       }
       send(200, { ...await policy(db, project.id), posts: await Promise.all(posts.map((post: ProviderRecord) => queueItem(context, post, queueSummary(post, queues, unavailable)))) }); return true;
     }
+    // The navigation badge: posts in this project whose newest review still awaits a decision.
+    if (req.method === 'GET' && path === 'pending-count') {
+      const row = await first(db.execute(sql`SELECT count(*)::int AS pending FROM (SELECT DISTINCT ON (r.post_id) r.status FROM post_approval_reviews r JOIN records p ON p.id=r.post_id AND p.project_id=r.project_id AND p.collection='posts' WHERE r.project_id=${project.id} ORDER BY r.post_id, r.seq DESC) latest WHERE status='pending'`));
+      send(200, { pending: Number(row?.pending || 0) }); return true;
+    }
     // Each item is its own decision through the single-review path, so one failure leaves the others decided.
     if (req.method === 'POST' && path === 'bulk') {
       if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');

@@ -363,3 +363,23 @@ test('a bulk decision racing a single decision on the same review records exactl
     });
   }
 });
+
+test('the pending-review count covers posts whose newest review awaits a decision, for any project member', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+  await f.pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-b','w','B')");
+  const count = async (role = 'viewer') => { let result; await handleApprovals({ db: f.db, store: f.store, project: f.project, role, user: { id: role, name: role }, req: { method: 'GET' }, url: new URL(`http://localhost/api/projects/${f.project.id}/approvals/pending-count`), send(status, data) { result = { status, data }; } }); return result; };
+  assert.deepEqual(await count(), { status: 200, data: { pending: 0 } });
+  const second = await f.store.create(f.project.id, 'posts', { content: 'Second pending fixture', platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [] });
+  await f.request('casey'); assert.equal((await f.invoke(`posts/${second.id}/request`, 'casey')).status, 200);
+  const foreign = await f.store.create('project-b', 'posts', { content: 'Foreign', platforms: ['facebook'], status: 'draft' });
+  await f.pool.query("INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES ('foreign-review','project-b',$1,'x','{}','pending','casey','2026-10-22T00:00:00Z')", [foreign.id]);
+  assert.deepEqual((await count()).data, { pending: 2 }); assert.deepEqual((await count('editor')).data, { pending: 2 });
+  // An edited post's newer request leaves its older row pending; the post still counts once.
+  await f.store.update(f.project.id, 'posts', f.post.id, { content: 'Edited while pending' }); const newest = await f.request('casey');
+  assert.equal(Number((await f.sql.get("SELECT count(*) AS count FROM post_approval_reviews WHERE post_id = ? AND status = 'pending'", f.post.id)).count), 2);
+  assert.deepEqual((await count()).data, { pending: 2 });
+  assert.equal((await f.review('blair', newest)).status, 200);
+  assert.deepEqual((await count()).data, { pending: 1 }, 'A decided newest review no longer counts, even with an older pending row.');
+  await f.store.remove(f.project.id, 'posts', second.id);
+  assert.deepEqual((await count()).data, { pending: 0 }, 'Reviews of deleted posts are not counted.');
+});
