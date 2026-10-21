@@ -243,3 +243,12 @@ test('post card publishing asks once and names every destination before calling 
   assert.match(dialog, /Accounts:<\/Text> \{postRecipients\(publishing, remote\.accounts\?\.accounts \|\| \[\]\)\}/);
   assert.match(appSource, /async function publish\(post: Row\) \{ await run\(async \(\) => \{ await integrate\('social\/publish', \{ postId: post\.id \}\); await reload\(\); \}/);
 });
+
+test('only an owner is offered to leave the workspace, through one confirmed danger action on their own membership', () => {
+  const appSource = source();
+  assert.ok(appSource.includes("{workspace?.role === 'owner' && <DangerZoneFlow busy={busy} title=\"Leave workspace\""), 'Admins cannot remove themselves on the server, so they are not offered it.');
+  assert.ok(appSource.includes("onConfirm={leaveWorkspace}/>}"));
+  const handler = appSource.slice(appSource.indexOf('async function leaveWorkspace('), appSource.indexOf('  async function clearSampleData('));
+  assert.ok(handler.includes("await api(`/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`, 'DELETE'); window.location.reload();"), 'It removes the signed-in member only, then reloads the workspace list.');
+  assert.ok(handler.includes('await run('), 'A refusal (for example the last owner) surfaces through the shared error path.');
+});
