@@ -17,7 +17,20 @@ async function withAdmin(run) {
   finally { await admin.end(); }
 }
 
-/** Returns { pool, db, url } for a fresh migrated database; registers cleanup on the test context when given. */
+/**
+ * Test-only SQL shorthand over a pool, so assertions keep their SQL: '?' placeholders become $1..$n.
+ * get → first row, all → rows, run → { changes }. Not for application code.
+ */
+export function sqlHelper(pool) {
+  const text = statement => { let index = 0; return statement.replace(/[?]/g, () => '$' + ++index); };
+  return {
+    get: async (statement, ...params) => (await pool.query(text(statement), params)).rows[0],
+    all: async (statement, ...params) => (await pool.query(text(statement), params)).rows,
+    run: async (statement, ...params) => ({ changes: (await pool.query(text(statement), params)).rowCount }),
+  };
+}
+
+/** Returns { pool, db, url, sql } for a fresh migrated database; registers cleanup on the test context when given. */
 export async function testDatabase(t) {
   if (!adminUrl) throw new Error('Set TEST_DATABASE_URL to run PostgreSQL tests.');
   const fingerprint = (await migrationSources()).map(source => source.checksum.slice(0, 8)).join('').slice(0, 40);
@@ -33,7 +46,7 @@ export async function testDatabase(t) {
     }
     await admin.query(`CREATE DATABASE ${name} TEMPLATE ${template}`);
   });
-  const connection = { ...connect(databaseUrl(name)), url: databaseUrl(name) };
+  const opened = connect(databaseUrl(name)), connection = { ...opened, url: databaseUrl(name), sql: sqlHelper(opened.pool) };
   const close = async () => {
     await connection.pool.end().catch(() => undefined);
     const admin = new pg.Client({ connectionString: adminUrl });
@@ -50,7 +63,7 @@ export async function testApp(t, options = {}) {
   try { app = await createApp({ ...options, database: { pool: database.pool, db: database.db } }); }
   catch (error) { await database.close(); throw error; }
   t.after(async () => { await app.close(); await database.close(); });
-  return Object.assign(app, { database });
+  return Object.assign(app, { database, sql: database.sql });
 }
 
 /**

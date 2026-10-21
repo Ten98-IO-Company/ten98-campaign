@@ -134,7 +134,7 @@ export async function createApp(options: AppOptions = {}) {
   const integrationSettings = await createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
   const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts });
-  direct.attachSmsInbox(smsInbox);
+  await direct.attachSmsInbox(smsInbox);
   const links = createLinks({ db, appUrl });
   const directTimer = options.directScheduler === false ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
   const webhooks = createWebhookService({ db, contacts: direct.contacts, env });

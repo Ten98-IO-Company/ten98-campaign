@@ -1,9 +1,9 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { transaction } from './database.ts';
+import { sql } from 'drizzle-orm';
+import { createStore } from './database.ts';
+import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
-import type { DatabaseSync } from 'node:sqlite';
-import type { Store } from './database.ts';
-import { createContacts } from './contacts.ts';
+import { createContacts, lockContacts } from './contacts.ts';
 import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions } from './direct-providers.ts';
 
 const channels = ['email', 'sms', 'whatsapp'];
@@ -67,46 +67,64 @@ function nextStatus(previous: string, incoming: string) {
   return (rank[incoming] ?? 99) >= (rank[previous] ?? 0) ? incoming : previous;
 }
 
-export function createDirectCampaigns({ db, env, appUrl, secret, store }: { db: DatabaseSync; env: any; appUrl: string; secret: string; store: Store }) {
+const resultRows = async (query: Promise<{ rows: unknown[] }>) => (await query).rows as any[];
+// A transaction on the pool, or a savepoint when the caller passes its own transaction.
+const atomic = <T>(executor: Executor, run: (tx: Transaction) => Promise<T>): Promise<T> => (executor as Database).transaction(run);
+
+// `store` stays in the options for callers; campaign activity is written with createStore(tx) inside the scheduling transaction.
+export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Database; env: any; appUrl: string; secret: string; store?: Store }) {
   const contacts = createContacts({ db });
-  let smsInbox: any;
-  db.exec(`CREATE TABLE IF NOT EXISTS direct_campaigns(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,data TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS direct_campaigns_project ON direct_campaigns(project_id);
-    CREATE TABLE IF NOT EXISTS direct_deliveries(id TEXT PRIMARY KEY,campaign_id TEXT NOT NULL REFERENCES direct_campaigns(id) ON DELETE CASCADE,contact_id TEXT NOT NULL,data TEXT NOT NULL,UNIQUE(campaign_id,contact_id));`);
-  const campaignRows = (projectId: string) => db.prepare('SELECT data FROM direct_campaigns WHERE project_id=? ORDER BY rowid DESC').all(projectId).map((row: any) => JSON.parse(row.data));
-  const find = (projectId: string, id: string) => { const row: any = db.prepare('SELECT data FROM direct_campaigns WHERE project_id=? AND id=?').get(projectId, id); if (!row) fail(404, 'CAMPAIGN_NOT_FOUND', 'Campaign not found.'); return JSON.parse(row.data); };
-  const save = (campaign: any) => {
-    const row: any = db.prepare('SELECT data FROM direct_campaigns WHERE id=?').get(campaign.id), current = row && JSON.parse(row.data);
-    if (current?.status === 'cancelled') { campaign.status = 'cancelled'; if (current.providerStatus === 'cancelled') campaign.providerStatus = 'cancelled'; }
-    campaign.updatedAt = nowISO(); db.prepare('UPDATE direct_campaigns SET data=? WHERE id=? AND project_id=?').run(JSON.stringify(campaign), campaign.id, campaign.projectId); return campaign;
+  let smsInbox: any, attaching: Promise<void> | undefined;
+  const campaignRows = async (projectId: string) => (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns WHERE project_id = ${projectId} ORDER BY seq DESC`))).map(row => row.data);
+  const find = async (projectId: string, id: string, ex: Executor = db, lock = false) => {
+    const [row] = await resultRows(ex.execute(lock ? sql`SELECT data FROM direct_campaigns WHERE project_id = ${projectId} AND id = ${id} FOR UPDATE` : sql`SELECT data FROM direct_campaigns WHERE project_id = ${projectId} AND id = ${id}`));
+    if (!row) fail(404, 'CAMPAIGN_NOT_FOUND', 'Campaign not found.'); return row.data;
   };
-  const deliveries = (id: string) => db.prepare('SELECT data FROM direct_deliveries WHERE campaign_id=? ORDER BY rowid').all(id).map((row: any) => JSON.parse(row.data));
-  const putDelivery = (delivery: any) => { delivery.updatedAt = nowISO(); db.prepare('UPDATE direct_deliveries SET data=? WHERE id=?').run(JSON.stringify(delivery), delivery.id); return delivery; };
-  const recordSms = (campaign: any, delivery: any) => smsInbox?.recordOutbound({ id: delivery.id, projectId: campaign.projectId, campaignId: campaign.id, accountSid: delivery.smsAccountSid, sender: delivery.smsSender, recipient: delivery.recipient, messagingServiceSid: delivery.smsMessagingServiceSid || '', providerId: delivery.providerId, message: delivery.message || '', status: delivery.status });
-  function decorate(campaign: any) {
+  // Row lock: a worker writing its in-memory copy cannot undo a cancellation that commits between this read and the update.
+  const save = (campaign: any, ex: Executor = db) => atomic(ex, async tx => {
+    const [row] = await resultRows(tx.execute(sql`SELECT data FROM direct_campaigns WHERE id = ${campaign.id} FOR UPDATE`)), current = row?.data;
+    if (current?.status === 'cancelled') { campaign.status = 'cancelled'; if (current.providerStatus === 'cancelled') campaign.providerStatus = 'cancelled'; }
+    campaign.updatedAt = nowISO(); await tx.execute(sql`UPDATE direct_campaigns SET data = ${JSON.stringify(campaign)} WHERE id = ${campaign.id} AND project_id = ${campaign.projectId}`); return campaign;
+  });
+  // Row lock: read-modify-write of the stored campaign, so a concurrent worker, refresh or cancellation write is not lost.
+  const changeCampaign = (projectId: string, id: string, change: (campaign: any) => unknown) => db.transaction(async tx => {
+    const campaign = await find(projectId, id, tx, true);
+    return await change(campaign) === false ? campaign : save(campaign, tx);
+  });
+  const deliveries = async (id: string, ex: Executor = db) => (await resultRows(ex.execute(sql`SELECT data FROM direct_deliveries WHERE campaign_id = ${id} ORDER BY seq`))).map(row => row.data);
+  const putDelivery = async (delivery: any, ex: Executor = db) => { delivery.updatedAt = nowISO(); await ex.execute(sql`UPDATE direct_deliveries SET data = ${JSON.stringify(delivery)} WHERE id = ${delivery.id}`); return delivery; };
+  // Row lock: read-modify-write of one delivery, so a callback, refresh, cancellation or worker acknowledgement is merged rather than
+  // overwritten by a stale copy. `change` returns false to leave the row unchanged; the current delivery is returned (null when gone).
+  const changeDelivery = (id: string, change: (delivery: any) => unknown) => db.transaction(async tx => {
+    const [row] = await resultRows(tx.execute(sql`SELECT data FROM direct_deliveries WHERE id = ${id} FOR UPDATE`));
+    if (!row) return null;
+    const delivery = row.data; if (await change(delivery) !== false) await putDelivery(delivery, tx); return delivery;
+  });
+  const recordSms = async (campaign: any, delivery: any) => smsInbox?.recordOutbound({ id: delivery.id, projectId: campaign.projectId, campaignId: campaign.id, accountSid: delivery.smsAccountSid, sender: delivery.smsSender, recipient: delivery.recipient, messagingServiceSid: delivery.smsMessagingServiceSid || '', providerId: delivery.providerId, message: delivery.message || '', status: delivery.status });
+  async function decorate(campaign: any) {
     const counts = { pending: 0, accepted: 0, delivered: 0, failed: 0, suppressed: 0, uncertain: 0 };
-    for (const delivery of deliveries(campaign.id)) counts[['pending', 'sending'].includes(delivery.status) ? 'pending' : ['delivered', 'read'].includes(delivery.status) ? 'delivered' : ['failed', 'undelivered'].includes(delivery.status) ? 'failed' : ['suppressed', 'cancelled'].includes(delivery.status) ? 'suppressed' : delivery.status === 'uncertain' ? 'uncertain' : 'accepted']++;
+    for (const delivery of await deliveries(campaign.id)) counts[['pending', 'sending'].includes(delivery.status) ? 'pending' : ['delivered', 'read'].includes(delivery.status) ? 'delivered' : ['failed', 'undelivered'].includes(delivery.status) ? 'failed' : ['suppressed', 'cancelled'].includes(delivery.status) ? 'suppressed' : delivery.status === 'uncertain' ? 'uncertain' : 'accepted']++;
     const { credentialHash, scheduledBy, ...publicCampaign } = campaign;
     return { ...publicCampaign, counts };
   }
-  function audience(campaign: any) {
-    const all = contacts.list(campaign.projectId).filter((contact: any) => (!campaign.contactIds.length || campaign.contactIds.includes(contact.id)) && (!campaign.tags.length || campaign.tags.some((tag: string) => contact.tags.includes(tag))));
+  async function audience(campaign: any) {
+    const everyone = await contacts.list(campaign.projectId), all = everyone.filter((contact: any) => (!campaign.contactIds.length || campaign.contactIds.includes(contact.id)) && (!campaign.tags.length || campaign.tags.some((tag: string) => contact.tags.includes(tag))));
     const eligible = [], exclusions = [];
     for (const contact of all) { const reason = exclusion(contact, campaign.channel); if (reason) exclusions.push({ id: contact.id, name: contact.name || contact.email || contact.phone, reason }); else eligible.push(contact); }
-    if (campaign.contactIds.some((id: string) => !contacts.get(campaign.projectId, id))) fail(400, 'CONTACT_NOT_FOUND', 'A selected contact does not belong to this project.');
+    if (campaign.contactIds.some((id: string) => !everyone.some((contact: any) => contact.id === id))) fail(400, 'CONTACT_NOT_FOUND', 'A selected contact does not belong to this project.');
     return { eligible, exclusions, total: all.length };
   }
-  function preview(campaign: any) {
-    const selected = audience(campaign), sample = content(campaign, selected.eligible[0] || { name: 'Recipient', email: 'recipient@example.com', phone: '+12025550123', company: 'Company' });
+  async function preview(campaign: any) {
+    const selected = await audience(campaign), sample = content(campaign, selected.eligible[0] || { name: 'Recipient', email: 'recipient@example.com', phone: '+12025550123', company: 'Company' });
     for (const contact of selected.eligible) { const rendered = content(campaign, contact); if (campaign.channel === 'sms' && rendered.text.length > 1600 || campaign.channel === 'email' && (rendered.subject.length > 998 || rendered.text.length > 99000 || rendered.html.length > 490000)) fail(400, 'PERSONALIZATION_TOO_LONG', 'Personalization makes a message too long. Shorten the content and check the audience again.'); }
-    return { campaign: decorate(campaign), previewToken: createHash('sha256').update(JSON.stringify([campaign, selected.eligible])).digest('hex'), audience: { eligible: selected.eligible.length, excluded: selected.exclusions.length, total: selected.total, exclusions: selected.exclusions, unverified: selected.eligible.filter((contact: any) => campaign.channel === 'email' && !['mx', 'implicit_mx'].includes(contact.hygiene?.dnsStatus)).length }, sample: { subject: sample.subject, text: sample.text, html: sample.html }, ...(campaign.channel === 'sms' ? { sms: { ...estimateSms(sample.text), totalSegments: selected.eligible.reduce((sum: number, contact: any) => sum + estimateSms(content(campaign, contact).text).segments, 0), estimate: true } } : {}) };
+    return { campaign: await decorate(campaign), previewToken: createHash('sha256').update(JSON.stringify([campaign, selected.eligible])).digest('hex'), audience: { eligible: selected.eligible.length, excluded: selected.exclusions.length, total: selected.total, exclusions: selected.exclusions, unverified: selected.eligible.filter((contact: any) => campaign.channel === 'email' && !['mx', 'implicit_mx'].includes(contact.hygiene?.dnsStatus)).length }, sample: { subject: sample.subject, text: sample.text, html: sample.html }, ...(campaign.channel === 'sms' ? { sms: { ...estimateSms(sample.text), totalSegments: selected.eligible.reduce((sum: number, contact: any) => sum + estimateSms(content(campaign, contact).text).segments, 0), estimate: true } } : {}) };
   }
-  const projectFor = (id: string): any => db.prepare('SELECT id,zernio_profile_id AS zernioProfileId FROM projects WHERE id=?').get(id);
-  function guard(campaign: any, requireAuthor = true) {
+  const projectFor = async (id: string): Promise<any> => (await resultRows(db.execute(sql`SELECT id, zernio_profile_id AS "zernioProfileId" FROM projects WHERE id = ${id}`)))[0];
+  async function guard(campaign: any, requireAuthor = true) {
     if (fingerprint(env, campaign.channel) !== campaign.credentialHash) fail(409, 'CONNECTION_CHANGED', 'Integration settings changed. Cancel this campaign and create a new draft after reviewing the connection.');
-    const project = projectFor(campaign.projectId);
+    const project = await projectFor(campaign.projectId);
     if (!project || (campaign.channel === 'whatsapp' && project.zernioProfileId !== campaign.profileId)) fail(409, 'CONNECTION_CHANGED', 'The project provider mapping changed.');
-    if (requireAuthor && !db.prepare("SELECT m.role FROM memberships m JOIN projects p ON p.workspace_id=m.workspace_id WHERE p.id=? AND m.user_id=? AND m.role IN ('owner','admin','editor')").get(campaign.projectId, campaign.scheduledBy)) fail(409, 'ACCESS_CHANGED', 'The campaign author no longer has permission to send.');
+    if (requireAuthor && !(await db.execute(sql`SELECT m.role FROM memberships m JOIN projects p ON p.workspace_id = m.workspace_id WHERE p.id = ${campaign.projectId} AND m.user_id = ${campaign.scheduledBy} AND m.role IN ('owner', 'admin', 'editor')`)).rowCount) fail(409, 'ACCESS_CHANGED', 'The campaign author no longer has permission to send.');
     return project;
   }
   function ready(channel: string) { return channel === 'email' ? Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS) : channel === 'sms' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : Boolean(env.ZERNIO_API_KEY); }
@@ -119,72 +137,92 @@ export function createDirectCampaigns({ db, env, appUrl, secret, store }: { db: 
     if (!Array.isArray(ids) || ids.length !== 2 || !ids.every((id: any) => typeof id === 'string')) fail(400, 'INVALID_LINK', 'The preference link is invalid.');
     return ids;
   }
-  function finish(campaign: any) {
-    const rows = deliveries(campaign.id);
-    if (!rows.length || ['draft', 'cancelled'].includes(campaign.status)) return save(campaign);
+  async function finish(campaign: any, ex: Executor = db) {
+    const rows = await deliveries(campaign.id, ex);
+    if (!rows.length || ['draft', 'cancelled'].includes(campaign.status)) return save(campaign, ex);
     if (rows.some((row: any) => row.status === 'uncertain')) campaign.status = 'attention';
     else if (!rows.some((row: any) => ['pending', 'sending'].includes(row.status))) campaign.status = 'completed';
-    return save(campaign);
+    return save(campaign, ex);
   }
-  // A process crash must never replay an external send whose acknowledgement was lost.
-  for (const row of db.prepare('SELECT data FROM direct_deliveries').all() as any[]) { const delivery = JSON.parse(row.data); if (delivery.status === 'sending') { delivery.status = 'uncertain'; delivery.error = 'The server stopped before the send was confirmed. Check the provider before making another campaign.'; putDelivery(delivery); } }
-  for (const row of db.prepare('SELECT data FROM direct_campaigns').all() as any[]) { const campaign = JSON.parse(row.data); if (campaign.phase === 'creating' || campaign.phase === 'adding' || campaign.phase === 'dispatching') { campaign.status = 'attention'; campaign.lastError = 'The server stopped during a WhatsApp request. Reconcile the broadcast with Zernio.'; save(campaign); } else if (campaign.status === 'sending') finish(campaign); }
-  let active = false, closed = false;
-  // ponytail: one SQLite process sends one recipient per second; use a dedicated worker when throughput requires it.
+  // Row lock: finishing the stored campaign cannot overwrite a worker or schedule write that lands between its read and save.
+  const finishLatest = (projectId: string, id: string) => db.transaction(async tx => finish(await find(projectId, id, tx, true), tx));
+  // A process crash must never replay an external send whose acknowledgement was lost. Runs once per process under the worker lease.
+  async function recover() {
+    for (const { id } of await resultRows(db.execute(sql`SELECT id FROM direct_deliveries WHERE data->>'status' = 'sending' ORDER BY seq`))) await changeDelivery(id, delivery => { if (delivery.status !== 'sending') return false; delivery.status = 'uncertain'; delivery.error = 'The server stopped before the send was confirmed. Check the provider before making another campaign.'; });
+    for (const { data: campaign } of await resultRows(db.execute(sql`SELECT data FROM direct_campaigns ORDER BY seq`))) { if (campaign.phase === 'creating' || campaign.phase === 'adding' || campaign.phase === 'dispatching') { campaign.status = 'attention'; campaign.lastError = 'The server stopped during a WhatsApp request. Reconcile the broadcast with Zernio.'; await save(campaign); } else if (campaign.status === 'sending') await finish(campaign); }
+  }
+  let active = false, closed = false, recovered = false;
+  // ponytail: one worker lease across processes sends one recipient per second; use a dedicated worker when throughput requires it.
   async function processPending({ now = Date.now(), limit = 1 } = {}) {
     if (active || closed) return;
     active = true;
     try {
-      const rows = db.prepare('SELECT data FROM direct_campaigns ORDER BY rowid').all().map((row: any) => JSON.parse(row.data)).filter((campaign: any) => ['scheduled', 'sending'].includes(campaign.status) && Date.parse(campaign.scheduledAt) <= now);
-      for (const campaign of rows.slice(0, Math.max(1, Math.min(25, limit)))) {
-        try {
-          const project = guard(campaign), currentEnv = { ...env }, assertMapping = () => { guard(campaign); if (campaign.channel === 'whatsapp') { if (find(campaign.projectId, campaign.id).status === 'cancelled') fail(409, 'CAMPAIGN_CANCELLED', 'This campaign was cancelled while its broadcast was being prepared.'); for (const delivery of deliveries(campaign.id).filter((row: any) => row.status === 'pending')) { const contact: any = contacts.get(campaign.projectId, delivery.contactId); if (exclusion(contact, 'whatsapp') || contact.phone !== delivery.recipient) fail(409, 'AUDIENCE_CHANGED', 'Recipient permission changed while preparing the broadcast.'); } } };
-          campaign.status = 'sending'; save(campaign);
-          if (campaign.channel === 'whatsapp') {
-            const pending = deliveries(campaign.id).filter((row: any) => row.status === 'pending'), selected: any[] = [];
-            for (const delivery of pending) { const contact: any = contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, 'whatsapp'); if (reason || contact.phone !== delivery.recipient) { delivery.status = 'suppressed'; delivery.error = reason || 'Contact address changed'; putDelivery(delivery); } else selected.push(contact); }
-            if (!selected.length) { finish(campaign); continue; }
-            if (!campaign.providerId) {
-              campaign.phase = 'creating'; save(campaign);
-              const result = await createWhatsAppBroadcast({ env: currentEnv, project, campaign, idempotencyKey: campaign.id, assertMapping });
-              campaign.providerId = result.providerId; campaign.phase = 'created'; save(campaign);
-            }
-            campaign.phase = 'adding'; save(campaign);
-            const added = await addWhatsAppRecipients({ env: currentEnv, project, campaign, providerId: campaign.providerId, contacts: selected, idempotencyKey: campaign.id + '-recipients', assertMapping });
-            if (added.added !== selected.length || added.skipped) fail(409, 'RECIPIENT_MISMATCH', 'Zernio did not accept the complete audience. Review the draft broadcast before sending.');
-            // Consent can be revoked while recipients are uploaded; never dispatch that stale batch.
-            for (const contact of selected) if (exclusion(contacts.get(campaign.projectId, contact.id), 'whatsapp') || contacts.get(campaign.projectId, contact.id)?.phone !== contact.phone) fail(409, 'AUDIENCE_CHANGED', 'A recipient changed during preparation. Review the draft broadcast.');
-            const prepared = await getWhatsAppBroadcast({ env: currentEnv, project, campaign, providerId: campaign.providerId, assertMapping }), expectedPhones = new Set(selected.map((contact: any) => contact.phone));
-            if (prepared.status !== 'draft' || prepared.recipients?.length !== expectedPhones.size || prepared.recipients.some((recipient: any) => !expectedPhones.delete(recipient.phone)) || expectedPhones.size) fail(409, 'AUDIENCE_CHANGED', 'The provider broadcast audience differs from the approved local audience. Review it before sending.');
-            for (const contact of selected) if (exclusion(contacts.get(campaign.projectId, contact.id), 'whatsapp') || contacts.get(campaign.projectId, contact.id)?.phone !== contact.phone) fail(409, 'AUDIENCE_CHANGED', 'A recipient changed while the broadcast was being verified.');
-            campaign.phase = 'dispatching'; save(campaign);
-            const result = await sendWhatsAppBroadcast({ env: currentEnv, project, campaign, providerId: campaign.providerId, expectedRecipientCount: selected.length, idempotencyKey: campaign.id + '-send', assertMapping });
-            campaign.phase = 'dispatched'; campaign.providerStatus = result.status; campaign.stats = result.stats; save(campaign);
-            if (result.stats?.recipientCount !== selected.length || result.stats.sentCount + result.stats.failedCount > selected.length) fail(502, 'AUDIENCE_MISMATCH', 'Zernio reported a different audience size after sending. Check its broadcast receipt.');
-            for (const delivery of pending) if (selected.some((contact: any) => contact.id === delivery.contactId)) { delivery.status = result.status === 'failed' ? 'failed' : 'accepted'; delivery.providerId = campaign.providerId; putDelivery(delivery); }
-            finish(campaign);
-          } else {
-            const delivery = deliveries(campaign.id).find((row: any) => row.status === 'pending');
-            if (!delivery) { finish(campaign); continue; }
-            const contact: any = contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, campaign.channel);
-            if (reason || (campaign.channel === 'email' ? contact.email : contact.phone) !== delivery.recipient) { delivery.status = 'suppressed'; delivery.error = reason || 'Contact address changed'; putDelivery(delivery); finish(campaign); continue; }
-            const rendered = content(campaign, contact);
-            if (campaign.channel === 'sms') Object.assign(delivery, { smsAccountSid: currentEnv.TWILIO_ACCOUNT_SID, smsSender: currentEnv.TWILIO_MESSAGING_SERVICE_SID ? '' : currentEnv.TWILIO_FROM_NUMBER, smsMessagingServiceSid: currentEnv.TWILIO_MESSAGING_SERVICE_SID || '', message: rendered.text });
-            delivery.status = 'sending'; putDelivery(delivery);
-            try {
-              const result: any = await sendDirect({ channel: campaign.channel, campaign: rendered, contact, delivery: { ...delivery, callbackUrl: `${appUrl}/api/webhooks/twilio/status/${delivery.id}` }, env: currentEnv, project, appUrl, unsubscribeUrl: `${appUrl}/api/direct/unsubscribe/${unsubscribeToken(campaign.projectId, contact.email)}`, assertMapping });
-              const latest = deliveries(campaign.id).find((row: any) => row.id === delivery.id);
-              if (latest.providerId && result.providerId !== latest.providerId || campaign.channel === 'sms' && latest.smsSender && result.sender && result.sender !== latest.smsSender) throw new IntegrationError(502, 'DELIVERY_MISMATCH', 'The provider acknowledgement conflicts with a delivery callback.', true);
-              latest.providerId = result.providerId; latest.status = nextStatus(latest.status, result.status); if (campaign.channel === 'sms') { latest.smsSender = result.sender || latest.smsSender; latest.smsMessagingServiceSid = result.messagingServiceSid || latest.smsMessagingServiceSid; } putDelivery(latest);
-              if (campaign.channel === 'sms') recordSms(campaign, latest);
-              if (campaign.channel === 'sms' && result.errorCode === '21610') contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
-              if (result.suppressionReason) contacts.suppressDestination(campaign.projectId, campaign.channel, delivery.recipient, result.suppressionReason);
-            } catch (error: any) { if (campaign.channel === 'sms' && error.providerCode === 21610) contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out'); const latest = deliveries(campaign.id).find((row: any) => row.id === delivery.id); if (!latest.providerId) { latest.status = error.uncertain ? 'uncertain' : 'failed'; latest.error = error instanceof IntegrationError ? error.message : 'The provider did not confirm the message.'; putDelivery(latest); } if (error.uncertain || error.status === 429) { campaign.status = 'attention'; campaign.lastError = latest.error || 'Review the provider acknowledgement before continuing.'; } }
-            finish(campaign);
-          }
-        } catch (error: any) { campaign.status = 'attention'; campaign.lastError = error instanceof IntegrationError ? error.message : 'The campaign could not continue. Check its provider status.'; save(campaign); }
-      }
+      await db.transaction(async lease => {
+        // Worker lease: only one process sends at a time, so two app instances cannot claim the same campaign and recovery never
+        // quarantines another live worker's in-flight send. The lease holds no other lock; all work below runs on other connections.
+        if (!(await resultRows(lease.execute(sql`SELECT pg_try_advisory_xact_lock(hashtextextended('direct-campaigns:worker', 0)) AS locked`)))[0].locked) return;
+        if (!recovered) { await recover(); recovered = true; }
+        await sendDue(now, limit);
+      });
     } finally { active = false; }
+  }
+  async function sendDue(now: number, limit: number) {
+    const rows = (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns ORDER BY seq`))).map(row => row.data).filter((campaign: any) => ['scheduled', 'sending'].includes(campaign.status) && Date.parse(campaign.scheduledAt) <= now);
+    for (const campaign of rows.slice(0, Math.max(1, Math.min(25, limit)))) {
+      try {
+        const project = await guard(campaign), currentEnv = { ...env }, assertMapping = async () => { await guard(campaign); if (campaign.channel === 'whatsapp') { if ((await find(campaign.projectId, campaign.id)).status === 'cancelled') fail(409, 'CAMPAIGN_CANCELLED', 'This campaign was cancelled while its broadcast was being prepared.'); for (const delivery of (await deliveries(campaign.id)).filter((row: any) => row.status === 'pending')) { const contact: any = await contacts.get(campaign.projectId, delivery.contactId); if (exclusion(contact, 'whatsapp') || contact.phone !== delivery.recipient) fail(409, 'AUDIENCE_CHANGED', 'Recipient permission changed while preparing the broadcast.'); } } };
+        campaign.status = 'sending'; await save(campaign);
+        if (campaign.channel === 'whatsapp') {
+          const pending = (await deliveries(campaign.id)).filter((row: any) => row.status === 'pending'), selected: any[] = [];
+          for (const delivery of pending) { const contact: any = await contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, 'whatsapp'); if (reason || contact.phone !== delivery.recipient) await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; current.status = 'suppressed'; current.error = reason || 'Contact address changed'; }); else selected.push(contact); }
+          if (!selected.length) { await finish(campaign); continue; }
+          if (!campaign.providerId) {
+            campaign.phase = 'creating'; await save(campaign);
+            const result = await createWhatsAppBroadcast({ env: currentEnv, project, campaign, idempotencyKey: campaign.id, assertMapping });
+            campaign.providerId = result.providerId; campaign.phase = 'created'; await save(campaign);
+          }
+          campaign.phase = 'adding'; await save(campaign);
+          const added = await addWhatsAppRecipients({ env: currentEnv, project, campaign, providerId: campaign.providerId, contacts: selected, idempotencyKey: campaign.id + '-recipients', assertMapping });
+          if (added.added !== selected.length || added.skipped) fail(409, 'RECIPIENT_MISMATCH', 'Zernio did not accept the complete audience. Review the draft broadcast before sending.');
+          // Consent can be revoked while recipients are uploaded; never dispatch that stale batch.
+          for (const contact of selected) { const current = await contacts.get(campaign.projectId, contact.id); if (exclusion(current, 'whatsapp') || current?.phone !== contact.phone) fail(409, 'AUDIENCE_CHANGED', 'A recipient changed during preparation. Review the draft broadcast.'); }
+          const prepared = await getWhatsAppBroadcast({ env: currentEnv, project, campaign, providerId: campaign.providerId, assertMapping }), expectedPhones = new Set(selected.map((contact: any) => contact.phone));
+          if (prepared.status !== 'draft' || prepared.recipients?.length !== expectedPhones.size || prepared.recipients.some((recipient: any) => !expectedPhones.delete(recipient.phone)) || expectedPhones.size) fail(409, 'AUDIENCE_CHANGED', 'The provider broadcast audience differs from the approved local audience. Review it before sending.');
+          for (const contact of selected) { const current = await contacts.get(campaign.projectId, contact.id); if (exclusion(current, 'whatsapp') || current?.phone !== contact.phone) fail(409, 'AUDIENCE_CHANGED', 'A recipient changed while the broadcast was being verified.'); }
+          campaign.phase = 'dispatching'; await save(campaign);
+          const result = await sendWhatsAppBroadcast({ env: currentEnv, project, campaign, providerId: campaign.providerId, expectedRecipientCount: selected.length, idempotencyKey: campaign.id + '-send', assertMapping });
+          campaign.phase = 'dispatched'; campaign.providerStatus = result.status; campaign.stats = result.stats; await save(campaign);
+          if (result.stats?.recipientCount !== selected.length || result.stats.sentCount + result.stats.failedCount > selected.length) fail(502, 'AUDIENCE_MISMATCH', 'Zernio reported a different audience size after sending. Check its broadcast receipt.');
+          for (const delivery of pending) if (selected.some((contact: any) => contact.id === delivery.contactId)) { delivery.status = result.status === 'failed' ? 'failed' : 'accepted'; delivery.providerId = campaign.providerId; await putDelivery(delivery); }
+          await finish(campaign);
+        } else {
+          const delivery = (await deliveries(campaign.id)).find((row: any) => row.status === 'pending');
+          if (!delivery) { await finish(campaign); continue; }
+          const contact: any = await contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, campaign.channel);
+          if (reason || (campaign.channel === 'email' ? contact.email : contact.phone) !== delivery.recipient) { await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; current.status = 'suppressed'; current.error = reason || 'Contact address changed'; }); await finish(campaign); continue; }
+          const rendered = content(campaign, contact);
+          if (campaign.channel === 'sms') Object.assign(delivery, { smsAccountSid: currentEnv.TWILIO_ACCOUNT_SID, smsSender: currentEnv.TWILIO_MESSAGING_SERVICE_SID ? '' : currentEnv.TWILIO_FROM_NUMBER, smsMessagingServiceSid: currentEnv.TWILIO_MESSAGING_SERVICE_SID || '', message: rendered.text });
+          delivery.status = 'sending';
+          // Claim: only a still-pending row moves to sending, so a cancellation that committed after the read above is never sent.
+          if ((await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; Object.assign(current, delivery); }))?.status !== 'sending') { await finish(campaign); continue; }
+          try {
+            const result: any = await sendDirect({ channel: campaign.channel, campaign: rendered, contact, delivery: { ...delivery, callbackUrl: `${appUrl}/api/webhooks/twilio/status/${delivery.id}` }, env: currentEnv, project, appUrl, unsubscribeUrl: `${appUrl}/api/direct/unsubscribe/${unsubscribeToken(campaign.projectId, contact.email)}`, assertMapping });
+            const latest = await changeDelivery(delivery.id, latest => {
+              if (latest.providerId && result.providerId !== latest.providerId || campaign.channel === 'sms' && latest.smsSender && result.sender && result.sender !== latest.smsSender) throw new IntegrationError(502, 'DELIVERY_MISMATCH', 'The provider acknowledgement conflicts with a delivery callback.', true);
+              latest.providerId = result.providerId; latest.status = nextStatus(latest.status, result.status); if (campaign.channel === 'sms') { latest.smsSender = result.sender || latest.smsSender; latest.smsMessagingServiceSid = result.messagingServiceSid || latest.smsMessagingServiceSid; }
+            });
+            if (campaign.channel === 'sms') await recordSms(campaign, latest);
+            if (campaign.channel === 'sms' && result.errorCode === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
+            if (result.suppressionReason) await contacts.suppressDestination(campaign.projectId, campaign.channel, delivery.recipient, result.suppressionReason);
+          } catch (error: any) {
+            if (campaign.channel === 'sms' && error.providerCode === 21610) await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
+            const latest = await changeDelivery(delivery.id, latest => { if (latest.providerId) return false; latest.status = error.uncertain ? 'uncertain' : 'failed'; latest.error = error instanceof IntegrationError ? error.message : 'The provider did not confirm the message.'; });
+            if (error.uncertain || error.status === 429) { campaign.status = 'attention'; campaign.lastError = latest.error || 'Review the provider acknowledgement before continuing.'; }
+          }
+          await finish(campaign);
+        }
+      } catch (error: any) { campaign.status = 'attention'; campaign.lastError = error instanceof IntegrationError ? error.message : 'The campaign could not continue. Check its provider status.'; await save(campaign); }
+    }
   }
   async function handle(context: any) {
     const { req, url, body, project, user, send } = context;
@@ -194,75 +232,90 @@ export function createDirectCampaigns({ db, env, appUrl, secret, store }: { db: 
     if (kind === 'status' && method === 'GET') { let accounts: any[] = [], accountError: any; if (env.ZERNIO_API_KEY && project.zernioProfileId) { try { accounts = await scopedAccounts(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping(project.zernioProfileId)), project.zernioProfileId); } catch (error: any) { accountError = error instanceof IntegrationError ? error.message : 'WhatsApp accounts could not be loaded.'; } } send(200, { providers: Object.fromEntries(channels.map(channel => [channel, ready(channel) && (channel !== 'whatsapp' || Boolean(project.zernioProfileId && !accountError))])), accounts: accounts.filter(account => account.platform === 'whatsapp').map(account => ({ id: account._id || account.id, name: account.displayName || account.username || 'WhatsApp Business' })), accountError, emailPolicy: 'transactional_only', callbackUrl: `${appUrl}/api/webhooks/twilio/inbound`, publicCallbacks: appUrl.startsWith('https://') }); return true; }
     if (kind === 'templates' && method === 'GET') { send(200, await listWhatsAppTemplates({ env: { ...env }, project, accountId: url.searchParams.get('accountId'), assertMapping: () => context.assertProjectMapping(project.zernioProfileId) })); return true; }
     if (kind === 'contacts') {
-      if (!id && method === 'GET') send(200, { contacts: contacts.list(project.id) });
-      else if (!id && method === 'POST') send(201, { contact: contacts.save(project.id, body) });
-      else if (id === 'import' && method === 'POST') send(200, contacts.import(project.id, body));
-      else if (id === 'assess-dns' && method === 'POST') { const result = await contacts.assessDNS(project.id, body.ids, { assertAccess: context.assertIntegrationSettings }); context.assertIntegrationSettings(); send(200, result); }
-      else if (id && !action && method === 'PATCH') send(200, { contact: contacts.save(project.id, body, id) });
-      else if (id && !action && method === 'DELETE') { if (!contacts.remove(project.id, id)) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { removed: true }); }
-      else if (id && action === 'suppress' && method === 'POST') send(200, { contact: contacts.suppress(project.id, id, body.channel, body.reason) });
+      if (!id && method === 'GET') send(200, { contacts: await contacts.list(project.id) });
+      else if (!id && method === 'POST') send(201, { contact: await contacts.save(project.id, body) });
+      else if (id === 'import' && method === 'POST') send(200, await contacts.import(project.id, body));
+      else if (id === 'assess-dns' && method === 'POST') { const result = await contacts.assessDNS(project.id, body.ids, { assertAccess: context.assertIntegrationSettings }); await context.assertIntegrationSettings(); send(200, result); }
+      else if (id && !action && method === 'PATCH') send(200, { contact: await contacts.save(project.id, body, id) });
+      else if (id && !action && method === 'DELETE') { if (!await contacts.remove(project.id, id)) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { removed: true }); }
+      else if (id && action === 'suppress' && method === 'POST') send(200, { contact: await contacts.suppress(project.id, id, body.channel, body.reason) });
       else return false;
       return true;
     }
     if (kind !== 'campaigns') return false;
-    if (!id && method === 'GET') { send(200, { campaigns: campaignRows(project.id).map(decorate) }); return true; }
-    if (!id && method === 'POST') { const timestamp = nowISO(), campaign = { ...validate(body), id: randomUUID(), projectId: project.id, status: 'draft', createdAt: timestamp, updatedAt: timestamp }; db.prepare('INSERT INTO direct_campaigns VALUES(?,?,?)').run(campaign.id, project.id, JSON.stringify(campaign)); send(201, { campaign: decorate(campaign) }); return true; }
-    const campaign = find(project.id, id);
-    if (!action && method === 'GET') { send(200, { campaign: decorate(campaign), deliveries: deliveries(id) }); return true; }
-    if (!action && method === 'PATCH') { if (campaign.status !== 'draft') fail(409, 'CAMPAIGN_LOCKED', 'Only drafts can be edited. Create a new draft for another send.'); const fields = Object.fromEntries(['name', 'channel', 'subject', 'text', 'html', 'emailPurpose', 'accountId', 'templateName', 'templateLanguage', 'templateComponents', 'contactIds', 'tags'].map(key => [key, campaign[key]])); Object.assign(campaign, validate({ ...fields, ...body })); send(200, { campaign: decorate(save(campaign)) }); return true; }
+    if (!id && method === 'GET') { const campaigns = []; for (const campaign of await campaignRows(project.id)) campaigns.push(await decorate(campaign)); send(200, { campaigns }); return true; }
+    if (!id && method === 'POST') { const timestamp = nowISO(), campaign = { ...validate(body), id: randomUUID(), projectId: project.id, status: 'draft', createdAt: timestamp, updatedAt: timestamp }; await db.execute(sql`INSERT INTO direct_campaigns (id, project_id, data) VALUES (${campaign.id}, ${project.id}, ${JSON.stringify(campaign)})`); send(201, { campaign: await decorate(campaign) }); return true; }
+    const campaign = await find(project.id, id);
+    if (!action && method === 'GET') { send(200, { campaign: await decorate(campaign), deliveries: await deliveries(id) }); return true; }
+    if (!action && method === 'PATCH') {
+      // Row lock: the draft check and the edit commit together, so a concurrent send cannot be reverted to an edited draft.
+      const saved = await db.transaction(async tx => { const current = await find(project.id, id, tx, true); if (current.status !== 'draft') fail(409, 'CAMPAIGN_LOCKED', 'Only drafts can be edited. Create a new draft for another send.'); const fields = Object.fromEntries(['name', 'channel', 'subject', 'text', 'html', 'emailPurpose', 'accountId', 'templateName', 'templateLanguage', 'templateComponents', 'contactIds', 'tags'].map(key => [key, current[key]])); Object.assign(current, validate({ ...fields, ...body })); return save(current, tx); });
+      send(200, { campaign: await decorate(saved) }); return true;
+    }
     if (method !== 'POST') return false;
-    if (action === 'preview') { if (campaign.channel === 'whatsapp') { const result = await listWhatsAppTemplates({ env: { ...env }, project, accountId: campaign.accountId, assertMapping: () => context.assertProjectMapping(project.zernioProfileId) }), approved = result.templates.find((template: any) => template.name === campaign.templateName && template.language === campaign.templateLanguage); if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template.'); validateWhatsAppTemplate(campaign, approved); } send(200, preview(campaign)); return true; }
+    if (action === 'preview') { if (campaign.channel === 'whatsapp') { const result = await listWhatsAppTemplates({ env: { ...env }, project, accountId: campaign.accountId, assertMapping: () => context.assertProjectMapping(project.zernioProfileId) }), approved = result.templates.find((template: any) => template.name === campaign.templateName && template.language === campaign.templateLanguage); if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template.'); validateWhatsAppTemplate(campaign, approved); } send(200, await preview(campaign)); return true; }
     if (['send', 'schedule'].includes(action)) {
-      if (campaign.status !== 'draft') { send(200, { campaign: decorate(campaign), deliveries: deliveries(id) }); return true; }
+      if (campaign.status !== 'draft') { send(200, { campaign: await decorate(campaign), deliveries: await deliveries(id) }); return true; }
       if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Review the audience and confirm provider charges before sending.');
       if (campaign.channel === 'email' && body.transactionalConfirmed !== true) fail(400, 'TRANSACTIONAL_CONFIRMATION_REQUIRED', 'Confirm this message is transactional and contains no marketing content.');
       if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
       if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending so unsubscribe links and delivery callbacks can work.');
       const scheduledAt = action === 'send' ? nowISO() : body.scheduledAt;
       if (typeof scheduledAt !== 'string' || !/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(scheduledAt) || !Number.isFinite(Date.parse(scheduledAt)) || new Date(scheduledAt.slice(0, 10)).toISOString().slice(0, 10) !== scheduledAt.slice(0, 10) || (action === 'schedule' && (Date.parse(scheduledAt) <= Date.now() || Date.parse(scheduledAt) > Date.now() + 366 * 86400000))) fail(400, 'INVALID_SCHEDULE', 'Choose a valid future time within the next year.');
-      const selected = audience(campaign);
-      if (body.previewToken !== preview(campaign).previewToken) fail(409, 'AUDIENCE_CHANGED', 'The campaign or audience changed. Review a fresh preview before confirming.');
+      const selected = await audience(campaign);
+      if (body.previewToken !== (await preview(campaign)).previewToken) fail(409, 'AUDIENCE_CHANGED', 'The campaign or audience changed. Review a fresh preview before confirming.');
       if (!selected.eligible.length || selected.eligible.length > 500) fail(400, 'AUDIENCE_LIMIT', 'Select between 1 and 500 eligible recipients per campaign.');
       if (campaign.channel === 'whatsapp') { const result = await listWhatsAppTemplates({ env: { ...env }, project, accountId: campaign.accountId, assertMapping: () => context.assertProjectMapping(project.zernioProfileId) }), approved = result.templates.find((template: any) => template.name === campaign.templateName && template.language === campaign.templateLanguage && template.status === 'APPROVED'); if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template.'); validateWhatsAppTemplate(campaign, approved); }
-      context.assertIntegrationSettings();
-      transaction(db, () => {
-        const fresh = find(project.id, id); if (fresh.status !== 'draft') return;
-        if (preview(fresh).previewToken !== body.previewToken) fail(409, 'AUDIENCE_CHANGED', 'The campaign or audience changed during preparation. Review a fresh preview before confirming.');
-        Object.assign(campaign, { status: 'scheduled', scheduledAt: new Date(scheduledAt).toISOString(), scheduledBy: user.id, profileId: project.zernioProfileId, credentialHash: fingerprint(env, campaign.channel), audienceCount: selected.eligible.length }); save(campaign);
-        for (const contact of selected.eligible) { const delivery = { id: randomUUID(), campaignId: id, contactId: contact.id, recipient: campaign.channel === 'email' ? contact.email : contact.phone, status: 'pending', createdAt: nowISO() }; db.prepare('INSERT INTO direct_deliveries VALUES(?,?,?,?)').run(delivery.id, id, contact.id, JSON.stringify(delivery)); }
-        store.activity(project.id, `${campaign.channel === 'email' ? 'Transactional email' : campaign.channel.toUpperCase()} campaign scheduled for ${selected.eligible.length} recipients.`);
+      await context.assertIntegrationSettings();
+      await db.transaction(async tx => {
+        // Contact writes in this project wait until the queue commits, so the audience cannot change between the token check and the delivery rows.
+        await lockContacts(tx, project.id);
+        // Row lock: a double-submitted send or schedule queues the deliveries once.
+        const fresh = await find(project.id, id, tx, true); if (fresh.status !== 'draft') return;
+        if ((await preview(fresh)).previewToken !== body.previewToken) fail(409, 'AUDIENCE_CHANGED', 'The campaign or audience changed during preparation. Review a fresh preview before confirming.');
+        Object.assign(campaign, { status: 'scheduled', scheduledAt: new Date(scheduledAt).toISOString(), scheduledBy: user.id, profileId: project.zernioProfileId, credentialHash: fingerprint(env, campaign.channel), audienceCount: selected.eligible.length }); await save(campaign, tx);
+        for (const contact of selected.eligible) { const delivery = { id: randomUUID(), campaignId: id, contactId: contact.id, recipient: campaign.channel === 'email' ? contact.email : contact.phone, status: 'pending', createdAt: nowISO() }; await tx.execute(sql`INSERT INTO direct_deliveries (id, campaign_id, contact_id, data) VALUES (${delivery.id}, ${id}, ${contact.id}, ${JSON.stringify(delivery)})`); }
+        await createStore(tx).activity(project.id, `${campaign.channel === 'email' ? 'Transactional email' : campaign.channel.toUpperCase()} campaign scheduled for ${selected.eligible.length} recipients.`);
       });
-      send(200, { campaign: decorate(find(project.id, id)), deliveries: deliveries(id) }); return true;
+      send(200, { campaign: await decorate(await find(project.id, id)), deliveries: await deliveries(id) }); return true;
     }
     if (action === 'cancel') {
-      campaign.status = 'cancelled'; save(campaign);
-      for (const delivery of deliveries(id)) if (delivery.status === 'pending') { delivery.status = 'cancelled'; putDelivery(delivery); }
+      // Cancel the stored campaign under its row lock rather than the copy read at the start of this request.
+      Object.assign(campaign, await changeCampaign(project.id, id, latest => { latest.status = 'cancelled'; }));
+      for (const delivery of await deliveries(id)) if (delivery.status === 'pending') await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; current.status = 'cancelled'; });
       if (campaign.channel === 'whatsapp' && campaign.providerId && campaign.providerStatus !== 'cancelled') {
-        const assertMapping = () => { context.assertIntegrationSettings(); guard(campaign, false); };
+        const assertMapping = async () => { await context.assertIntegrationSettings(); await guard(campaign, false); };
         try {
-          assertMapping(); const result = await cancelWhatsAppBroadcast({ env: { ...env }, project, campaign, providerId: campaign.providerId, idempotencyKey: campaign.id + '-cancel', assertMapping });
-          const latest = find(project.id, id); latest.providerStatus = result.status; delete latest.lastError; save(latest);
+          await assertMapping(); const result = await cancelWhatsAppBroadcast({ env: { ...env }, project, campaign, providerId: campaign.providerId, idempotencyKey: campaign.id + '-cancel', assertMapping });
+          await changeCampaign(project.id, id, latest => { latest.providerStatus = result.status; delete latest.lastError; });
         } catch (error: any) {
-          const latest = find(project.id, id); latest.lastError = error instanceof IntegrationError ? error.message : 'Local sending stopped. Provider cancellation was not confirmed; check Zernio.'; save(latest);
+          await changeCampaign(project.id, id, latest => { latest.lastError = error instanceof IntegrationError ? error.message : 'Local sending stopped. Provider cancellation was not confirmed; check Zernio.'; });
         }
       }
-      context.assertIntegrationSettings(); send(200, { campaign: decorate(find(project.id, id)), deliveries: deliveries(id) }); return true;
+      await context.assertIntegrationSettings(); send(200, { campaign: await decorate(await find(project.id, id)), deliveries: await deliveries(id) }); return true;
     }
     if (action === 'refresh') {
-      const assertMapping = () => { context.assertIntegrationSettings(); guard(campaign, false); };
+      const assertMapping = async () => { await context.assertIntegrationSettings(); await guard(campaign, false); };
       if (campaign.channel === 'whatsapp' && campaign.providerId) {
-        assertMapping(); const result = await getWhatsAppBroadcast({ env: { ...env }, project, campaign, providerId: campaign.providerId, assertMapping }), latest = find(project.id, id);
+        await assertMapping(); const result = await getWhatsAppBroadcast({ env: { ...env }, project, campaign, providerId: campaign.providerId, assertMapping });
         // Preserve worker/cancellation progress and receipts written while this provider read was in flight.
-        if (latest.providerStatus === campaign.providerStatus && JSON.stringify(latest.stats) === JSON.stringify(campaign.stats)) { latest.providerStatus = result.status; latest.stats = result.stats; save(latest); }
-        for (const delivery of deliveries(id)) { const remote = result.recipients?.find((recipient: any) => recipient.phone === delivery.recipient || recipient.phone === delivery.recipient.replace(/^\+/, '')); if (remote) { delivery.status = nextStatus(delivery.status, remote.status); putDelivery(delivery); } }
+        await changeCampaign(project.id, id, latest => { if (latest.providerStatus !== campaign.providerStatus || JSON.stringify(latest.stats) !== JSON.stringify(campaign.stats)) return false; latest.providerStatus = result.status; latest.stats = result.stats; });
+        for (const delivery of await deliveries(id)) { const remote = result.recipients?.find((recipient: any) => recipient.phone === delivery.recipient || recipient.phone === delivery.recipient.replace(/^\+/, '')); if (remote) await changeDelivery(delivery.id, current => { current.status = nextStatus(current.status, remote.status); }); }
       }
-      if (campaign.channel === 'sms' && deliveries(id).some((row: any) => row.providerId)) { assertMapping(); for (const delivery of deliveries(id).filter((row: any) => row.providerId && !terminal.has(row.status)).slice(0, 25)) { const result = await getSmsStatus({ env: { ...env }, providerId: delivery.providerId, assertMapping }); if (result.recipient !== delivery.recipient) fail(502, 'DELIVERY_MISMATCH', 'The provider returned another recipient.'); const latest = deliveries(id).find((row: any) => row.id === delivery.id); if (result.sender && latest.smsSender && result.sender !== latest.smsSender || result.messagingServiceSid && result.messagingServiceSid !== (latest.smsMessagingServiceSid || '')) fail(502, 'DELIVERY_MISMATCH', 'The provider returned another sending number or messaging service.'); latest.status = nextStatus(latest.status, result.status); if (result.errorCode) latest.errorCode = result.errorCode; if (result.sender) Object.assign(latest, { smsSender: result.sender, smsAccountSid: env.TWILIO_ACCOUNT_SID, smsMessagingServiceSid: result.messagingServiceSid || latest.smsMessagingServiceSid || '' }); putDelivery(latest); recordSms(campaign, latest); if (result.errorCode === '21610') contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out'); } }
-      if (campaign.channel === 'email' && ready('email')) { const result = await syncEmailSuppressions({ env: { ...env }, assertMapping: () => context.assertIntegrationSettings() }); const suppressed = (result.suppressions || []).filter((row: any) => (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()) && (row.scope?.type !== 'sending_domain' || row.scope.value.toLowerCase() === env.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase())); for (const contact of contacts.list(project.id)) { const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (match) contacts.suppress(project.id, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason); } }
-      context.assertIntegrationSettings(); finish(find(project.id, id)); send(200, { campaign: decorate(find(project.id, id)), deliveries: deliveries(id) }); return true;
+      if (campaign.channel === 'sms' && (await deliveries(id)).some((row: any) => row.providerId)) {
+        await assertMapping();
+        for (const delivery of (await deliveries(id)).filter((row: any) => row.providerId && !terminal.has(row.status)).slice(0, 25)) {
+          const result = await getSmsStatus({ env: { ...env }, providerId: delivery.providerId, assertMapping }); if (result.recipient !== delivery.recipient) fail(502, 'DELIVERY_MISMATCH', 'The provider returned another recipient.');
+          const latest = await changeDelivery(delivery.id, latest => { if (result.sender && latest.smsSender && result.sender !== latest.smsSender || result.messagingServiceSid && result.messagingServiceSid !== (latest.smsMessagingServiceSid || '')) fail(502, 'DELIVERY_MISMATCH', 'The provider returned another sending number or messaging service.'); latest.status = nextStatus(latest.status, result.status); if (result.errorCode) latest.errorCode = result.errorCode; if (result.sender) Object.assign(latest, { smsSender: result.sender, smsAccountSid: env.TWILIO_ACCOUNT_SID, smsMessagingServiceSid: result.messagingServiceSid || latest.smsMessagingServiceSid || '' }); });
+          await recordSms(campaign, latest); if (result.errorCode === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
+        }
+      }
+      if (campaign.channel === 'email' && ready('email')) { const result = await syncEmailSuppressions({ env: { ...env }, assertMapping: () => context.assertIntegrationSettings() }); const suppressed = (result.suppressions || []).filter((row: any) => (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()) && (row.scope?.type !== 'sending_domain' || row.scope.value.toLowerCase() === env.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase())); for (const contact of await contacts.list(project.id)) { const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (match) await contacts.suppress(project.id, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason); } }
+      await context.assertIntegrationSettings(); await finishLatest(project.id, id); send(200, { campaign: await decorate(await find(project.id, id)), deliveries: await deliveries(id) }); return true;
     }
     return false;
   }
-  function receiveTwilio({ rawBody, headers, url }: { rawBody: any; headers: any; url: URL }) {
+  async function receiveTwilio({ rawBody, headers, url }: { rawBody: any; headers: any; url: URL }) {
     if (!env.TWILIO_AUTH_TOKEN || !env.TWILIO_ACCOUNT_SID) fail(503, 'WEBHOOK_NOT_CONFIGURED', 'Twilio is not configured.');
     if (!(headers['content-type'] || '').toLowerCase().startsWith('application/x-www-form-urlencoded')) fail(415, 'INVALID_WEBHOOK', 'Twilio form content is required.');
     let form: URLSearchParams; try { form = new URLSearchParams(new TextDecoder('utf-8', { fatal: true }).decode(rawBody)); } catch { fail(400, 'INVALID_WEBHOOK', 'Twilio form content must use UTF-8.'); } const keys = [...form.keys()];
@@ -272,28 +325,36 @@ export function createDirectCampaigns({ db, env, appUrl, secret, store }: { db: 
     if (form.get('AccountSid') !== env.TWILIO_ACCOUNT_SID) fail(400, 'ACCOUNT_MISMATCH', 'The webhook belongs to another account.');
     const id = url.pathname.match(/^\/api\/webhooks\/twilio\/status\/([\w-]+)$/)?.[1];
     if (id) {
-      const row: any = db.prepare('SELECT d.data,c.project_id FROM direct_deliveries d JOIN direct_campaigns c ON c.id=d.campaign_id WHERE d.id=?').get(id);
-      if (!row) { if (smsInbox?.receiveStatus(form, id)) return { accepted: true }; fail(404, 'DELIVERY_NOT_FOUND', 'Delivery not found.'); }
-      const delivery = JSON.parse(row.data), campaign = find(row.project_id, delivery.campaignId), providerId = form.get('MessageSid'), status = form.get('MessageStatus') === 'canceled' ? 'cancelled' : form.get('MessageStatus') as string;
-      if (campaign.channel !== 'sms' || !/^(SM|MM)[a-f0-9]{32}$/i.test(providerId || '') || (delivery.providerId && providerId !== delivery.providerId) || form.get('To') !== delivery.recipient || !statuses.includes(status) || form.get('From') && delivery.smsSender && form.get('From') !== delivery.smsSender || form.get('MessagingServiceSid') && delivery.smsMessagingServiceSid && form.get('MessagingServiceSid') !== delivery.smsMessagingServiceSid) fail(400, 'DELIVERY_MISMATCH', 'The callback does not match this delivery.');
-      if (/^\+[1-9]\d{6,14}$/.test(form.get('From') || '')) { delivery.smsSender = form.get('From'); delivery.smsAccountSid = form.get('AccountSid'); if (/^MG[a-f0-9]{32}$/i.test(form.get('MessagingServiceSid') || '')) delivery.smsMessagingServiceSid = form.get('MessagingServiceSid'); }
-      delivery.providerId = providerId; delivery.status = nextStatus(delivery.status, status); if (form.get('ErrorCode')) delivery.errorCode = form.get('ErrorCode')!.slice(0, 20); putDelivery(delivery); finish(campaign);
-      recordSms(campaign, delivery);
-      if (form.get('ErrorCode') === '21610') contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
+      const [row] = await resultRows(db.execute(sql`SELECT d.data, c.project_id FROM direct_deliveries d JOIN direct_campaigns c ON c.id = d.campaign_id WHERE d.id = ${id}`));
+      if (!row) { if (await smsInbox?.receiveStatus(form, id)) return { accepted: true }; fail(404, 'DELIVERY_NOT_FOUND', 'Delivery not found.'); }
+      const campaign = await find(row.project_id, row.data.campaignId), providerId = form.get('MessageSid'), status = form.get('MessageStatus') === 'canceled' ? 'cancelled' : form.get('MessageStatus') as string;
+      const delivery = await changeDelivery(id, delivery => {
+        if (campaign.channel !== 'sms' || !/^(SM|MM)[a-f0-9]{32}$/i.test(providerId || '') || (delivery.providerId && providerId !== delivery.providerId) || form.get('To') !== delivery.recipient || !statuses.includes(status) || form.get('From') && delivery.smsSender && form.get('From') !== delivery.smsSender || form.get('MessagingServiceSid') && delivery.smsMessagingServiceSid && form.get('MessagingServiceSid') !== delivery.smsMessagingServiceSid) fail(400, 'DELIVERY_MISMATCH', 'The callback does not match this delivery.');
+        if (/^\+[1-9]\d{6,14}$/.test(form.get('From') || '')) { delivery.smsSender = form.get('From'); delivery.smsAccountSid = form.get('AccountSid'); if (/^MG[a-f0-9]{32}$/i.test(form.get('MessagingServiceSid') || '')) delivery.smsMessagingServiceSid = form.get('MessagingServiceSid'); }
+        delivery.providerId = providerId; delivery.status = nextStatus(delivery.status, status); if (form.get('ErrorCode')) delivery.errorCode = form.get('ErrorCode')!.slice(0, 20);
+      });
+      if (!delivery) fail(404, 'DELIVERY_NOT_FOUND', 'Delivery not found.');
+      await finishLatest(row.project_id, campaign.id);
+      await recordSms(campaign, delivery);
+      if (form.get('ErrorCode') === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
     } else if (/^\/api\/webhooks\/twilio\/inbound(?:\/[\w-]+)?$/.test(url.pathname)) {
       if (form.get('To') !== env.TWILIO_FROM_NUMBER && !(env.TWILIO_MESSAGING_SERVICE_SID && form.get('MessagingServiceSid') === env.TWILIO_MESSAGING_SERVICE_SID)) fail(400, 'SENDER_MISMATCH', 'The callback is for another sender.');
-      if (smsInbox) return smsInbox.receiveVerified(form, { projectId: url.pathname.split('/')[5] || undefined });
+      if (smsInbox) return await smsInbox.receiveVerified(form, { projectId: url.pathname.split('/')[5] || undefined });
       if (form.get('OptOutType') === 'STOP' || /^(STOP|STOPALL|UNSUBSCRIBE|CANCEL|END|QUIT|REVOKE|OPT OUT)$/i.test((form.get('Body') || '').trim())) {
-        contacts.suppressSmsGlobally(form.get('From')!, 'Recipient opted out');
+        await contacts.suppressSmsGlobally(form.get('From')!, 'Recipient opted out');
       }
     } else fail(404, 'WEBHOOK_NOT_FOUND', 'Webhook not found.');
     return { accepted: true };
   }
-  function handleUnsubscribe(token: any, method: string) { const [projectId, email] = unsubscribe(token); if (method === 'POST' && projectFor(projectId)) contacts.suppressDestination(projectId, 'email', email, 'Unsubscribed'); return method === 'POST' ? '<h1>Preferences updated</h1><p>This address will receive no further email campaigns from this project.</p>' : '<h1>Email preferences</h1><form method="post"><button type="submit">Stop email from this project</button></form>'; }
-  return { handle, contacts, processPending, receiveTwilio, handleUnsubscribe, attachSmsInbox(service: any) {
-    smsInbox = service;
-    for (const row of db.prepare('SELECT data FROM direct_campaigns').all() as any[]) { const campaign = JSON.parse(row.data); if (campaign.channel !== 'sms') continue; for (const delivery of deliveries(campaign.id)) { if (!delivery.smsAccountSid && campaign.credentialHash === fingerprint(env, 'sms') && !env.TWILIO_MESSAGING_SERVICE_SID) Object.assign(delivery, { smsAccountSid: env.TWILIO_ACCOUNT_SID, smsSender: env.TWILIO_FROM_NUMBER }); recordSms(campaign, delivery); } }
-  }, close() { closed = true; }, async idle() { while (active) await new Promise(resolve => setTimeout(resolve, 10)); } };
+  async function handleUnsubscribe(token: any, method: string) { const [projectId, email] = unsubscribe(token); if (method === 'POST' && await projectFor(projectId)) await contacts.suppressDestination(projectId, 'email', email, 'Unsubscribed'); return method === 'POST' ? '<h1>Preferences updated</h1><p>This address will receive no further email campaigns from this project.</p>' : '<h1>Email preferences</h1><form method="post"><button type="submit">Stop email from this project</button></form>'; }
+  async function backfillSms() {
+    for (const { data: campaign } of await resultRows(db.execute(sql`SELECT data FROM direct_campaigns ORDER BY seq`))) { if (campaign.channel !== 'sms') continue; for (const delivery of await deliveries(campaign.id)) { if (!delivery.smsAccountSid && campaign.credentialHash === fingerprint(env, 'sms') && !env.TWILIO_MESSAGING_SERVICE_SID) Object.assign(delivery, { smsAccountSid: env.TWILIO_ACCOUNT_SID, smsSender: env.TWILIO_FROM_NUMBER }); await recordSms(campaign, delivery); } }
+  }
+  return { handle, contacts, processPending, receiveTwilio, handleUnsubscribe,
+    /** Attaches the inbox at once; the returned promise records existing campaign SMS in it. Await it before serving requests. */
+    attachSmsInbox(service: any) { smsInbox = service; return attaching = backfillSms(); },
+    close() { closed = true; },
+    async idle() { await attaching?.catch(() => undefined); while (active) await new Promise(resolve => setTimeout(resolve, 10)); } };
 }
 
 export { nextStatus as nextDeliveryStatus };

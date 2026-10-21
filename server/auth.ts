@@ -164,8 +164,9 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
         if (continuation) await tx.execute(sql`INSERT INTO oidc_return_targets VALUES (${digest(state)}, ${digest(continuation)})`);
       });
       const location = client.buildAuthorizationUrl(provider, { redirect_uri: config.appUrl + callbackPath, scope: 'openid email profile', state, nonce, code_challenge: await client.calculatePKCECodeChallenge(verifier), code_challenge_method: 'S256' });
+      // Without an invitation no hash is stored, so a stale continuation cookie is ignored and cleared at the callback.
+      if (continuation) setCookie(res, cookie(inviteName, continuation, oidcWindow, callbackPath));
       setCookie(res, cookie(oidcName, browser, oidcWindow));
-      setCookie(res, continuation ? cookie(inviteName, continuation, oidcWindow, callbackPath) : cookie(inviteName, '', 0, callbackPath));
       res.writeHead(302, { Location: location.href }); res.end();
     },
     async oidcCallback(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {

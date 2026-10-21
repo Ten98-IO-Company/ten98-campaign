@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Resolver } from 'node:dns/promises';
 import { domainToASCII } from 'node:url';
-import { HttpError } from './auth.ts';
-import type { DatabaseSync } from 'node:sqlite';
-import { transaction } from './database.ts';
+import { sql } from 'drizzle-orm';
+import { advisoryLock, HttpError } from './auth.ts';
+import type { Database, Executor, Transaction } from './database.ts';
 import { reportObject as object } from './provider-core.ts';
 import type { ProviderRecord } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
@@ -50,25 +50,32 @@ function parseCsv(csv: any) {
   return rows.map((values, index) => ({ row: index + 2, values: values.length === headers.length ? Object.fromEntries(headers.map((header, position) => [header, values[position]])) : null }));
 }
 
-export function createContacts({ db }: { db: DatabaseSync }) {
-  db.exec(`CREATE TABLE IF NOT EXISTS direct_contacts(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,data TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS direct_contacts_project ON direct_contacts(project_id);
-    CREATE TABLE IF NOT EXISTS direct_contact_messenger_identities(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,account_id TEXT NOT NULL,participant_id TEXT NOT NULL,contact_id TEXT NOT NULL REFERENCES direct_contacts(id) ON DELETE CASCADE,PRIMARY KEY(project_id,account_id,participant_id));
-    CREATE TABLE IF NOT EXISTS direct_contact_suppressions(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,channel TEXT NOT NULL,target_hash TEXT NOT NULL,reason TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(project_id,channel,target_hash));
-    CREATE TABLE IF NOT EXISTS direct_sms_suppressions(target_hash TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at TEXT NOT NULL);`);
-  const read = db.prepare('SELECT data FROM direct_contacts WHERE project_id=? ORDER BY rowid DESC'), find = db.prepare('SELECT data FROM direct_contacts WHERE project_id=? AND id=?');
+// Every contact write in one project takes this lock: duplicate-destination checks, the 10,000-contact limit and
+// Messenger identity creation read the whole project first, so concurrent writers could otherwise both pass them.
+export const lockContacts = (tx: Executor, projectId: string) => advisoryLock(tx, 'direct-contacts:' + projectId);
+// A transaction on the pool, or a savepoint when the caller passes its own transaction.
+const atomic = <T>(executor: Executor, run: (tx: Transaction) => Promise<T>): Promise<T> => (executor as Database).transaction(run);
+const resultRows = async (query: Promise<{ rows: unknown[] }>) => (await query).rows as ProviderRecord[];
+
+export function createContacts({ db }: { db: Database }) {
   const hash = (target: string) => createHash('sha256').update(target).digest('hex');
-  const ledger = db.prepare('SELECT reason,created_at AS at FROM direct_contact_suppressions WHERE project_id=? AND channel=? AND target_hash=?');
-  const remember = db.prepare('INSERT INTO direct_contact_suppressions VALUES(?,?,?,?,?) ON CONFLICT(project_id,channel,target_hash) DO NOTHING');
-  const smsSuppression = (target: string) => target ? db.prepare('SELECT reason,created_at AS at FROM direct_sms_suppressions WHERE target_hash=?').get(hash(target)) : null;
-  const contactView = (row: ProviderRecord) => { const contact = JSON.parse(row.data), suppressed = smsSuppression(contact.phone); if (suppressed) { contact.suppression.sms ||= suppressed; contact.consents.sms = false; delete contact.consentEvidence?.sms; } return contact; };
-  const list = (projectId: string): ProviderRecord[] => read.all(projectId).map(contactView);
-  const get = (projectId: string, id: string): ProviderRecord | null => { const row = find.get(projectId, id); return row ? contactView(row) : null; };
-  const messengerContact = db.prepare('SELECT c.data FROM direct_contact_messenger_identities i JOIN direct_contacts c ON c.id=i.contact_id AND c.project_id=i.project_id WHERE i.project_id=? AND i.account_id=? AND i.participant_id=?');
-  function findMessenger(projectId: string, accountId: unknown, participantId: unknown) {
-    const row = messengerContact.get(projectId, messengerId(accountId, 'account ID'), messengerId(participantId, 'participant ID')); return row ? contactView(row) : null;
+  const ledger = async (ex: Executor, projectId: string, channel: string, target: string) => (await resultRows(ex.execute(sql`SELECT reason, created_at AS at FROM direct_contact_suppressions WHERE project_id = ${projectId} AND channel = ${channel} AND target_hash = ${hash(target)}`)))[0];
+  const remember = (ex: Executor, projectId: string, channel: string, targetHash: string, reason: string, at: string) => ex.execute(sql`INSERT INTO direct_contact_suppressions VALUES (${projectId}, ${channel}, ${targetHash}, ${reason}, ${at}) ON CONFLICT (project_id, channel, target_hash) DO NOTHING`);
+  const smsSuppression = async (target: string, ex: Executor = db): Promise<any> => target ? (await resultRows(ex.execute(sql`SELECT reason, created_at AS at FROM direct_sms_suppressions WHERE target_hash = ${hash(target)}`)))[0] : null;
+  // One suppression lookup per read instead of one query per contact.
+  async function contactViews(ex: Executor, found: ProviderRecord[]): Promise<ProviderRecord[]> {
+    const contacts = found.map(row => row.data as ProviderRecord), hashes = [...new Set(contacts.filter(contact => contact.phone).map(contact => hash(contact.phone)))], blocked = new Map<string, ProviderRecord>();
+    if (hashes.length) for (const row of await resultRows(ex.execute(sql`SELECT target_hash, reason, created_at AS at FROM direct_sms_suppressions WHERE target_hash IN ${hashes}`))) blocked.set(row.target_hash, { reason: row.reason, at: row.at });
+    for (const contact of contacts) { const suppressed = contact.phone && blocked.get(hash(contact.phone)); if (suppressed) { contact.suppression.sms ||= suppressed; contact.consents.sms = false; delete contact.consentEvidence?.sms; } }
+    return contacts;
   }
-  function prepare(projectId: string, body: any, previous?: ProviderRecord, messengerIdentity?: ProviderRecord): ProviderRecord {
+  const list = async (projectId: string, ex: Executor = db): Promise<ProviderRecord[]> => contactViews(ex, await resultRows(ex.execute(sql`SELECT data FROM direct_contacts WHERE project_id = ${projectId} ORDER BY seq DESC`)));
+  const get = async (projectId: string, id: string, ex: Executor = db): Promise<ProviderRecord | null> => (await contactViews(ex, await resultRows(ex.execute(sql`SELECT data FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`))))[0] || null;
+  async function findMessenger(projectId: string, accountId: unknown, participantId: unknown, ex: Executor = db) {
+    const found = await resultRows(ex.execute(sql`SELECT c.data FROM direct_contact_messenger_identities i JOIN direct_contacts c ON c.id = i.contact_id AND c.project_id = i.project_id WHERE i.project_id = ${projectId} AND i.account_id = ${messengerId(accountId, 'account ID')} AND i.participant_id = ${messengerId(participantId, 'participant ID')}`));
+    return (await contactViews(ex, found))[0] || null;
+  }
+  async function prepare(ex: Executor, projectId: string, body: any, previous?: ProviderRecord, messengerIdentity?: ProviderRecord): Promise<ProviderRecord> {
     if (!object(body) || Object.keys(body).some(key => !['name', 'email', 'phone', 'company', 'tags', 'consents', 'consentSource'].includes(key))) fail(400, 'Use the supported contact fields.');
     const result: ProviderRecord = { name: '', email: '', phone: '', company: '', tags: [], ...previous };
     for (const field of ['name', 'company']) if (own(body, field)) result[field] = text(body[field], field);
@@ -84,7 +91,7 @@ export function createContacts({ db }: { db: DatabaseSync }) {
     const now = new Date().toISOString();
     for (const channel of channels) {
       const destination = channel === 'email' ? result.email : result.phone, oldDestination = channel === 'email' ? previous?.email : previous?.phone;
-      if (destination) { const suppressed = ledger.get(projectId, channel, hash(destination)) || channel === 'sms' && smsSuppression(destination); if (suppressed) result.suppression[channel] = suppressed; }
+      if (destination) { const suppressed = await ledger(ex, projectId, channel, destination) || channel === 'sms' && await smsSuppression(destination, ex); if (suppressed) result.suppression[channel] = suppressed; }
       if (!destination || previous && destination !== oldDestination || result.suppression[channel]) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
       if (result.consents[channel]) {
         const newlyEnabled = previous?.consents?.[channel] !== true;
@@ -107,66 +114,70 @@ export function createContacts({ db }: { db: DatabaseSync }) {
     if (previous && (email && previous.email && email !== previous.email || phone && previous.phone && phone !== previous.phone)) fail(409, 'This row would replace another contact identity. Edit that contact explicitly.');
     return previous;
   }
-  function persist(record: ProviderRecord) {
-    db.prepare('INSERT INTO direct_contacts VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE direct_contacts.project_id=excluded.project_id').run(record.id, record.projectId, JSON.stringify(record));
-    for (const channel of channels) { const target = channel === 'email' ? record.email : record.phone, suppression = record.suppression[channel]; if (target && suppression) remember.run(record.projectId, channel, hash(target), suppression.reason, suppression.at); }
+  async function persist(ex: Executor, record: ProviderRecord) {
+    await ex.execute(sql`INSERT INTO direct_contacts (id, project_id, data) VALUES (${record.id}, ${record.projectId}, ${JSON.stringify(record)}) ON CONFLICT (id) DO UPDATE SET data = excluded.data WHERE direct_contacts.project_id = excluded.project_id`);
+    for (const channel of channels) { const target = channel === 'email' ? record.email : record.phone, suppression = record.suppression[channel]; if (target && suppression) await remember(ex, record.projectId, channel, hash(target), suppression.reason, suppression.at); }
     return record;
   }
-  function save(projectId: string, body: any, id?: string) {
-    return transaction(db, () => {
+  async function save(projectId: string, body: any, id?: string) {
+    return db.transaction(async tx => {
+      await lockContacts(tx, projectId);
       // ponytail: scan at most 10,000 contacts; index canonical destinations if this project limit grows.
-      const rows = new Map(list(projectId).map(row => [row.id, row])), previous = match(rows, body, id), record = prepare(projectId, body, previous);
+      const rows = new Map((await list(projectId, tx)).map(row => [row.id, row])), previous = match(rows, body, id), record = await prepare(tx, projectId, body, previous);
       if ([...rows.values()].some(row => row.id !== record.id && (record.email && row.email === record.email || record.phone && row.phone === record.phone))) fail(409, 'This destination belongs to another contact in this project.');
       if (!previous && rows.size >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
-      return persist(record);
+      return persist(tx, record);
     });
   }
-  function fromMessenger(projectId: string, body: any) {
+  /** Pass the webhook transaction as `executor`; the contact and identity writes then run in a savepoint inside it. */
+  async function fromMessenger(projectId: string, body: any, executor: Executor = db) {
     if (!object(body) || Object.keys(body).some(key => !['accountId', 'participantId', 'conversationId', 'name', 'avatarUrl'].includes(key))) fail(400, 'Use the verified Messenger identity fields.');
     const accountId = messengerId(body.accountId, 'account ID'), participantId = messengerId(body.participantId, 'participant ID'), conversationId = messengerId(body.conversationId, 'conversation ID');
     const name = body.name === undefined ? undefined : text(body.name, 'Messenger name');
-    let avatarUrl;
+    let avatarUrl: string | undefined;
     if (body.avatarUrl !== undefined && body.avatarUrl !== '') { try { avatarUrl = publicMediaUrl(body.avatarUrl); } catch { fail(400, 'Use a public HTTPS Messenger avatar URL.'); } }
-    // SAVEPOINT also works inside the caller's webhook transaction; a failed identity write must not leave an orphan contact.
-    db.exec('SAVEPOINT messenger_contact');
-    try {
-      if (!db.prepare('SELECT id FROM projects WHERE id=?').get(projectId)) fail(404, 'Project not found.');
-      let record = findMessenger(projectId, accountId, participantId);
+    // The savepoint also works inside the caller's webhook transaction; a failed identity write must not leave an orphan contact.
+    return atomic(executor, async tx => {
+      if (!(await tx.execute(sql`SELECT id FROM projects WHERE id = ${projectId}`)).rowCount) fail(404, 'Project not found.');
+      // Replayed or parallel deliveries of one identity wait here and then find the first contact instead of creating a second.
+      await lockContacts(tx, projectId);
+      let record = await findMessenger(projectId, accountId, participantId, tx);
       const at = new Date().toISOString();
       if (record) {
         const identity = record.identities.find((row: ProviderRecord) => row.platform === 'facebook' && row.accountId === accountId && row.participantId === participantId);
         if (!identity) throw new Error('The stored Messenger identity is incomplete.');
         if (name && record.nameSource === 'messenger') record.name = name;
         Object.assign(identity, { conversationId, ...(name ? { name } : {}), ...(avatarUrl ? { avatarUrl } : {}), updatedAt: at });
-        record.updatedAt = at; persist(record);
+        record.updatedAt = at; await persist(tx, record);
       } else {
-        if ((db.prepare('SELECT COUNT(*) AS count FROM direct_contacts WHERE project_id=?').get(projectId) as ProviderRecord).count >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
+        if ((await resultRows(tx.execute(sql`SELECT COUNT(*) AS count FROM direct_contacts WHERE project_id = ${projectId}`)))[0].count >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
         const identity = { platform: 'facebook', accountId, participantId, conversationId, name: name || '', ...(avatarUrl ? { avatarUrl } : {}), createdAt: at, updatedAt: at };
-        record = persist(prepare(projectId, { name: name || '' }, undefined, identity));
-        db.prepare('INSERT INTO direct_contact_messenger_identities VALUES(?,?,?,?)').run(projectId, accountId, participantId, record.id);
+        record = await persist(tx, await prepare(tx, projectId, { name: name || '' }, undefined, identity));
+        await tx.execute(sql`INSERT INTO direct_contact_messenger_identities VALUES (${projectId}, ${accountId}, ${participantId}, ${record.id})`);
       }
-      db.exec('RELEASE SAVEPOINT messenger_contact'); return record;
-    } catch (error) { db.exec('ROLLBACK TO SAVEPOINT messenger_contact; RELEASE SAVEPOINT messenger_contact'); throw error; }
+      return record;
+    });
   }
-  function importCsv(projectId: string, options: any) {
+  async function importCsv(projectId: string, options: any) {
     if (!object(options) || Object.keys(options).some(key => !['csv', 'dryRun', 'consents', 'consentSource'].includes(key)) || options.dryRun !== undefined && typeof options.dryRun !== 'boolean') fail(400, 'Use CSV text, optional consent evidence and an optional dry-run flag.');
     if (options.consents !== undefined && (!object(options.consents) || Object.entries(options.consents).some(([channel, granted]) => !channels.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use explicit channel consent flags.');
     if (Object.values(options.consents || {}).some(Boolean) && (!options.consentSource || !text(options.consentSource, 'consent source', 1000))) fail(400, 'Record the source of explicit consent before importing opt-ins.');
     const entries = parseCsv(options.csv);
-    return transaction(db, () => {
-      const rows = new Map(list(projectId).map(row => [row.id, row])), result: ProviderRecord = { imported: 0, created: 0, updated: 0, skipped: 0, contacts: [], errors: [], dryRun: options.dryRun === true };
+    return db.transaction(async tx => {
+      await lockContacts(tx, projectId);
+      const rows = new Map((await list(projectId, tx)).map(row => [row.id, row])), result: ProviderRecord = { imported: 0, created: 0, updated: 0, skipped: 0, contacts: [], errors: [], dryRun: options.dryRun === true };
       for (const entry of entries) {
         try {
           if (!entry.values) fail(400, 'The number of fields does not match the CSV header.');
           const body: ProviderRecord = Object.fromEntries(Object.entries(entry.values as ProviderRecord).filter(([, value]) => value.trim())), previous = match(rows, body);
           if (body.tags) body.tags = [...new Set([...(previous?.tags || []), ...body.tags.split(/[;|]/).map((value: string) => value.trim()).filter(Boolean)])];
           body.consents = Object.fromEntries(Object.entries(options.consents || {}).filter(([, granted]) => granted)); if (options.consentSource !== undefined) body.consentSource = options.consentSource;
-          const record = prepare(projectId, body, previous);
+          const record = await prepare(tx, projectId, body, previous);
           if (!previous && rows.size >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
           rows.set(record.id, record); result.imported++; result[previous ? 'updated' : 'created']++; result.contacts.push(record);
         } catch (error: any) { if (!(error instanceof HttpError)) throw error; result.skipped++; result.errors.push({ row: entry.row, error: error.message }); }
       }
-      if (!result.dryRun) for (const record of new Map<string, ProviderRecord>(result.contacts.map((record: ProviderRecord): [string, ProviderRecord] => [record.id, record])).values()) persist(record);
+      if (!result.dryRun) for (const record of new Map<string, ProviderRecord>(result.contacts.map((record: ProviderRecord): [string, ProviderRecord] => [record.id, record])).values()) await persist(tx, record);
       result.contacts = [...new Map(result.contacts.map((record: ProviderRecord): [string, ProviderRecord] => [record.id, record])).values()]; return result;
     });
   }
@@ -175,40 +186,43 @@ export function createContacts({ db }: { db: DatabaseSync }) {
     reason = text(reason, 'suppression reason', 500); if (!reason) fail(400, 'Provide a suppression reason.');
     return channel === 'email' && /^hard[-_ ]?bounce$/i.test(reason) ? 'hard-bounce' : reason;
   }
-  function suppressRecord(record: ProviderRecord, channel: string, reason: string, at: string) {
+  function suppressRecord(ex: Executor, record: ProviderRecord, channel: string, reason: string, at: string) {
     record.suppression[channel] ||= { reason, at }; record.consents[channel] = false; delete record.consentEvidence[channel]; record.updatedAt = at;
     if (channel === 'email' && reason === 'hard-bounce') record.hardBounceAt ||= at;
-    return persist(record);
+    return persist(ex, record);
   }
-  function suppress(projectId: string, id: string, channel: string, reason: any) {
+  async function suppress(projectId: string, id: string, channel: string, reason: any) {
     reason = suppressionReason(channel, reason);
-    return transaction(db, () => {
-      const record = get(projectId, id); if (!record) fail(404, 'Contact not found in this project.');
-      return suppressRecord(record, channel, reason, new Date().toISOString());
+    return db.transaction(async tx => {
+      await lockContacts(tx, projectId);
+      const record = await get(projectId, id, tx); if (!record) fail(404, 'Contact not found in this project.');
+      return suppressRecord(tx, record, channel, reason, new Date().toISOString());
     });
   }
-  function suppressDestination(projectId: string, channel: string, target: any, reason: any) {
+  async function suppressDestination(projectId: string, channel: string, target: any, reason: any) {
     reason = suppressionReason(channel, reason);
     target = channel === 'email' ? emailAddress(target) : text(target, 'phone number', 16);
     if (!target || channel !== 'email' && !/^\+[1-9]\d{6,14}$/.test(target)) fail(400, 'Provide a valid destination to suppress.');
-    return transaction(db, () => {
-      if (!db.prepare('SELECT id FROM projects WHERE id=?').get(projectId)) return { suppressed: 0 };
-      const at = new Date().toISOString(); remember.run(projectId, channel, hash(target), reason, at);
-      const matching = list(projectId).filter(record => (channel === 'email' ? record.email : record.phone) === target);
-      for (const record of matching) suppressRecord(record, channel, reason, at);
+    return db.transaction(async tx => {
+      if (!(await tx.execute(sql`SELECT id FROM projects WHERE id = ${projectId}`)).rowCount) return { suppressed: 0 };
+      await lockContacts(tx, projectId);
+      const at = new Date().toISOString(); await remember(tx, projectId, channel, hash(target), reason, at);
+      const matching = (await list(projectId, tx)).filter(record => (channel === 'email' ? record.email : record.phone) === target);
+      for (const record of matching) await suppressRecord(tx, record, channel, reason, at);
       return { suppressed: matching.length };
     });
   }
-  function suppressSmsGlobally(target: any, reason: any) {
+  async function suppressSmsGlobally(target: any, reason: any) {
     reason = suppressionReason('sms', reason); target = text(target, 'phone number', 16);
     if (!/^\+[1-9]\d{6,14}$/.test(target)) fail(400, 'Provide a valid destination to suppress.');
-    db.prepare('INSERT INTO direct_sms_suppressions VALUES(?,?,?) ON CONFLICT(target_hash) DO NOTHING').run(hash(target), reason, new Date().toISOString());
+    await db.execute(sql`INSERT INTO direct_sms_suppressions VALUES (${hash(target)}, ${reason}, ${new Date().toISOString()}) ON CONFLICT (target_hash) DO NOTHING`);
     return { suppressed: true };
   }
-  async function assessDNS(projectId: string, ids: unknown, { resolver, assertAccess }: { resolver?: any; assertAccess?: () => void } = {}) {
-    assertAccess?.();
+  async function assessDNS(projectId: string, ids: unknown, { resolver, assertAccess }: { resolver?: any; assertAccess?: () => unknown } = {}) {
+    await assertAccess?.();
     if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some(id => typeof id !== 'string')) fail(400, 'Select between 1 and 100 contacts to check DNS.');
-    const selected = [...new Set(ids)].map(id => { const record = get(projectId, id); if (!record) fail(404, 'A selected contact is not in this project.'); return record; });
+    const selected: ProviderRecord[] = [];
+    for (const id of new Set(ids)) { const record = await get(projectId, id); if (!record) fail(404, 'A selected contact is not in this project.'); selected.push(record); }
     const domains = [...new Set(selected.filter(row => row.email).map(row => row.email.split('@')[1]))], outcomes = new Map();
     if (domains.length) {
       const native = resolver ? null : new Resolver({ timeout: 1500, tries: 1 }), backend = resolver || native, lookup = typeof resolver === 'function' ? resolver : backend.resolveMx.bind(backend); let expired = false, timer;
@@ -239,13 +253,19 @@ export function createContacts({ db }: { db: DatabaseSync }) {
         }
       })); } finally { clearTimeout(timer); native?.cancel(); }
     }
-    assertAccess?.();
+    await assertAccess?.();
     const checkedAt = new Date().toISOString();
-    return transaction(db, () => ({ checked: outcomes.size, contacts: selected.flatMap(snapshot => {
-      const current = get(projectId, snapshot.id); if (!current) return [];
-      if (!current.email || current.email !== snapshot.email) return [current];
-      current.hygiene = { ...current.hygiene, dnsStatus: outcomes.get(current.email.split('@')[1]) || 'unavailable', dnsCheckedAt: checkedAt }; current.updatedAt = checkedAt; persist(current); return [current];
-    }), notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' }));
+    return db.transaction(async tx => {
+      // Re-read under the project lock so a stale DNS result cannot overwrite an edit or suppression made during the lookups.
+      await lockContacts(tx, projectId);
+      const contacts: ProviderRecord[] = [];
+      for (const snapshot of selected) {
+        const current = await get(projectId, snapshot.id, tx); if (!current) continue;
+        if (!current.email || current.email !== snapshot.email) { contacts.push(current); continue; }
+        current.hygiene = { ...current.hygiene, dnsStatus: outcomes.get(current.email.split('@')[1]) || 'unavailable', dnsCheckedAt: checkedAt }; current.updatedAt = checkedAt; await persist(tx, current); contacts.push(current);
+      }
+      return { checked: outcomes.size, contacts, notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' };
+    });
   }
-  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressDestination, suppressSmsGlobally, smsSuppression, remove(projectId: string, id: string) { return db.prepare('DELETE FROM direct_contacts WHERE project_id=? AND id=?').run(projectId, id).changes > 0; } };
+  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressDestination, suppressSmsGlobally, smsSuppression, async remove(projectId: string, id: string) { return Boolean((await db.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount); } };
 }
