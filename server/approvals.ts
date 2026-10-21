@@ -86,11 +86,17 @@ function queueSummary(post: ProviderRecord, queues: ProviderRecord[] | undefined
   catch (error) { return { ...(queue || { _id: post.queueId }), ready: false, message: error instanceof IntegrationError ? error.message : 'The publishing queue could not be verified.' }; }
 }
 
-// Council decision ten98-code-system#30: with approval required, a requester may approve their own review only while
-// they are the project's single active owner or administrator (by count, not role). Every membership change locks
-// the workspace row FOR UPDATE (lockWorkspace), so this FOR SHARE lock holds the count until the decision commits.
-async function assertSelfApprovalAllowed(tx: Executor, projectId: string, userId: string) {
+// Every membership change locks the workspace row FOR UPDATE (lockWorkspace), so this FOR SHARE lock holds the
+// reviewer's role and the administrator count until the decision commits. It is taken before the advisory
+// approval lock, keeping the order workspaces → advisory.
+async function lockReviewer(tx: Executor, projectId: string, userId: string) {
   await tx.execute(sql`SELECT w.id FROM workspaces w JOIN projects p ON p.workspace_id=w.id WHERE p.id=${projectId} FOR SHARE OF w`);
+  const current = await first(tx.execute(sql`SELECT m.role FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id WHERE p.id=${projectId} AND m.user_id=${userId}`));
+  if (!administrators.has(String(current?.role))) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
+}
+// Council decision ten98-code-system#30: with approval required, a requester may approve their own review only while
+// they are the project's single active owner or administrator (by count, not role). Runs under lockReviewer.
+async function assertSelfApprovalAllowed(tx: Executor, projectId: string, userId: string) {
   const reviewers = (await tx.execute(sql`SELECT u.id,u.name FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id JOIN users u ON u.id=m.user_id WHERE p.id=${projectId} AND m.role IN ('owner','admin')`)).rows as ProviderRecord[];
   if (reviewers.length === 1 && reviewers[0].id === userId) return;
   const others = reviewers.filter(row => row.id !== userId).map(row => String(row.name)).sort((a, b) => a.localeCompare(b));
@@ -207,9 +213,10 @@ export async function handleApprovals(context: ApprovalContext) {
       if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
       assetApproved(snapshot);
     }
-    // The per-post lock serialises decisions with requests; only a still-pending review takes a decision, so a
-    // parallel approve and reject cannot both apply.
+    // The reviewer's role is re-checked under the workspace lock. The per-post lock serialises decisions with requests;
+    // only a still-pending review takes a decision, so a parallel approve and reject cannot both apply.
     const selfApproved = await db.transaction(async (tx: Executor) => {
+      await lockReviewer(tx, project.id, user.id);
       await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
       const self = body.decision === 'approved' && review.requested_by === user.id && (await policy(tx, project.id)).requireApproval;
       if (self) await assertSelfApprovalAllowed(tx, project.id, user.id);

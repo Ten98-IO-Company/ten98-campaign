@@ -6,7 +6,7 @@ import { blockWrites, postgresSkip, singleConnection, testDatabase } from './pos
 
 test('content approval policy binds current posts and creative to audited review requests and enforces role and project boundaries', { skip: postgresSkip }, async t => {
   const { db, pool, sql } = await testDatabase(t);
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner','Workspace owner','owner@example.test'),('admin','Reviewer','admin@example.test'),('editor','Author','editor@example.test'),('viewer','Reader','viewer@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'),('project-b','w','B')");
+  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner','Workspace owner','owner@example.test'),('admin','Reviewer','admin@example.test'),('editor','Author','editor@example.test'),('viewer','Reader','viewer@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'),('project-b','w','B'); INSERT INTO memberships VALUES ('w','owner','owner'),('w','admin','admin'),('w','editor','editor'),('w','viewer','viewer')");
   const store = createStore(db), project = { id: 'project-a' }, foreignProject = { id: 'project-b' };
   const context = (role = 'editor', selectedProject = project) => ({ db, store, project: selectedProject, role, user: { id: role, name: { owner: 'Workspace owner', admin: 'Reviewer', editor: 'Author', viewer: 'Reader' }[role] } });
   async function invoke(path, { method = 'GET', body = {}, role = 'editor', selectedProject = project } = {}) {
@@ -115,7 +115,7 @@ test('content approval policy binds current posts and creative to audited review
 
 test('parallel review requests open one pending review and a parallel approve and reject record one decision', { skip: postgresSkip }, async t => {
   const { db, pool, sql } = await testDatabase(t);
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('admin','Reviewer','admin@example.test'),('editor','Author','editor@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A')");
+  await pool.query("INSERT INTO users (id, name, email) VALUES ('admin','Reviewer','admin@example.test'),('editor','Author','editor@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'); INSERT INTO memberships VALUES ('w','admin','admin'),('w','editor','editor')");
   const store = createStore(db), project = { id: 'project-a' };
   const post = await store.create(project.id, 'posts', { content: 'Race fixture', platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [] });
   const invoke = async (path, role, body = {}) => { let result; await handleApprovals({ db, store, project, role, user: { id: role, name: role }, req: { method: 'POST' }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body, send(status, data) { result = { status, data }; } }); return result; };
@@ -283,4 +283,16 @@ test('review requests, proposals and decisions each run on their own transaction
   const result = await proposed.request('casey', { proposal: { content: 'Proposed on one connection', mode: 'draft' } });
   assert.equal(result.status, 200, JSON.stringify(result.data));
   assert.equal((await proposed.review('blair', result.data.item.review.id)).status, 200);
+});
+
+test('a reviewer demoted after their request started cannot approve or reject', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['avery', 'admin'], ['casey', 'editor']]);
+  const reviewId = await f.request('casey');
+  // The request read Avery as an administrator; the membership changed before the decision took its locks.
+  await f.pool.query("UPDATE memberships SET role = 'editor' WHERE user_id = 'avery'");
+  for (const decision of ['approved', 'rejected']) {
+    const result = await f.review('avery', reviewId, decision);
+    assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVAL_ADMIN_REQUIRED');
+  }
+  assert.deepEqual(await f.stored(reviewId), { status: 'pending', self_approved: false });
 });
