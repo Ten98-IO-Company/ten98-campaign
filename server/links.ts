@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
 import { sql } from 'drizzle-orm';
+import { workspaceRoles } from '@ten98/runtime';
 import qrcode from 'qrcode-generator';
 import { advisoryLock, HttpError } from './auth.ts';
 import type { Database, Executor } from './database.ts';
@@ -94,7 +95,7 @@ export function createLinks({ db, appUrl }: { db: Database; appUrl: string }) {
   async function handle(context: { req: IncomingMessage; res: ServerResponse; url: URL; project: { id: string }; role: string; user?: PublicUser; send: (status: number, body: unknown) => void; body?: any }) {
     const { req, res, url, project, role, user, send, body = {} } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/links`;
     if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
-    if (!['owner', 'admin', 'editor', 'viewer'].includes(role)) fail(403, 'Project access is required.');
+    if (!(workspaceRoles as readonly string[]).includes(role)) fail(403, 'Project access is required.');
     const path = url.pathname.slice(prefix.length), method = req.method;
     if (method !== 'GET' && !['owner', 'admin', 'editor'].includes(role)) fail(403, 'Your workspace role is view only.');
     if (path === '/settings' && method === 'GET') { send(200, { settings: settingsView(await settings(project.id)) }); return true; }

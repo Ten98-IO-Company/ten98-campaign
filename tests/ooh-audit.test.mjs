@@ -9,13 +9,14 @@ import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
 async function fixture(t, run) {
   const { pool, db, sql } = await testDatabase(t), originalFetch = globalThis.fetch, project = { id: 'ooh-audit' };
   await pool.query("INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('ooh-audit','w','OOH audit')");
-  const store = createStore(db), calls = [], state = { providerStatus: 1, proposal: null, item: null, beforeBookResponse: null, beforeItemResponse: null, malformed: undefined };
+  const store = createStore(db), calls = [], state = { providerStatus: 1, proposal: null, item: null, beforeBookResponse: null, beforeItemResponse: null, malformed: undefined, raw: undefined };
   globalThis.fetch = async (target, options) => {
     const path = new URL(target).pathname, payload = options.body && JSON.parse(options.body); calls.push({ path, payload }); let result;
     if (path === '/api/v1/user/current_user') result = { id: 1, domain_id: 7 };
     else if (path.startsWith('/api/v1/screen/')) result = { id: Number(path.split('/').at(-1)), domain_id: 7, name: 'Approved screen' };
     else if (path === '/api/v1/proposal') { await state.beforeProposalResponse?.(); result = state.proposal = { ...payload, id: 800, domain_id: 7, proposal_item_id_list: [], status: 1 }; }
     else if (path === '/api/v1/proposal/add_screens') { result = state.item = { ...payload, id: 1800 }; state.proposal.proposal_item_id_list = [1800]; }
+    else if (path === '/api/v1/proposal/800' && state.raw !== undefined) return new Response(state.raw);
     else if (path === '/api/v1/proposal/800') result = state.malformed !== undefined ? state.malformed : { ...state.proposal, status: state.providerStatus };
     else if (path === '/api/v1/proposal/proposal_item/1800') { await state.beforeItemResponse?.(); result = state.item; }
     else if (path.endsWith('/availability')) result = { proposal_id: 800, availability: 'available', requested_screen_count: 2, bookable_screen_count: 2 };
@@ -111,6 +112,23 @@ test('OOH malformed provider JSON yields a controlled error without changing sav
       const result = await invoke(bookingPath + '/report');
       assert.equal(result.status, 502); assert.equal(result.data.error.code, 'INVALID_OOH_RESPONSE');
       assert.equal((await sql.get('SELECT data::text AS data FROM project_ooh_bookings WHERE id=?', booking.id)).data, before);
+    }
+  });
+});
+
+test('OOH provider bodies over 2 MiB, with a BOM or with malformed UTF-8 are refused without changing saved bookings', { skip: postgresSkip }, async t => {
+  await fixture(t, async ({ sql, state, invoke, booking, bookingPath }) => {
+    const valid = JSON.stringify({ ...state.proposal, status: state.providerStatus });
+    state.raw = valid;
+    assert.equal((await invoke(bookingPath + '/report')).status, 200, 'The raw-body stub serves an acceptable response.');
+    const before = (await sql.get('SELECT data::text AS data FROM project_ooh_bookings WHERE id=?', booking.id)).data;
+    const oversized = JSON.stringify({ ...JSON.parse(valid), padding: 'a'.repeat(2 * 1024 * 1024) });
+    const badUtf8 = new Uint8Array([...Buffer.from(valid.slice(0, -1) + ',"note":"'), 0xff, ...Buffer.from('"}')]);
+    for (const [name, raw] of [['oversized', oversized], ['byte order mark', '﻿' + valid], ['malformed UTF-8', badUtf8]]) {
+      state.raw = raw;
+      const result = await invoke(bookingPath + '/report');
+      assert.equal(result.status, 502, name); assert.equal(result.data.error.code, 'INVALID_OOH_RESPONSE', name);
+      assert.equal((await sql.get('SELECT data::text AS data FROM project_ooh_bookings WHERE id=?', booking.id)).data, before, name);
     }
   });
 });
