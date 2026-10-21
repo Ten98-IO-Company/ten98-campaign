@@ -1,5 +1,5 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Disclosure, EmptyState, Field, FormActions, Heading, Inline, Link, List, ListItem, Progress, SegmentedControl, StatusLine, Stack, Switch, Text, Textarea } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Disclosure, EmptyState, FeatureControls, Field, FormActions, Heading, Inline, Link, List, ListItem, Option, Progress, SegmentedControl, Select, StatusLine, Stack, Switch, Text, Textarea } from '@ten98/ui';
 import { PostVariantPreview } from './PostComposer';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { reviewKeyAction } from './review-keys';
@@ -22,6 +22,7 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
   const [data, setData] = useState<any>(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [filter, setFilter] = useState('all'), [notes, setNotes] = useState<Record<string, string>>({});
   const [focusId, setFocusId] = useState(''), advance = useRef<{ id: string; index: number } | null>(null);
   const [selected, setSelected] = useState<string[]>([]), [bulk, setBulk] = useState<{ done: number; total: number } | null>(null), [bulkResult, setBulkResult] = useState<{ decision: string; ok: number; skipped: number; failed: { id: string; name: string; message: string }[] } | null>(null);
+  const [sort, setSort] = useState('requested'), [platform, setPlatform] = useState('');
   const active = useRef(true), readVersion = useRef(0), path = `/projects/${encodeURIComponent(projectId)}/approvals`, canReview = ['owner', 'admin'].includes(role), canRequest = ['owner', 'admin', 'editor'].includes(role);
   function acceptItem(item: any) { if (active.current) setData((previous: any) => previous ? { ...previous, posts: previous.posts.map((entry: any) => entry.post.id === item.post.id ? item : entry) } : previous); }
   async function load() {
@@ -38,7 +39,15 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
   async function review(item: any, decision: string) {
     await action(item.post.id, async () => { const result = await request(`${path}/posts/${encodeURIComponent(item.post.id)}/review`, 'POST', { decision, note: notes[item.post.id] || '', reviewId: item.review.id }); if (!active.current) return; acceptItem(result.item); setNotes(previous => ({ ...previous, [item.post.id]: '' })); setNotice(decision === 'approved' ? 'Post approved. Publishing remains a separate action.' : 'Changes requested. The author can update this draft and request another review.'); await onChanged?.(); await load(); });
   }
-  const posts = (data?.posts || []).filter((item: any) => !item.post.sample && (filter === 'all' || item.status === filter));
+  const posts = (data?.posts || []).filter((item: any) => !item.post.sample && inPlatform(item) && (filter === 'all' || item.status === filter)).sort(byReviewOrder);
+  // Counts, sort and platform filter follow pendpost/pendpost@42ac77b29f7720a912bdce1507b16a2a56fca74f app/src/components/Freigaben.jsx:54-60, 807-833 and 896-920 (MIT):
+  // each status count uses the list's own platform filter, so a count never promises posts the list hides. Only loaded data is used.
+  function inPlatform(item: any) { return !platform || (item.post.platforms || []).includes(platform); }
+  function reviewTime(item: any) { const value = Date.parse(sort === 'planned' ? item.post.scheduledAt : item.review?.requestedAt); return Number.isFinite(value) ? value : null; }
+  function byReviewOrder(a: any, b: any) { const left = reviewTime(a), right = reviewTime(b); return left === null ? right === null ? 0 : 1 : right === null ? -1 : sort === 'planned' ? left - right : right - left; }
+  const statusValues = ['all', 'pending', 'stale', 'approved', 'rejected', 'not_requested'], loaded = (data?.posts || []).filter((item: any) => !item.post.sample);
+  const counts: Record<string, number> = Object.fromEntries(statusValues.map(value => [value, loaded.filter((item: any) => inPlatform(item) && (value === 'all' || item.status === value)).length]));
+  const platformChoices: string[] = [...new Set([...loaded.flatMap((item: any) => item.post.platforms || []), ...(platform ? [platform] : [])])];
   // A hidden or no-longer-pending post can stay in the selection, so every count and the loop use this intersection.
   const actionable = canReview ? posts.filter((item: any) => item.status === 'pending') : [], chosen = actionable.filter((item: any) => selected.includes(item.post.id)), blockedChosen = chosen.filter((item: any) => approveBlocked(item)).length;
   async function bulkReview(decision: string) {
@@ -78,7 +87,8 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
       {data?.requireApproval && <Text tone="muted" size="sm">While approval is required, an owner or administrator must make changes to posts already submitted to a provider. Editors can still cancel or remove copies using the publishing controls.</Text>}
     </Stack></Card>
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}
-    <SegmentedControl label="Review status" value={filter} onValueChange={setFilter} options={['all', 'pending', 'stale', 'approved', 'rejected', 'not_requested'].map(value => ({ value, label: value === 'all' ? 'All posts' : label(value) }))}/>
+    <SegmentedControl label="Review status" value={filter} onValueChange={setFilter} options={statusValues.map(value => ({ value, label: `${value === 'all' ? 'All posts' : label(value)} (${counts[value]})` }))}/>
+    <FeatureControls><Field label="Platform"><Select value={platform} onChange={event => setPlatform(event.target.value)}><Option value="">All platforms</Option>{platformChoices.map(value => <Option key={value} value={value}>{PLATFORM_RULES[value]?.label || value}</Option>)}</Select></Field><Field label="Sort"><Select value={sort} onChange={event => setSort(event.target.value)}><Option value="requested">Newest review request first</Option><Option value="planned">Planned time, soonest first</Option></Select></Field></FeatureControls>
     {canReview && actionable.length > 0 && <Stack as="section" gap={3} aria-label="Bulk review">
       <Checkbox label={`Select all visible posts awaiting review (${actionable.length})`} disabled={Boolean(busy)} checked={chosen.length === actionable.length} onChange={event => setSelected(event.target.checked ? actionable.map((item: any) => item.post.id) : [])}/>
       {chosen.length > 0 && <><StatusLine>{chosen.length} post{chosen.length === 1 ? '' : 's'} selected.{blockedChosen ? ` Approve will skip ${blockedChosen} whose approval is blocked by an unverified queue or a creative not yet approved.` : ''}</StatusLine>

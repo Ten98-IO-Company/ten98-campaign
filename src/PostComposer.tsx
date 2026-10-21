@@ -36,6 +36,25 @@ function presetTime(preset: string, now = new Date()) {
   date.setHours(preset === 'tomorrow-18' ? 18 : 9, 0, 0, 0);
   return localTime(date.toISOString());
 }
+// The "Next slot" hint follows zernio-dev/latewiz@28dd018063b955769de11f881acd03bb64c61cd4 src/app/dashboard/compose/_components/schedule-picker.tsx:39,55-61 (MIT).
+// latewiz asks the provider; this reads only the loaded weekly slots, so it cannot know which slots other posts already hold.
+function nextQueueSlot(slots: { dayOfWeek: number; time: string }[], timeZone: string, now = new Date()) {
+  const week = 7 * 1440, base = new Date(Math.floor(now.getTime() / 60000) * 60000);
+  let clock: Intl.DateTimeFormat;
+  try { clock = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); } catch { return null; }
+  const wall = (date: Date) => { const parts = Object.fromEntries(clock.formatToParts(date).map(part => [part.type, part.value])); return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday) * 1440 + Number(parts.hour) * 60 + Number(parts.minute); };
+  let best: Date | null = null;
+  for (const slot of slots) {
+    const [hour, minute] = String(slot.time).split(':').map(Number), target = slot.dayOfWeek * 1440 + hour * 60 + minute;
+    if (!Number.isInteger(slot.dayOfWeek) || slot.dayOfWeek < 0 || slot.dayOfWeek > 6 || !Number.isInteger(hour) || !Number.isInteger(minute) || hour > 23 || minute > 59) continue;
+    let candidate = new Date(base.getTime() + ((target - wall(base) + week) % week || week) * 60000);
+    // A daylight-saving change inside the week moves the wall clock; shift back onto the slot's own time.
+    const drift = (target - wall(candidate) + week * 1.5) % week - week / 2;
+    if (drift) candidate = new Date(candidate.getTime() + drift * 60000);
+    if (!best || candidate < best) best = candidate;
+  }
+  return best;
+}
 const issueMessages = (errors: { message: string }[], warnings: { message: string }[]): ValidationMessage[] => [...errors.map((item, index) => ({ id: 'error' + index, text: item.message })), ...warnings.map((item, index) => ({ id: 'warning' + index, text: 'To verify: ' + item.message }))];
 function AccountGroupPicker({ load, onChoose, disabled }: { load: NonNullable<Props['onLoadGroups']>; onChoose: (members: Row[], directory: Row[]) => void; disabled: boolean }) {
   const [data, setData] = useState<any>(null), [selectedId, setSelectedId] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
@@ -221,6 +240,10 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   const [groupAccounts, setGroupAccounts] = useState<Row[] | null>(null), accounts = groupAccounts || connectedAccounts;
   const [tagInput, setTagInput] = useState((post?.tags || []).join('\n')), [previewSize, setPreviewSize] = useState<PreviewSize>('desktop');
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  // Accounts load once when an editable composer opens without them, as latewiz's account picker loads on open
+  // (zernio-dev/latewiz@28dd018063b955769de11f881acd03bb64c61cd4 src/app/dashboard/compose/_components/platform-selector.tsx:24, MIT).
+  const autoLoaded = useRef(false);
+  useEffect(() => { if (autoLoaded.current || readOnly || !canWrite || providerPost || !onLoadAccounts || connectedAccounts.length) return; autoLoaded.current = true; void loadAccounts(); }, []);
   const disabled = busy || saving || shortening || !canWrite || readOnly || post?.status === 'published' || !!post?.externalId && !providerPost;
   const selected = platforms.includes(activePlatform) ? activePlatform : platforms[0] || '', rule = PLATFORM_RULES[selected];
   const accountChoices = accounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))), editingAccount = accountChoices.find(account => accountId(account) === activeAccount), editingAccountId = editingAccount ? accountId(editingAccount) : '', editKey = selected + ':' + editingAccountId;
@@ -287,7 +310,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   const mediaMode = platformMediaModes[editKey] || (own(override, 'mediaItems') ? override.mediaItems?.length ? 'custom' : 'none' : own(override, 'assetId') ? override.assetId ? 'asset' : 'none' : 'shared');
   const captionLimit = variant ? captionLimitForVariant(variant) : rule?.captionLimit || 0;
   const tikTokAccounts = socialAccounts.filter(account => account.platform === 'tiktok' && selectedAccounts.includes(accountId(account)));
-  const tagErrors = checks.errors.filter((item: any) => item.field === 'tags'), providerStale = !!providerCheck && providerCheck.signature !== JSON.stringify(values), selectedQueue = queues.find(row => row._id === queueId);
+  const tagErrors = checks.errors.filter((item: any) => item.field === 'tags'), providerStale = !!providerCheck && providerCheck.signature !== JSON.stringify(values), selectedQueue = queues.find(row => row._id === queueId), nextSlot = selectedQueue?.active && Array.isArray(selectedQueue.slots) ? nextQueueSlot(selectedQueue.slots, selectedQueue.timezone) : null;
   const providerPassed = providerCheck?.result?.valid === true || providerCheck?.result?.validation?.valid === true, providerFailed = providerCheck?.result?.valid === false || providerErrors.length > 0;
   const providerMessages: ValidationMessage[] = providerCheck ? [...(Array.isArray(providerErrors) ? providerErrors.map((item: any, index: number) => ({ id: 'error' + index, text: typeof item === 'string' ? item : item.message || item.error || 'A destination failed validation.' })) : []), ...(Array.isArray(providerWarnings) ? providerWarnings.map((item: any, index: number) => ({ id: 'warning' + index, text: typeof item === 'string' ? item : item.message || item.warning || 'The provider reported a restriction to review.' })) : []), ...(providerCheck.result?.message ? [{ id: 'message', text: providerCheck.result.message }] : [])] : [];
   const panel = rule && variant && <Stack gap={4}>
@@ -357,6 +380,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
         {queueId && queues.some(row => row._id === queueId && row.version !== queueVersion) && <ReviewConfirm title="This queue changed since you selected it" reviewKey={`${queueId}:${selectedQueue?.version}`} acknowledgements={[]} confirmLabel="Use reviewed queue settings" onConfirm={() => { setQueueVersion(queues.find(row => row._id === queueId)?.version || ''); setProviderCheck(null); }}><Text>Review its schedule, then save the new queue settings and obtain approval again if required.</Text></ReviewConfirm>}
         <Text tone="muted" size="sm">Saving keeps this post local. Submit it from Publishing or Queues after approval. Zernio reserves the next free slot when the post is submitted; preview times are not reservations. Choosing a queue clears a fixed planned time.</Text>
         {queueId && selectedQueue && <Text tone="muted" size="sm">Weekly slots ({selectedQueue.timezone}): {selectedQueue.slots.map((slot: any) => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][slot.dayOfWeek] + ' ' + slot.time).join(', ') || 'None'}</Text>}
+        {queueId && selectedQueue && nextSlot && <StatusLine>Next weekly slot (preview): {new Intl.DateTimeFormat(undefined, { timeZone: selectedQueue.timezone, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(nextSlot)} ({selectedQueue.timezone}). Zernio reserves the next free slot only when the post is submitted, so this time may already be taken.</StatusLine>}
       </Stack>}
       <Stack as="section" gap={3}>
         <ValidationSummary title="Publishing checks" emptyMessage="Choose a platform to check your post." items={destinationChecks.map(check => { const account = check.accountId ? accounts.find(row => accountId(row) === check.accountId) : undefined; return { id: check.platform + ':' + (check.accountId || ''), target: (PLATFORM_RULES[check.platform]?.label || check.platform) + (check.accountId ? ' · ' + (account ? accountLabel(account) : check.accountId) : ''), status: check.errors.length ? 'error' : check.warnings.length ? 'warning' : 'ok', messages: issueMessages(check.errors, check.warnings) }; })}/>
