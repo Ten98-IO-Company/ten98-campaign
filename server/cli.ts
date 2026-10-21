@@ -3,9 +3,10 @@ import { sql } from 'drizzle-orm';
 import { assertSchema, closeDatabase, getDatabase, migrate, type Database } from './database.ts';
 import { hashPassword, lockUser } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
+import type { importSqlite } from './import-sqlite.ts';
 
 class CliError extends Error {}
-const usage = 'Usage: node server/cli.ts migrate, or pipe JSON account input to create-user, reset-password, or {email} to grant-operator or revoke-operator.';
+const usage = 'Usage: node server/cli.ts migrate, import-sqlite <path-to-campaign.sqlite>, or pipe JSON account input to create-user, reset-password, or {email} to grant-operator or revoke-operator.';
 
 // Read JSON from stdin so passwords never appear in process arguments or output.
 async function account(command: string, db: Database) {
@@ -39,12 +40,32 @@ async function account(command: string, db: Database) {
   }
 }
 
+// Prints counts and table names only: never row data, hashes or secrets.
+// Loaded on demand so only this command opens node:sqlite.
+async function importSqliteCommand(pool: Parameters<typeof importSqlite>[0], file: string) {
+  const summary = await (await import('./import-sqlite.ts')).importSqlite(pool, file);
+  console.log(`Imported ${summary.tables.length} tables in one transaction; row counts and fingerprints verified.`);
+  for (const { name, rows } of summary.tables) console.log(`  ${name}: ${rows}`);
+  if (summary.absent.length) console.log(`Not in the source file (never created there; left empty): ${summary.absent.join(', ')}.`);
+  if (summary.ephemeral.length) console.log(`Not imported (sign-in state; everyone signs in again): ${summary.ephemeral.map(({ name, rows }) => `${name} ${rows}`).join(', ')}.`);
+  if (summary.defaulted.length) console.log(`Columns absent from the source file, filled with their defaults: ${summary.defaulted.join(', ')}.`);
+  console.log(summary.sequences.length ? `Identity sequences advanced: ${summary.sequences.map(({ column, value }) => `${column} to ${value}`).join(', ')}.` : 'No identity sequence needed advancing.');
+  console.log(`Installation ${summary.claimed ? 'is claimed' : 'is unclaimed; first-run setup remains available'}.`);
+}
+
 const command = process.argv[2];
 try {
   if (command === 'migrate') {
     if (!process.env.DATABASE_URL) throw new CliError('Set DATABASE_URL to the PostgreSQL connection string.');
     const applied = await migrate();
     console.log(applied.length ? `Database migrations applied: ${applied.join(', ')}.` : 'Database migrations already applied; all checksums verified.');
+  } else if (command === 'import-sqlite') {
+    const file = process.argv[3];
+    if (!file || process.argv.length > 4) throw new CliError(usage);
+    if (!process.env.DATABASE_URL) throw new CliError('Set DATABASE_URL to the PostgreSQL connection string.');
+    const { pool } = getDatabase();
+    await assertSchema(pool);
+    await importSqliteCommand(pool, file);
   } else {
     if (!['create-user', 'grant-operator', 'revoke-operator', 'reset-password'].includes(command) || process.stdin.isTTY) throw new CliError(usage);
     if (!process.env.DATABASE_URL) throw new CliError('Set DATABASE_URL to the PostgreSQL connection string.');
@@ -54,8 +75,9 @@ try {
   }
 } catch (error: any) {
   // PostgreSQL driver errors can carry connection details, so only this command's own messages are printed.
-  console.error(error instanceof CliError || error?.code === 'SCHEMA_MISMATCH' ? error.message
+  console.error(error instanceof CliError || ['SCHEMA_MISMATCH', 'IMPORT_REFUSED'].includes(error?.code) ? error.message
     : command === 'migrate' ? 'Migration failed and was rolled back. Check DATABASE_URL, database availability and permissions.'
+    : command === 'import-sqlite' ? 'SQLite import failed and was rolled back. Check DATABASE_URL, database availability and permissions.'
     : 'Account command failed. Check DATABASE_URL, the database and the account details.');
   process.exitCode = 1;
 } finally {
