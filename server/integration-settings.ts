@@ -3,7 +3,7 @@ import { openRouterFetch, readResponseText } from '@ten98/runtime';
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
 import type { Database } from './database.ts';
-import { fail, googleToken, providerRequest, reportObject as plain } from './provider-core.ts';
+import { fail, googleToken, pathSegment, providerRequest, reportObject as plain } from './provider-core.ts';
 import { testNativeGoogleAds } from './native-google-ads.ts';
 import { testMicrosoftAds } from './native-microsoft-ads.ts';
 
@@ -174,7 +174,7 @@ export async function createIntegrationSettings({ db, env, secret }: { db: Datab
         if (context.driveFolderId) {
           const folder = String(context.driveFolderId);
           if (!/^[\w-]{1,500}$/.test(folder)) fail(400, 'INVALID_MAPPING', 'Choose a valid project Drive folder before testing.');
-          const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folder)}`); url.searchParams.set('supportsAllDrives', 'true'); url.searchParams.set('fields', 'id,mimeType,trashed,capabilities(canAddChildren)');
+          const url = new URL(`https://www.googleapis.com/drive/v3/files/${pathSegment(folder)}`); url.searchParams.set('supportsAllDrives', 'true'); url.searchParams.set('fields', 'id,mimeType,trashed,capabilities(canAddChildren)');
           const data = await providerRequest(url, { method: 'GET', headers: { Authorization: `Bearer ${token}` } }, 'Google Drive');
           if (data.id !== folder || data.mimeType !== 'application/vnd.google-apps.folder' || data.trashed === true) fail(409, 'INVALID_DRIVE_FOLDER', 'The mapped Drive location is not an accessible active folder.');
           result.message = `The mapped Drive folder is readable.${data.capabilities?.canAddChildren === true ? ' Google reports permission to add files.' : ' Upload permissions were not confirmed.'} No files were changed.`;
@@ -188,7 +188,7 @@ export async function createIntegrationSettings({ db, env, secret }: { db: Datab
           const calendar = String(context.calendarId);
           if (calendar === 'primary' || calendar.length > 1024 || /[\u0000-\u001f]/.test(calendar)) fail(400, 'INVALID_MAPPING', 'Choose a shared calendar ID before testing.');
           const token = await googleToken(current, 'https://www.googleapis.com/auth/calendar.events');
-          const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendar)}/events`); url.searchParams.set('maxResults', '1'); url.searchParams.set('fields', 'items(id),kind');
+          const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${pathSegment(calendar)}/events`); url.searchParams.set('maxResults', '1'); url.searchParams.set('fields', 'items(id),kind');
           const data = await providerRequest(url, { method: 'GET', headers: { Authorization: `Bearer ${token}` } }, 'Google Calendar');
           if (!Array.isArray(data.items) && data.kind !== 'calendar#events') fail(502, 'INVALID_PROVIDER_RESPONSE', 'Google Calendar did not return an event list.');
           result.message = 'The mapped Google Calendar is readable. No events were changed; calendar write permissions were not tested.';
