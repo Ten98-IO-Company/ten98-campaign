@@ -240,6 +240,10 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   const [groupAccounts, setGroupAccounts] = useState<Row[] | null>(null), accounts = groupAccounts || connectedAccounts;
   const [tagInput, setTagInput] = useState((post?.tags || []).join('\n')), [previewSize, setPreviewSize] = useState<PreviewSize>('desktop');
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  // Accounts load once when an editable composer opens without them, as latewiz's account picker loads on open
+  // (zernio-dev/latewiz@28dd018063b955769de11f881acd03bb64c61cd4 src/app/dashboard/compose/_components/platform-selector.tsx:24, MIT).
+  const autoLoaded = useRef(false);
+  useEffect(() => { if (autoLoaded.current || readOnly || !canWrite || providerPost || !onLoadAccounts || connectedAccounts.length) return; autoLoaded.current = true; void loadAccounts(); }, []);
   const disabled = busy || saving || shortening || !canWrite || readOnly || post?.status === 'published' || !!post?.externalId && !providerPost;
   const selected = platforms.includes(activePlatform) ? activePlatform : platforms[0] || '', rule = PLATFORM_RULES[selected];
   const accountChoices = accounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))), editingAccount = accountChoices.find(account => accountId(account) === activeAccount), editingAccountId = editingAccount ? accountId(editingAccount) : '', editKey = selected + ':' + editingAccountId;
