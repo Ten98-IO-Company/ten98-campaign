@@ -23,10 +23,6 @@
   "src/UnifiedInbox.tsx": {
     "element": 1
   },
-  "src/ZernioRecycling.tsx": {
-    "element": 91,
-    "styling": 28
-  },
   "src/main.tsx": {
     "stylesheet": 1
   }
