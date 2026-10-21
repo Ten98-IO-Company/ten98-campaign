@@ -228,6 +228,21 @@ test('import-sqlite refuses a file that is not a Campaign SQLite database', pgOn
   assert.equal((await pool.query('SELECT count(*)::int AS count FROM users')).rows[0].count, 0);
 });
 
+test('import-sqlite skips empty tables older releases left behind but refuses one with rows', pgOnly, async t => {
+  const file = await sourceFile(t), { pool, url } = await testDatabase(t), source = new DatabaseSync(file);
+  // Production 0.9.x databases still carry these 0.8.x webhook tables, unused and empty.
+  source.exec('CREATE TABLE webhook_messages(id TEXT PRIMARY KEY); CREATE TABLE webhook_engagement_updates(id TEXT PRIMARY KEY); CREATE TABLE legacy_with_rows(id TEXT PRIMARY KEY); INSERT INTO legacy_with_rows VALUES ('kept')');
+  source.close();
+  const refused = runCli(url, 'import-sqlite', file);
+  assert.equal(refused.status, 1); assert.match(refused.stderr, /tables with rows the PostgreSQL schema does not: legacy_with_rows./);
+  assert.equal((await pool.query('SELECT count(*)::int AS count FROM users')).rows[0].count, 0);
+  const again = new DatabaseSync(file); again.exec('DROP TABLE legacy_with_rows'); again.close();
+  const imported = runCli(url, 'import-sqlite', file);
+  assert.equal(imported.status, 0, imported.stderr);
+  assert.match(imported.stdout, /Empty tables no longer used, skipped: webhook_engagement_updates, webhook_messages./);
+  assert.ok((await pool.query('SELECT count(*)::int AS count FROM users')).rows[0].count > 0);
+});
+
 test('invalid JSON in one record rolls back the whole import', pgOnly, async t => {
   const file = await sourceFile(t, source => source.exec(`UPDATE records SET data = '{"broken":' WHERE id = 'r3'`)), { pool, url } = await testDatabase(t);
   const result = runCli(url, 'import-sqlite', file);
