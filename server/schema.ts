@@ -209,6 +209,7 @@ export const postApprovalReviews = pgTable('post_approval_reviews', {
   reviewed_at: text('reviewed_at'),
   note: text('note').notNull().default(''),
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
+  self_approved: boolean('self_approved').notNull().default(false),
 }, t => [
   check('post_approval_reviews_status_check', sql`${t.status} IN ('pending','approved','rejected')`),
   index('post_approval_reviews_post').on(t.project_id, t.post_id),

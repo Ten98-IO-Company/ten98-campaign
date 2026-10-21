@@ -59,7 +59,7 @@ function approvalAccounts(post: ProviderRecord) {
 async function publicReview(db: Executor, row: ProviderRecord | undefined) {
   if (!row) return null;
   const actor = async (id: string) => id ? await first(db.execute(sql`SELECT id,name FROM users WHERE id=${id}`)) || { id, name: 'Former team member' } : null;
-  return { id: row.id, status: row.status, requestedBy: await actor(row.requested_by), requestedAt: row.requested_at, reviewedBy: await actor(row.reviewed_by), reviewedAt: row.reviewed_at, note: row.note, snapshot: JSON.parse(row.snapshot) };
+  return { id: row.id, status: row.status, requestedBy: await actor(row.requested_by), requestedAt: row.requested_at, reviewedBy: await actor(row.reviewed_by), reviewedAt: row.reviewed_at, note: row.note, selfApproved: Boolean(row.self_approved), snapshot: JSON.parse(row.snapshot) };
 }
 function fields(body: any, allowed: string[]) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_APPROVAL_FIELDS', 'Use only the fields shown in the approval form.');
@@ -81,17 +81,38 @@ function queueSummary(post: ProviderRecord, queues: ProviderRecord[] | undefined
   catch (error) { return { ...(queue || { _id: post.queueId }), ready: false, message: error instanceof IntegrationError ? error.message : 'The publishing queue could not be verified.' }; }
 }
 
+// Council decision ten98-code-system#30: with approval required, a requester may approve their own review only while
+// they are the project's single active owner or administrator (by count, not role). Every membership change locks
+// the workspace row FOR UPDATE (lockWorkspace), so this FOR SHARE lock holds the count until the decision commits.
+async function assertSelfApprovalAllowed(tx: Executor, projectId: string, userId: string) {
+  await tx.execute(sql`SELECT w.id FROM workspaces w JOIN projects p ON p.workspace_id=w.id WHERE p.id=${projectId} FOR SHARE OF w`);
+  const reviewers = (await tx.execute(sql`SELECT u.id,u.name FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id JOIN users u ON u.id=m.user_id WHERE p.id=${projectId} AND m.role IN ('owner','admin')`)).rows as ProviderRecord[];
+  if (reviewers.length === 1 && reviewers[0].id === userId) return;
+  const others = reviewers.filter(row => row.id !== userId).map(row => String(row.name)).sort((a, b) => a.localeCompare(b));
+  fail(403, 'APPROVAL_SELF_REVIEW', `You requested this review, so another owner or administrator must approve it${others.length ? `: ${others.join(', ')}` : ''}.`);
+}
+async function assertApprovedReview(context: ApprovalContext, post: ProviderRecord, snapshot: ProviderRecord) {
+  approvalAccounts(post);
+  assetApproved(snapshot);
+  const review = await latest(context.db, context.project.id, post.id);
+  if (!review || review.status !== 'approved') fail(403, 'PUBLISHING_APPROVAL_REQUIRED', 'An owner or administrator must approve this post before it can be sent to a provider.');
+  if (review.fingerprint !== fingerprint(snapshot)) fail(409, 'PUBLISHING_APPROVAL_STALE', 'This post or its creative changed after approval. Request a new review before publishing.');
+}
+
 export async function assertPublishingApproval(context: ApprovalContext, post: ProviderRecord) {
   const current = await context.store.get(context.project.id, 'posts', post?.id);
   if (!current || post.sample || current.sample) fail(409, 'APPROVAL_POST_NOT_FOUND', 'Use a real post from this project before publishing.');
   const snapshot = await postSnapshot(context, current), currentFingerprint = fingerprint(snapshot);
   if (fingerprint(await postSnapshot(context, post)) !== currentFingerprint) fail(409, 'APPROVAL_POST_CHANGED', 'The post or creative changed while publishing was being prepared. Refresh it before publishing.');
   if (!(await policy(context.db, context.project.id)).requireApproval) return;
-  approvalAccounts(current);
-  assetApproved(snapshot);
-  const review = await latest(context.db, context.project.id, current.id);
-  if (!review || review.status !== 'approved') fail(403, 'PUBLISHING_APPROVAL_REQUIRED', 'An owner or administrator must approve this post before it can be sent to a provider.');
-  if (review.fingerprint !== currentFingerprint) fail(409, 'PUBLISHING_APPROVAL_STALE', 'This post or its creative changed after approval. Request a new review before publishing.');
+  await assertApprovedReview(context, current, snapshot);
+}
+
+// A provider update replaces a submitted post's content, so the approval must match the proposed post (the current
+// post merged with the update), not the stored one (#30).
+export async function assertProposedPostApproval(context: ApprovalContext, proposed: ProviderRecord) {
+  if (!(await policy(context.db, context.project.id)).requireApproval) return;
+  await assertApprovedReview(context, proposed, await postSnapshot(context, proposed));
 }
 
 export async function assertProviderPostEdit(context: ApprovalContext) {
@@ -156,10 +177,17 @@ export async function handleApprovals(context: ApprovalContext) {
       if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
       assetApproved(snapshot);
     }
-    // Only a still-pending review takes a decision, so a parallel approve and reject cannot both apply.
-    const decided = await db.execute(sql`UPDATE post_approval_reviews SET status=${body.decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()} WHERE id=${review.id} AND status='pending'`);
-    if (!decided.rowCount) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
-    await store.activity(project.id, `Content ${body.decision} by ${user.name || user.id}.`); send(200, { item: await queueItem(context, post, queue ? { ...queue, ready: true } : queueSummary(post, [], true)) }); return true;
+    // The per-post lock serialises decisions with requests; only a still-pending review takes a decision, so a
+    // parallel approve and reject cannot both apply.
+    const selfApproved = await db.transaction(async (tx: Executor) => {
+      await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
+      const self = body.decision === 'approved' && review.requested_by === user.id && (await policy(tx, project.id)).requireApproval;
+      if (self) await assertSelfApprovalAllowed(tx, project.id, user.id);
+      const decided = await tx.execute(sql`UPDATE post_approval_reviews SET status=${body.decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()},self_approved=${self} WHERE id=${review.id} AND status='pending'`);
+      if (!decided.rowCount) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
+      return self;
+    });
+    await store.activity(project.id, selfApproved ? `Content self-approved by ${user.name || user.id} (only administrator).` : `Content ${body.decision} by ${user.name || user.id}.`); send(200, { item: await queueItem(context, post, queue ? { ...queue, ready: true } : queueSummary(post, [], true)) }); return true;
   } catch (error) {
     send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'APPROVAL_ERROR', message: error instanceof IntegrationError ? error.message : 'The content approval action could not be completed.' } }); return true;
   }

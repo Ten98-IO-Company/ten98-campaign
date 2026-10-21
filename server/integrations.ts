@@ -22,6 +22,7 @@ import { handleZernioQueues, applyQueueIntent, assertQueueReceipt } from './zern
 import { handleZernioMedia } from './zernio-media.ts';
 import { handleZernioBlogs } from './zernio-blogs.ts';
 import { handleZernioProducts } from './zernio-products.ts';
+import { assertProposedPostApproval } from './approvals.ts';
 
 const GOOGLE = 'https://www.googleapis.com';
 const WRITE_ROLES = new Set(['owner', 'admin', 'editor']);
@@ -1117,6 +1118,8 @@ export async function handleIntegration(context: any) {
           const changed: any = { ...model, content, scheduledAt, ...(Object.hasOwn(body, 'tags') ? { tags: body.tags } : {}), ...(Object.hasOwn(body, 'mediaItems') ? { mediaItems: body.mediaItems } : {}), ...(Object.hasOwn(body, 'assetId') ? { assetId: body.assetId } : {}), ...(replacingPlatforms ? { platformOverrides: body.platformOverrides, ...(!replacingAccounts ? { accountOverrides: {} } : {}) } : {}), ...(replacingAccounts ? { accountOverrides: body.accountOverrides } : {}) };
           normalizedVariants(changed);
           if (Object.hasOwn(body, 'tags')) { changed.tags = normalizePostTags(body.tags); payload.tags = changed.tags; }
+          // With approval required, the proposed content needs its own approved review; checked again after the provider checks.
+          await assertProposedPostApproval(context, changed);
           for (const [id, variant] of Object.entries(normalizeAccountVariants(changed))) if (!remote.platforms.some((target: any) => String(target.accountId?._id || target.accountId) === id && target.platform === variant.platform)) fail(400, 'ACCOUNT_VARIANT_MISMATCH', 'Every account customization must match an existing destination and platform on this post.');
           if (body.mode === 'scheduled') try { assertAccountSchedules(changed); } catch (error: any) { fail(400, 'ACCOUNT_SCHEDULE_INVALID', error.message); }
           const assets = await postAssets(store, project.id, changed), replacingVariants = replacingPlatforms || replacingAccounts, replacingMedia = Object.hasOwn(body, 'mediaItems') || Object.hasOwn(body, 'assetId');
@@ -1138,6 +1141,7 @@ export async function handleIntegration(context: any) {
             const validation = await providerPostValidation(api, { ...checkPayload, scheduledFor: scheduledAt, timezone: 'UTC' }, { assets, providerOwnedMediaUrls }); assertPostRestrictions(validation); validationWarnings = [...new Set(validation.warnings.map(item => item.message))];
           }
           await context.assertProviderPostEdit?.();
+          await assertProposedPostApproval(context, changed);
           if (body.mode === 'scheduled' && [payload.scheduledFor, ...checkPayload.platforms.map((target: any) => target.scheduledFor)].filter(Boolean).some(time => Date.parse(time) <= Date.now())) fail(409, 'SCHEDULE_PASSED', 'A scheduled time passed during the provider checks. Choose future times before submitting.');
           if (body.mode === 'scheduled') validateRemotePayload(checkPayload, await postAssets(store, project.id, changed), changed, providerPostMediaUrls(await scopedPost(api, profileId, post, true)));
           const result = await api(endpoint, {}, payload, key, 'PUT');

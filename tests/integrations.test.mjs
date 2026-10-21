@@ -4,6 +4,7 @@ import { generateKeyPairSync, verify } from 'node:crypto';
 import { handleIntegration } from '../server/integrations.ts';
 import { providerRequest, zernioClient, scopedAccounts, adAccounts, remotePostModel, remoteRestrictionPayload, savePostSnapshot, operation } from '../server/provider-core.ts';
 import { createStore } from '../server/database.ts';
+import { handleApprovals, assertProviderPostEdit } from '../server/approvals.ts';
 import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
 
 test('only documented exact product GET absence codes survive and revoked access cannot prove deletion', async () => {
@@ -699,4 +700,50 @@ test('parallel identical ad creations with different action keys send one paid r
   const results = await Promise.all(pending);
   assert.deepEqual(results.map(result => result.status).sort(), [200, 409], JSON.stringify(results));
   assert.equal(creates, 1, 'Two parallel identical paid creations must send exactly one provider request.');
+});
+
+// Council decision ten98-code-system#30 (Q2): a provider update needs an approval of the proposed content.
+test('with approval required, social/update needs an approved review of the proposed content before any provider update', { skip: postgresSkip }, async t => {
+  const { db, pool } = await testDatabase(t), originalFetch = globalThis.fetch, updates = [];
+  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner','Owner','owner@example.test'),('editor','Editor','editor@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO memberships VALUES ('w','owner','owner'),('w','editor','editor'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('q2-project','w','Q2','profile-q2')");
+  const project = { id: 'q2-project', zernioProfileId: 'profile-q2' }, store = createStore(db), account = { _id: 'facebook-q2', profileId: project.zernioProfileId, platform: 'facebook' };
+  let remote = { _id: 'remote-q2', status: 'draft', content: 'Reviewed caption', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] }, keySequence = 0;
+  const context = (role, extra) => { const value = { db, store, project, role, user: { id: role, name: role }, ...extra }; value.assertProviderPostEdit = () => assertProviderPostEdit(value); return value; };
+  async function approvals(path, role, body = {}) {
+    let response; await handleApprovals({ ...context(role), req: { method: 'POST' }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body, send(status, data) { response = { status, data }; } });
+    assert.equal(response.status, 200, JSON.stringify(response.data)); return response.data;
+  }
+  async function update(body, role = 'owner') {
+    let response;
+    await handleIntegration(context(role, { req: { method: 'POST', headers: { 'idempotency-key': `approval-update-${++keySequence}` } }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/social/update`), body: { postId: local.id, mode: 'draft', ...body }, config: { env: {}, ZERNIO_API_KEY: 'sk_test_stub' }, assertProjectMapping(expected) { if (expected !== project.zernioProfileId) throw new Error('Mapping changed'); }, send(status, data) { response = { status, data }; } }));
+    return response;
+  }
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(target), method = options.method || 'GET'; let result;
+    if (url.pathname === '/api/v1/accounts') result = { accounts: [account] };
+    else if (url.pathname === '/api/v1/posts/remote-q2' && method === 'GET') result = { post: remote };
+    else if (url.pathname === '/api/v1/posts/remote-q2' && method === 'PUT') { const payload = JSON.parse(options.body); updates.push(payload); remote = { ...remote, ...payload, status: payload.isDraft ? 'draft' : 'scheduled' }; result = { post: remote }; }
+    else throw new Error(`Unexpected provider call ${method} ${url.pathname}`);
+    return new Response(JSON.stringify(result), { status: 200 });
+  };
+  const local = await store.create(project.id, 'posts', { content: 'Reviewed caption', platforms: ['facebook'], accounts: [account._id], status: 'draft', mediaItems: [] });
+  const submit = () => store.update(project.id, 'posts', local.id, { externalId: remote._id, zernioProfileId: project.zernioProfileId });
+  try {
+    await approvals('policy', 'owner', { requireApproval: true }); await submit();
+    let result = await update({ content: 'Reviewed caption' });
+    assert.equal(result.status, 403); assert.equal(result.data.error.code, 'PUBLISHING_APPROVAL_REQUIRED'); assert.equal(updates.length, 0);
+    // Reviews open only on local drafts, so the reviewed content is approved before the post is submitted again.
+    await store.update(project.id, 'posts', local.id, { externalId: '' });
+    const requested = await approvals(`posts/${local.id}/request`, 'editor');
+    assert.equal((await approvals(`posts/${local.id}/review`, 'owner', { reviewId: requested.item.review.id, decision: 'approved' })).item.status, 'approved');
+    await submit();
+    result = await update({ content: 'Unreviewed caption' });
+    assert.equal(result.status, 409); assert.equal(result.data.error.code, 'PUBLISHING_APPROVAL_STALE'); assert.equal(updates.length, 0);
+    result = await update({ content: 'Reviewed caption' }, 'editor');
+    assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVED_PROVIDER_EDIT_RESTRICTED'); assert.equal(updates.length, 0);
+    result = await update({ content: 'Reviewed caption' });
+    assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(updates.length, 1); assert.equal(updates[0].content, 'Reviewed caption');
+    result = await update({ content: 'Reviewed caption' }, 'editor');
+    assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVED_PROVIDER_EDIT_RESTRICTED'); assert.equal(updates.length, 1);
+  } finally { globalThis.fetch = originalFetch; }
 });

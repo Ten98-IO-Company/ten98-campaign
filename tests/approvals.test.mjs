@@ -134,3 +134,69 @@ test('parallel review requests open one pending review and a parallel approve an
   const decided = await sql.all('SELECT status FROM post_approval_reviews WHERE post_id = ?', post.id);
   assert.equal(decided.length, 1); assert.ok(['approved', 'rejected'].includes(decided[0].status));
 });
+
+// Council decision ten98-code-system#30: self-review is refused unless the requester is the single active owner/admin.
+async function selfReviewFixture(t, members) {
+  const { db, pool, sql } = await testDatabase(t);
+  await pool.query("INSERT INTO users (id, name, email) VALUES ('blair','Blair Owner','blair@example.test'),('avery','Avery Admin','avery@example.test'),('casey','Casey Editor','casey@example.test'),('dana','Dana Admin','dana@example.test'),('abe','Abe Admin','abe@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A')");
+  const addMember = (id, role) => pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', ['w', id, role]);
+  for (const [id, role] of members) await addMember(id, role);
+  const store = createStore(db), project = { id: 'project-a' }, roles = Object.fromEntries(members);
+  const names = { blair: 'Blair Owner', avery: 'Avery Admin', casey: 'Casey Editor', dana: 'Dana Admin', abe: 'Abe Admin' };
+  async function invoke(path, userId, body = {}) {
+    let result;
+    await handleApprovals({ db, store, project, role: roles[userId], user: { id: userId, name: names[userId] }, req: { method: 'POST' }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body, send(status, data) { result = { status, data }; } });
+    return result;
+  }
+  const post = await store.create(project.id, 'posts', { content: 'Self-review fixture', platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [] });
+  const request = async userId => { const result = await invoke(`posts/${post.id}/request`, userId); assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data.item.review.id; };
+  const review = (userId, reviewId, decision = 'approved') => invoke(`posts/${post.id}/review`, userId, { reviewId, decision, note: 'Checked.' });
+  const stored = reviewId => sql.get('SELECT status, self_approved FROM post_approval_reviews WHERE id = ?', reviewId);
+  const setPolicy = async (userId, requireApproval) => assert.equal((await invoke('policy', userId, { requireApproval })).status, 200);
+  return { pool, sql, store, project, post, roles, addMember, invoke, request, review, stored, setPolicy };
+}
+
+test('with approval required, a requester cannot approve their own review while another owner or administrator is active', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['avery', 'admin']]);
+  await f.setPolicy('blair', true);
+  const reviewId = await f.request('avery');
+  let result = await f.review('avery', reviewId);
+  assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVAL_SELF_REVIEW');
+  assert.match(result.data.error.message, /Blair Owner/); assert.doesNotMatch(result.data.error.message, /Avery Admin/, 'The error names only the other eligible reviewers.');
+  assert.deepEqual(await f.stored(reviewId), { status: 'pending', self_approved: false });
+  result = await f.review('blair', reviewId); assert.equal(result.status, 200);
+  assert.equal(result.data.item.review.reviewedBy.id, 'blair'); assert.equal(result.data.item.review.selfApproved, false);
+  assert.deepEqual(await f.stored(reviewId), { status: 'approved', self_approved: false });
+  await f.store.update(f.project.id, 'posts', f.post.id, { content: 'Withdrawn by its requester' });
+  const withdrawn = await f.request('avery');
+  result = await f.review('avery', withdrawn, 'rejected'); assert.equal(result.status, 200, 'A requester may still reject (withdraw) their own request.');
+  assert.deepEqual(await f.stored(withdrawn), { status: 'rejected', self_approved: false });
+  await f.setPolicy('blair', false);
+  await f.store.update(f.project.id, 'posts', f.post.id, { content: 'Optional review keeps the previous behaviour' });
+  const optional = await f.request('avery');
+  result = await f.review('avery', optional); assert.equal(result.status, 200, 'Without required approval self-review is unchanged.'); assert.equal(result.data.item.review.selfApproved, false);
+  assert.deepEqual(await f.stored(optional), { status: 'approved', self_approved: false });
+});
+
+test('the single active owner or administrator may approve their own request, which is recorded as a self-approval', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+  await f.setPolicy('blair', true);
+  const reviewId = await f.request('blair');
+  const result = await f.review('blair', reviewId);
+  assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.item.status, 'approved'); assert.equal(result.data.item.review.selfApproved, true);
+  assert.deepEqual(await f.stored(reviewId), { status: 'approved', self_approved: true });
+  assert.ok((await f.sql.all('SELECT message FROM activity WHERE project_id = ?', f.project.id)).some(row => row.message === 'Content self-approved by Blair Owner (only administrator).'));
+});
+
+test('the self-approval exception counts active owners and administrators at review time, not at request time', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+  await f.setPolicy('blair', true);
+  const reviewId = await f.request('blair');
+  await f.addMember('dana', 'admin');
+  let result = await f.review('blair', reviewId);
+  assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVAL_SELF_REVIEW'); assert.match(result.data.error.message, /: Dana Admin\.$/);
+  await f.addMember('abe', 'admin');
+  result = await f.review('blair', reviewId);
+  assert.equal(result.status, 403); assert.match(result.data.error.message, /: Abe Admin, Dana Admin\.$/, 'Eligible reviewers are listed in name order.');
+  assert.deepEqual(await f.stored(reviewId), { status: 'pending', self_approved: false });
+});
