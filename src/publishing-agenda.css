@@ -2,9 +2,6 @@
 @media(max-width:760px){
   .campaign-publishing-agenda{display:block;margin-bottom:24px;padding:18px;background:var(--color-surface,#fff);border:1px solid var(--border);border-radius:9px;min-width:0}
   .calendar-panel .calendar-week,.calendar-panel .calendar-grid{display:none}
-  .campaign-publishing-agenda .t98-agenda-item{grid-template-columns:minmax(0,1fr)}
-  .campaign-publishing-agenda .t98-agenda-item-title{overflow-wrap:anywhere}
-  .campaign-publishing-agenda .t98-agenda-actions .button{min-height:44px}
   .campaign-publishing-agenda .agenda-create{display:flex;align-items:end;flex-wrap:wrap;gap:12px;margin-top:16px}
   .campaign-publishing-agenda .agenda-create .field{flex:1;min-width:150px;margin:0}
 }
