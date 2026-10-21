@@ -47,6 +47,7 @@ async function importSqliteCommand(pool: Parameters<typeof importSqlite>[0], fil
   console.log(`Imported ${summary.tables.length} tables in one transaction; row counts and fingerprints verified.`);
   for (const { name, rows } of summary.tables) console.log(`  ${name}: ${rows}`);
   if (summary.absent.length) console.log(`Not in the source file (never created there; left empty): ${summary.absent.join(', ')}.`);
+  if (summary.ignored.length) console.log(`Empty tables no longer used, skipped: ${summary.ignored.join(', ')}.`);
   if (summary.ephemeral.length) console.log(`Not imported (sign-in state; everyone signs in again): ${summary.ephemeral.map(({ name, rows }) => `${name} ${rows}`).join(', ')}.`);
   if (summary.defaulted.length) console.log(`Columns absent from the source file, filled with their defaults: ${summary.defaulted.join(', ')}.`);
   console.log(summary.sequences.length ? `Identity sequences advanced: ${summary.sequences.map(({ column, value }) => `${column} to ${value}`).join(', ')}.` : 'No identity sequence needed advancing.');
