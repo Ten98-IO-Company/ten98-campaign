@@ -24,6 +24,9 @@ Campaign ports selected behaviour from these references, adapted to its own stac
 | --- | --- | --- |
 | React and React DOM | 19.2.8 | MIT; Meta Platforms, Inc. and affiliates. |
 | openid-client | 6.8.8 | MIT; Filip Skokan. |
+| pg (node-postgres) | 8.23.0 | MIT; Brian Carlson. |
+| drizzle-orm | 0.45.2 | Apache-2.0; Drizzle Team. |
+| @types/pg | 8.15.6 | MIT; DefinitelyTyped contributors. |
 | Vite | 8.3.4 | MIT. |
 | TypeScript | 7.0.2 | Apache-2.0. |
 | @types/react | 19.2.2 | MIT; DefinitelyTyped contributors. |

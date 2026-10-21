@@ -4,10 +4,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-// Run from the repository/image root. The container needs only loopback networking.
+// Run from the repository/image root against a fresh, empty PostgreSQL database named by DATABASE_URL.
+if (!process.env.DATABASE_URL) throw new Error('Set DATABASE_URL to an empty PostgreSQL database for the container check.');
 const { createApp } = await import(pathToFileURL(resolve('server/index.ts')));
+const { closeDatabase, migrate } = await import(pathToFileURL(resolve('server/database.ts')));
+await migrate();
 const dataDir = await mkdtemp(join(tmpdir(), 'ten98-container-check-'));
-const app = createApp({ dataDir, env: {}, appUrl: 'http://127.0.0.1:3018', directScheduler: false });
+const app = await createApp({ dataDir, env: { DATABASE_URL: process.env.DATABASE_URL }, appUrl: 'http://127.0.0.1:3018', directScheduler: false });
 try {
   assert.notEqual(process.getuid?.(), 0, 'The production image must run as an unprivileged user.');
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
@@ -26,4 +29,4 @@ try {
   assert.equal(appearance.status, 200); assert.match(appearance.headers.get('content-type'), /^text\/javascript/);
   assert.match(await appearance.text(), /ten98-campaign-theme/);
   console.log('Container imports, non-root startup, database, auth boundary, frontend bundle and appearance bootstrap passed.');
-} finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+} finally { await app.close(); await closeDatabase(); await rm(dataDir, { recursive: true, force: true }); }

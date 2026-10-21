@@ -14,7 +14,28 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 20
+    # The suite runs on PostgreSQL; each test file clones its own database from a migrated template.
+    services:
+      postgres:
+        image: postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_USER: ten98
+          POSTGRES_DB: ten98_test
+          # Only this fresh hosted-runner service uses trust, bound to loopback.
+          # This is not a deployment configuration or a production auth example.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ten98 -d ten98_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://ten98@127.0.0.1:5432/ten98_test
+      # The import restore test runs pg_dump inside the service container, so client and server versions match.
+      CAMPAIGN_PG_CONTAINER: ${{ job.services.postgres.id }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

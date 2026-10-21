@@ -1,9 +1,26 @@
 services:
+  postgres:
+    image: postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: campaign
+      POSTGRES_DB: campaign
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - campaign-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "campaign", "-d", "campaign"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
   campaign:
     build: .
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "127.0.0.1:3018:3018"
     env_file: .env
@@ -11,7 +28,11 @@ services:
       HOST: 0.0.0.0
       PORT: 3018
       DATA_DIR: /app/data
+      DATABASE_URL: postgres://campaign:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/campaign
+    # The app refuses to serve an unmigrated schema, so apply pending migrations first (idempotent, advisory-locked).
+    command: ["sh", "-c", "node server/cli.ts migrate && exec node server/index.ts"]
     volumes:
+      # The data directory keeps the session secret and bootstrap token; application data lives in PostgreSQL.
       - campaign-data:/app/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3018/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
@@ -21,3 +42,4 @@ services:
       start_period: 10s
 volumes:
   campaign-data:
+  campaign-postgres:

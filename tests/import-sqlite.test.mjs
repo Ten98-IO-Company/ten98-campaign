@@ -132,9 +132,11 @@ function dumpTool() {
   if (spawnSync('docker', ['exec', container, 'pg_dump', '--version'], { encoding: 'utf8' }).status === 0) {
     // Inside the container the server listens on its own port 5432.
     const local = value => { const url = new URL(value); url.hostname = '127.0.0.1'; url.port = '5432'; return url.href; };
-    return { run: (tool, args, url, input) => spawnSync('docker', ['exec', '-i', container, tool, ...args, local(url)], { input, maxBuffer: 1 << 30 }) };
+    return { major: Infinity, run: (tool, args, url, input) => spawnSync('docker', ['exec', '-i', container, tool, ...args, local(url)], { input, maxBuffer: 1 << 30 }) };
   }
-  if (spawnSync('pg_dump', ['--version'], { encoding: 'utf8' }).status === 0) return { run: (tool, args, url, input) => spawnSync(tool, [...args, url], { input, maxBuffer: 1 << 30 }) };
+  // A client on PATH must be at least the server's major version, or pg_dump refuses to dump it.
+  const version = spawnSync('pg_dump', ['--version'], { encoding: 'utf8' });
+  if (version.status === 0) return { major: Number(version.stdout.match(/(d+)./)?.[1] || 0), run: (tool, args, url, input) => spawnSync(tool, [...args, url], { input, maxBuffer: 1 << 30 }) };
   return null;
 }
 function dumpAndRestore(tool, from, to) {
@@ -240,6 +242,8 @@ test('an imported database survives pg_dump and restore with identical counts an
   const tool = dumpTool();
   if (!tool) { t.skip('Neither the campaign-m6-pg container nor pg_dump on PATH is available.'); return; }
   const file = await sourceFile(t), imported = await testDatabase(t);
+  const serverMajor = Math.floor(Number((await imported.pool.query('SHOW server_version_num')).rows[0].server_version_num) / 10000);
+  if (tool.major < serverMajor) { t.skip(`pg_dump ${tool.major} on PATH is older than PostgreSQL ${serverMajor}; set CAMPAIGN_PG_CONTAINER to the server container.`); return; }
   assert.equal(runCli(imported.url, 'import-sqlite', file).status, 0);
   const restoredUrl = await emptyDatabase(t);
   dumpAndRestore(tool, imported.url, restoredUrl);

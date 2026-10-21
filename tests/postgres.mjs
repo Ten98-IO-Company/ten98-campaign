@@ -5,6 +5,8 @@ import pg from 'pg';
 import { connect, migrate, migrationSources } from '../server/database.ts';
 
 const adminUrl = process.env.TEST_DATABASE_URL;
+// CI must exercise PostgreSQL: a missing URL there fails loudly instead of silently skipping the suite.
+if (!adminUrl && process.env.CI) throw new Error('TEST_DATABASE_URL must be set in CI; the test suite runs on PostgreSQL.');
 export const postgresSkip = !adminUrl && 'TEST_DATABASE_URL is not set';
 
 function databaseUrl(name) { const url = new URL(adminUrl); url.pathname = `/${name}`; return url.href; }
