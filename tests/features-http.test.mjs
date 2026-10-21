@@ -57,7 +57,7 @@ test('HTTP feature wiring preserves signed bytes, project boundaries, protected 
     const privateWorkspace = await request('/api/workspaces', { method: 'POST', body: { name: 'Other workspace' }, cookie: viewerCookie });
     assert.equal((await request(`/api/projects/${privateWorkspace.data.projectId}/maps/config`)).status, 404);
     assert.equal((await request(`/api/projects/${privateWorkspace.data.projectId}/calendar/connection`, { method: 'POST', body: { calendarId: 'not-operator@example.test' }, cookie: viewerCookie })).status, 403);
-    await request(`/api/workspaces/${workspaceId}/members`, { method: 'POST', body: { email: 'member-http@example.test', role: 'viewer' } });
+    app.db.prepare("INSERT INTO memberships VALUES(?,?,'viewer')").run(workspaceId, viewerId);
     const agent = await request(project + '/agent/status', { cookie: viewerCookie }); assert.equal(agent.status, 200); assert.equal(agent.data.configured, false);
     assert.equal((await request(project + '/agent/run', { method: 'POST', body: { message: 'Prepare a campaign' }, cookie: viewerCookie })).status, 403);
     assert.equal((await request(project + '/calendar/status')).data.mapped, false);

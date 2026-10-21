@@ -46,13 +46,15 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request('/api/session', { cookie: viewerCookie })).data.user.isOperator, false);
     assert.equal((await request(`/api/state?projectId=${projectId}`, { cookie: viewerCookie })).status, 404);
     assert.equal((await request(`/api/projects/${projectId}/campaigns`, { method: 'POST', body: { name: 'Attack' }, cookie: viewerCookie })).status, 404);
-    assert.equal((await request(`/api/workspaces/${workspaceId}/members`, { method: 'POST', body: { email: 'viewer@example.com', role: 'viewer' } })).status, 200);
+    assert.equal((await request(`/api/workspaces/${workspaceId}/members`, { method: 'POST', body: { email: 'viewer@example.com', role: 'viewer' } })).status, 404, 'People join by invitation only.');
+    const invited = await request(`/api/workspaces/${workspaceId}/invitations`, { method: 'POST', body: { email: 'viewer@example.com', role: 'viewer' } });
+    assert.equal((await request('/api/invitations/' + new URL(invited.data.url).searchParams.get('invite'), { method: 'POST', body: {}, cookie: viewerCookie })).status, 200);
     assert.equal((await request(`/api/workspaces/${workspaceId}/members`)).data.members.length, 2);
     assert.equal((await request(`/api/workspaces/${workspaceId}/members`, { cookie: viewerCookie })).status, 403);
     assert.equal((await request(`/api/state?projectId=${projectId}`, { cookie: viewerCookie })).status, 200);
     assert.equal((await request(`/api/projects/${projectId}/campaigns`, { method: 'POST', body: { name: 'No write' }, cookie: viewerCookie })).status, 403);
     assert.equal((await request(`/api/projects/${projectId}`, { method: 'PATCH', body: { zernioProfileId: 'other' }, cookie: viewerCookie })).status, 403);
-    assert.equal((await request(`/api/workspaces/${workspaceId}/members`, { method: 'POST', body: { email: setup.email, role: 'viewer' } })).status, 409);
+    assert.equal((await request(`/api/workspaces/${workspaceId}/members/${state.user.id}`, { method: 'PATCH', body: { role: 'viewer' } })).status, 409);
     const path = `/api/projects/${projectId}/campaigns`;
     for (const body of [{ name: '' }, { name: 'Invalid', budget: -1 }, { name: 'Invalid', budget: '20' }, { name: 'Invalid', currency: 'INVALID' }, { name: 'Invalid', impressions: -1 }, { name: 'Invalid', startDate: '2026-11-02', endDate: '2026-11-01' }, { name: 'Invalid', startDate: '2026-02-31' }]) assert.equal((await request(path, { method: 'POST', body })).status, 400);
     const campaign = (await request(path, { method: 'POST', body: { name: 'Real draft', channel: 'mixed', budget: 100 } })).data.record;
@@ -80,7 +82,7 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request(`/api/projects/${project.id}/posts`, { method: 'POST', body: { content: 'Cross project', campaignId: campaign.id }, cookie: viewerCookie })).status, 400);
     assert.equal((await request(`${path}/${campaign.id}`, { method: 'DELETE' })).status, 200);
     assert.equal((await request(`${path}/${campaign.id}`, { method: 'PATCH', body: { name: 'Gone' } })).status, 404);
-    await request(`/api/workspaces/${workspaceId}/members`, { method: 'POST', body: { email: 'viewer@example.com', role: 'editor' } });
+    await request(`/api/workspaces/${workspaceId}/members/${viewerId}`, { method: 'PATCH', body: { role: 'editor' } });
     assert.equal((await request(`/api/projects/${projectId}`, { method: 'PATCH', body: { zernioProfileId: 'other' }, cookie: viewerCookie })).status, 403);
     assert.equal((await request(path, { method: 'POST', body: { name: 'Editor writes' }, cookie: viewerCookie })).status, 201);
     await request(`/api/workspaces/${workspaceId}/members/${viewerId}`, { method: 'PATCH', body: { role: 'admin' } });

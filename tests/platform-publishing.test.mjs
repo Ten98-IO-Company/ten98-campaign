@@ -63,7 +63,7 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);
     const viewerId = randomUUID(), owner = app.db.prepare('SELECT password FROM users WHERE id=?').get(state.user.id);
     app.db.prepare('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)').run(viewerId, 'Platform viewer', 'platform-viewer@example.test', owner.password);
-    assert.equal((await post(`/api/workspaces/${state.workspaces[0].id}/members`, { email: 'platform-viewer@example.test', role: 'viewer' })).status, 200);
+    app.db.prepare("INSERT INTO memberships VALUES(?,?,'viewer')").run(state.workspaces[0].id, viewerId);
     const viewerCookie = (await post('/api/auth/login', { email: 'platform-viewer@example.test', password: 'platform fixture password that is long enough' })).cookie;
     const image = { type: 'image', url: 'https://cdn.example.test/common.jpg', width: 1200, height: 1200, size: 2000, mimeType: 'image/jpeg', altText: 'Common creative' };
     const instagramImage = { ...image, url: 'https://cdn.example.test/instagram.jpg', altText: 'Square Instagram creative' };
@@ -147,7 +147,7 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     assert.equal((await post(`${project}/approvals/policy`, { requireApproval: false })).status, 200);
     const asset = app.store.create(projectId, 'assets', { name: 'Platform creative', kind: 'image', url: 'https://cdn.example.test/dam.jpg', width: 1080, height: 1080, approval: 'approved', size: 2000 });
     const remoteDraft = await draft({ status: 'scheduled', scheduledAt: '2070-06-01T10:00:00Z' }); result = await publish(remoteDraft); assert.equal(result.status, 200);
-    assert.equal((await post(`/api/workspaces/${state.workspaces[0].id}/members`, { email: 'platform-viewer@example.test', role: 'editor' })).status, 200);
+    assert.equal((await request(`/api/workspaces/${state.workspaces[0].id}/members/${viewerId}`, { method: 'PATCH', body: { role: 'editor' } })).status, 200);
     validationHook = () => app.db.prepare('UPDATE project_approval_policy SET require_approval=1 WHERE project_id=?').run(projectId); beforeWrites = writes.length;
     result = await post(integrations + '/update', { postId: remoteDraft.id, content: 'Edit racing the approval policy', mode: 'scheduled', scheduledAt: '2070-07-01T10:00:00Z' }, { cookie: viewerCookie, key: 'recheck-edit-policy-after-preflight' });
     assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVED_PROVIDER_EDIT_RESTRICTED'); assert.equal(writes.length, beforeWrites);

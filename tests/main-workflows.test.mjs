@@ -215,12 +215,11 @@ test('Settings keeps its two existing columns and renders scoped receipt recover
   const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
   const AccountSettings = () => React.createElement('section', { 'data-account-settings': true });
   const OperationRecovery = ({ projectId }) => React.createElement('section', { 'data-provider-recovery': projectId });
-  const TeamPanel = () => React.createElement('section', { 'data-team-panel': true });
-  const WorkspaceInvitations = () => React.createElement('section', { 'data-workspace-invitations': true });
+  const TeamSettings = () => React.createElement('section', { 'data-team-settings': true });
   const api = () => assert.fail('Rendering Settings must not submit an operation');
   const activeProject = { current: 'project-a' }, pendingKeys = { current: new Map([['retained', 'key']]) };
   const context = { React, page: 'Settings', project: { id: 'project-a', name: 'Campaign project' }, state: { projectId: 'project-a', user: { id: 'viewer-a', isOperator: true } }, workspace: { id: 'workspace-a', role: 'admin', name: 'Workspace' }, session: { oidcEnabled: false }, canAdmin: true, sample: false, busy: false, activeProject, pendingKeys, api,
-    Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, AccountSettings, OperationRecovery, TeamPanel, WorkspaceInvitations, title: value => value,
+    Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, AccountSettings, OperationRecovery, TeamSettings, title: value => value,
     run: () => assert.fail('Rendering must not run an action'), reload: () => assert.fail('Rendering must not reload'), setPage: () => {}, setModal: () => {}, clearSampleData: () => {} };
   const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context));
   assert.equal(tree.type, React.Fragment);
@@ -228,7 +227,7 @@ test('Settings keeps its two existing columns and renders scoped receipt recover
   assert.equal(children.length, 2); assert.equal(grid.props.className, 'settings-grid'); assert.equal(recovery.type, OperationRecovery);
   assert.equal(React.Children.toArray(grid.props.children).length, 2, 'Project/account and workspace/access retain their columns.');
   assert.equal(nodes(grid).filter(node => node.type === AccountSettings).length, 1);
-  assert.equal(nodes(grid).filter(node => node.type === TeamPanel).length, 1); assert.equal(nodes(grid).filter(node => node.type === WorkspaceInvitations).length, 1);
+  assert.equal(nodes(grid).filter(node => node.type === TeamSettings).length, 1);
   assert.equal(nodes(grid).filter(node => node.type === OperationRecovery).length, 0, 'The receipt table is outside either half-width column.');
   assert.equal(tree.props.children[1].key, 'receipts:project-a', 'The existing recovery instance key is unchanged before React.Children escapes it.');
   assert.equal(recovery.props.projectId, 'project-a'); assert.equal(recovery.props.role, 'admin'); assert.equal(recovery.props.isOperator, true); assert.equal(recovery.props.request, api);

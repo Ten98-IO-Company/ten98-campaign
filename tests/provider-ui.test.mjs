@@ -107,18 +107,6 @@ test('calendar writes finishing in a departed month or closed page do not contin
   active.current = true; update([{ id: 'current-event' }]); assert.deepEqual(parent, [[{ id: 'current-event' }]]);
 });
 
-test('team changes completing after Settings closes cannot reload a different page or fetch the old workspace', async () => {
-  const source = await readFile(new URL('../src/TeamPanel.tsx', import.meta.url), 'utf8');
-  const handler = stripTypeScriptTypes(source.slice(source.indexOf('async function change('), source.indexOf('  async function add(')));
-  for (const userId of ['self', 'colleague']) {
-    let finish, refreshed = false, reloaded = false;
-    const active = { current: true }, context = { busy: false, canManage: true, active, setBusy() {}, setError() {}, request: () => new Promise(resolve => { finish = resolve; }), path: '/workspaces/old/members', currentUserId: 'self', window: { location: { reload() { reloaded = true; } } }, load: async () => { refreshed = true; } };
-    const change = new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context));
-    const pending = change('PATCH', { userId }, { role: 'viewer' }); active.current = false; finish({}); await pending;
-    assert.equal(reloaded, false); assert.equal(refreshed, false);
-  }
-});
-
 test('an agent history refresh failure preserves the uncertain paid request error and retry key', async () => {
   const source = await readFile(new URL('../src/CampaignAgent.tsx', import.meta.url), 'utf8');
   const sendSource = source.slice(source.indexOf('async function send('), source.indexOf('  async function applyDraft(')).replace('event: React.FormEvent', 'event').replace('key.current!.value', 'key.current.value').replace('error as any', 'error');

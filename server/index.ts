@@ -240,21 +240,19 @@ export function createApp(options: AppOptions = {}) {
           return send(201, { workspace, projectId });
         }
         const memberRoute = path.match(/^\/api\/workspaces\/([^/]+)\/members(?:\/([^/]+))?$/);
-        if (memberRoute && ['GET', 'POST', 'PATCH', 'DELETE'].includes(req.method!)) {
+        if (memberRoute && ['GET', 'PATCH', 'DELETE'].includes(req.method!)) {
           const role = workspaceAccess(memberRoute[1], user.id);
           if (!['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
           if (req.method === 'GET' && !memberRoute[2]) return send(200, { members: db.prepare('SELECT u.id,u.id AS userId,u.name,u.email,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=? ORDER BY u.name').all(memberRoute[1]) });
-          if ((req.method === 'POST' && memberRoute[2]) || (req.method !== 'POST' && !memberRoute[2]) || req.method === 'GET') throw new HttpError(404, 'Team route not found.');
+          if (!memberRoute[2] || req.method === 'GET') throw new HttpError(404, 'Team route not found.');
           const requested = req.method === 'DELETE' ? null : choice(body.role, roles, 'Role');
           transaction(db, () => {
-            const target = req.method === 'POST' ? db.prepare('SELECT id FROM users WHERE email=?').get(email(body.email)) as { id: string } | undefined : db.prepare('SELECT id FROM users WHERE id=?').get(memberRoute[2]) as { id: string } | undefined;
-            if (!target) throw new HttpError(400, 'This account does not exist. Ask the operator to create it first.');
-            const previous = db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(memberRoute[1], target.id) as { role: string } | undefined;
-            if (req.method !== 'POST' && !previous) throw new HttpError(404, 'Workspace member not found.');
-            if ((requested !== null && !mayGrantWorkspaceRole(role, requested)) || (previous && !mayGrantWorkspaceRole(role, previous.role))) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
-            if (previous?.role === 'owner' && requested !== 'owner' && (db.prepare("SELECT count(*) AS count FROM memberships WHERE workspace_id=? AND role='owner'").get(memberRoute[1]) as { count: number }).count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
+            const target = { id: memberRoute[2] }, previous = db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(memberRoute[1], target.id) as { role: string } | undefined;
+            if (!previous) throw new HttpError(404, 'Workspace member not found.');
+            if ((requested !== null && !mayGrantWorkspaceRole(role, requested)) || !mayGrantWorkspaceRole(role, previous.role)) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
+            if (previous.role === 'owner' && requested !== 'owner' && (db.prepare("SELECT count(*) AS count FROM memberships WHERE workspace_id=? AND role='owner'").get(memberRoute[1]) as { count: number }).count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
             if (req.method === 'DELETE') db.prepare('DELETE FROM memberships WHERE workspace_id=? AND user_id=?').run(memberRoute[1], target.id);
-            else db.prepare('INSERT INTO memberships VALUES(?,?,?) ON CONFLICT(workspace_id,user_id) DO UPDATE SET role=excluded.role').run(memberRoute[1], target.id, requested);
+            else db.prepare('UPDATE memberships SET role=? WHERE workspace_id=? AND user_id=?').run(requested, memberRoute[1], target.id);
             for (const project of db.prepare('SELECT id FROM projects WHERE workspace_id=?').all(memberRoute[1]) as { id: string }[]) store.activity(project.id, 'Workspace team membership updated.');
           });
           return send(200, { ok: true });

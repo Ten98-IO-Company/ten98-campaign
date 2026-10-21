@@ -50,7 +50,7 @@ test('HTTP publishing approvals, Drive delivery links and provider outcome revie
       const userId = randomUUID(), email = `${name}@example.test`;
       app.db.prepare('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)').run(userId, name, email, passwordHash);
       const login = await post('/api/auth/login', { email, password: 'a sufficiently long workflow fixture password' }); assert.equal(login.status, 200);
-      if (role) assert.equal((await post(`/api/workspaces/${workspaceId}/members`, { email, role })).status, 200);
+      if (role) app.db.prepare('INSERT INTO memberships VALUES(?,?,?)').run(workspaceId, userId, role);
       return { id: userId, cookie: login.cookie, email };
     }
     const viewer = await member('workflow-viewer', 'viewer'), editor = await member('workflow-editor', 'editor'), admin = await member('workflow-admin', 'admin'), outsider = await member('workflow-outsider');

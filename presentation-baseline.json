@@ -91,10 +91,6 @@
     "element": 87,
     "styling": 24
   },
-  "src/TeamPanel.tsx": {
-    "element": 35,
-    "styling": 11
-  },
   "src/TikTokPublishingTools.tsx": {
     "element": 45,
     "styling": 23
@@ -107,10 +103,6 @@
   "src/WhatsAppTemplate.tsx": {
     "element": 19,
     "styling": 6
-  },
-  "src/WorkspaceInvitations.tsx": {
-    "element": 40,
-    "styling": 13
   },
   "src/ZernioAccounts.tsx": {
     "element": 246,
