@@ -7,10 +7,6 @@
     "element": 186,
     "styling": 64
   },
-  "src/ContentApprovals.tsx": {
-    "element": 84,
-    "styling": 44
-  },
   "src/DirectCampaigns.tsx": {
     "stylesheet": 1,
     "element": 301,
@@ -51,8 +47,8 @@
     "styling": 51
   },
   "src/ZernioInsights.tsx": {
-    "element": 259,
-    "styling": 39
+    "element": 7,
+    "styling": 1
   },
   "src/ZernioLeads.tsx": {
     "element": 153,

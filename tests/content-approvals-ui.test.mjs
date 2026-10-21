@@ -12,7 +12,8 @@ test('approval cards expose every saved recipient when account copies inherit th
   const item = { post: { id: 'post-one', content: 'Shared reviewed caption', platforms: ['facebook'], accounts: ['inherited-account-one', 'inherited-account-two'], platformOverrides: {}, accountOverrides: {}, mediaItems: [] }, status: 'pending', review: { id: 'review-one', requestedAt: '2030-01-01T00:00:00Z' } };
   const data = { requireApproval: true, posts: [item] }, calls = [];
   let stateIndex = 0;
-  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'PostVariantPreview', 'PLATFORM_RULES', code + '; return ContentApprovals;')(React, () => {}, value => ({ current: value }), initial => [stateIndex++ === 0 ? data : initial, () => {}], () => null, PLATFORM_RULES);
+  const ui = Object.entries(await import('@ten98/ui')).filter(([name]) => /^[A-Z]/.test(name));
+  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'PostVariantPreview', 'PLATFORM_RULES', ...ui.map(([name]) => name), code + '; return ContentApprovals;')(React, () => {}, value => ({ current: value }), initial => [stateIndex++ === 0 ? data : initial, () => {}], () => null, PLATFORM_RULES, ...ui.map(([, value]) => value));
   const html = renderToStaticMarkup(Component({ projectId: 'project-one', role: 'owner', request: async (...args) => { calls.push(args); } }));
   assert.match(html, /Selected account IDs:<\/strong> inherited-account-one, inherited-account-two/);
   assert.match(html, /2 selected accounts/);
