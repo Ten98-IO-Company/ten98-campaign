@@ -311,15 +311,24 @@ export async function createApp(options: AppOptions = {}) {
           // Inside a transaction, pass its executor: a second pool connection can starve the pool and reads outside the lock.
           // Errors keep their precedence: session ended, then project unavailable, then role changed, then credentials.
           type CurrentAccess = { session: boolean; role: string | null; zernio_profile_id: string | null; drive_folder_id: string | null; project: string | null };
-          const assertIntegrationSettings = async (executor: Executor = db): Promise<CurrentAccess> => {
+          const readAccess = async (executor: Executor): Promise<CurrentAccess> => {
             const current = (await first<CurrentAccess>(executor.execute(sql`SELECT EXISTS (SELECT 1 FROM sessions WHERE token = ${auth.sessionKey(req)} AND expires_at > ${Date.now()} AND user_id = ${user.id}) AS session,
               (SELECT m.role FROM memberships m WHERE m.workspace_id = p.workspace_id AND m.user_id = ${user.id}) AS role, p.id AS project, p.zernio_profile_id, p.drive_folder_id
               FROM (SELECT 1) one LEFT JOIN projects p ON p.id = ${project.id}`)))!;
             if (!current.session) throw new HttpError(403, 'Your sign-in session ended. Sign in again.');
             if (!current.project || !current.role) throw new HttpError(404, 'Project not found or unavailable.');
             if (current.role !== role) throw new HttpError(403, 'Your workspace role changed. Refresh this project before continuing.');
-            if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.');
             return current;
+          };
+          // Guards often run back to back (a mapping check calls this, then the handler calls it again) with no I/O between
+          // them. They share one read until the event loop's next check phase after it settles: anything awaited on I/O (a
+          // provider call, another query) resumes after that phase and reads again, so each check after I/O sees current access.
+          let sharedAccess: Promise<CurrentAccess> | undefined;
+          const assertIntegrationSettings = async (executor: Executor = db): Promise<CurrentAccess> => {
+            // The clear is scheduled once the read settles, so the calls that run straight after it still share it.
+            const access = await (executor !== db ? readAccess(executor) : sharedAccess ??= readAccess(db).finally(() => setImmediate(() => { sharedAccess = undefined; })));
+            if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.');
+            return access;
           };
           const context: RequestContext = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: async (expected: string | null, executor: Executor = db) => { const current = await assertIntegrationSettings(executor); if (current.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: async (expected: string | null, executor: Executor = db) => { const current = await assertIntegrationSettings(executor); if (current.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: async (collection: string, fields: ProviderRecord) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); await checkReferences(store, project.id, data); return data; } };
           context.assertPublishingApproval = (post: ProviderRecord) => assertPublishingApproval(context, post);
