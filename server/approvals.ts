@@ -13,8 +13,8 @@ const first = async (query: Promise<{ rows: unknown[] }>) => (await query).rows[
 // Inside a transaction every read and write goes through it, never a second pool connection.
 const within = (context: ApprovalContext, tx: Executor): ApprovalContext => ({ ...context, db: tx, store: createStore(tx) });
 async function policy(db: Executor, projectId: string) {
-  const row = await first(db.execute(sql`SELECT require_approval AS "requireApproval",updated_by AS "updatedBy",updated_at AS "updatedAt" FROM project_approval_policy WHERE project_id=${projectId}`));
-  return row ? { ...row, requireApproval: Boolean(row.requireApproval) } : { requireApproval: false, updatedBy: null, updatedAt: null };
+  const row = await first(db.execute(sql`SELECT require_approval AS "requireApproval",require_ad_approval AS "requireAdApproval",updated_by AS "updatedBy",updated_at AS "updatedAt" FROM project_approval_policy WHERE project_id=${projectId}`));
+  return row ? { ...row, requireApproval: Boolean(row.requireApproval), requireAdApproval: Boolean(row.requireAdApproval) } : { requireApproval: false, requireAdApproval: false, updatedBy: null, updatedAt: null };
 }
 // `loaded` serves a caller that already read the project's assets, so many snapshots cost no further queries.
 async function assetRecords(context: ApprovalContext, post: ProviderRecord, loaded?: Map<string, ProviderRecord>) {
@@ -110,10 +110,11 @@ function queueSummary(post: ProviderRecord, queues: ProviderRecord[] | undefined
 // Every membership change locks the workspace row FOR UPDATE (lockWorkspace), so this FOR SHARE lock holds the
 // reviewer's role and the administrator count until the decision commits. It is taken before the advisory
 // approval lock, keeping the order workspaces → advisory.
+const shareWorkspace = (tx: Executor, projectId: string) => tx.execute(sql`SELECT w.id FROM workspaces w JOIN projects p ON p.workspace_id=w.id WHERE p.id=${projectId} FOR SHARE OF w`);
+const memberRole = async (tx: Executor, projectId: string, userId: string) => String((await first(tx.execute(sql`SELECT m.role FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id WHERE p.id=${projectId} AND m.user_id=${userId}`)))?.role);
 async function lockReviewer(tx: Executor, projectId: string, userId: string) {
-  await tx.execute(sql`SELECT w.id FROM workspaces w JOIN projects p ON p.workspace_id=w.id WHERE p.id=${projectId} FOR SHARE OF w`);
-  const current = await first(tx.execute(sql`SELECT m.role FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id WHERE p.id=${projectId} AND m.user_id=${userId}`));
-  if (!administrators.has(String(current?.role))) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
+  await shareWorkspace(tx, projectId);
+  if (!administrators.has(await memberRole(tx, projectId, userId))) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
 }
 // Council decision ten98-code-system#30: with approval required, a requester may approve their own review only while
 // they are the project's single active owner or administrator (by count, not role). Runs under lockReviewer.
@@ -189,6 +190,27 @@ function reviewInput(body: any) {
   if (!['approved', 'rejected'].includes(body.decision) || typeof note !== 'string' || note.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(note) || typeof body.reviewId !== 'string') fail(400, 'INVALID_APPROVAL_REVIEW', 'Choose approve or reject and use a review note of at most 2,000 characters.');
   return note;
 }
+// Records one decision on a pending review of `subject` (a post id, or an ad spend subject key). The reviewer's role
+// is re-checked under the workspace lock. The per-subject lock serialises decisions with requests (and ad spend
+// approvals with their use); only a still-pending review takes a decision, so a parallel approve and reject cannot both
+// apply. `setting` names the policy flag under which the self-review rule applies. Returns whether the decision was a
+// self-approval, or null when a repeatable item finds a parallel decision the same way already recorded.
+async function recordDecision(context: ApprovalContext, subject: string, review: ProviderRecord, decision: string, note: string, setting: 'requireApproval' | 'requireAdApproval', repeatable = false) {
+  const { project, user, db } = context;
+  return db.transaction(async (tx: Executor) => {
+    await lockReviewer(tx, project.id, user.id);
+    await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, subject]));
+    const self = decision === 'approved' && review.requested_by === user.id && (await policy(tx, project.id))[setting];
+    if (self) await assertSelfApprovalAllowed(tx, project.id, user.id);
+    const decided = await tx.execute(sql`UPDATE post_approval_reviews SET status=${decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()},self_approved=${self} WHERE id=${review.id} AND status='pending'`);
+    if (!decided.rowCount) {
+      // A parallel decision the same way already holds; a repeatable item reports it instead of failing.
+      if (repeatable && (await first(tx.execute(sql`SELECT status FROM post_approval_reviews WHERE id=${review.id}`)))?.status === decision) return null;
+      fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
+    }
+    return self;
+  });
+}
 // One review decision; the single and bulk routes both run it. A repeatable (bulk) item already decided the same way
 // returns its current state without a second decision or activity entry.
 async function decide(context: ApprovalContext, { post, review, snapshot, hash, proposing }: ProviderRecord, body: any, repeatable = false) {
@@ -213,23 +235,85 @@ async function decide(context: ApprovalContext, { post, review, snapshot, hash, 
     const failed = retryableFailure(post) ? post.providerResults.filter((copy: ProviderRecord) => copy.status === 'failed' && copy.platform) : [];
     assertPlatformRules(post, (await assetRecords(context, post)).records.filter(Boolean), failed.length ? failed : undefined);
   }
-  // The reviewer's role is re-checked under the workspace lock. The per-post lock serialises decisions with requests;
-  // only a still-pending review takes a decision, so a parallel approve and reject cannot both apply.
-  const selfApproved = await db.transaction(async (tx: Executor) => {
-    await lockReviewer(tx, project.id, user.id);
-    await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
-    const self = body.decision === 'approved' && review.requested_by === user.id && (await policy(tx, project.id)).requireApproval;
-    if (self) await assertSelfApprovalAllowed(tx, project.id, user.id);
-    const decided = await tx.execute(sql`UPDATE post_approval_reviews SET status=${body.decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()},self_approved=${self} WHERE id=${review.id} AND status='pending'`);
-    if (!decided.rowCount) {
-      // A parallel decision the same way already holds; a repeatable item reports it instead of failing.
-      if (repeatable && (await first(tx.execute(sql`SELECT status FROM post_approval_reviews WHERE id=${review.id}`)))?.status === body.decision) return null;
-      fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
-    }
-    return self;
-  });
+  const selfApproved = await recordDecision(context, post.id, review, body.decision, note, 'requireApproval', repeatable);
   if (selfApproved === null) return { status: 'unchanged', item: await queueItem(context, post, queueSummary(post, [], true)) };
   await store.activity(project.id, selfApproved ? `Content self-approved by ${user.name || user.id} (only administrator).` : `Content ${body.decision} by ${user.name || user.id}.`); return { status: 'decided', item: await queueItem(context, post, queue ? { ...queue, ready: true } : queueSummary(post, [], true)) };
+}
+
+// Ad spend approval (council decision ten98-code-system#35, Q1). With require_ad_approval on, a provider write that
+// starts spend (an activation) or raises a budget needs an approved review of exactly that change: subject id,
+// platform, action, amount in minor units and currency. Pauses, ends and budget decreases never need one. The
+// `-status` actions activate; the `-budget` actions raise a budget.
+export const AD_SPEND_ACTIONS = ['ads/status', 'ads/ad-status', 'ads/adset-status', 'ads/adset-budget', 'ads/campaign-budget', 'google-native/campaign-status', 'google-native/campaign-budget', 'microsoft/campaign-status', 'microsoft/campaign-budget'];
+type AdSpendChange = { subjectId: string; platform: string; action: string; amount: number; currency: string };
+// What a gated route read: `amount` is the budget (major units) that spends once the write applies, and
+// `currentAmount` the budget configured now (null when the route could not read it).
+export type AdSpendAttempt = { subjectId: string; platform: string; action: string; amount: unknown; currency: unknown; currentAmount: unknown; activates: boolean };
+// Exact minor units for the currency's decimal places, or null when the amount is not exactly representable.
+function minorUnits(amount: unknown, currency: unknown) {
+  if (typeof currency !== 'string' || !/^[A-Z]{3}$/.test(currency) || typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) return null;
+  const value = amount * 10 ** new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits!, rounded = Math.round(value);
+  return Number.isSafeInteger(rounded) && Math.abs(value - rounded) <= 0.000001 ? rounded : null;
+}
+const adSubject = (change: AdSpendChange) => 'ad-spend:' + JSON.stringify([change.platform, change.subjectId, change.action]);
+const adFingerprint = (change: AdSpendChange) => createHash('sha256').update(JSON.stringify([change.subjectId, change.platform, change.action, change.amount, change.currency])).digest('hex');
+// An approval is usable until a provider write consumes it; a consuming receipt that failed releases it.
+const usableApproval = sql`r.status='approved' AND (r.consumed_by IS NULL OR EXISTS (SELECT 1 FROM integration_operations o WHERE o.project_id=r.project_id AND o.request_key=r.consumed_by AND o.status='failed'))`;
+async function adSpendReview(db: Executor, row: ProviderRecord | undefined) {
+  if (!row) return null;
+  const used = row.consumed_by ? await first(db.execute(sql`SELECT status FROM integration_operations WHERE project_id=${row.project_id} AND request_key=${row.consumed_by}`)) : undefined;
+  return { ...await publicReview(db, row), kind: 'ad_spend', consumed: Boolean(row.consumed_by) && used?.status !== 'failed' };
+}
+// Opens a pending review of `change` (run under its subject's approval lock). An identical pending review is the
+// answer; a different pending change of the same subject and action is superseded. `currentAmount` (minor units) is
+// what a gated route read, so the reviewer sees the current budget beside the requested one.
+async function openAdSpendReview(tx: Executor, project: ProviderRecord, user: ProviderRecord, change: AdSpendChange, currentAmount: number | null) {
+  const subject = adSubject(change), hash = adFingerprint(change), now = new Date().toISOString();
+  const pending = await first(tx.execute(sql`SELECT * FROM post_approval_reviews WHERE project_id=${project.id} AND kind='ad_spend' AND post_id=${subject} AND status='pending' AND fingerprint=${hash} ORDER BY seq DESC LIMIT 1`));
+  if (pending) {
+    const snapshot = JSON.parse(pending.snapshot);
+    if (snapshot.currentAmount === null && currentAmount !== null) await tx.execute(sql`UPDATE post_approval_reviews SET snapshot=${JSON.stringify({ ...snapshot, currentAmount })} WHERE id=${pending.id}`);
+    return pending.id as string;
+  }
+  await tx.execute(sql`UPDATE post_approval_reviews SET status='rejected',reviewed_at=${now},note=${'Superseded by a newer ad spend request.'} WHERE project_id=${project.id} AND kind='ad_spend' AND post_id=${subject} AND status='pending'`);
+  const id = randomUUID(), snapshot = { ...change, currentAmount, activates: change.action.endsWith('status') };
+  await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,kind,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${id}, ${project.id}, ${subject}, 'ad_spend', ${hash}, ${JSON.stringify(snapshot)}, 'pending', ${user.id}, ${now})`);
+  await createStore(tx).activity(project.id, `Ad spend review requested by ${user.name || user.id}.`);
+  return id;
+}
+
+// The gate each spend-starting or budget-raising route awaits inside its operation(), immediately before the provider
+// write. A matching approval is consumed by this receipt (`key`), so one approval allows one provider write. Without
+// one, a review of this exact change is opened: 403 when the project holds no usable ad spend approval, 409 when it
+// holds approvals for a different change (amount, currency, platform, subject or action).
+export async function assertAdSpendApproval(context: ApprovalContext, attempt: AdSpendAttempt, key: string) {
+  const { project, user, db } = context;
+  if (!attempt.activates && typeof attempt.amount === 'number' && typeof attempt.currentAmount === 'number' && attempt.amount <= attempt.currentAmount) return;
+  if (!(await policy(db, project.id)).requireAdApproval) return;
+  const amount = minorUnits(attempt.amount, attempt.currency), currentAmount = minorUnits(attempt.currentAmount, attempt.currency);
+  if (amount === null) fail(409, 'AD_SPEND_AMOUNT_UNAVAILABLE', 'The budget and currency of this change could not be read exactly, so it cannot be matched to an approval. Make this change in the provider dashboard.');
+  const change: AdSpendChange = { subjectId: attempt.subjectId, platform: attempt.platform, action: attempt.action, amount, currency: attempt.currency as string }, hash = adFingerprint(change);
+  // Lock order as for decisions: workspace FOR SHARE, then the subject's approval lock, then the role re-check.
+  const outcome = await db.transaction(async (tx: Executor) => {
+    await shareWorkspace(tx, project.id);
+    await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, adSubject(change)]));
+    if (!['owner', 'admin', 'editor'].includes(await memberRole(tx, project.id, user.id))) fail(403, 'AD_SPEND_WRITE_REQUIRED', 'Editing permission is required to change ad spend.');
+    if (!(await policy(tx, project.id)).requireAdApproval) return 'off';
+    const approved = await first(tx.execute(sql`SELECT r.id FROM post_approval_reviews r WHERE r.project_id=${project.id} AND r.kind='ad_spend' AND r.fingerprint=${hash} AND ${usableApproval} ORDER BY r.seq LIMIT 1 FOR UPDATE OF r`));
+    if (approved) { await tx.execute(sql`UPDATE post_approval_reviews SET consumed_by=${key},consumed_at=${new Date().toISOString()} WHERE id=${approved.id}`); return 'approved'; }
+    const other = await first(tx.execute(sql`SELECT r.id FROM post_approval_reviews r WHERE r.project_id=${project.id} AND r.kind='ad_spend' AND ${usableApproval} LIMIT 1`));
+    await openAdSpendReview(tx, project, user, change, currentAmount);
+    return other ? 'mismatch' : 'missing';
+  });
+  if (outcome === 'missing') fail(403, 'AD_SPEND_APPROVAL_REQUIRED', 'An owner or administrator must approve this spend change before it is sent. A review of it was requested.');
+  if (outcome === 'mismatch') fail(409, 'AD_SPEND_APPROVAL_MISMATCH', 'This change differs from the approved spend change (amount, currency, platform, campaign or action). A review of this exact change was requested.');
+}
+
+function adSpendInput(body: any) {
+  fields(body, ['subjectId', 'platform', 'action', 'amount', 'currency']);
+  const readable = (value: any, maximum: number) => typeof value === 'string' && value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/.test(value);
+  if (!readable(body.subjectId, 200) || typeof body.platform !== 'string' || !/^[a-z]{2,30}$/.test(body.platform) || !AD_SPEND_ACTIONS.includes(body.action) || !Number.isSafeInteger(body.amount) || body.amount <= 0 || typeof body.currency !== 'string' || !/^[A-Z]{3}$/.test(body.currency)) fail(400, 'INVALID_AD_SPEND_REQUEST', 'Choose the campaign, platform and spend action, and enter the amount in minor units with its three-letter currency.');
+  return { subjectId: body.subjectId, platform: body.platform, action: body.action, amount: body.amount, currency: body.currency } as AdSpendChange;
 }
 
 export async function handleApprovals(context: ApprovalContext) {
@@ -240,9 +324,37 @@ export async function handleApprovals(context: ApprovalContext) {
     if (req.method === 'GET' && path === 'policy') { send(200, await policy(db, project.id)); return true; }
     if (req.method === 'POST' && path === 'policy') {
       if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can change the publishing approval policy.');
-      fields(body, ['requireApproval']); if (typeof body.requireApproval !== 'boolean') fail(400, 'INVALID_APPROVAL_POLICY', 'Publishing approval must be enabled or disabled.');
-      await db.execute(sql`INSERT INTO project_approval_policy VALUES (${project.id}, ${body.requireApproval}, ${user.id}, ${new Date().toISOString()}) ON CONFLICT (project_id) DO UPDATE SET require_approval=excluded.require_approval,updated_by=excluded.updated_by,updated_at=excluded.updated_at`);
-      await store.activity(project.id, `Publishing approval ${body.requireApproval ? 'required' : 'made optional'} by ${user.name || user.id}.`); send(200, await policy(db, project.id)); return true;
+      // Either setting may be sent alone; the other keeps its stored value (off for a project without a policy row).
+      fields(body, ['requireApproval', 'requireAdApproval']);
+      const post = Object.hasOwn(body, 'requireApproval'), ads = Object.hasOwn(body, 'requireAdApproval');
+      if (!post && !ads || post && typeof body.requireApproval !== 'boolean' || ads && typeof body.requireAdApproval !== 'boolean') fail(400, 'INVALID_APPROVAL_POLICY', 'Publishing approval must be enabled or disabled.');
+      await db.execute(sql`INSERT INTO project_approval_policy (project_id,require_approval,require_ad_approval,updated_by,updated_at) VALUES (${project.id}, ${post ? body.requireApproval : false}, ${ads ? body.requireAdApproval : false}, ${user.id}, ${new Date().toISOString()}) ON CONFLICT (project_id) DO UPDATE SET require_approval=${post ? sql`excluded.require_approval` : sql`project_approval_policy.require_approval`},require_ad_approval=${ads ? sql`excluded.require_ad_approval` : sql`project_approval_policy.require_ad_approval`},updated_by=excluded.updated_by,updated_at=excluded.updated_at`);
+      if (post) await store.activity(project.id, `Publishing approval ${body.requireApproval ? 'required' : 'made optional'} by ${user.name || user.id}.`);
+      if (ads) await store.activity(project.id, `Ad spend approval ${body.requireAdApproval ? 'required' : 'made optional'} by ${user.name || user.id}.`);
+      send(200, await policy(db, project.id)); return true;
+    }
+    if (req.method === 'GET' && path === 'ad-spend') {
+      const rows = (await db.execute(sql`SELECT * FROM post_approval_reviews WHERE project_id=${project.id} AND kind='ad_spend' ORDER BY seq DESC LIMIT 100`)).rows as ProviderRecord[];
+      send(200, { requireAdApproval: (await policy(db, project.id)).requireAdApproval, reviews: await Promise.all(rows.map(row => adSpendReview(db, row))) }); return true;
+    }
+    if (req.method === 'POST' && path === 'ad-spend/request') {
+      if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'APPROVAL_WRITE_REQUIRED', 'Editing permission is required to request an ad spend review.');
+      const change = adSpendInput(body);
+      const id = await db.transaction(async (tx: Executor) => {
+        await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, adSubject(change)]));
+        return openAdSpendReview(tx, project, user, change, null);
+      });
+      send(200, { review: await adSpendReview(db, await first(db.execute(sql`SELECT * FROM post_approval_reviews WHERE id=${id}`))) }); return true;
+    }
+    if (req.method === 'POST' && path === 'ad-spend/review') {
+      if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject ad spend.');
+      const note = reviewInput(body);
+      const review = await first(db.execute(sql`SELECT * FROM post_approval_reviews WHERE id=${body.reviewId} AND project_id=${project.id} AND kind='ad_spend'`));
+      if (!review) fail(404, 'APPROVAL_REVIEW_NOT_FOUND', 'This ad spend review was not found in the current project.');
+      if (review!.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review was already decided or superseded. Refresh before reviewing it.');
+      const self = await recordDecision(context, review!.post_id, review!, body.decision, note, 'requireAdApproval');
+      await store.activity(project.id, self ? `Ad spend self-approved by ${user.name || user.id} (only administrator).` : `Ad spend ${body.decision} by ${user.name || user.id}.`);
+      send(200, { review: await adSpendReview(db, await first(db.execute(sql`SELECT * FROM post_approval_reviews WHERE id=${review!.id}`))) }); return true;
     }
     if (req.method === 'GET' && path === 'posts') {
       const posts = await store.list(project.id, 'posts'); let queues: ProviderRecord[] | undefined, unavailable = false;
@@ -257,7 +369,9 @@ export async function handleApprovals(context: ApprovalContext) {
       const [posts, assets, reviews, current] = await Promise.all([store.list(project.id, 'posts'), store.list(project.id, 'assets'), db.execute(sql`SELECT DISTINCT ON (post_id) * FROM post_approval_reviews WHERE project_id=${project.id} ORDER BY post_id, seq DESC`), policy(db, project.id)]);
       const loaded = new Map<string, ProviderRecord>(assets.map((asset: ProviderRecord) => [asset.id, asset])), latestReview = new Map((reviews.rows as ProviderRecord[]).map(row => [row.post_id, row]));
       const statuses = Object.fromEntries(await Promise.all(posts.map(async (post: ProviderRecord) => [post.id, approvalStatus(post, latestReview.get(post.id), await postSnapshot(context, post, loaded))])));
-      send(200, { requireApproval: current.requireApproval, pending: Object.values(statuses).filter(status => status === 'pending').length, statuses }); return true;
+      // The latest-review read also holds each ad spend subject's latest review; only that one can be pending.
+      const pendingAdSpend = (reviews.rows as ProviderRecord[]).filter(row => row.kind === 'ad_spend' && row.status === 'pending').length;
+      send(200, { requireApproval: current.requireApproval, pending: Object.values(statuses).filter(status => status === 'pending').length, statuses, pendingAdSpend }); return true;
     }
     // Each item is its own decision through the single-review path, so one failure leaves the others decided.
     if (req.method === 'POST' && path === 'bulk') {
