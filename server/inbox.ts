@@ -4,7 +4,8 @@ import type { OperationContext, ProviderRecord, ZernioApi } from './provider-cor
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
 import { listWhatsAppTemplates, validateWhatsAppTemplate } from './direct-providers.ts';
-import { publicMediaUrl, assetDeliveryIssue } from '../shared/social-posts.ts';
+import { publicMediaUrl, assetDeliveryIssue, validPostInstant as iso } from '../shared/social-posts.ts';
+import type { Executor } from './database.ts';
 
 const id = (value: any): string => { if (typeof value !== 'string' || !value || value.length > 2000 || /[\s\u0000-\u001f\u007f]/.test(value)) fail(400, 'INVALID_INBOX_ID', 'Choose a valid inbox item.'); return value; };
 const decodedId = (value: string): string => { try { return id(decodeURIComponent(value)); } catch (error: any) { if (error instanceof IntegrationError) throw error; fail(400, 'INVALID_INBOX_ID', 'Choose a valid inbox item.'); } };
@@ -395,6 +396,7 @@ async function acceptRequest(context: ProviderRecord, api: ZernioApi, accounts: 
   try { sent = await findMessage(api, account, conversationId, row.id, response.data.messageId); }
   catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
   if (!sent || sent.direction !== 'outgoing' || sent.message !== payload.message) fail(502, 'REQUEST_REPLY_NOT_CONFIRMED', 'The latest history has not confirmed this acceptance reply. Review the conversation before another send.', true);
+  await recordReply(context, account._id, 'conversation', [conversationId, row.id]);
   return { accepted: true, sent: true, messageId: response.data.messageId };
 }
 async function aggregate(api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, kind: string, params: ProviderRecord): Promise<ProviderRecord> {
@@ -576,11 +578,102 @@ async function privateCommentReply(context: ProviderRecord, api: ZernioApi, acco
 export const inboxReplyVersion = (row: ProviderRecord) => createHash('sha256').update(JSON.stringify([row.id, row.accountId, row.hasReply, row.reply?.id || null, row.reply?.text || null, row.reply?.created || null])).digest('hex');
 const review = (row: ProviderRecord) => ({ ...pick(row, reviewFields), replyVersion: inboxReplyVersion(row) });
 
+// Team triage overlay (ten98-code-system#35 Q2, ten98-campaign#41 change 1): local state keyed on provider IDs, never
+// provider content. Behaviour ported from chatwoot/chatwoot@a8487ab (MIT; nothing from enterprise/): an inbound message
+// sets waiting_since when blank and reopens a resolved or snoozed item (app/models/message.rb:348-369), the first human
+// reply is recorded once and a reply clears waiting (message.rb:232-241, :394), and resolving clears it
+// (app/controllers/api/v1/accounts/conversations_controller.rb:281-288). A snooze ends when read after snoozed_until
+// instead of by a timer job (jobs/conversations/reopen_snoozed_conversations_job.rb).
+const ITEM_KINDS = new Set(['conversation', 'comment', 'review', 'mention']), ITEM_STATUSES = new Set(['open', 'pending', 'snoozed', 'resolved']);
+type ItemKey = { projectId: string; profileId: string; accountId: string; kind: string; resourceId: string };
+const itemKey = (key: ItemKey) => sql`project_id=${key.projectId} AND profile_id=${key.profileId} AND account_id=${key.accountId} AND kind=${key.kind} AND resource_id=${key.resourceId}`;
+// Strictly later than the previous token, so two changes within one millisecond never share an expectedUpdatedAt.
+const nextStamp = (previous?: string | null) => new Date(Math.max(Date.now(), previous ? Date.parse(previous) + 1 : 0)).toISOString();
+function itemStateView(row: ProviderRecord, now: string): ProviderRecord {
+  const woke = row.status === 'snoozed' && row.snoozed_until <= now;
+  return { accountId: row.account_id, kind: row.kind, resourceId: row.resource_id, status: woke ? 'open' : row.status, snoozedUntil: woke ? null : row.snoozed_until ?? null, assigneeId: row.assignee_id ?? null, waitingSince: row.waiting_since ?? null, firstReplyAt: row.first_reply_at ?? null, updatedAt: row.updated_at ?? null, updatedBy: row.updated_by ?? null };
+}
+/** Webhook drain hook: an inbound message, comment or review marks its item waiting, on the drain's transaction. */
+export async function markInboxItemWaiting(tx: Executor, key: ItemKey, eventAt: string): Promise<void> {
+  const at = new Date(eventAt).toISOString();
+  if ((await tx.execute(sql`INSERT INTO inbox_item_state(project_id,profile_id,account_id,kind,resource_id,waiting_since) VALUES(${key.projectId},${key.profileId},${key.accountId},${key.kind},${key.resourceId},${at}) ON CONFLICT DO NOTHING`)).rowCount) return;
+  const row = (await tx.execute(sql`SELECT status,last_reply_at,updated_at FROM inbox_item_state WHERE ${itemKey(key)} FOR UPDATE`)).rows[0] as ProviderRecord;
+  // A late or retried delivery must not undo a reply, or a resolve or snooze, recorded after the message itself.
+  const triagedLater = row.updated_at != null && row.updated_at >= at;
+  if (row.last_reply_at != null && row.last_reply_at >= at || row.status === 'resolved' && triagedLater) return;
+  const reopen = ['resolved', 'snoozed'].includes(row.status) && !triagedLater;
+  await tx.execute(sql`UPDATE inbox_item_state SET waiting_since=COALESCE(waiting_since,${at})${reopen ? sql`,status='open',snoozed_until=NULL,updated_at=${nextStamp(row.updated_at)},updated_by=NULL` : sql``} WHERE ${itemKey(key)}`);
+}
+// After a provider-confirmed human reply sent through Campaign. The first ID is the item's list key; the rest are
+// aliases of the same thread (a stored conversation ID) that only clear rows that already exist.
+async function recordReply(context: ProviderRecord, accountId: string, kind: string, ids: string[]): Promise<void> {
+  const { db, project } = context, at = new Date().toISOString(), [resourceId, ...aliases] = [...new Set(ids)];
+  // An inbound message newer than this reply stays waiting.
+  const cleared = sql`waiting_since=CASE WHEN inbox_item_state.waiting_since<=${at} THEN NULL ELSE inbox_item_state.waiting_since END,first_reply_at=COALESCE(inbox_item_state.first_reply_at,${at}),last_reply_at=GREATEST(inbox_item_state.last_reply_at,${at})`;
+  try {
+    await db.execute(sql`INSERT INTO inbox_item_state(project_id,profile_id,account_id,kind,resource_id,first_reply_at,last_reply_at) VALUES(${project.id},${project.zernioProfileId},${accountId},${kind},${resourceId},${at},${at}) ON CONFLICT(project_id,profile_id,account_id,kind,resource_id) DO UPDATE SET ${cleared}`);
+    for (const alias of aliases) await db.execute(sql`UPDATE inbox_item_state SET ${cleared} WHERE ${itemKey({ projectId: project.id, profileId: project.zernioProfileId, accountId, kind, resourceId: alias })}`);
+  } catch {
+    // The provider already confirmed the reply; triage bookkeeping must not turn it into an uncertain operation.
+    console.error('Inbox triage state could not record a confirmed reply.');
+  }
+}
+async function itemStates(context: ProviderRecord): Promise<void> {
+  const { req, url, project, role, user, send, body = {} } = context, profileId = project.zernioProfileId, now = () => new Date().toISOString();
+  if (!['GET', 'PATCH'].includes(req.method)) fail(405, 'METHOD_NOT_ALLOWED', 'Read inbox item state with GET or change it with PATCH.');
+  if (req.method === 'PATCH' && !WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this inbox action.');
+  if (!valid(profileId)) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
+  const kindOf = (value: any): string => { if (!ITEM_KINDS.has(value)) fail(400, 'INVALID_INBOX_FILTER', 'Choose a conversation, comment, review or mention.'); return value; };
+  if (req.method === 'GET') {
+    if ([...url.searchParams.keys()].some(name => !['accountId', 'kind', 'id'].includes(name))) fail(400, 'INVALID_INBOX_FILTER', 'Request item state by accountId, kind and id only.');
+    const accountId = id(url.searchParams.get('accountId')), kind = kindOf(url.searchParams.get('kind')), ids = [...new Set(url.searchParams.getAll('id'))].map(id);
+    if (!ids.length || ids.length > 100) fail(400, 'INVALID_INBOX_FILTER', 'Request the state of 1 to 100 inbox items.');
+    await context.assertProjectMapping(profileId);
+    // An assignee who has since left the workspace reads as unassigned.
+    const rows = (await context.db.execute(sql`SELECT s.account_id,s.kind,s.resource_id,s.status,s.snoozed_until,CASE WHEN m.user_id IS NULL THEN NULL ELSE s.assignee_id END AS assignee_id,s.waiting_since,s.first_reply_at,s.updated_at,s.updated_by
+      FROM inbox_item_state s JOIN projects p ON p.id=s.project_id LEFT JOIN memberships m ON m.workspace_id=p.workspace_id AND m.user_id=s.assignee_id
+      WHERE s.project_id=${project.id} AND s.profile_id=${profileId} AND s.account_id=${accountId} AND s.kind=${kind} AND s.resource_id IN (${sql.join(ids.map(value => sql`${value}`), sql`,`)})`)).rows as ProviderRecord[];
+    const found = new Map(rows.map(row => [row.resource_id, row])), checkedAt = now();
+    send(200, { states: ids.map(resourceId => itemStateView(found.get(resourceId) || { account_id: accountId, kind, resource_id: resourceId, status: 'open' }, checkedAt)), checkedAt });
+    return;
+  }
+  fields(body, ['accountId', 'kind', 'resourceId', 'expectedUpdatedAt', 'status', 'snoozedUntil', 'assigneeId']);
+  const key = { projectId: project.id, profileId, accountId: id(body.accountId), kind: kindOf(body.kind), resourceId: id(body.resourceId) }, expected = body.expectedUpdatedAt;
+  if (expected !== null && typeof expected !== 'string') fail(400, 'INVALID_INBOX_STATE', 'Send the updatedAt you last read, or null for an item with no saved state.');
+  if (body.status === undefined && body.assigneeId === undefined) fail(400, 'INVALID_INBOX_STATE', 'Choose a status or an assignee to change.');
+  if (body.status !== undefined && !ITEM_STATUSES.has(body.status)) fail(400, 'INVALID_INBOX_STATE', 'Choose open, pending, snoozed or resolved.');
+  if (body.status === 'snoozed' ? !iso(body.snoozedUntil) || !(Date.parse(body.snoozedUntil) > Date.now() && Date.parse(body.snoozedUntil) <= Date.now() + 366 * 86400000) : body.snoozedUntil != null) fail(400, 'INVALID_INBOX_STATE', 'Snooze until a time with a timezone within the next year, and set it only when snoozing.');
+  if (body.assigneeId !== undefined && body.assigneeId !== null) id(body.assigneeId);
+  const { assertProjectMapping } = context;
+  const row = await context.db.transaction(async (tx: any) => {
+    // Lock order workspaces → rows (auth.ts). Membership changes lock the workspace row FOR UPDATE, so this share lock
+    // holds the actor's role and the assignee's membership until the change commits; both are re-read under it.
+    await tx.execute(sql`SELECT w.id FROM workspaces w JOIN projects p ON p.workspace_id=w.id WHERE p.id=${project.id} FOR SHARE OF w`);
+    await assertProjectMapping(profileId, tx);
+    const memberRole = async (userId: string) => (await tx.execute(sql`SELECT m.role FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id WHERE p.id=${project.id} AND m.user_id=${userId}`)).rows[0]?.role as string | undefined;
+    if (typeof body.assigneeId === 'string' && !WRITERS.has(await memberRole(body.assigneeId) as string)) fail(409, 'ASSIGNEE_NOT_ELIGIBLE', 'Choose a workspace member with editing permission.');
+    const current = (await tx.execute(sql`SELECT status,snoozed_until,assignee_id,updated_at FROM inbox_item_state WHERE ${itemKey(key)}`)).rows[0] as ProviderRecord | undefined;
+    const stale = () => fail(409, 'INBOX_STATE_CHANGED', 'This item’s triage state changed. Refresh it before changing it again.');
+    if ((current?.updated_at ?? null) !== expected) stale();
+    const status = body.status ?? current?.status ?? 'open', snoozedUntil = body.status === 'snoozed' ? new Date(body.snoozedUntil).toISOString() : status === 'snoozed' ? current!.snoozed_until : null;
+    // A kept assignee who has left the workspace is dropped, as reads already show it.
+    const assigneeId = body.assigneeId !== undefined ? body.assigneeId : current?.assignee_id && await memberRole(current.assignee_id) ? current.assignee_id : null, updatedAt = nextStamp(current?.updated_at);
+    // The compare-and-set in the statement itself decides parallel changes that both passed the read above.
+    const written = current
+      ? await tx.execute(sql`UPDATE inbox_item_state SET status=${status},snoozed_until=${snoozedUntil},assignee_id=${assigneeId},waiting_since=${body.status === 'resolved' ? null : sql`waiting_since`},updated_at=${updatedAt},updated_by=${user.id} WHERE ${itemKey(key)} AND updated_at IS NOT DISTINCT FROM ${expected} RETURNING *`)
+      : await tx.execute(sql`INSERT INTO inbox_item_state(project_id,profile_id,account_id,kind,resource_id,status,snoozed_until,assignee_id,updated_at,updated_by) VALUES(${key.projectId},${key.profileId},${key.accountId},${key.kind},${key.resourceId},${status},${snoozedUntil},${assigneeId},${updatedAt},${user.id}) ON CONFLICT DO NOTHING RETURNING *`);
+    const saved = written.rows[0] as ProviderRecord | undefined;
+    return saved || stale();
+  });
+  send(200, { state: itemStateView(row, now()) });
+}
+
 export async function handleInbox(context: ProviderRecord): Promise<boolean> {
   const { req, url, project, role, send, body = {} } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/inbox`;
   if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
   const path = url.pathname.slice(prefix.length).replace(/^\//, '');
   const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status|thread-control|accept|typing|delete))?$/), messageAction = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/(edit|delete|react|unreact)$/), media = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/attachments\/(0|[1-9]\d?)$/), action = path.match(/^(comments|reviews)\/(reply|private-reply|edit|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
+  if (path === 'item-states') { try { await itemStates(context); } catch (error: any) { if (!(error instanceof IntegrationError)) throw error; send(error.status, { error: { code: error.code, message: error.message } }); } return true; }
   if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews', 'mentions'].includes(path) && !route && !messageAction && !media && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
   try {
     if (!['GET', 'POST'].includes(req.method)) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available inbox controls.');
@@ -715,6 +808,7 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
         if (receipt.messageIds !== undefined && (!combined || !Array.isArray(receipt.messageIds) || receipt.messageIds.length !== (partial ? 1 : 2) || receipt.messageIds.some((value: any) => !valid(value)) || new Set(receipt.messageIds).size !== receipt.messageIds.length || receipt.messageIds[0] !== receipt.messageId)) invalid(true);
         if (partial !== undefined && (!combined || !plain(partial) || partial.part !== 'text' || typeof partial.error !== 'string' || !partial.error.trim() || partial.error.length > 4000 || partial.platformError !== undefined && (!plain(partial.platformError) || ['code', 'subcode'].some(name => partial.platformError[name] !== undefined && !Number.isSafeInteger(partial.platformError[name])) || ['fbtraceId', 'type'].some(name => partial.platformError[name] !== undefined && (typeof partial.platformError[name] !== 'string' || partial.platformError[name].length > 500))))) invalid(true);
         if (receipt.attachments !== undefined && (!payload.attachmentUrl || !Array.isArray(receipt.attachments) || receipt.attachments.length > 1 || receipt.attachments.some((item: any) => !plain(item) || item.type !== payload.attachmentType || typeof item.url !== 'string' || !(() => { try { return Boolean(publicMediaUrl(item.url)); } catch { return false; } })()))) invalid(true);
+        await recordReply(context, accountId, 'conversation', [conversationId, row.id]);
         return { sent: true, accountId, platform: account.platform, ...pick(receipt, ['messageId', 'conversationId', 'messageIds']), ...(receipt.attachments ? { attachments: receipt.attachments.map((item: any) => pick(item, ['type', 'url'])) } : {}), ...(partial ? { partialFailure: { ...pick(partial, ['part', 'error']), ...(partial.platformError ? { platformError: pick(partial.platformError, ['code', 'subcode', 'fbtraceId', 'type']) } : {}) } } : {}), warnings: (result.warnings || []).map((warning: any) => typeof warning === 'string' ? warning : pick(warning, ['code', 'param', 'message'])) };
       }
       if (path === 'mentions') { supported(account, 'mentions'); const result = await aggregate(api, accounts, account, 'mentions', query(url, 'mentions')); return { mentions: result.rows.map((row: any) => pick(row, mentionFields)), pagination: result.pagination, meta: result.meta }; }
@@ -761,7 +855,9 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
           if (target?.row.canReply === false) fail(422, 'COMMENT_ACTION_UNSUPPORTED', 'This comment cannot be replied to through the provider.');
           payload.message = str(body.message, 'comment reply'); if (target) payload.commentId = target.row.id;
           if (platform === 'bluesky') { const root = target?.row || post; if (!valid(root.cid)) fail(409, 'COMMENT_REFERENCE_REQUIRED', 'Refresh this Bluesky thread before replying.'); payload.parentCid = root.cid; payload.rootUri = target?.row.rootUri || post.id; payload.rootCid = target?.row.rootCid || post.cid; if (!valid(payload.rootCid)) fail(409, 'COMMENT_REFERENCE_REQUIRED', 'Refresh the Bluesky post reference before replying.'); }
-          const result = await api(endpoint, {}, payload, key); if (result.success !== true || !valid(result.data?.commentId)) invalid(true); return { replied: true, ...pick(result.data, ['commentId', 'isReply', 'cid']) };
+          const result = await api(endpoint, {}, payload, key); if (result.success !== true || !valid(result.data?.commentId)) invalid(true);
+          if (target) await recordReply(context, accountId, 'comment', [target.row.id]);
+          return { replied: true, ...pick(result.data, ['commentId', 'isReply', 'cid']) };
         }
         if (['hide', 'unhide'].includes(verb)) {
           if (!HIDE.has(platform) || target.row.canHide === false) fail(422, 'COMMENT_ACTION_UNSUPPORTED', 'This comment cannot be hidden through the provider.');
@@ -805,6 +901,7 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
         if (deleting && account.platform !== 'googlebusiness') fail(422, 'REVIEW_DELETE_UNSUPPORTED', 'Only Google Business Profile review replies can be deleted.');
         const payload = { accountId, ...(!deleting ? { message: str(body.message, 'review reply', account.platform === 'googlebusiness' ? 4096 : 10000) } : {}) }, result = await api(`/inbox/reviews/${encodeURIComponent(row.id)}/reply`, {}, payload, key, deleting ? 'DELETE' : 'POST');
         if (result.status !== 'success' || result.platform !== account.platform || !deleting && (!plain(result.reply) || result.reply.text !== payload.message)) invalid(true);
+        if (!deleting) await recordReply(context, accountId, 'review', [row.id]);
         return { reviewId: row.id, ...(deleting ? { deleted: true } : { reply: pick(result.reply, ['id', 'text', 'created']) }) };
       }
       fail(404, 'INBOX_ROUTE_NOT_FOUND', 'This inbox action was not found.');
