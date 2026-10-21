@@ -17,6 +17,10 @@ The publishing/scheduling and content-approval workflows are compared against th
   - Pendpost's "no self-approval" rule compares a caller-supplied string, so it is a user-experience rule, not authorization. Campaign keeps its own server-side role and membership authorization for reviews.
   - Pendpost exempts a role (`owner`) from its self-approval rule. Campaign exempts by count instead: a requester may approve their own request only when the project has exactly one active owner or administrator, and that review is recorded as self-approved (council decision ten98-code-system#30).
 
+Team-inbox triage state (waiting since, first reply, status, snooze and assignment; ten98-campaign#41) follows this reference:
+
+- [chatwoot/chatwoot](https://github.com/chatwoot/chatwoot) at commit [a8487ab](https://github.com/chatwoot/chatwoot/tree/a8487abf5c5b54960f2375e8c613fe72711077fa), copyright (c) 2017-2026 Chatwoot Inc. — [MIT license](https://github.com/chatwoot/chatwoot/blob/a8487abf5c5b54960f2375e8c613fe72711077fa/LICENSE), excluding `enterprise/`, which has its own licence and is not used. This is a behaviour port only; no source is copied.
+
 Campaign ports selected behaviour from these references, adapted to its own stack. Each ported helper carries a provenance comment naming the reference, commit and file; whole source files are not copied. Zernio calls are implemented independently with Node.js built-ins and `fetch`. The workspace/project hierarchy and purple visual palette also follow the local ten98-monitor project (MIT, copyright 2026 ten98-monitor contributors), inspected as reference rather than copied source.
 
 ## Direct dependencies

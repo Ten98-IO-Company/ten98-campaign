@@ -507,6 +507,29 @@ export const inboxCommentReactions = pgTable('inbox_comment_reactions', {
 }, t => [
   index('inbox_comment_reactions_target').on(t.platform, t.post_id, t.comment_id),
 ]);
+// Team triage overlay (inbox.ts): provider IDs only, never provider content.
+export const inboxItemState = pgTable('inbox_item_state', {
+  project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  profile_id: text('profile_id').notNull(),
+  account_id: text('account_id').notNull(),
+  kind: text('kind').notNull(),
+  resource_id: text('resource_id').notNull(),
+  status: text('status').notNull().default('open'),
+  snoozed_until: text('snoozed_until'),
+  assignee_id: text('assignee_id').references(() => users.id, { onDelete: 'set null' }),
+  waiting_since: text('waiting_since'),
+  first_reply_at: text('first_reply_at'),
+  last_reply_at: text('last_reply_at'),
+  updated_at: text('updated_at'),
+  updated_by: text('updated_by').references(() => users.id, { onDelete: 'set null' }),
+}, t => [
+  check('inbox_item_state_kind_check', sql`${t.kind} IN ('conversation','comment','review','mention')`),
+  check('inbox_item_state_status_check', sql`${t.status} IN ('open','pending','snoozed','resolved')`),
+  check('inbox_item_state_snooze_check', sql`(${t.status} = 'snoozed') = (${t.snoozed_until} IS NOT NULL)`),
+  primaryKey({ columns: [t.project_id, t.profile_id, t.account_id, t.kind, t.resource_id] }),
+  index('inbox_item_state_assignee').on(t.assignee_id, t.project_id, t.profile_id, t.waiting_since),
+  index('inbox_item_state_waiting').on(t.project_id, t.profile_id, t.waiting_since).where(sql`${t.waiting_since} IS NOT NULL`),
+]);
 
 // Zernio provider state and receipts (zernio-*.ts, integrations.ts)
 export const zernioContactLinks = pgTable('zernio_contact_links', {
