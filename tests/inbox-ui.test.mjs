@@ -878,3 +878,106 @@ test('lost Reddit edit response terminal unsent receipt requires a fresh comment
   const read = compile(section('async function fetchThread(', '  async function openItem('), { ...context, tab: 'comments', commentsWithDepth: rows => rows, setSelected() {}, setFocusedComment() {}, setDetail() {}, requester: { current: async () => ({ comments: [{ id: 'comment', message: 'Current text', editVersion: 'fresh-version', from: { isOwner: true } }] }) } }); await read({ id: 'post' }, 1); assert.equal(draft.needsRefresh, false); assert.equal(draft.editVersion, 'fresh-version'); assert.equal(draft.message, 'Current text'); assert.equal(draft.content, body.content); assert.equal(draft.confirmed, ''); await run({ ...body, expectedCommentVersion: 'fresh-version' }, false); assert.equal(writes, 2);
   }
 });
+
+// Team triage overlay: the actual helpers, change handler and detail controls from the source.
+const { validPostInstant } = await import('../shared/social-posts.ts');
+function triageHelpers() {
+  const start = source.indexOf('// Team triage overlay'), end = source.indexOf('function TriageControls(', start); assert.ok(start > 0 && end > start);
+  return new Function('validPostInstant', 'when', stripTypeScriptTypes(source.slice(start, end)) + '; return { triageFilters, triageNames, triageKey, triageVisible, waitingFor, triageLabel, snoozeUntil, validSnooze, mergeTriage, loadItemStates, snoozePresets };')(validPostInstant, value => 'at ' + value);
+}
+async function triageControls() {
+  const start = source.indexOf('function TriageControls('), end = source.indexOf('\nexport default function UnifiedInbox(', start); assert.ok(start > 0 && end > start);
+  const { code } = await transformWithOxc(source.slice(start, end), 'TriageControls.tsx', { jsx: { runtime: 'classic' } }), helpers = triageHelpers();
+  return new Function('React', 'useState', 'when', ...Object.keys(helpers), ...uiNames, code + '; return TriageControls;')(React, initial => [initial, () => {}], value => 'at ' + value, ...Object.values(helpers), ...uiValues);
+}
+function triageContext(overrides = {}) {
+  const helpers = triageHelpers(), calls = [], context = { ...helpers, path, tab: 'messages', accountId: 'tg', readOnly: false, version: { current: 1 }, pending: { current: false }, revision: { current: 0 }, errors: [], notices: [], setBusy() {}, when: value => 'at ' + value, ...overrides };
+  context.triage = { accountId: 'tg', states: { 'thread-1': { accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', status: 'open', updatedAt: '2026-10-22T08:00:00.000Z' } }, error: '' };
+  context.setTriage = value => { context.triage = typeof value === 'function' ? value(context.triage) : value; };
+  context.setError = value => context.errors.push(value); context.setNotice = value => context.notices.push(value);
+  context.requester = { current: async (...args) => { calls.push(args); return overrides.respond ? overrides.respond(...args) : { state: { ...context.triage.states['thread-1'], ...args[2], updatedAt: '2026-10-22T09:00:00.000Z' } }; } };
+  context.action = compile(section('async function action(', '  async function write('), context);
+  // Each call closes over the states of a fresh render, as React would.
+  const changeTriage = (...args) => compile(section('async function changeTriage(', '  async function searchHistory('), { ...context, states: context.triage.accountId === context.accountId ? context.triage.states : {} })(...args);
+  return { context, calls, changeTriage };
+}
+
+test('triage state loads in batches of 100 unique IDs, keyed like the webhook drain, and ignores foreign states', async () => {
+  const { loadItemStates, triageKey } = triageHelpers(), calls = [];
+  assert.equal(triageKey({ id: 'stored-1', platformConversationId: 't_platform' }), 't_platform'); assert.equal(triageKey({ id: 'stored-2' }), 'stored-2');
+  const ids = Array.from({ length: 250 }, (_, index) => 'thread-' + index);
+  const request = async (...args) => { calls.push(args); const query = new URL('https://x.test' + args[0]).searchParams; return { states: [...query.getAll('id').map(resourceId => ({ accountId: query.get('accountId'), kind: query.get('kind'), resourceId, status: 'pending', updatedAt: null })), { accountId: 'other', kind: 'conversation', resourceId: 'thread-0', status: 'resolved' }, { accountId: 'tg', kind: 'conversation', resourceId: 'not-requested', status: 'resolved' }], checkedAt: '2026-10-22T09:00:00.000Z' }; };
+  const states = await loadItemStates(request, path, 'tg', 'conversation', [...ids, 'thread-1', 'thread-249']);
+  assert.equal(calls.length, 3); assert.deepEqual(calls.map(call => call.length), [1, 1, 1], 'Reads are plain GETs with no body or action key.');
+  const batches = calls.map(([url]) => { assert.ok(url.startsWith(path + '/item-states?')); const query = new URL('https://x.test' + url).searchParams; assert.equal(query.get('accountId'), 'tg'); assert.equal(query.get('kind'), 'conversation'); assert.deepEqual([...new Set(query.keys())], ['accountId', 'kind', 'id']); return query.getAll('id'); });
+  assert.deepEqual(batches.map(batch => batch.length), [100, 100, 50]); assert.deepEqual(batches.flat(), ids);
+  assert.equal(Object.keys(states).length, 250); assert.equal(states['thread-0'].status, 'pending'); assert.equal(states['not-requested'], undefined);
+  assert.deepEqual(await loadItemStates(async () => { throw new Error('unexpected'); }, path, 'tg', 'conversation', []), {}, 'No IDs make no request.');
+});
+
+test('the triage filter defaults to open and pending, keeps unloaded items and labels waiting time and assignee', () => {
+  const { triageFilters, triageVisible, waitingFor, triageLabel, mergeTriage } = triageHelpers();
+  assert.deepEqual(triageFilters.map(([, label]) => label), ['Open and pending', 'Open', 'Pending', 'Snoozed', 'Resolved', 'All']);
+  assert.match(source, /\[triageFilter, setTriageFilter\] = useState\('active'\)/);
+  const rows = ['open', 'pending', 'snoozed', 'resolved'].map(status => ({ status }));
+  const shown = filter => rows.filter(state => triageVisible(state, filter)).map(state => state.status);
+  assert.deepEqual(shown('active'), ['open', 'pending']); assert.deepEqual(shown('snoozed'), ['snoozed']); assert.deepEqual(shown('resolved'), ['resolved']); assert.deepEqual(shown('all'), ['open', 'pending', 'snoozed', 'resolved']);
+  assert.equal(triageVisible(undefined, 'resolved'), true, 'A conversation whose state has not loaded is never hidden.');
+  const now = Date.parse('2026-10-22T12:00:00Z');
+  assert.equal(waitingFor('2026-10-22T09:00:00Z', now), 'waiting 3h'); assert.equal(waitingFor('2026-10-22T11:35:00Z', now), 'waiting 25m'); assert.equal(waitingFor('2026-10-22T11:59:40Z', now), 'waiting under 1m'); assert.equal(waitingFor('2026-10-19T12:00:00Z', now), 'waiting 3d'); assert.equal(waitingFor(null, now), ''); assert.equal(waitingFor('not a date', now), '');
+  assert.equal(triageLabel({ status: 'pending', assigneeId: 'me' }, 'me'), 'Pending · Assigned to you'); assert.equal(triageLabel({ status: 'resolved', assigneeId: 'teammate' }, 'me'), 'Resolved · Assigned'); assert.equal(triageLabel({ status: 'snoozed', assigneeId: null }, 'me'), 'Snoozed'); assert.equal(triageLabel(undefined), '');
+  const saved = { 'a': { status: 'resolved', updatedAt: '2026-10-22T09:00:00.000Z' }, 'b': { status: 'open', updatedAt: '2026-10-22T09:00:00.000Z' } };
+  const merged = mergeTriage(saved, { a: { status: 'open', updatedAt: '2026-10-22T08:00:00.000Z' }, b: { status: 'open', updatedAt: '2026-10-22T09:00:00.000Z', waitingSince: '2026-10-22T10:00:00.000Z' }, c: { status: 'open', updatedAt: null } });
+  assert.equal(merged.a.status, 'resolved', 'A read that started before a change cannot undo it.'); assert.equal(merged.b.waitingSince, '2026-10-22T10:00:00.000Z'); assert.equal(merged.c.status, 'open');
+  assert.match(source, /triageVisible\(states\[triageKey\(row\)\], triageFilter\)/); assert.match(source, /meta: \[when\(item\.lastMessageAt \|\| item\.updatedTime\), waitingFor\(states\[triageKey\(item\)\]\?\.waitingSince\)\]/);
+});
+
+test('snooze presets send local times with an offset, and invalid snoozes never reach the server', async () => {
+  const { snoozeUntil, validSnooze } = triageHelpers(), now = new Date(2026, 9, 22, 15, 30, 0), at = value => new Date(Date.parse(value));
+  for (const preset of ['hour', 'tomorrow', 'week']) { const value = snoozeUntil(preset, now); assert.ok(validPostInstant(value), value); assert.match(value, /[+-]\d{2}:\d{2}$/); assert.ok(validSnooze(value, now.getTime()), preset); }
+  assert.equal(Date.parse(snoozeUntil('hour', now)) - now.getTime(), 3600000);
+  const tomorrow = at(snoozeUntil('tomorrow', now)); assert.deepEqual([tomorrow.getDate(), tomorrow.getHours(), tomorrow.getMinutes()], [23, 9, 0]);
+  const week = at(snoozeUntil('week', now)); assert.deepEqual([week.getDay(), week.getHours(), week.getDate()], [1, 9, 26], 'Next week is the coming Monday at 9 AM local time.');
+  const monday = at(snoozeUntil('week', new Date(2026, 9, 26, 8, 0, 0))); assert.equal(monday.getDate(), 2, 'On a Monday, next week is seven days ahead.');
+  assert.equal(validSnooze('2026-10-22T16:30:00', now.getTime()), false, 'A time without a zone is rejected.'); assert.equal(validSnooze(new Date(now.getTime() - 60000).toISOString(), now.getTime()), false); assert.equal(validSnooze(new Date(now.getTime() + 367 * 86400000).toISOString(), now.getTime()), false); assert.equal(validSnooze(undefined, now.getTime()), false);
+  const { context, calls, changeTriage } = triageContext();
+  await changeTriage({ id: 'thread-1' }, { status: 'snoozed', snoozedUntil: '2020-01-01T09:00:00+04:00' }); assert.equal(calls.length, 0); assert.match(context.errors.at(-1), /future/);
+  const until = snoozeUntil('tomorrow'); await changeTriage({ id: 'thread-1' }, { status: 'snoozed', snoozedUntil: until });
+  assert.equal(calls.length, 1); assert.deepEqual(calls[0], [path + '/item-states', 'PATCH', { accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', expectedUpdatedAt: '2026-10-22T08:00:00.000Z', status: 'snoozed', snoozedUntil: until }], 'PATCH carries no idempotency key.');
+  assert.equal(context.triage.states['thread-1'].status, 'snoozed'); assert.equal(context.triage.states['thread-1'].updatedAt, '2026-10-22T09:00:00.000Z'); assert.match(context.notices.at(-1), /snoozed until/);
+});
+
+test('a stale triage change reloads that item, keeps no optimistic state and lets the user choose again', async () => {
+  const fresh = { accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', status: 'resolved', assigneeId: 'teammate', updatedAt: '2026-10-22T08:30:00.000Z' };
+  const { context, calls, changeTriage } = triageContext({ respond: (url, method) => { if (method === 'PATCH') throw Object.assign(new Error('changed'), { status: 409, code: 'INBOX_STATE_CHANGED' }); return { states: [fresh], checkedAt: '2026-10-22T09:00:00.000Z' }; } });
+  await changeTriage({ id: 'thread-1' }, { status: 'pending' });
+  assert.equal(calls.length, 2); assert.equal(calls[0][1], 'PATCH'); assert.equal(calls[1][0], path + '/item-states?accountId=tg&kind=conversation&id=thread-1'); assert.equal(calls[1].length, 1);
+  assert.deepEqual(context.triage.states['thread-1'], fresh); assert.match(context.errors.at(-1), /changed elsewhere.*choose again/); assert.equal(context.pending.current, false);
+  context.requester.current = async (...args) => { calls.push(args); return { state: { ...fresh, ...args[2], updatedAt: '2026-10-22T09:30:00.000Z' } }; };
+  await changeTriage({ id: 'thread-1' }, { status: 'pending' }); assert.equal(calls.at(-1)[2].expectedUpdatedAt, fresh.updatedAt, 'The retry uses the reloaded token.'); assert.equal(context.triage.states['thread-1'].status, 'pending');
+  for (const code of ['ASSIGNEE_NOT_ELIGIBLE', 'INVALID_INBOX_STATE']) {
+    const failed = triageContext({ respond: () => { throw Object.assign(new Error('Server message for ' + code), { status: code === 'ASSIGNEE_NOT_ELIGIBLE' ? 409 : 400, code }); } });
+    await failed.changeTriage({ id: 'thread-1' }, { assigneeId: 'someone' }); assert.equal(failed.calls.length, 1, code + ' does not reload.'); assert.equal(failed.context.errors.at(-1), 'Server message for ' + code); assert.equal(failed.context.triage.states['thread-1'].updatedAt, '2026-10-22T08:00:00.000Z');
+  }
+  const foreign = triageContext({ respond: () => ({ state: { accountId: 'other', kind: 'conversation', resourceId: 'thread-1', status: 'resolved', updatedAt: 'x' } }) });
+  await foreign.changeTriage({ id: 'thread-1' }, { status: 'resolved' }); assert.equal(foreign.context.triage.states['thread-1'].status, 'open'); assert.match(foreign.context.errors.at(-1), /could not be read/);
+});
+
+test('read-only users see triage status without controls, and the handler refuses their changes', async () => {
+  const TriageControls = await triageControls(), state = { accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', status: 'pending', waitingSince: new Date(Date.now() - 3 * 3600000 - 60000).toISOString(), assigneeId: 'me', updatedAt: '2026-10-22T08:00:00.000Z' };
+  const viewer = renderToStaticMarkup(React.createElement(TriageControls, { state, readOnly: true, busy: false, userId: '', onChange() { throw new Error('no'); } }));
+  assert.match(viewer, /Triage: Pending · waiting 3h · Assigned to a teammate/); assert.doesNotMatch(viewer, /<button|<select/);
+  const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children)] : [];
+  const changes = [], tree = TriageControls({ state, readOnly: false, busy: false, userId: 'me', onChange: change => changes.push(change) });
+  const buttons = Object.fromEntries(elements(tree).filter(node => node.type === ui.Button).map(node => [[node.props.children].flat().join(''), node]));
+  assert.deepEqual(Object.keys(buttons), ['Mark open', 'Resolve', 'Snooze', 'Unassign']);
+  for (const label of Object.keys(buttons)) buttons[label].props.onClick();
+  assert.deepEqual(changes.map(change => change.status ?? 'assignee:' + change.assigneeId), ['open', 'resolved', 'snoozed', 'assignee:null']); assert.ok(validPostInstant(changes[2].snoozedUntil));
+  const editor = renderToStaticMarkup(React.createElement(TriageControls, { state: { ...state, status: 'resolved', assigneeId: null }, readOnly: false, busy: false, userId: 'me', onChange() {} }));
+  assert.match(editor, />Reopen<\/button>/); assert.match(editor, />Mark pending<\/button>/); assert.match(editor, />Assign to me<\/button>/); assert.doesNotMatch(editor, />Resolve<|>Unassign</); assert.match(editor, /Snooze until/); assert.match(editor, /Tomorrow, 9 AM/);
+  assert.doesNotMatch(renderToStaticMarkup(React.createElement(TriageControls, { state, readOnly: false, busy: false, userId: '', onChange() {} })), /Assign to me/, 'Without a confirmed user ID there is no Assign to me.');
+  assert.match(renderToStaticMarkup(React.createElement(TriageControls, { readOnly: false, busy: false, userId: 'me', onChange() {} })), /Loading triage status…/);
+  const { calls, changeTriage } = triageContext({ readOnly: true }); await changeTriage({ id: 'thread-1' }, { status: 'resolved' }); assert.equal(calls.length, 0);
+  const comments = triageContext({ tab: 'comments' }); await comments.changeTriage({ id: 'thread-1' }, { status: 'resolved' }); assert.equal(comments.calls.length, 0);
+  assert.match(source, /<TriageControls key=\{accountId \+ ':' \+ triageKey\(selected\)\} state=\{states\[triageKey\(selected\)\]\}/);
+});
