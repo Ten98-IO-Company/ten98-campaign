@@ -179,7 +179,7 @@ test('calendar overlay hides only exact verified copies of visible local post en
   for (const change of [{ managed: false }, { projectId: 'foreign' }, { plan: undefined }, { plan: { ...event.plan, recordId: 'deleted' } }, { plan: { ...event.plan, accountId: 'one' } }, { plan: { ...event.plan, collection: 'campaigns' } }, { summary: 'Manually edited caption' }, { start: { dateTime: '2026-10-18T12:00:00Z' } }, { end: { dateTime: '2026-10-18T12:00:00Z' } }]) assert.equal(overlay([{ ...event, ...change }], entries, 'project').length, 1, JSON.stringify(change));
   assert.equal(overlay([event], [], 'project').length, 1, 'Orphan or currently invisible local entries stay visible.');
   assert.equal(overlay([{ ...event, plan: { collection: 'posts', recordId: 'ordinary' }, summary: 'Social · Ordinary' }], postScheduleEntries({ id: 'ordinary', content: 'Ordinary', scheduledAt: event.start.dateTime }), 'project').length, 0);
-  assert.match(source(), /calendarPosts\.filter\(p =>/); assert.match(source(), /calendarOverlay\.filter\(event =>/);
+  assert.match(source(), /<CampaignPublishingAgenda posts=\{calendarPosts\} googleEvents=\{calendarOverlay\}/, 'The agenda shows local posts and only the unverified Google overlay.');
 });
 
 test('asset previews select safe actual media and fall back after a thumbnail fails', () => {

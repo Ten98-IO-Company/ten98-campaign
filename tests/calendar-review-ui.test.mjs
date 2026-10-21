@@ -4,7 +4,9 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { ReviewSummary } from '@ten98/ui';
+import * as ui from '@ten98/ui';
+
+const { ReviewSummary } = ui;
 
 const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace('export default function', 'function'), 'GoogleCalendar.tsx', { jsx: { runtime: 'classic' } });
@@ -29,9 +31,9 @@ test('Calendar shared review renders exact plan changes and keeps current, stale
     if (target.includes('/events?')) return { events: [] };
     throw new Error('Unexpected synthetic request: ' + target);
   };
-  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'ReviewSummary', code + '; return GoogleCalendar;')(React, () => {}, initial => { const index = refIndex++; return refs[index] ||= { current: initial }; }, initial => { const index = stateIndex++; if (!(index in states)) states[index] = initial; return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }]; }, ReviewSummary);
+  const Component = new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(ui), code + '; return GoogleCalendar;')(React, () => {}, initial => { const index = refIndex++; return refs[index] ||= { current: initial }; }, initial => { const index = stateIndex++; if (!(index in states)) states[index] = initial; return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }]; }, ...Object.values(ui));
   function render(extra = {}) { stateIndex = 0; refIndex = 0; return Component({ projectId, isOperator: true, canWrite: true, request, ...extra }); }
-  const button = (tree, label) => elements(tree).find(node => node.type === 'button' && node.props.children === label);
+  const button = (tree, label) => elements(tree).find(node => node.type === ui.Button && node.props.children === label);
   const preview = async () => button(render(), 'Review campaign plan for Google').props.onClick();
   await preview();
   assert.equal(calls.filter(call => call.method === 'POST').length, 0, 'Previewing never writes to Google.');
@@ -45,7 +47,7 @@ test('Calendar shared review renders exact plan changes and keeps current, stale
   const writes = () => calls.filter(call => call.method === 'POST');
   assert.equal(writes().length, 2); assert.equal(writes()[0].key, writes()[1].key, 'Uncertain retries retain the original operation identity.');
   assert.deepEqual(writes()[0], { target: path + '/sync', method: 'POST', body: { planFingerprint: 'a'.repeat(64) }, key: writes()[0].key });
-  assert.match(renderToStaticMarkup(render()), /role="alert"[^>]*>The campaign plan changed/);
+  assert.match(renderToStaticMarkup(render()), /role="alert"[^>]*>(?:<svg[\s\S]*?<\/svg>)?(?:<div[^>]*>)*The campaign plan changed/);
   plan.fingerprint = 'b'.repeat(64); uncertain = false; await preview();
   tree = render(); const stalePublish = button(tree, publishLabel);
   states[3] = '2030-02-01'; assert.equal(elements(render()).filter(node => node.type === ReviewSummary).length, 0);

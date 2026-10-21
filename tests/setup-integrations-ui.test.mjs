@@ -58,6 +58,10 @@ function settingsRequest(calls, sms) {
   };
 }
 
+// GoogleCalendar places shared controls in Card actions as well as children.
+const calendarElements = node => Array.isArray(node) ? node.flatMap(calendarElements) : React.isValidElement(node) ? [node, ...calendarElements(node.props.children), ...calendarElements(node.props.actions)] : [];
+const calendarButton = (tree, label) => { const found = calendarElements(tree).find(node => node.type === ui.Button && text(node.props.children) === label); assert.ok(found, label); return found; };
+
 test('Calendar retains event workflows and navigates to Integrations without a second mapping form', async () => {
   for (const connected of [false, true]) {
     const h = mount('GoogleCalendar'), calls = [];
@@ -67,11 +71,49 @@ test('Calendar retains event workflows and navigates to Integrations without a s
     const tree = h.render(options), html = renderToStaticMarkup(tree);
     assert.doesNotMatch(html, /Save calendar connection|Shared calendar ID|service account|type="password"/);
     assert.equal(elements(tree).filter(node => node.type === 'input' && node.props.name === 'calendarId').length, 0);
-    button(tree, 'Open Integrations').props.onClick(); assert.equal(opened, 1);
+    calendarButton(tree, 'Open Integrations').props.onClick(); assert.equal(opened, 1);
     assert.deepEqual(calls, [['/projects/project-a/calendar/status']]);
-    if (connected) { button(tree, 'Load Google events'); button(tree, 'Review campaign plan for Google'); assert.match(html, /Create a Google event/); }
+    if (connected) { calendarButton(tree, 'Load Google events'); calendarButton(tree, 'Review campaign plan for Google'); assert.match(html, /Create a Google event/); }
     else assert.match(html, /Connect this project’s Google Calendar in Integrations/);
     assert.doesNotMatch(renderToStaticMarkup(h.render({ ...options, onOpenIntegrations: undefined })), /Open Integrations/);
+    h.unmount();
+  }
+});
+
+test('Calendar renders the agenda without a Google connection and offers Edit and Delete only for this project’s managed events to writers', async () => {
+  const agendaCalls = [], agenda = eventActions => { agendaCalls.push(eventActions); return React.createElement('div', null, 'Publishing agenda'); };
+  const disconnected = mount('GoogleCalendar'), offline = { projectId: 'project-a', canWrite: true, agenda, request: async () => ({ configured: false, mapped: false }) };
+  disconnected.render(offline); disconnected.flush(); await settle();
+  const offlineHtml = renderToStaticMarkup(disconnected.render(offline));
+  assert.match(offlineHtml, /^<div>Publishing agenda<\/div>/, 'The agenda renders first, even before Google is connected.');
+  assert.match(offlineHtml, /Connect this project’s Google Calendar in Integrations/);
+  assert.doesNotMatch(offlineHtml, /Load Google events/);
+  disconnected.unmount();
+
+  const at = hour => ({ start: { dateTime: `2026-10-03T${hour}:00:00Z` }, end: { dateTime: `2026-10-03T${hour}:30:00Z` } });
+  const managed = { id: 'managed', etag: 'e1', summary: 'Plan event', managed: true, projectId: 'project-a', htmlLink: 'https://calendar.google.com/event?eid=managed', ...at('09') };
+  const otherProject = { ...managed, id: 'other', projectId: 'project-b', ...at('10') }, external = { id: 'external', summary: 'Team sync', htmlLink: 'javascript:alert(1)', ...at('11') };
+  const request = async path => path.endsWith('/status') ? { configured: true, mapped: true, calendarId: 'shared@example.test' } : { events: [managed, otherProject, external] };
+  for (const canWrite of [true, false]) {
+    const h = mount('GoogleCalendar'), options = { projectId: 'project-a', canWrite, agenda, request, fromDate: '2026-10-01', toDate: '2026-10-31' };
+    h.render(options); h.flush(); await settle();
+    await calendarButton(h.render(options), 'Load Google events').props.onClick(); await settle();
+    h.render(options);
+    const eventActions = agendaCalls.at(-1), labels = event => calendarElements(eventActions(event)).filter(node => [ui.Button, ui.Link].includes(node.type)).map(node => text(node.props.children));
+    assert.deepEqual(labels(managed), canWrite ? ['Open in Google', 'Edit', 'Delete'] : ['Open in Google']);
+    assert.deepEqual(labels(otherProject), ['Open in Google'], 'Events managed by another project stay read-only.');
+    assert.deepEqual(labels(external), [], 'Unsafe provider links are not rendered.');
+    if (canWrite) {
+      calendarButton(eventActions(managed), 'Delete').props.onClick();
+      const dialog = calendarElements(h.render(options)).find(node => node.type === ui.ConfirmDialog);
+      assert.equal(dialog.props.open, true); assert.equal(dialog.props.title, 'Delete this Google event?'); assert.equal(dialog.props.confirmLabel, 'Delete this event from Google'); assert.equal(dialog.props.danger, true);
+      for (const detail of ['Plan event', 'Shared calendar: shared@example.test', 'Event ID: managed']) assert.ok(dialog.props.description.includes(detail), detail);
+      dialog.props.onOpenChange(false);
+      assert.equal(calendarElements(h.render(options)).find(node => node.type === ui.ConfirmDialog).props.open, false, 'Closing the dialog clears the pending deletion.');
+      calendarButton(eventActions(managed), 'Edit').props.onClick();
+      const form = calendarElements(h.render(options)).find(node => node.type === ui.Disclosure);
+      assert.equal(form.props.summary, 'Edit project event'); assert.equal(form.props.defaultOpen, true);
+    }
     h.unmount();
   }
 });

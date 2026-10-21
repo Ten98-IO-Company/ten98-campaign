@@ -28,7 +28,7 @@ test('the Calendar UI ignores stale month and unmounted responses and reloads af
 
 test('Calendar deletion sends the selected revision and calendar even after the event list refreshes', async () => {
   const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
-  const selectSource = source.match(/onClick=\{(\(\) => setDeleting\(.+?\))\}>Delete<\/button>/)?.[1];
+  const selectSource = source.match(/onClick=\{(\(\) => setDeleting\(.+?\))\}>Delete<\/Button>/)?.[1];
   assert.ok(selectSource, 'The event delete control must select an event for confirmation.');
   const removeSource = stripTypeScriptTypes(source.slice(source.indexOf('async function removeEvent('), source.indexOf('  function edit(')));
   const writeSource = stripTypeScriptTypes(source.slice(source.indexOf('async function write('), source.indexOf('  async function load(')));

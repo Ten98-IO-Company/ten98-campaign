@@ -1,27 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { PublishingAgenda } from '@ten98/ui';
+import * as ui from '@ten98/ui';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
 
 const source = await readFile(new URL('../src/PublishingAgenda.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace('export default ', ''), 'PublishingAgenda.tsx', { jsx: { runtime: 'classic' } });
-const Agenda = new Function('React', 'PublishingAgenda', code + '; return CampaignPublishingAgenda;')(React, PublishingAgenda);
+const { PublishingAgenda } = ui;
+const Agenda = new Function('React', ...Object.keys(ui), code + '; return CampaignPublishingAgenda;')(React, ...Object.values(ui));
 const appSource = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
 const overlay = new Function(stripTypeScriptTypes(appSource.match(/^function calendarOverlayEvents\([^\r\n]+\}$/m)[0]) + '; return calendarOverlayEvents;')();
 const postLabel = post => post.content || 'Media post';
 const children = element => React.Children.toArray(element.props.children);
 
-test('desktop account captions separate in every theme while the existing narrow-calendar hiding still wins', async () => {
+test('the month grid is gone and the publishing agenda is always rendered inside the Google Calendar page', async () => {
   const styles = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
-  const owner = '.calendar-post>small{color:light-dark(#735c81,var(--color-text-muted));display:block;margin-top:4px}';
-  assert.equal(styles.split(owner).length - 1, 1, 'The native account caption has one theme-independent layout owner.');
-  assert.ok(styles.indexOf(owner) < styles.indexOf('.calendar-post small{display:none}'), 'The existing responsive hiding rule comes after the equally specific caption owner.');
-  assert.doesNotMatch(styles, /html\[data-theme=['"]dark['"]\] \.calendar-post>small\{/);
+  assert.doesNotMatch(styles, /\.(?:calendar-panel|calendar-week|calendar-grid|calendar-day|calendar-post|day-number)\b/, 'No month-grid rules remain.');
+  await assert.rejects(access(new URL('../src/publishing-agenda.css', import.meta.url)), 'The desktop-hiding agenda stylesheet is deleted.');
+  assert.doesNotMatch(source, /\.css'/);
+  assert.doesNotMatch(appSource, /calendar-panel|calendar-grid|day-number|Create post for /);
+  const page = appSource.match(/\{page === 'Calendar' && [^\r\n]+/g);
+  assert.equal(page.length, 1, 'The Calendar page is one agenda inside GoogleCalendar.');
+  assert.match(page[0], /^\{page === 'Calendar' && <GoogleCalendar key=\{state\.projectId\}[^\r\n]*agenda=\{eventActions => <React\.Suspense[^\r\n]*<CampaignPublishingAgenda [^\r\n]*googleEventActions=\{eventActions\}/);
+  for (const label of ['aria-label="Previous month"', '>Today<', 'aria-label="Next month"']) assert.ok(page[0].includes(label), label);
 });
 
 test('the real expanded schedules retain account captions, timezone instants, order, and original post click identity', () => {
@@ -62,13 +67,22 @@ test('verified Google copies stay deduplicated while cross-month all-day and unr
   assert.match(empty, /No scheduled posts or loaded Google events this month/);
 });
 
-test('narrow creation forwards the chosen date to the native composer and resets the default with the month', () => {
+test('agenda creation forwards the chosen date to the native composer and resets the default with the month', () => {
   const dates = [], props = { posts: [], googleEvents: [], month: new Date(2026, 9, 1), canWrite: true, postLabel, onSelect() {}, onCreateDay: day => dates.push(day) };
-  const form = children(Agenda(props))[1], input = children(children(form)[0])[1];
+  const form = children(Agenda(props))[1], input = children(children(form)[0])[0];
+  assert.equal(form.props.as, 'form'); assert.equal(input.type, ui.Input); assert.equal(children(form)[1].props.type, 'submit');
   assert.equal(input.props.defaultValue, '2026-10-01');
   const NativeFormData = globalThis.FormData;
   try { globalThis.FormData = class { get(name) { assert.equal(name, 'day'); return '2026-10-27'; } }; form.props.onSubmit({ preventDefault() {}, currentTarget: {} }); }
   finally { globalThis.FormData = NativeFormData; }
   assert.deepEqual(dates, ['2026-10-27']);
   assert.notEqual(form.key, children(Agenda({ ...props, month: new Date(2026, 10, 1) }))[1].key);
+});
+
+test('Google entries carry the supplied event actions and month navigation reaches the shared agenda header', () => {
+  const event = { id: 'google-a', summary: 'Launch', start: { dateTime: new Date(2026, 9, 3, 9).toISOString() }, end: { dateTime: new Date(2026, 9, 3, 10).toISOString() } }, seen = [];
+  const navigation = React.createElement('span', null, 'Month navigation');
+  const shared = children(Agenda({ posts: [], googleEvents: [event], month: new Date(2026, 9, 1), canWrite: true, postLabel, onSelect() {}, actions: navigation, googleEventActions: item => { seen.push(item); return 'Google actions'; } }))[0];
+  assert.deepEqual(seen, [event]); assert.equal(shared.props.entries[0].actions, 'Google actions'); assert.equal(shared.props.actions, navigation);
+  assert.match(renderToStaticMarkup(shared), /Month navigation[\s\S]*Google actions/);
 });

@@ -20,10 +20,6 @@
     "element": 301,
     "styling": 124
   },
-  "src/GoogleCalendar.tsx": {
-    "element": 83,
-    "styling": 34
-  },
   "src/GoogleConversions.tsx": {
     "element": 120,
     "styling": 34
@@ -60,11 +56,6 @@
     "stylesheet": 1,
     "element": 368,
     "styling": 158
-  },
-  "src/PublishingAgenda.tsx": {
-    "stylesheet": 1,
-    "element": 7,
-    "styling": 5
   },
   "src/SocialAnalytics.tsx": {
     "element": 87,
@@ -141,7 +132,7 @@
   },
   "src/main.tsx": {
     "stylesheet": 1,
-    "element": 422,
-    "styling": 198
+    "element": 402,
+    "styling": 186
   }
 }
