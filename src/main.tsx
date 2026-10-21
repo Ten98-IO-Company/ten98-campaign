@@ -413,11 +413,6 @@ function App() {
     const requestProject = state!.projectId, requestModal = modal;
     await run(async () => { if (activeProject.current !== requestProject) throw new DOMException('Project changed', 'AbortError'); await api(endpoint(collection + '/' + item.id), 'DELETE'); if (activeProject.current === requestProject) { if (modalRef.current === requestModal) setModal(null); await reload(requestProject); } }, 'Record deleted');
   }
-  // An owner may leave when another owner remains (the server refuses the last owner); the app then reloads its workspaces.
-  async function leaveWorkspace() {
-    const workspaceId = workspace!.id, userId = state!.user.id;
-    await run(async () => { await api(`/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`, 'DELETE'); window.location.reload(); });
-  }
   async function clearSampleData() {
     const requestProject = state!.projectId;
     await run(async () => { const result = await api(`/projects/${requestProject}/sample-data`, 'DELETE'); if (activeProject.current === requestProject) { setRemote({}); await reload(requestProject); setNotice(`Removed ${result.removed} sample records.`); } });
@@ -450,6 +445,11 @@ function App() {
     const rows = [['Campaign', 'Channel', 'Status', 'Currency', 'Budget', 'Spend', 'Impressions', 'Clicks', 'Conversions'], ...state!.campaigns.map(c => [c.name, c.channel, c.status, c.currency || 'AED', c.budget, c.spent, c.impressions, c.clicks, c.conversions])];
     const csv = rows.map(row => row.map(cell => { let v = String(cell ?? ''); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return '"' + v.replaceAll('"', '""') + '"'; }).join(',')).join('\r\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' })); const a = document.createElement('a'); a.href = url; a.download = 'ten98-campaign-report.csv'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  // An owner may leave when another owner remains (the server refuses the last owner); the app then reloads its workspaces.
+  async function leaveWorkspace() {
+    const workspaceId = workspace!.id, userId = state!.user.id;
+    await run(async () => { await api(`/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`, 'DELETE'); window.location.reload(); });
   }
   if (!session) return <AppStateScreen state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading Campaign…'}/>;
   if (inviteToken && !(inviteSignIn && !session.user)) return <AcceptInvitation key={inviteToken + ':' + (session.user?.id || '')} token={inviteToken} signedInEmail={session.user?.email} request={api} onAccepted={() => { window.location.assign('/'); }} onSignIn={() => { setInviteSignIn(true); if (session.user) run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); }); }}/>;
