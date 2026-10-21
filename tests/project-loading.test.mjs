@@ -47,7 +47,7 @@ test('completed saves and deletes refresh their project without closing a newer 
   ]) {
     const modal = { type, item: type === 'post' ? { id: 'original' } : undefined }, modalRef = { current: modal }, closed = [], reloads = [];
     let finish;
-    const context = { state: { projectId: 'a' }, activeProject: { current: 'a' }, modal, modalRef, pendingWork: { current: 0 }, setBusy() {}, setError() {}, setNotice() {}, setModal: value => closed.push(value), reload: async id => reloads.push(id), run: work => work(), api: () => new Promise(resolve => { finish = resolve; }), endpoint: value => value, workspace: { id: 'workspace-a' }, window: { confirm: () => true }, FormData: class { *[Symbol.iterator]() { yield ['name', 'Original']; } } };
+    const context = { state: { projectId: 'a' }, activeProject: { current: 'a' }, modal, modalRef, pendingWork: { current: 0 }, setBusy() {}, setError() {}, setNotice() {}, setModal: value => closed.push(value), reload: async id => reloads.push(id), run: work => work(), api: () => new Promise(resolve => { finish = resolve; }), endpoint: value => value, workspace: { id: 'workspace-a' }, FormData: class { *[Symbol.iterator]() { yield ['name', 'Original']; } } };
     const handler = source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
     const invoke = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(handler)});`)(...Object.values(context));
     const pending = invoke(...args); modalRef.current = { type: 'post', item: { id: 'newer-draft' } }; finish({ projectId: 'new-workspace-project' }); await pending;
