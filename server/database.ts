@@ -137,3 +137,10 @@ export function createStore(db: Executor) {
     },
   };
 }
+
+/**
+ * Migration marker, not a fallback: modules still on SQLite import this until their slice moves them (#25).
+ * Keeping the import resolvable lets the converted routes run; the unconverted ones fail when called.
+ * Delete with the last SQLite module.
+ */
+export function transaction(..._unconverted: unknown[]): never { throw new Error('This module has not moved to PostgreSQL yet (#25).'); }

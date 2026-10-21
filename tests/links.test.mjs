@@ -2,13 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
 import { runInNewContext } from 'node:vm';
 import { createLinks } from '../server/links.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
-async function fixture() {
-  const db = new DatabaseSync(':memory:');
-  db.exec(`PRAGMA foreign_keys=ON; CREATE TABLE projects(id TEXT PRIMARY KEY); INSERT INTO projects VALUES('one'),('two'); CREATE TABLE records(id TEXT PRIMARY KEY,project_id TEXT,collection TEXT,data TEXT); INSERT INTO records VALUES('campaign-one','one','campaigns','{}'),('campaign-two','two','campaigns','{}'); CREATE TABLE direct_campaigns(id TEXT PRIMARY KEY,project_id TEXT); INSERT INTO direct_campaigns VALUES('direct-one','one');`);
+async function fixture(t) {
+  const { db, pool } = await testDatabase(t);
+  await pool.query(`INSERT INTO workspaces (id, name) VALUES ('workspace', 'Workspace');
+    INSERT INTO projects (id, workspace_id, name) VALUES ('one', 'workspace', 'One'), ('two', 'workspace', 'Two');
+    INSERT INTO records (id, project_id, collection, data) VALUES ('campaign-one', 'one', 'campaigns', '{}'), ('campaign-two', 'two', 'campaigns', '{}');
+    INSERT INTO direct_campaigns (id, project_id, data) VALUES ('direct-one', 'one', '{}');`);
+  const query = async (text, params) => (await pool.query(text, params)).rows;
   let links, base;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, base), send = (status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -28,11 +32,11 @@ async function fixture() {
     });
   }
   const api = (path = '', method = 'GET', body, headers) => request('/api/projects/one/links' + path, method, body, headers);
-  return { db, base, request, api, close: async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); db.close(); } };
+  return { query, base, request, api, close: async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
 }
 
-test('short links scope campaigns, preserve destinations, reuse active links and enforce edit roles', async () => {
-  const f = await fixture(); try {
+test('short links scope campaigns, preserve destinations, reuse active links and enforce edit roles', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); try {
     const created = await f.api('', 'POST', { name: 'Launch', destination: 'https://www.example.com/offer?utm_campaign=launch#details', campaignId: 'campaign-one' });
     assert.equal(created.status, 201); const link = created.data.link; assert.match(link.code, /^[\w-]{12}$/); assert.equal(link.shortUrl, f.base + '/s/' + link.code);
     assert.equal((await f.api('', 'POST', { name: 'Another name', destination: link.destination, campaignId: 'campaign-one' })).data.link.id, link.id);
@@ -46,8 +50,8 @@ test('short links scope campaigns, preserve destinations, reuse active links and
   } finally { await f.close(); }
 });
 
-test('custom domain settings require operator administration and saved QR codes survive domain changes', async () => {
-  const f = await fixture(); try {
+test('custom domain settings require operator administration and saved QR codes survive domain changes', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); try {
     const settings = (await f.api('/settings')).data.settings;
     assert.equal(settings.domainStatus, 'app_origin'); assert.match(settings.siteToken, /^[\w-]{32}$/);
     assert.equal((await f.api('/settings', 'PUT', { allowedWebsiteOrigins: ['https://www.example.com'] }, { 'X-Role': 'editor' })).status, 403);
@@ -68,8 +72,8 @@ test('custom domain settings require operator administration and saved QR codes 
   } finally { await f.close(); }
 });
 
-test('unresolvable overlong domains cannot create broken QR links or tracking settings', async () => {
-  const f = await fixture(); try {
+test('unresolvable overlong domains cannot create broken QR links or tracking settings', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); try {
     const maximumHost = [...Array(3).fill('a'.repeat(63)), 'b'.repeat(61)].join('.');
     assert.equal(maximumHost.length, 253);
     for (const host of [maximumHost + 'b', Array(40).fill('a'.repeat(60)).join('.') + '.com']) {
@@ -84,8 +88,8 @@ test('unresolvable overlong domains cannot create broken QR links or tracking se
   } finally { await f.close(); }
 });
 
-test('redirects count QR-tagged and ordinary requests separately, excluding HEAD and opt-outs', async () => {
-  const f = await fixture(); try {
+test('redirects count QR-tagged and ordinary requests separately, excluding HEAD and opt-outs', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); try {
     const link = (await f.api('', 'POST', { name: 'Visit', destination: 'https://example.com/offer?utm_source=ooh', campaignId: 'campaign-one' })).data.link, path = '/s/' + link.code;
     const redirect = await f.request(path); assert.equal(redirect.status, 302); assert.equal(redirect.headers.get('location'), link.destination); assert.equal(redirect.headers.get('cache-control'), 'no-store'); assert.equal(redirect.headers.get('set-cookie'), null);
     await f.request(path + '?source=qr'); await f.request(path, 'HEAD'); await f.request(path, 'GET', undefined, { DNT: '1' }); await f.request(path + '?source=qr', 'GET', undefined, { 'Sec-GPC': '1' });
@@ -97,8 +101,8 @@ test('redirects count QR-tagged and ordinary requests separately, excluding HEAD
   } finally { await f.close(); }
 });
 
-test('website intake uses exact origins, strips query/hash, deduplicates IDs and stores no visitor identity', async () => {
-  const f = await fixture(); try {
+test('website intake uses exact origins, strips query/hash, deduplicates IDs and stores no visitor identity', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); try {
     const settings = (await f.api('/settings', 'PUT', { allowedWebsiteOrigins: ['https://www.example.com'] })).data.settings, endpoint = '/api/tracking/' + settings.siteToken + '/events', body = { eventId: randomUUID(), name: 'pageview', path: '/landing?email=private@example.com#secret' }, headers = { Origin: 'https://www.example.com' };
     assert.equal((await f.request(endpoint, 'POST', body)).status, 403); assert.equal((await f.request(endpoint, 'POST', body, { Origin: 'https://www.example.com.attacker.com' })).status, 403);
     const preflight = await f.request(endpoint, 'OPTIONS', undefined, headers); assert.equal(preflight.status, 204); assert.equal(preflight.headers.get('access-control-allow-origin'), headers.Origin); assert.equal(preflight.headers.get('access-control-allow-credentials'), null);
@@ -108,17 +112,17 @@ test('website intake uses exact origins, strips query/hash, deduplicates IDs and
     const stats = (await f.api('/analytics')).data; assert.equal(stats.totals.pageviews, 1); assert.equal(stats.totals.events, 1); assert.deepEqual(stats.pages, [{ path: '/landing', count: 1 }]); assert.deepEqual(stats.events, [{ name: 'lead_submitted', count: 1 }]);
     assert.equal((await f.api('/analytics?campaignId=campaign-one')).data.totals.pageviews, 0);
     assert.equal((await f.request('/api/projects/two/links/analytics')).data.totals.pageviews, 0);
-    const data = JSON.stringify(f.db.prepare('SELECT * FROM website_daily').all()); assert.doesNotMatch(data, /private|secret|127\.0\.0\.1|Mozilla|email|referrer|user.agent/i);
-    assert.deepEqual(f.db.prepare('PRAGMA table_info(website_daily)').all().map(row => row.name), ['project_id', 'day', 'path', 'name', 'count']);
+    const data = JSON.stringify(await f.query('SELECT * FROM website_daily')); assert.doesNotMatch(data, /private|secret|127\.0\.0\.1|Mozilla|email|referrer|user.agent/i);
+    assert.deepEqual((await f.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'website_daily' ORDER BY ordinal_position")).map(row => row.column_name), ['project_id', 'day', 'path', 'name', 'count']);
     for (const invalid of [{ ...body, eventId: 'bad' }, { ...body, name: 'Email:person@example.com' }, { ...body, path: 'https://example.com/private' }, { ...body, path: '//example.com/private' }, { ...body, referrer: 'https://private.example.com' }]) assert.equal((await f.request(endpoint, 'POST', invalid, headers)).status, 400);
     assert.equal((await f.request(endpoint, 'POST', { ...body, path: '/x'.repeat(2000) }, headers)).status, 413);
-    f.db.prepare('INSERT INTO website_event_limits VALUES(?,?,600) ON CONFLICT(bucket,minute) DO UPDATE SET count=600').run(settings.siteToken, Math.floor(Date.now() / 60000));
+    await f.query('INSERT INTO website_event_limits VALUES($1,$2,600) ON CONFLICT(bucket,minute) DO UPDATE SET count=600', [settings.siteToken, Math.floor(Date.now() / 60000)]);
     assert.equal((await f.request(endpoint, 'POST', { ...body, eventId: randomUUID() }, headers)).status, 429);
   } finally { await f.close(); }
 });
 
-test('tracking browser script respects privacy signals, omits credentials and tracks SPA path changes', async () => {
-  const f = await fixture(); try {
+test('tracking browser script respects privacy signals, omits credentials and tracks SPA path changes', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); try {
     const settings = (await f.api('/settings')).data.settings, script = await f.request(new URL(settings.scriptUrl).pathname); assert.equal(script.status, 200); assert.match(script.headers.get('content-type'), /javascript/);
     const calls = [], events = {}, location = { pathname: '/landing', search: '?email=private', hash: '#secret' }, context = { window: {}, navigator: {}, crypto: { randomUUID }, location, fetch: (...args) => { calls.push(args); return Promise.resolve(); }, history: { pushState(_, __, path) { location.pathname = path; return 7; }, replaceState(_, __, path) { location.pathname = path; } }, addEventListener: (name, fn) => { events[name] = fn; } };
     runInNewContext(script.text, context); assert.equal(calls.length, 1); context.window.ten98Track('signup'); assert.equal(context.history.pushState(null, '', '/pricing'), 7); context.history.replaceState(null, '', '/pricing'); events.popstate(); assert.equal(calls.length, 3);
@@ -129,8 +133,8 @@ test('tracking browser script respects privacy signals, omits credentials and tr
   } finally { await f.close(); }
 });
 
-test('campaign reports and public tokens remain isolated through archive and project deletion', async () => {
-  const f = await fixture(); try {
+test('campaign reports and public tokens remain isolated through archive and project deletion', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); try {
     const settings = (await f.api('/settings', 'PUT', { allowedWebsiteOrigins: ['https://www.example.com'] })).data.settings;
     const link = (await f.api('', 'POST', { name: 'One', destination: 'https://example.com/one', campaignId: 'campaign-one' })).data.link;
     const other = (await f.request('/api/projects/two/links', 'POST', { name: 'Two', destination: 'https://example.com/two', campaignId: 'campaign-two' })).data.link;
@@ -144,13 +148,13 @@ test('campaign reports and public tokens remain isolated through archive and pro
     assert.equal((await f.request('/api/projects/two/links/' + link.id + '/qr.svg')).status, 404);
     await f.api('/' + link.id, 'PATCH', { archived: true });
     assert.equal((await f.api('/analytics')).data.totals.clicks, 1);
-    f.db.prepare("DELETE FROM projects WHERE id='one'").run();
+    await f.query("DELETE FROM projects WHERE id='one'");
     assert.equal((await f.request('/s/' + link.code)).status, 404);
     assert.equal((await f.request(new URL(settings.scriptUrl).pathname)).status, 404);
     assert.equal((await f.request(event, 'POST', { eventId: randomUUID(), name: 'pageview', path: '/one' }, origin)).status, 404);
-    assert.equal(f.db.prepare("SELECT count(*) AS count FROM campaign_link_daily WHERE link_id=?").get(link.id).count, 0);
-    assert.equal(f.db.prepare("SELECT count(*) AS count FROM website_daily WHERE project_id='one'").get().count, 0);
-    assert.equal(f.db.prepare("SELECT count(*) AS count FROM website_event_ids WHERE project_id='one'").get().count, 0);
+    assert.equal((await f.query('SELECT count(*) AS count FROM campaign_link_daily WHERE link_id=$1', [link.id]))[0].count, 0);
+    assert.equal((await f.query("SELECT count(*) AS count FROM website_daily WHERE project_id='one'"))[0].count, 0);
+    assert.equal((await f.query("SELECT count(*) AS count FROM website_event_ids WHERE project_id='one'"))[0].count, 0);
     assert.equal((await f.request('/s/' + other.code)).status, 302);
     assert.deepEqual((await f.request('/api/projects/two/links/analytics')).data.totals, { clicks: 1, qrScans: 1, pageviews: 0, events: 0 });
   } finally { await f.close(); }

@@ -4,13 +4,14 @@ import { readResponseText } from '@ten98/runtime';
 import { buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostTags, validPostInstant, resolveVariant, validatePostForPlatforms, wireMediaItems, assetDeliveryIssue } from '../shared/social-posts.ts';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
+import type { Database } from './database.ts';
 
 // Provider and stored records are untrusted JSON; every reader below validates the fields it consumes.
 export type ProviderRecord = Record<string, any>;
 export type MappingCheck = (() => void) | undefined;
 export type ZernioApi = (path: string, query?: Record<string, unknown>, body?: unknown, idempotencyKey?: string, method?: string, observeReceipt?: (result: ProviderRecord) => void) => Promise<ProviderRecord>;
 export interface PostStore { get(projectId: string, collection: string, id: string): ProviderRecord | null; list(projectId: string, collection: string): ProviderRecord[]; update(projectId: string, collection: string, id: string, data: Record<string, unknown>): ProviderRecord | null }
-export interface OperationContext { db: DatabaseSync; project: { id: string }; req: { method?: string; headers: IncomingHttpHeaders }; url: URL; body?: unknown; [key: string]: any }
+export interface OperationContext { db: Database; project: { id: string }; req: { method?: string; headers: IncomingHttpHeaders }; url: URL; body?: unknown; [key: string]: any }
 export interface OperationOutcome { status: number; data: ProviderRecord }
 type RestrictionCheck = ReturnType<typeof validatePostForPlatforms>;
 

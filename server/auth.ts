@@ -53,7 +53,9 @@ export const lockUser = (tx: Executor, userId: string) => first<{ id: string; pa
 export const lockWorkspace = async (tx: Executor, workspaceId: string) => Boolean((await tx.execute(sql`SELECT id FROM workspaces WHERE id = ${workspaceId} FOR UPDATE`)).rowCount);
 export const memberRole = async (executor: Executor, workspaceId: string, userId: string) => (await first<{ role: string }>(executor.execute(sql`SELECT role FROM memberships WHERE workspace_id = ${workspaceId} AND user_id = ${userId}`)))?.role;
 
-export function createAuth(db: Database, config: AuthConfig) {
+type OpenIdClient = typeof import('openid-client');
+// The OIDC client loader is injectable so tests can exercise the real flow without an identity provider.
+export function createAuth(db: Database, config: AuthConfig, { openidClient = () => import('openid-client') }: { openidClient?: () => Promise<OpenIdClient> } = {}) {
   const digest = (value: string) => createHmac('sha256', config.sessionSecret).update(value).digest('hex');
   // Cookies are shared across ports; include the configured origin so local instances can coexist.
   const scope = createHash('sha256').update(new URL(config.appUrl).origin).digest('hex').slice(0, 16), sessionName = 'ten98_session_' + scope, oidcName = 'ten98_oidc_' + scope, inviteName = 'ten98_oidc_invite_' + scope;
@@ -96,7 +98,7 @@ export function createAuth(db: Database, config: AuthConfig) {
   }
   let oidcConfig: import('openid-client').Configuration | undefined;
   async function oidc() {
-    const client = await import('openid-client');
+    const client = await openidClient();
     if (!oidcConfig) oidcConfig = await client.discovery(new URL(config.oidcIssuer), config.oidcClientId, config.oidcClientSecret || undefined);
     return { client, provider: oidcConfig };
   }

@@ -137,10 +137,10 @@ export async function createApp(options: AppOptions = {}) {
   direct.attachSmsInbox(smsInbox);
   const links = createLinks({ db, appUrl });
   const directTimer = options.directScheduler === false ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
-  const webhooks = createWebhookService({ db, store, contacts: direct.contacts, env });
+  const webhooks = createWebhookService({ db, contacts: direct.contacts, env });
   // One drain at a time; close() waits for the one in flight before the pool ends.
   let draining: Promise<void> | undefined;
-  const drainWebhooks = () => { draining ??= webhooks.processPending().catch(() => { console.error('Webhook processing deferred.'); }).finally(() => { draining = undefined; }); };
+  const drainWebhooks = () => { draining ??= webhooks.processPending().then(() => undefined, () => { console.error('Webhook processing deferred.'); }).finally(() => { draining = undefined; }); };
   drainWebhooks(); const webhookTimer = setInterval(drainWebhooks, 1000); webhookTimer.unref();
   async function workspaceAccess(workspaceId: string, userId: string, write = false, executor: Executor = db): Promise<string> {
     const role = await memberRole(executor, workspaceId, userId);

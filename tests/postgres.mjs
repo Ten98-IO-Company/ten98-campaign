@@ -42,3 +42,34 @@ export async function testDatabase(t) {
   if (t) t.after(close);
   return Object.assign(connection, { close });
 }
+
+/** createApp on a fresh database; the app closes before its database is dropped. */
+export async function testApp(t, options = {}) {
+  const database = await testDatabase(), { createApp } = await import('../server/index.ts');
+  let app;
+  try { app = await createApp({ ...options, database: { pool: database.pool, db: database.db } }); }
+  catch (error) { await database.close(); throw error; }
+  t.after(async () => { await app.close(); await database.close(); });
+  return Object.assign(app, { database });
+}
+
+/**
+ * Deterministic race harness: a separate session holds `LOCK TABLE <table> IN EXCLUSIVE MODE`, which lets reads
+ * through but blocks writes. Parallel requests that lack their own lock all read the same state before they block.
+ * `waiting(n)` resolves once n backends wait on a lock, and `release()` lets them run.
+ */
+export async function blockWrites(pool, table) {
+  const client = await pool.connect();
+  await client.query('BEGIN'); await client.query(`LOCK TABLE ${table} IN EXCLUSIVE MODE`);
+  return {
+    async waiting(count, timeout = 5000) {
+      for (const deadline = Date.now() + timeout; ;) {
+        const { rows: [row] } = await pool.query("SELECT count(*) AS waiting FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'");
+        if (row.waiting >= count) return;
+        if (Date.now() > deadline) throw new Error(`Expected ${count} lock waiters, saw ${row.waiting}.`);
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    },
+    async release() { await client.query('COMMIT'); client.release(); },
+  };
+}
