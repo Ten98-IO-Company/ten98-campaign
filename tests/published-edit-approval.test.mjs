@@ -108,9 +108,6 @@ test('an approved published-text edit is sent once, and an edit differing in any
   await f.setPolicy(true);
   const approved = { accountId: 'fb-a', content: 'Approved replacement text' };
   const stored = await f.approveProposal(postId, 'social/edit-published', approved);
-  assert.deepEqual(stored.snapshot.proposal, approved);
-  assert.deepEqual(stored.snapshot.publishedEdit, { path: 'social/edit-published', accountId: 'fb-a', platform: 'facebook', content: approved.content });
-  assert.equal(stored.snapshot.accountOverrides['fb-a'].content, approved.content, 'The reviewer sees the edited copy.');
   for (const [field, changed] of [['content', { content: 'Approved replacement text, then changed' }], ['accountId', { accountId: 'fb-b' }]]) {
     const result = await f.action('social/edit-published', { postId, ...approved, ...changed, confirmEdit: true });
     assert.equal(result.status, 409, `${field}: ${JSON.stringify(result.data)}`); assert.equal(result.data.error.code, 'PUBLISHING_APPROVAL_STALE', field);
@@ -119,6 +116,10 @@ test('an approved published-text edit is sent once, and an edit differing in any
   const result = await f.action('social/edit-published', { postId, ...approved, confirmEdit: true });
   assert.equal(result.status, 200, JSON.stringify(result.data));
   assert.deepEqual(f.writes.map(write => write.payload), [{ platform: 'facebook', ...approved }]);
+  // The review stores the proposal, the edit it fingerprints, and the edited copy for the reviewer.
+  assert.deepEqual(stored.snapshot.proposal, approved);
+  assert.deepEqual(stored.snapshot.publishedEdit, { path: 'social/edit-published', accountId: 'fb-a', platform: 'facebook', content: approved.content });
+  assert.equal(stored.snapshot.accountOverrides['fb-a'].content, approved.content, 'The reviewer sees the edited copy.');
 });
 
 test('an approved YouTube metadata edit is sent once, and an edit differing in any field is refused before the provider', { skip: postgresSkip }, async t => {
@@ -126,7 +127,6 @@ test('an approved YouTube metadata edit is sent once, and an edit differing in a
   await f.setPolicy(true);
   const approved = { accountId: 'yt-a', videoId: 'aaaaaaaaaaa', title: 'Approved title', tags: ['approved', 'launch'] };
   const stored = await f.approveProposal(postId, 'social/update-metadata', approved);
-  assert.deepEqual(stored.snapshot.publishedEdit, { path: 'social/update-metadata', platform: 'youtube', ...approved });
   const { title, tags, ...withoutMetadata } = approved;
   for (const [field, body] of [['title', { ...approved, title: 'Changed title' }], ['title omitted', { ...withoutMetadata, tags }], ['tags', { ...approved, tags: ['approved'] }], ['tags omitted', { ...withoutMetadata, title }], ['accountId and videoId', { ...approved, accountId: 'yt-b', videoId: 'bbbbbbbbbbb' }], ['videoId', { ...approved, videoId: 'bbbbbbbbbbb' }]]) {
     const result = await f.action('social/update-metadata', { postId, ...body, confirmEdit: true });
@@ -136,6 +136,7 @@ test('an approved YouTube metadata edit is sent once, and an edit differing in a
   const result = await f.action('social/update-metadata', { postId, ...approved, confirmEdit: true });
   assert.equal(result.status, 200, JSON.stringify(result.data));
   assert.deepEqual(f.writes.map(write => write.payload), [{ platform: 'youtube', accountId: 'yt-a', title, tags }]);
+  assert.deepEqual(stored.snapshot.publishedEdit, { path: 'social/update-metadata', platform: 'youtube', ...approved });
 });
 
 test('without a review, published edits are refused while approval is required, and removal is never gated', { skip: postgresSkip }, async t => {
