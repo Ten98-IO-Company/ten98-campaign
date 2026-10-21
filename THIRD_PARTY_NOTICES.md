@@ -4,7 +4,7 @@ ten98 Campaign's original application code is available under the [MIT license](
 
 ## Reference applications
 
-The following projects informed the original advertising and messaging workflows. The unified inbox feature was removed in version 0.4.0; its historical reference credit is retained:
+The following projects inform the advertising and unified inbox (messages, comments and reviews) workflows. The inbox was removed in version 0.4.0 and later restored, so both credits are current:
 
 - [zernio-dev/ads-dashboard](https://github.com/zernio-dev/ads-dashboard), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/ads-dashboard/blob/main/LICENSE).
 - [zernio-dev/unified-inbox](https://github.com/zernio-dev/unified-inbox), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/unified-inbox/blob/main/LICENSE).
