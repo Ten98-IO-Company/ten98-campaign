@@ -101,23 +101,23 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     const delivery = row.data; if (await change(delivery) !== false) await putDelivery(delivery, tx); return delivery;
   });
   const recordSms = async (campaign: any, delivery: any) => smsInbox?.recordOutbound({ id: delivery.id, projectId: campaign.projectId, campaignId: campaign.id, accountSid: delivery.smsAccountSid, sender: delivery.smsSender, recipient: delivery.recipient, messagingServiceSid: delivery.smsMessagingServiceSid || '', providerId: delivery.providerId, message: delivery.message || '', status: delivery.status });
-  async function decorate(campaign: any) {
+  async function decorate(campaign: any, ex: Executor = db) {
     const counts = { pending: 0, accepted: 0, delivered: 0, failed: 0, suppressed: 0, uncertain: 0 };
-    for (const delivery of await deliveries(campaign.id)) counts[['pending', 'sending'].includes(delivery.status) ? 'pending' : ['delivered', 'read'].includes(delivery.status) ? 'delivered' : ['failed', 'undelivered'].includes(delivery.status) ? 'failed' : ['suppressed', 'cancelled'].includes(delivery.status) ? 'suppressed' : delivery.status === 'uncertain' ? 'uncertain' : 'accepted']++;
+    for (const delivery of await deliveries(campaign.id, ex)) counts[['pending', 'sending'].includes(delivery.status) ? 'pending' : ['delivered', 'read'].includes(delivery.status) ? 'delivered' : ['failed', 'undelivered'].includes(delivery.status) ? 'failed' : ['suppressed', 'cancelled'].includes(delivery.status) ? 'suppressed' : delivery.status === 'uncertain' ? 'uncertain' : 'accepted']++;
     const { credentialHash, scheduledBy, ...publicCampaign } = campaign;
     return { ...publicCampaign, counts };
   }
-  async function audience(campaign: any) {
-    const everyone = await contacts.list(campaign.projectId), all = everyone.filter((contact: any) => (!campaign.contactIds.length || campaign.contactIds.includes(contact.id)) && (!campaign.tags.length || campaign.tags.some((tag: string) => contact.tags.includes(tag))));
+  async function audience(campaign: any, ex: Executor = db) {
+    const everyone = await contacts.list(campaign.projectId, ex), all = everyone.filter((contact: any) => (!campaign.contactIds.length || campaign.contactIds.includes(contact.id)) && (!campaign.tags.length || campaign.tags.some((tag: string) => contact.tags.includes(tag))));
     const eligible = [], exclusions = [];
     for (const contact of all) { const reason = exclusion(contact, campaign.channel); if (reason) exclusions.push({ id: contact.id, name: contact.name || contact.email || contact.phone, reason }); else eligible.push(contact); }
     if (campaign.contactIds.some((id: string) => !everyone.some((contact: any) => contact.id === id))) fail(400, 'CONTACT_NOT_FOUND', 'A selected contact does not belong to this project.');
     return { eligible, exclusions, total: all.length };
   }
-  async function preview(campaign: any) {
-    const selected = await audience(campaign), sample = content(campaign, selected.eligible[0] || { name: 'Recipient', email: 'recipient@example.com', phone: '+12025550123', company: 'Company' });
+  async function preview(campaign: any, ex: Executor = db) {
+    const selected = await audience(campaign, ex), sample = content(campaign, selected.eligible[0] || { name: 'Recipient', email: 'recipient@example.com', phone: '+12025550123', company: 'Company' });
     for (const contact of selected.eligible) { const rendered = content(campaign, contact); if (campaign.channel === 'sms' && rendered.text.length > 1600 || campaign.channel === 'email' && (rendered.subject.length > 998 || rendered.text.length > 99000 || rendered.html.length > 490000)) fail(400, 'PERSONALIZATION_TOO_LONG', 'Personalization makes a message too long. Shorten the content and check the audience again.'); }
-    return { campaign: await decorate(campaign), previewToken: createHash('sha256').update(JSON.stringify([campaign, selected.eligible])).digest('hex'), audience: { eligible: selected.eligible.length, excluded: selected.exclusions.length, total: selected.total, exclusions: selected.exclusions, unverified: selected.eligible.filter((contact: any) => campaign.channel === 'email' && !['mx', 'implicit_mx'].includes(contact.hygiene?.dnsStatus)).length }, sample: { subject: sample.subject, text: sample.text, html: sample.html }, ...(campaign.channel === 'sms' ? { sms: { ...estimateSms(sample.text), totalSegments: selected.eligible.reduce((sum: number, contact: any) => sum + estimateSms(content(campaign, contact).text).segments, 0), estimate: true } } : {}) };
+    return { campaign: await decorate(campaign, ex), previewToken: createHash('sha256').update(JSON.stringify([campaign, selected.eligible])).digest('hex'), audience: { eligible: selected.eligible.length, excluded: selected.exclusions.length, total: selected.total, exclusions: selected.exclusions, unverified: selected.eligible.filter((contact: any) => campaign.channel === 'email' && !['mx', 'implicit_mx'].includes(contact.hygiene?.dnsStatus)).length }, sample: { subject: sample.subject, text: sample.text, html: sample.html }, ...(campaign.channel === 'sms' ? { sms: { ...estimateSms(sample.text), totalSegments: selected.eligible.reduce((sum: number, contact: any) => sum + estimateSms(content(campaign, contact).text).segments, 0), estimate: true } } : {}) };
   }
   const projectFor = async (id: string): Promise<any> => (await resultRows(db.execute(sql`SELECT id, zernio_profile_id AS "zernioProfileId" FROM projects WHERE id = ${id}`)))[0];
   async function guard(campaign: any, requireAuthor = true) {
@@ -272,7 +272,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
         await lockContacts(tx, project.id);
         // Row lock: a double-submitted send or schedule queues the deliveries once.
         const fresh = await find(project.id, id, tx, true); if (fresh.status !== 'draft') return;
-        if ((await preview(fresh)).previewToken !== body.previewToken) fail(409, 'AUDIENCE_CHANGED', 'The campaign or audience changed during preparation. Review a fresh preview before confirming.');
+        if ((await preview(fresh, tx)).previewToken !== body.previewToken) fail(409, 'AUDIENCE_CHANGED', 'The campaign or audience changed during preparation. Review a fresh preview before confirming.');
         Object.assign(campaign, { status: 'scheduled', scheduledAt: new Date(scheduledAt).toISOString(), scheduledBy: user.id, profileId: project.zernioProfileId, credentialHash: fingerprint(env, campaign.channel), audienceCount: selected.eligible.length }); await save(campaign, tx);
         for (const contact of selected.eligible) { const delivery = { id: randomUUID(), campaignId: id, contactId: contact.id, recipient: campaign.channel === 'email' ? contact.email : contact.phone, status: 'pending', createdAt: nowISO() }; await tx.execute(sql`INSERT INTO direct_deliveries (id, campaign_id, contact_id, data) VALUES (${delivery.id}, ${id}, ${contact.id}, ${JSON.stringify(delivery)})`); }
         await createStore(tx).activity(project.id, `${campaign.channel === 'email' ? 'Transactional email' : campaign.channel.toUpperCase()} campaign scheduled for ${selected.eligible.length} recipients.`);

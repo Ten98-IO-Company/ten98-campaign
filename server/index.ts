@@ -126,8 +126,10 @@ export async function createApp(options: AppOptions = {}) {
   if (!['https:', 'http:'].includes(parsed.protocol) || parsed.origin !== appUrl || parsed.username || parsed.password || (parsed.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname))) throw new Error('APP_URL must be an HTTPS origin, or HTTP loopback for local use.');
   if (env.OIDC_ISSUER && env.OIDC_CLIENT_ID) oidcEndpoint(env.OIDC_ISSUER, { issuer: true });
   // DIRECT_SCHEDULER=off starts the app without sending due direct campaigns (for example to verify an upgrade before
-  // switching traffic). Any other value than on/off refuses to start, so a typo cannot leave sending enabled.
-  if (env.DIRECT_SCHEDULER !== undefined && !['on', 'off'].includes(env.DIRECT_SCHEDULER)) throw new Error('DIRECT_SCHEDULER must be on or off.');
+  // switching traffic). Unset or empty (as a copied `DIRECT_SCHEDULER=` line gives) means on; any other value than on/off
+  // refuses to start, so a typo cannot leave sending enabled.
+  const directScheduler = env.DIRECT_SCHEDULER || 'on';
+  if (!['on', 'off'].includes(directScheduler)) throw new Error('DIRECT_SCHEDULER must be on or off.');
   const { pool, db } = options.database || getDatabase(env.DATABASE_URL), store = createStore(db);
   await assertSchema(pool);
   const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean) };
@@ -139,7 +141,7 @@ export async function createApp(options: AppOptions = {}) {
   const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts });
   await direct.attachSmsInbox(smsInbox);
   const links = createLinks({ db, appUrl });
-  const directTimer = options.directScheduler === false || env.DIRECT_SCHEDULER === 'off' ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
+  const directTimer = options.directScheduler === false || directScheduler === 'off' ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
   const webhooks = createWebhookService({ db, contacts: direct.contacts, env });
   // One drain at a time; close() waits for the one in flight before the pool ends.
   let draining: Promise<void> | undefined;

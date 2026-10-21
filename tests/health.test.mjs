@@ -17,7 +17,7 @@ test('health reports ready only while PostgreSQL answers, and a scheduler switch
   assert.equal((await health()).status, 503);
 });
 
-test('DIRECT_SCHEDULER=off never runs the direct-campaign sender, which otherwise runs every second', { skip: postgresSkip }, async t => {
+test('DIRECT_SCHEDULER=off never runs the direct-campaign sender, which otherwise (unset or empty) runs every second', { skip: postgresSkip }, async t => {
   const ticks = async env => {
     const dataDir = await mkdtemp(join(tmpdir(), 'campaign-scheduler-')); t.after(() => rm(dataDir, { recursive: true, force: true }));
     const app = await testApp(t, { dataDir, env }); let calls = 0;
@@ -27,4 +27,6 @@ test('DIRECT_SCHEDULER=off never runs the direct-campaign sender, which otherwis
   };
   assert.equal(await ticks({ DIRECT_SCHEDULER: 'off' }), 0);
   assert.ok(await ticks({}) > 0, 'Without the switch the scheduler runs, so the zero above is not vacuous.');
+  // A copied `DIRECT_SCHEDULER=` line reaches the app as an empty string, which means the default (on).
+  assert.ok(await ticks({ DIRECT_SCHEDULER: '' }) > 0);
 });
