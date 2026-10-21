@@ -72,6 +72,8 @@ const resultRows = async (query: Promise<{ rows: unknown[] }>) => (await query).
 const atomic = <T>(executor: Executor, run: (tx: Transaction) => Promise<T>): Promise<T> => (executor as Database).transaction(run);
 
 // `store` stays in the options for callers; campaign activity is written with createStore(tx) inside the scheduling transaction.
+// Twilio's re-subscribe keywords (Advanced Opt-Out): a signed START, YES or UNSTOP, or its OptOutType.
+export const smsStarted = (form: URLSearchParams) => form.get('OptOutType') === 'START' || /^(START|UNSTOP|YES)$/i.test((form.get('Body') || '').trim());
 export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Database; env: any; appUrl: string; secret: string; store?: Store }) {
   const contacts = createContacts({ db });
   let smsInbox: any, attaching: Promise<void> | undefined;
@@ -343,7 +345,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       if (smsInbox) return await smsInbox.receiveVerified(form, { projectId: url.pathname.split('/')[5] || undefined });
       if (form.get('OptOutType') === 'STOP' || /^(STOP|STOPALL|UNSUBSCRIBE|CANCEL|END|QUIT|REVOKE|OPT OUT)$/i.test((form.get('Body') || '').trim())) {
         await contacts.suppressSmsGlobally(form.get('From')!, 'Recipient opted out');
-      }
+      } else if (smsStarted(form)) await contacts.liftSmsOptOut(form.get('From')!);
     } else fail(404, 'WEBHOOK_NOT_FOUND', 'Webhook not found.');
     return { accepted: true };
   }
