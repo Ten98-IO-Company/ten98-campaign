@@ -77,7 +77,7 @@ test('OOH write keys allow a manual retry after definitive rejection and preserv
   error = undefined; reloadError = new Error('Reload failed'); assert.deepEqual(await write(target, body), { acknowledged: true }, 'A confirmed write remains successful if the follow-up read fails.'); assert.equal(pendingKeys.current.get(signature), 'operation-key-2'); assert.equal(refreshRequired, true); assert.equal(refreshNeeded.current, true);
   const writesBeforeRefresh = calls.length;
   await assert.rejects(write(target, { name: 'Changed draft' }), /Refresh provider details/); assert.equal(calls.length, writesBeforeRefresh, 'A changed proposal cannot bypass the stale-details lock with a fresh request key.');
-  assert.match(source, /<fieldset disabled=\{refreshRequired\}>/); assert.match(source, /Broadsign saved the action/);
+  assert.match(source, /<Stack as="fieldset" disabled=\{refreshRequired\}>/); assert.match(source, /Broadsign saved the action/);
   const refreshCode = source.slice(source.indexOf('async function refresh()'), source.indexOf('  useEffect('));
   const refresh = new Function('action', 'load', 'onChanged', 'pendingKeys', 'refreshNeeded', 'setRefreshRequired', 'setNotice', `return (${refreshCode});`)(run => run(), load, undefined, pendingKeys, refreshNeeded, setRefreshRequired, value => { notice = value; });
   await assert.rejects(refresh(), /Reload failed/); assert.equal(refreshRequired, true); assert.equal(pendingKeys.current.get(signature), 'operation-key-2');
