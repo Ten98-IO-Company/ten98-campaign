@@ -78,7 +78,7 @@ Create a draft, choose contacts or tags, and preview the eligible audience, excl
 
 A campaign accepts 1–500 eligible contacts. Review a fresh preview before confirming provider charges. Email additionally requires confirmation that its content is transactional. A preview becomes stale when its content or relevant audience changes. Scheduling records a UTC instant; the interface accepts local time. Saving a draft or importing contacts does not send anything.
 
-Run one application process with SQLite. The local queue checks once per second and handles one email/SMS recipient at a time. WhatsApp hands the approved batch to Zernio; provider pacing governs its subsequent delivery. Consent, suppression, destination, author access, provider credentials and project mapping are checked before dispatch. Connection or access changes stop the campaign for review.
+One sending worker runs at a time per installation (a PostgreSQL lease). The local queue checks once per second and handles one email/SMS recipient at a time. WhatsApp hands the approved batch to Zernio; provider pacing governs its subsequent delivery. Consent, suppression, destination, author access, provider credentials and project mapping are checked before dispatch. Connection or access changes stop the campaign for review.
 
 Cancellation stops remaining local work and requests cancellation of an eligible provider broadcast. An already submitted message may still arrive. Accepted, queued, sent, delivered and read are distinct states. A completed local queue does not mean every recipient received a message. Refresh delivery details to read supported provider evidence; Cloudflare suppression refresh does not supply email opens or a complete asynchronous delivery history.
 

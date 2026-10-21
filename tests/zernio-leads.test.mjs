@@ -5,12 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 import { transformWithOxc } from 'vite';
 
-async function fixture() {
+const pg = { skip: postgresSkip };
+async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-leads-')), originalFetch = globalThis.fetch, origin = 'https://leads.example.test', calls = [];
-  const app = createApp({ dataDir, env: { ZERNIO_API_KEY: 'synthetic-leads-key' }, appUrl: origin, directScheduler: false });
+  const app = await testApp(t, { dataDir, env: { ZERNIO_API_KEY: 'synthetic-leads-key' }, appUrl: origin, directScheduler: false });
   const accounts = ['metaads', 'linkedinads'].map(platform => ({ _id: platform + '-account', platform, profileId: 'lead-profile', isActive: true, displayName: platform }));
   const meta = index => ({ id: 'meta-form-' + index, name: 'Meta form ' + index, status: 'ACTIVE', questions: [{ type: 'EMAIL' }, { type: 'FULL_NAME' }, { type: 'PHONE' }], privacy_policy_url: 'https://example.test/privacy', accessToken: 'must-not-leak' });
   const state = { forms: { metaads: [meta(1), meta(2)], linkedinads: [{ id: 'linkedin-form-1', name: 'LinkedIn inquiry', state: 'PUBLISHED', headline: 'Talk to us', questions: [{ kind: 'text', name: 'email', question: 'Work email' }, { kind: 'text', name: 'Company name', question: 'Company name' }], accessToken: 'must-not-leak' }] }, paged: false, hook: null, sequence: 0, tests: new Map() };
@@ -62,11 +63,11 @@ async function fixture() {
   const setup = await request('/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Lead owner', email: 'owner@example.test', password: 'synthetic lead acceptance passphrase', sample: false }); cookie = setup.cookie; const project = '/projects/' + setup.data.projectId;
   await request(project, 'PATCH', { zernioProfileId: 'lead-profile' });
   const path = project + '/integrations/leads', formPath = platform => `${path}/${platform}-account/forms`, selected = platform => `${formPath(platform)}/${state.forms[platform][0].id}`;
-  return { app, state, calls, accounts, project, path, formPath, selected, request, query: '?adAccountId=advertiser-1', writes: () => calls.filter(row => row.method !== 'GET'), async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
+  return { app, state, calls, accounts, project, path, formPath, selected, request, query: '?adAccountId=advertiser-1', writes: () => calls.filter(row => row.method !== 'GET'), async close() { globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
 }
 
-test('authenticated lead browser verifies project, native advertiser and paginated form ownership before scoped reads', async () => {
-  const f = await fixture();
+test('authenticated lead browser verifies project, native advertiser and paginated form ownership before scoped reads', pg, async t => {
+  const f = await fixture(t);
   try {
     assert.equal((await f.request(f.path + '/accounts', 'GET', undefined, undefined, false)).status, 401);
     const accounts = await f.request(f.path + '/accounts'); assert.equal(accounts.status, 200); assert.equal(accounts.data.accounts.length, 2);
@@ -84,8 +85,8 @@ test('authenticated lead browser verifies project, native advertiser and paginat
   } finally { await f.close(); }
 });
 
-test('lead import revalidates reviewed answers, preserves contact consent/suppression and persists one association across replays', async () => {
-  const f = await fixture();
+test('lead import revalidates reviewed answers, preserves contact consent/suppression and persists one association across replays', pg, async t => {
+  const f = await fixture(t);
   try {
     const created = await f.request(f.project + '/direct/contacts', 'POST', { name: 'Existing contact', email: 'lead1@example.test', phone: '+971501234561', consents: { email: true, whatsapp: true }, consentSource: 'Earlier documented channel permission' }); assert.equal(created.status, 201, JSON.stringify(created.data));
     const contact = created.data.contact;
@@ -99,15 +100,15 @@ test('lead import revalidates reviewed answers, preserves contact consent/suppre
     assert.equal(imported.data.contact.consents.email, true); assert.equal(imported.data.contact.consents.whatsapp, true); assert.equal(imported.data.contact.consents.sms, false); assert.equal(imported.data.contact.suppression.sms.reason, 'Earlier opt-out');
     const replay = await f.request(route, 'POST', body, key); assert.deepEqual(replay.data, imported.data);
     const fresh = await f.request(route, 'POST', body); assert.equal(fresh.data.alreadyImported, true); assert.equal(fresh.data.association.contactId, contact.id);
-    assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM zernio_lead_associations').get().n, 1); assert.equal((await f.request(f.project + '/direct/contacts')).data.contacts.length, 1);
+    assert.equal((await f.app.sql.get('SELECT count(*) AS n FROM zernio_lead_associations')).n, 1); assert.equal((await f.request(f.project + '/direct/contacts')).data.contacts.length, 1);
     const second = (await f.request(f.selected('metaads') + '/leads' + f.query + '&cursor=lead-next%2B%2F')).data.leads[0];
     const secondImport = await f.request(f.selected('metaads') + `/leads/${second.id}/import`, 'POST', { ...body, expectedLeadVersion: second.version, mapping: { email: 'email' } }); assert.equal(secondImport.status, 200); assert.deepEqual(secondImport.data.contact.consents, { email: false, sms: false, whatsapp: false });
     assert.equal(f.writes().length, 0, 'Contact import makes local changes only.');
   } finally { await f.close(); }
 });
 
-test('form creation, archival and app-created Meta test lead lifecycle use typed scoped contracts and exact-key receipts', async () => {
-  const f = await fixture();
+test('form creation, archival and app-created Meta test lead lifecycle use typed scoped contracts and exact-key receipts', pg, async t => {
+  const f = await fixture(t);
   try {
     for (const platform of ['metaads', 'linkedinads']) {
       const body = { adAccountId: 'advertiser-1', name: platform + ' typed form', privacyPolicyUrl: 'https://example.test/privacy', questions: platform === 'metaads' ? [{ type: 'EMAIL' }, { type: 'CUSTOM', key: 'team', label: 'Team size', options: [{ key: 'small', value: 'Small' }] }] : [{ kind: 'text', name: 'email', question: 'Work email', required: true }, { kind: 'multipleChoice', name: 'team', question: 'Team size', choices: [{ id: 1, text: 'Small' }] }], ...(platform === 'linkedinads' ? { headline: 'Enquire', description: 'Tell us about your project', state: 'PUBLISHED', consents: [{ description: 'Contact me about this inquiry', required: true }] } : { thankYouTitle: 'Thank you' }) }, key = randomUUID();
@@ -129,26 +130,26 @@ test('form creation, archival and app-created Meta test lead lifecycle use typed
   } finally { await f.close(); }
 });
 
-test('lead reads reject malformed and foreign data, role changes and unsupported filters before returning contact answers', async () => {
-  const f = await fixture();
+test('lead reads reject malformed and foreign data, role changes and unsupported filters before returning contact answers', pg, async t => {
+  const f = await fixture(t);
   try {
     for (const row of [{ id: 'foreign', formId: 'other-form', fields: {} }, { id: 'bad', formId: 'meta-form-1', fields: { email: {} } }]) {
       f.state.hook = url => url.pathname.endsWith('/meta-form-1/leads') ? Response.json({ status: 'success', leads: [row], pagination: { hasMore: false, cursor: null } }) : undefined;
       assert.equal((await f.request(f.selected('metaads') + '/leads' + f.query)).status, 502);
     }
     f.state.hook = null; assert.equal((await f.request(f.formPath('metaads') + f.query + '&fields=access_token')).status, 400);
-    f.state.hook = url => { if (url.pathname.endsWith('/meta-form-1/leads')) { f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); return Response.json({ status: 'success', leads: [], pagination: { hasMore: false, cursor: null } }); } };
+    f.state.hook = async url => { if (url.pathname.endsWith('/meta-form-1/leads')) { await f.app.sql.run("UPDATE memberships SET role='viewer'"); return Response.json({ status: 'success', leads: [], pagination: { hasMore: false, cursor: null } }); } };
     assert.equal((await f.request(f.selected('metaads') + '/leads' + f.query)).status, 403); f.state.hook = null;
     const before = f.calls.length; assert.equal((await f.request(f.formPath('metaads') + '/create', 'POST', {})).status, 403); assert.equal(f.calls.length, before);
-    f.app.db.prepare("UPDATE memberships SET role='editor'").run(); assert.equal((await f.request(f.formPath('metaads') + '/create', 'POST', {})).status, 403);
+    await f.app.sql.run("UPDATE memberships SET role='editor'"); assert.equal((await f.request(f.formPath('metaads') + '/create', 'POST', {})).status, 403);
     const row = (await f.request(f.selected('metaads') + '/leads' + f.query)).data.leads[0];
     assert.equal((await f.request(f.selected('metaads') + `/leads/${row.id}/import`, 'POST', { adAccountId: 'advertiser-1', expectedLeadVersion: row.version, confirmImport: true, mapping: { email: 'email' } })).status, 200);
   } finally { await f.close(); }
 });
 
-test('form creation requires a fresh id and read-back proof of the requested privacy, questions and consent settings', async () => {
+test('form creation requires a fresh id and read-back proof of the requested privacy, questions and consent settings', pg, async t => {
   for (const drift of ['existing-id', 'privacy', 'question', 'consent', 'required', 'response-editable', 'response-length']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       const linkedin = ['consent', 'required', 'response-editable', 'response-length'].includes(drift), platform = linkedin ? 'linkedinads' : 'metaads';
       const body = { adAccountId: 'advertiser-1', name: 'Verified requested form', privacyPolicyUrl: 'https://example.test/privacy', questions: linkedin ? [{ kind: 'text', name: 'email', question: 'Work email', required: true, responseEditable: false, maxResponseLength: 120 }] : [{ type: 'CUSTOM', key: 'email', label: 'Work email' }], ...(linkedin ? { headline: 'Headline', description: 'Description', state: 'PUBLISHED', consents: [{ description: 'Contact me about this inquiry', required: true }] } : {}) };
@@ -170,8 +171,8 @@ test('form creation requires a fresh id and read-back proof of the requested pri
   }
 });
 
-test('unknown lead mutations retain durable fences across changed request bodies until explicit recovery', async () => {
-  const f = await fixture();
+test('unknown lead mutations retain durable fences across changed request bodies until explicit recovery', pg, async t => {
+  const f = await fixture(t);
   try {
     const body = { adAccountId: 'advertiser-1', name: 'Unconfirmed creation', privacyPolicyUrl: 'https://example.test/privacy', questions: [{ type: 'EMAIL' }] }, key = randomUUID();
     f.state.hook = (url, options) => url.pathname.endsWith('/ads/lead-forms') && options.method === 'POST' ? Response.json({ status: 'success', form: { id: null } }) : undefined;
@@ -179,7 +180,7 @@ test('unknown lead mutations retain durable fences across changed request bodies
     assert.equal((await f.request(f.formPath('metaads') + '/create', 'POST', body, key)).status, 409);
     const blocked = await f.request(f.formPath('metaads') + '/create', 'POST', { ...body, name: 'Changed request body' }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, unknown.data.operation.id); assert.equal(f.writes().length, count);
     const reviewed = await f.request(`${f.project}/operations/${unknown.data.operation.id}/review`, 'POST', { resolution: 'not_applied', confirmChecked: true, note: 'Synthetic fixture confirmed the malformed request persisted no form.', reference: 'synthetic-no-form' }); assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
-    f.state.hook = null; const result = await f.request(f.formPath('metaads') + '/create', 'POST', { ...body, name: 'Reviewed new creation' }); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM zernio_lead_mutations').get().n, 0);
+    f.state.hook = null; const result = await f.request(f.formPath('metaads') + '/create', 'POST', { ...body, name: 'Reviewed new creation' }); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal((await f.app.sql.get('SELECT count(*) AS n FROM zernio_lead_mutations')).n, 0);
   } finally { await f.close(); }
 });
 
@@ -225,8 +226,8 @@ async function integrationRequester(f) {
   return { request, pendingKeys, requests };
 }
 
-test('a form chosen in the ad composer is re-read before scoped paused ad creation and app review metadata never reaches the provider', async () => {
-  const f = await fixture();
+test('a form chosen in the ad composer is re-read before scoped paused ad creation and app review metadata never reaches the provider', pg, async t => {
+  const f = await fixture(t);
   try {
     for (const platform of ['metaads', 'linkedinads']) {
       const list = await f.request(f.formPath(platform) + f.query), chosen = list.data.forms[0], preview = await f.request(f.formPath(platform) + '/' + chosen.id + f.query), form = preview.data.form, bridge = await integrationRequester(f), before = f.calls.length;
@@ -241,8 +242,8 @@ test('a form chosen in the ad composer is re-read before scoped paused ad creati
   } finally { await f.close(); }
 });
 
-test('ad creation rejects unseen, stale, inactive, foreign and unavailable lead forms before any advertising write', async () => {
-  const f = await fixture();
+test('ad creation rejects unseen, stale, inactive, foreign and unavailable lead forms before any advertising write', pg, async t => {
+  const f = await fixture(t);
   try {
     const form = (await f.request(f.selected('metaads') + f.query)).data.form, bridge = await integrationRequester(f);
     await submitLeadAd(form, bridge.request, { leadReview: false }); assert.equal(bridge.requests.length, 0);
@@ -259,8 +260,8 @@ test('ad creation rejects unseen, stale, inactive, foreign and unavailable lead 
   } finally { await f.close(); }
 });
 
-test('an uncertain ad create retains the exact reviewed form and request key when the user retries', async () => {
-  const f = await fixture();
+test('an uncertain ad create retains the exact reviewed form and request key when the user retries', pg, async t => {
+  const f = await fixture(t);
   try {
     const form = (await f.request(f.selected('metaads') + f.query)).data.form, bridge = await integrationRequester(f);
     f.state.hook = url => { if (url.pathname.endsWith('/ads/create')) throw new Error('Synthetic connection loss after the provider received creation.'); };

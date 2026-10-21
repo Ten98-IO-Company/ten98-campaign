@@ -1,14 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { createApp } from '../server/index.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
-test('native ad connection tests persist rotated tokens, survive restart and reject credentials changed in flight', async () => {
+test('native ad connection tests persist rotated tokens, survive restart and reject credentials changed in flight', { skip: postgresSkip }, async t => {
+  const database = await testDatabase(t), { sql } = database;
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-native-settings-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;
-  let env = {}, app = createApp({ dataDir, env, appUrl: origin }), base, cookie, pause;
+  let env = {}, app = await createApp({ dataDir, env, appUrl: origin, database }), base, cookie, pause;
   const start = async () => { await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`; };
   const request = async (path, method = 'GET', body) => {
     const response = await originalFetch(base + path, { method, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(method !== 'GET' ? { Origin: origin, 'Content-Type': 'application/json' } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -56,8 +58,8 @@ test('native ad connection tests persist rotated tokens, survive restart and rej
     }
     const described = JSON.stringify((await request('/api/settings/integrations')).data);
     assert.equal(described.includes('private-'), false);
-    for (const row of app.db.prepare('SELECT ciphertext FROM integration_settings').all()) assert.equal(Buffer.from(row.ciphertext).includes(Buffer.from('private-')), false);
-    await app.close(); env = {}; app = createApp({ dataDir, env, appUrl: origin }); await start();
+    for (const row of await sql.all('SELECT ciphertext FROM integration_settings')) assert.equal(Buffer.from(row.ciphertext).includes(Buffer.from('private-')), false);
+    await app.close(); env = {}; app = await createApp({ dataDir, env, appUrl: origin, database }); await start();
     for (const [provider, prefix] of [['googleAdsNative', 'GOOGLE_ADS'], ['microsoftAds', 'MICROSOFT_ADS']]) {
       assert.equal(env[prefix + '_REFRESH_TOKEN'], 'private-reconnected-' + provider);
       assert.equal((await request('/api/settings/integrations/' + provider + '/test', 'POST', { projectId })).status, 200);
@@ -65,10 +67,11 @@ test('native ad connection tests persist rotated tokens, survive restart and rej
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }
 });
 
-test('integration settings HTTP routes enforce operators, retain encrypted secrets, use approved project mappings and make only explicit connection tests', async () => {
+test('integration settings HTTP routes enforce operators, retain encrypted secrets, use approved project mappings and make only explicit connection tests', { skip: postgresSkip }, async t => {
+  const database = await testDatabase(t), { sql } = database;
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-settings-http-')), distDir = join(dataDir, 'dist');
   await mkdir(distDir); await writeFile(join(distDir, 'index.html'), '<!doctype html><title>Campaign</title><script src="/app.js"></script>');
-  const env = { ZERNIO_API_KEY: 'environment-zernio-fixture-key' }, origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, distDir, env, appUrl: origin });
+  const env = { ZERNIO_API_KEY: 'environment-zernio-fixture-key' }, origin = 'http://127.0.0.1:3000', app = await createApp({ dataDir, distDir, env, appUrl: origin, database });
   const originalFetch = globalThis.fetch, providerCalls = [];
   let ownerCookie, pausedRead;
   globalThis.fetch = async (target, options = {}) => {
@@ -103,12 +106,12 @@ test('integration settings HTTP routes enforce operators, retain encrypted secre
     assert.equal(find(settings.data, 'zernio').source, 'environment');
     assert.equal(JSON.stringify(settings.data).includes(env.ZERNIO_API_KEY), false);
 
-    const passwordHash = app.db.prepare('SELECT password FROM users WHERE id=?').get(state.user.id).password, otherUserId = randomUUID();
-    app.db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(otherUserId, 'Workspace owner', 'settings-owner@example.test', passwordHash);
+    const passwordHash = (await sql.get('SELECT password FROM users WHERE id=?', state.user.id)).password, otherUserId = randomUUID();
+    await sql.run('INSERT INTO users VALUES(?,?,?,?)', otherUserId, 'Workspace owner', 'settings-owner@example.test', passwordHash);
     const otherCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'settings-owner@example.test', password: 'fixture settings password 2026' } })).cookie;
     const otherWorkspace = await request('/api/workspaces', { method: 'POST', body: { name: 'Separate workspace' }, cookie: otherCookie });
     assert.equal(otherWorkspace.status, 201);
-    app.db.prepare("INSERT INTO memberships VALUES(?,?,'owner')").run(workspaceId, otherUserId);
+    await sql.run("INSERT INTO memberships VALUES(?,?,'owner')", workspaceId, otherUserId);
     for (const action of [request(route, { cookie: otherCookie }), save('zernio', { apiKey: 'unauthorized-fixture-key' }, { cookie: otherCookie }), request(`${route}/zernio`, { method: 'DELETE', cookie: otherCookie }), request(`${route}/zernio/test`, { method: 'POST', body: { projectId }, cookie: otherCookie })]) assert.equal((await action).status, 403, 'Workspace ownership does not grant installation credentials access.');
     assert.equal((await save('zernio', { apiKey: 'csrf-fixture-key' }, { originHeader: null })).status, 403);
     assert.equal((await save('zernio', { apiKey: 'csrf-fixture-key' }, { originHeader: 'https://other.example.test' })).status, 403);
@@ -139,9 +142,11 @@ test('integration settings HTTP routes enforce operators, retain encrypted secre
     assert.equal(providerCalls.length, 0, 'Saving credentials, mappings, app state, and status never tests a provider implicitly.');
     const described = await request(route), serialized = JSON.stringify(described.data);
     for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey, 'saved-webhook-fixture-secret']) assert.equal(serialized.includes(secret), false, 'Global settings metadata never returns raw credentials.');
-    const encrypted = app.db.prepare('SELECT nonce,ciphertext,tag FROM integration_settings').all(); assert.equal(encrypted.length, 4);
+    const encrypted = await sql.all('SELECT nonce,ciphertext,tag FROM integration_settings'); assert.equal(encrypted.length, 4);
     for (const row of encrypted) { assert.equal(row.nonce.length, 12); assert.equal(row.tag.length, 16); for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey]) assert.equal(Buffer.from(row.ciphertext).includes(Buffer.from(secret)), false); }
-    for (const file of ['campaign.sqlite', 'campaign.sqlite-wal']) { const bytes = await readFile(join(dataDir, file)); for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey]) assert.equal(bytes.includes(Buffer.from(secret)), false, 'Persisted database bytes do not contain plaintext provider credentials.'); }
+    // PostgreSQL replaces the SQLite file and WAL: scan every persisted row of every table, then every file the app keeps in its data directory.
+    for (const { name: table } of await sql.all("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")) { const { dump } = await sql.get(`SELECT coalesce(string_agg(row_to_json(t)::text, ''), '') AS dump FROM "${table}" t`); for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey]) assert.equal(dump.includes(JSON.stringify(secret).slice(1, -1)), false, `Persisted ${table} rows do not contain plaintext provider credentials.`); }
+    for (const file of await readdir(dataDir, { recursive: true })) { const bytes = await readFile(join(dataDir, file)).catch(error => { if (error.code === 'EISDIR') return Buffer.alloc(0); throw error; }); for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey]) assert.equal(bytes.includes(Buffer.from(secret)), false, 'Persisted data directory bytes do not contain plaintext provider credentials.'); }
 
     assert.equal((await request(`${route}/googleDrive/test`, { method: 'POST', body: { projectId, driveFolderId: 'arbitrary-client-folder' } })).status, 400);
     assert.equal((await request(`${route}/googleCalendar/test`, { method: 'POST', body: { projectId, calendarId: 'arbitrary-calendar@example.test' } })).status, 400);

@@ -10,10 +10,11 @@ import React from 'react';
 import * as design from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-async function fixture() {
+async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'campaign-destinations-')), origin = 'https://destinations.example.test', originalFetch = globalThis.fetch, calls = [];
-  const config = { dataDir: directory, appUrl: origin, env: { ZERNIO_API_KEY: 'synthetic-destinations-key' }, directScheduler: false }; let app = createApp(config);
+  const config = { dataDir: directory, appUrl: origin, env: { ZERNIO_API_KEY: 'synthetic-destinations-key' }, directScheduler: false }, first = await testApp(t, config); let app = first;
   const accounts = ['pinterest', 'youtube', 'reddit'].map(platform => ({ _id: 'account-' + platform, platform, profileId: 'destination-profile', isActive: true, displayName: platform + ' publishing', platformUserId: 'native-' + platform }));
   const state = { hook: null, sequence: 1, boards: [{ id: 'board-1', name: 'Existing board', description: 'Reviewed description', privacy: 'PUBLIC' }], playlists: [{ id: 'PL-1', title: 'Existing playlist', description: 'Reviewed description', privacy: 'unlisted', itemCount: 3, thumbnailUrl: '' }], defaultPlaylistId: 'PL-1', subreddits: [{ id: 'reddit-1', name: 'marketing', title: 'Marketing', url: '/r/marketing/', over18: false }, { id: 'reddit-2', name: 'socialmedia', title: 'Social media', url: '/r/socialmedia/', over18: true }], defaultSubreddit: 'marketing' };
   globalThis.fetch = async (target, options = {}) => {
@@ -33,13 +34,14 @@ async function fixture() {
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); let base = `http://127.0.0.1:${app.server.address().port}/api`, cookie;
   async function request(path, body, key = randomUUID(), authenticated = true) { const response = await originalFetch(base + path, { method: body === undefined ? 'GET' : 'POST', headers: { Origin: origin, ...(cookie && authenticated ? { Cookie: cookie } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Idempotency-Key': key }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] }; }
   const setup = await request('/auth/setup', { token: app.config.bootstrapToken, name: 'Destination owner', email: 'destinations@example.test', password: 'Synthetic destination fixture passphrase!', sample: false }); cookie = setup.cookie; const project = '/projects/' + setup.data.projectId;
-  app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('destination-profile', setup.data.projectId);
+  await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'destination-profile', setup.data.projectId);
   const route = platform => `${project}/integrations/publishing/accounts/account-${platform}/${platform === 'youtube' ? 'youtube-playlists' : platform === 'reddit' ? 'reddit-subreddits' : 'pinterest-boards'}`, get = platform => request(route(platform) + '/manage'), write = async (platform, task, settings, extra = {}, key) => request(route(platform) + '/' + task, { expectedVersion: (await get(platform)).data.version, confirmed: true, ...(task === 'create' ? { settings } : { destinationId: settings }), ...extra }, key);
-  return { get app() { return app; }, accounts, state, calls, project, route, request, get, write, writes: () => calls.filter(row => row.method !== 'GET'), async reopen() { await app.close(); app = createApp(config); await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}/api`; }, async close() { await app.close(); globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); } };
+  return { get app() { return app; }, accounts, state, calls, project, route, request, get, write, writes: () => calls.filter(row => row.method !== 'GET'), // Reopening is a second app over the same database; testApp closes the first one and drops the database.
+    async reopen() { await app.close(); app = Object.assign(await createApp({ ...config, database: { pool: first.database.pool, db: first.database.db } }), { sql: first.sql }); await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}/api`; }, async close() { if (app !== first) await app.close(); globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); } };
 }
 
-test('all four destination mutations use authenticated native contracts, fresh census/readback and unchanged lookup projections', async () => {
-  const f = await fixture();
+test('all four destination mutations use authenticated native contracts, fresh census/readback and unchanged lookup projections', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     assert.equal((await f.request(f.route('youtube') + '/manage', undefined, undefined, false)).status, 401);
     const original = await f.request(f.route('youtube')); assert.equal(original.data.playlists[0].description, undefined); assert.equal(original.data.version, undefined);
@@ -54,8 +56,8 @@ test('all four destination mutations use authenticated native contracts, fresh c
   } finally { await f.close(); }
 });
 
-test('destination management rejects foreign, stale, malformed, unsupported clear and nonadministrator changes without dispatch', async () => {
-  const f = await fixture();
+test('destination management rejects foreign, stale, malformed, unsupported clear and nonadministrator changes without dispatch', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const snapshot = (await f.get('youtube')).data, body = { expectedVersion: snapshot.version, confirmed: true, settings: { title: 'Reviewed playlist', description: '', privacy: 'private' } };
     assert.equal((await f.request(f.route('youtube').replace('account-youtube', 'account-foreign') + '/manage')).status, 403);
@@ -63,14 +65,14 @@ test('destination management rejects foreign, stale, malformed, unsupported clea
     for (const invalid of [{ ...body, confirmed: false }, { ...body, settings: { ...body.settings, privacy: undefined } }, { ...body, settings: { ...body.settings, raw: {} } }]) assert.equal((await f.request(f.route('youtube') + '/create', invalid)).status, 400);
     assert.equal((await f.write('youtube', 'default', '')).status, 400); assert.equal((await f.write('youtube', 'default', 'PL-foreign')).status, 403);
     f.state.playlists[0].title = 'Changed after review'; assert.equal((await f.request(f.route('youtube') + '/create', body)).status, 409);
-    f.app.db.prepare("UPDATE memberships SET role='editor'").run(); assert.equal((await f.write('youtube', 'create', body.settings)).status, 403); assert.equal((await f.get('youtube')).status, 200);
+    await f.app.sql.run("UPDATE memberships SET role='editor'"); assert.equal((await f.write('youtube', 'create', body.settings)).status, 403); assert.equal((await f.get('youtube')).status, 200);
     assert.equal(f.writes().length, 0);
   } finally { await f.close(); }
 });
 
-test('destination writes refresh connection scope after the census and retain unknown creation/default receipts until reviewed recovery', async () => {
+test('destination writes refresh connection scope after the census and retain unknown creation/default receipts until reviewed recovery', { skip: postgresSkip }, async t => {
   for (const scenario of ['moved-profile', 'changed-native', 'existing-id', 'privacy-drift', 'foreign-ack', 'default-not-saved', 'default-changed-on-create', 'default-reporting-lost']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       if (scenario === 'default-reporting-lost') f.state.defaultPlaylistId = null;
       const before = (await f.get('youtube')).data, body = { expectedVersion: before.version, confirmed: true, settings: { title: 'Reviewed playlist', description: '', privacy: 'private' } }; let reads = 0;
@@ -90,18 +92,18 @@ test('destination writes refresh connection scope after the census and retain un
       assert.equal(result.status, scenario === 'moved-profile' ? 403 : 409, scenario + ':' + JSON.stringify(result.data)); assert.equal(f.writes().length, ['moved-profile', 'changed-native'].includes(scenario) ? 0 : 1);
       if (!['moved-profile', 'changed-native'].includes(scenario)) { assert.equal(result.data.operation.status, 'uncertain'); f.state.hook = null; const blocked = await f.write('youtube', 'create', { title: 'Different new request', description: '', privacy: 'private' }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id); assert.equal(f.writes().length, 1); }
       if (scenario === 'existing-id') {
-        const other = await f.request('/workspaces', { name: 'Other publishing project' }); assert.equal(other.status, 201); f.app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('destination-profile-2', other.data.projectId); f.accounts.push({ _id: 'account-youtube-shared', platform: 'youtube', profileId: 'destination-profile-2', isActive: true, platformUserId: 'native-youtube' });
+        const other = await f.request('/workspaces', { name: 'Other publishing project' }); assert.equal(other.status, 201); await f.app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'destination-profile-2', other.data.projectId); f.accounts.push({ _id: 'account-youtube-shared', platform: 'youtube', profileId: 'destination-profile-2', isActive: true, platformUserId: 'native-youtube' });
         const otherRoute = `/projects/${other.data.projectId}/integrations/publishing/accounts/account-youtube-shared/youtube-playlists`, snapshot = (await f.request(otherRoute + '/manage')).data;
         const sharedBlocked = await f.request(otherRoute + '/create', { expectedVersion: snapshot.version, confirmed: true, settings: body.settings }); assert.equal(sharedBlocked.status, 409); assert.equal(sharedBlocked.data.error.code, 'DESTINATION_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(f.writes().length, 1);
         const reviewed = await f.request(`${f.project}/operations/${result.data.operation.id}/review`, { resolution: 'not_applied', confirmChecked: true, note: 'Synthetic existing-ID acknowledgement created no new playlist.', reference: 'synthetic-existing-playlist-only' }); assert.equal(reviewed.status, 200);
-        assert.equal((await f.write('youtube', 'create', { title: 'After reviewed recovery', description: '', privacy: 'private' })).status, 200); assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM zernio_destination_mutations').get().n, 0);
+        assert.equal((await f.write('youtube', 'create', { title: 'After reviewed recovery', description: '', privacy: 'private' })).status, 200); assert.equal((await f.app.sql.get('SELECT count(*) AS n FROM zernio_destination_mutations')).n, 0);
       }
     } finally { await f.close(); }
   }
 });
 
-test('provider-wide destination fencing blocks missing-native-ID aliases in the same and other projects until reviewed recovery', async () => {
-  const f = await fixture();
+test('provider-wide destination fencing blocks missing-native-ID aliases in the same and other projects until reviewed recovery', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     delete f.accounts[1].platformUserId;
     f.accounts.push({ _id: 'account-youtube-alias', platform: 'youtube', profileId: 'destination-profile', isActive: true });
@@ -111,18 +113,18 @@ test('provider-wide destination fencing blocks missing-native-ID aliases in the 
     const unknown = await f.request(f.route('youtube') + '/create', { expectedVersion: before.version, confirmed: true, settings }, key); assert.equal(unknown.status, 409); assert.equal(unknown.data.operation.status, 'uncertain');
     const sameProject = f.route('youtube').replace('account-youtube/', 'account-youtube-alias/'), alias = (await f.request(sameProject + '/manage')).data;
     const blockedAlias = await f.request(sameProject + '/create', { expectedVersion: alias.version, confirmed: true, settings }); assert.equal(blockedAlias.status, 409); assert.equal(blockedAlias.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blockedAlias.data.operation.status, 'failed'); assert.notEqual(blockedAlias.data.operation.id, unknown.data.operation.id);
-    const other = await f.request('/workspaces', { name: 'Unknown native identity project' }); assert.equal(other.status, 201); f.app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('missing-native-profile', other.data.projectId); f.accounts.push({ _id: 'account-youtube-other-alias', platform: 'youtube', profileId: 'missing-native-profile', isActive: true });
+    const other = await f.request('/workspaces', { name: 'Unknown native identity project' }); assert.equal(other.status, 201); await f.app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'missing-native-profile', other.data.projectId); f.accounts.push({ _id: 'account-youtube-other-alias', platform: 'youtube', profileId: 'missing-native-profile', isActive: true });
     const otherRoute = `/projects/${other.data.projectId}/integrations/publishing/accounts/account-youtube-other-alias/youtube-playlists`, otherSnapshot = (await f.request(otherRoute + '/manage')).data;
     const blockedOther = await f.request(otherRoute + '/create', { expectedVersion: otherSnapshot.version, confirmed: true, settings }, key); assert.equal(blockedOther.status, 409); assert.equal(blockedOther.data.error.code, 'DESTINATION_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(blockedOther.data.operation.status, 'failed'); assert.equal(f.writes().length, 1);
-    assert.equal(f.app.db.prepare('SELECT resource FROM zernio_destination_mutations').get().resource, 'youtube');
+    assert.equal((await f.app.sql.get('SELECT resource FROM zernio_destination_mutations')).resource, 'youtube');
     assert.equal((await f.write('pinterest', 'create', { name: 'Independent provider board', description: '', privacy: 'PUBLIC' })).status, 200, 'YouTube reconciliation does not block Pinterest writes.');
     const reviewed = await f.request(`${f.project}/operations/${unknown.data.operation.id}/review`, { resolution: 'not_applied', confirmChecked: true, note: 'The synthetic fixture failed before persisting any playlist.', reference: 'synthetic-no-playlist' }); assert.equal(reviewed.status, 200);
-    f.state.hook = null; assert.equal((await f.request(otherRoute + '/create', { expectedVersion: otherSnapshot.version, confirmed: true, settings })).status, 200); assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM zernio_destination_mutations').get().n, 0);
+    f.state.hook = null; assert.equal((await f.request(otherRoute + '/create', { expectedVersion: otherSnapshot.version, confirmed: true, settings })).status, 200); assert.equal((await f.app.sql.get('SELECT count(*) AS n FROM zernio_destination_mutations')).n, 0);
   } finally { await f.close(); }
 });
 
-test('Reddit defaults use exact fresh names, explicit readback and versions while composer lookups stay unchanged', async () => {
-  const f = await fixture();
+test('Reddit defaults use exact fresh names, explicit readback and versions while composer lookups stay unchanged', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const lookup = (await f.request(f.route('reddit'))).data; assert.deepEqual(lookup.subreddits[0], { id: 'reddit-1', name: 'marketing', title: 'Marketing', over18: false }); assert.equal(lookup.defaultSubreddit, 'marketing');
     const before = (await f.get('reddit')).data; assert.equal(before.subreddits[0].url, '/r/marketing/'); assert.equal(before.defaultReported, true);
@@ -136,8 +138,8 @@ test('Reddit defaults use exact fresh names, explicit readback and versions whil
   } finally { await f.close(); }
 });
 
-test('Reddit defaults reject unsupported creation, clearing, stale names, foreign IDs, extra fields, ads and nonadministrators before dispatch', async () => {
-  const f = await fixture();
+test('Reddit defaults reject unsupported creation, clearing, stale names, foreign IDs, extra fields, ads and nonadministrators before dispatch', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const before = (await f.get('reddit')).data, body = { expectedVersion: before.version, confirmed: true, destinationId: 'reddit-2' };
     for (const patch of [{ destinationId: '' }, { destinationId: null }, { confirmed: false }, { defaultSubreddit: 'socialmedia' }, { settings: {} }]) assert.equal((await f.request(f.route('reddit') + '/default', { ...body, ...patch })).status, 400);
@@ -145,13 +147,13 @@ test('Reddit defaults reject unsupported creation, clearing, stale names, foreig
     assert.equal((await f.request(f.route('reddit') + '/default', { ...body, destinationId: 'foreign' })).status, 403);
     f.state.subreddits[1].name = 'renamed'; assert.equal((await f.request(f.route('reddit') + '/default', body)).status, 409);
     f.accounts[2].platform = 'redditads'; assert.equal((await f.get('reddit')).status, 422); f.accounts[2].platform = 'reddit';
-    f.app.db.prepare("UPDATE memberships SET role='editor'").run(); assert.equal((await f.write('reddit', 'default', 'reddit-2')).status, 403); assert.equal((await f.get('reddit')).status, 200); assert.equal(f.writes().length, 0);
+    await f.app.sql.run("UPDATE memberships SET role='editor'"); assert.equal((await f.write('reddit', 'default', 'reddit-2')).status, 403); assert.equal((await f.get('reddit')).status, 200); assert.equal(f.writes().length, 0);
   } finally { await f.close(); }
 });
 
-test('managed destination writes recheck reviewed connection identity after the final account await', async () => {
+test('managed destination writes recheck reviewed connection identity after the final account await', { skip: postgresSkip }, async t => {
   for (const platform of ['pinterest', 'youtube', 'reddit']) for (const task of platform === 'reddit' ? ['default'] : ['create', 'default']) for (const scenario of ['username', 'native', 'reconnect', 'unrelated']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       const before = (await f.get(platform)).data, account = f.accounts.find(row => row.platform === platform), resource = platform === 'pinterest' ? 'pinterest-boards' : platform === 'youtube' ? 'youtube-playlists' : 'reddit-subreddits';
       let lists = 0, final = 0, changed = false;
@@ -175,24 +177,24 @@ test('managed destination writes recheck reviewed connection identity after the 
   }
 });
 
-test('Reddit rejects changed account/access after GET and after the final account await before PUT', async () => {
+test('Reddit rejects changed account/access after GET and after the final account await before PUT', { skip: postgresSkip }, async t => {
   for (const scenario of ['native-after-list', 'username-after-list', 'inactive-after-list', 'reconnect-after-list', 'profile-after-list', 'role-after-list', 'session-after-list', 'mapping-after-list', 'native-final-account', 'role-final-account']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       const before = (await f.get('reddit')).data; let lists = 0, final = 0;
-      const change = () => { if (scenario.startsWith('native')) f.accounts[2].platformUserId = 'different-native'; if (scenario.startsWith('username')) f.accounts[2].username = 'changed'; if (scenario.startsWith('inactive')) f.accounts[2].isActive = false; if (scenario.startsWith('reconnect')) f.accounts[2].needsReconnection = true; if (scenario.startsWith('profile')) f.accounts[2].profileId = 'foreign'; if (scenario.startsWith('role')) f.app.db.prepare("UPDATE memberships SET role='editor'").run(); if (scenario.startsWith('session')) f.app.db.prepare('DELETE FROM sessions').run(); if (scenario.startsWith('mapping')) f.app.db.prepare('UPDATE projects SET zernio_profile_id=?').run('foreign'); };
-      f.state.hook = (url, options) => {
-        if (url.pathname.endsWith('/reddit-subreddits') && options.method === 'GET' && ++lists === 2) { if (scenario.endsWith('final-account')) final = 2; else change(); }
-        else if (url.pathname.endsWith('/accounts') && final && --final === 0) change();
+      const change = async () => { if (scenario.startsWith('native')) f.accounts[2].platformUserId = 'different-native'; if (scenario.startsWith('username')) f.accounts[2].username = 'changed'; if (scenario.startsWith('inactive')) f.accounts[2].isActive = false; if (scenario.startsWith('reconnect')) f.accounts[2].needsReconnection = true; if (scenario.startsWith('profile')) f.accounts[2].profileId = 'foreign'; if (scenario.startsWith('role')) await f.app.sql.run("UPDATE memberships SET role='editor'"); if (scenario.startsWith('session')) await f.app.sql.run('DELETE FROM sessions'); if (scenario.startsWith('mapping')) await f.app.sql.run('UPDATE projects SET zernio_profile_id=?', 'foreign'); };
+      f.state.hook = async (url, options) => {
+        if (url.pathname.endsWith('/reddit-subreddits') && options.method === 'GET' && ++lists === 2) { if (scenario.endsWith('final-account')) final = 2; else await change(); }
+        else if (url.pathname.endsWith('/accounts') && final && --final === 0) await change();
       };
       const saved = await f.request(f.route('reddit') + '/default', { expectedVersion: before.version, confirmed: true, destinationId: 'reddit-2' }); assert.ok([403, 409, 422].includes(saved.status), scenario + ':' + JSON.stringify(saved.data)); assert.equal(f.writes().length, 0, scenario);
     } finally { await f.close(); }
   }
 });
 
-test('Reddit uncertain acknowledgements and readbacks retain the durable provider fence through aliases, projects and reopen', async () => {
+test('Reddit uncertain acknowledgements and readbacks retain the durable provider fence through aliases, projects and reopen', { skip: postgresSkip }, async t => {
   for (const scenario of ['lost-ack', 'false-success', 'missing-success', 'foreign-ack', 'not-saved', 'missing-default', 'null-default', 'changed-id', 'changed-identity-after-readback']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       const before = (await f.get('reddit')).data, body = { expectedVersion: before.version, confirmed: true, destinationId: 'reddit-2' }, key = randomUUID(); let sent = false, readback = false;
       f.state.hook = (url, options) => {
@@ -205,20 +207,20 @@ test('Reddit uncertain acknowledgements and readbacks retain the durable provide
       f.accounts.push({ ...f.accounts[2], _id: 'reddit-alias', platformUserId: undefined }); const aliasRoute = f.route('reddit').replace('account-reddit/', 'reddit-alias/'), alias = (await f.request(aliasRoute + '/manage')).data;
       const blocked = await f.request(aliasRoute + '/default', { expectedVersion: alias.version, confirmed: true, destinationId: 'reddit-1' }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id); assert.equal(f.writes().length, 1);
       if (scenario === 'lost-ack') {
-        await f.reopen(); const other = await f.request('/workspaces', { name: 'Reddit alias project' }); f.app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('reddit-other-profile', other.data.projectId); f.accounts.push({ ...f.accounts[2], _id: 'reddit-other-alias', platformUserId: undefined, profileId: 'reddit-other-profile' });
+        await f.reopen(); const other = await f.request('/workspaces', { name: 'Reddit alias project' }); await f.app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'reddit-other-profile', other.data.projectId); f.accounts.push({ ...f.accounts[2], _id: 'reddit-other-alias', platformUserId: undefined, profileId: 'reddit-other-profile' });
         const route = `/projects/${other.data.projectId}/integrations/publishing/accounts/reddit-other-alias/reddit-subreddits`, snapshot = (await f.request(route + '/manage')).data;
         const across = await f.request(route + '/default', { expectedVersion: snapshot.version, confirmed: true, destinationId: 'reddit-1' }); assert.equal(across.data.error.code, 'DESTINATION_PREVIOUS_OUTCOME_UNRESOLVED');
         assert.equal((await f.request(`${f.project}/operations/${result.data.operation.id}/review`, { resolution: 'applied', confirmChecked: true, note: 'The synthetic Reddit readback confirms the shared default was applied.', reference: 'synthetic-reddit-readback' })).status, 200);
-        const recovered = await f.write('reddit', 'default', 'reddit-1'); assert.equal(recovered.status, 200, JSON.stringify(recovered.data)); assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM zernio_destination_mutations').get().n, 0);
+        const recovered = await f.write('reddit', 'default', 'reddit-1'); assert.equal(recovered.status, 200, JSON.stringify(recovered.data)); assert.equal((await f.app.sql.get('SELECT count(*) AS n FROM zernio_destination_mutations')).n, 0);
       } else assert.equal(f.writes().length, 1);
     } finally { await f.close(); }
   }
 });
 
-test('Reddit provider fence remains held through the final readback account await', async () => {
-  const f = await fixture(); let release;
+test('Reddit provider fence remains held through the final readback account await', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); let release;
   try {
-    const other = await f.request('/workspaces', { name: 'Concurrent Reddit destination project' }); f.app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('concurrent-profile', other.data.projectId); f.accounts.push({ ...f.accounts[2], _id: 'concurrent-alias', profileId: 'concurrent-profile' });
+    const other = await f.request('/workspaces', { name: 'Concurrent Reddit destination project' }); await f.app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'concurrent-profile', other.data.projectId); f.accounts.push({ ...f.accounts[2], _id: 'concurrent-alias', profileId: 'concurrent-profile' });
     const route = `/projects/${other.data.projectId}/integrations/publishing/accounts/concurrent-alias/reddit-subreddits`, otherSnapshot = (await f.request(route + '/manage')).data, before = (await f.get('reddit')).data;
     let ready, sent = false, readback = false, held = false; const blocked = new Promise(resolve => { ready = resolve; });
     f.state.hook = (url, options) => {
@@ -228,8 +230,25 @@ test('Reddit provider fence remains held through the final readback account awai
     };
     const pending = f.request(f.route('reddit') + '/default', { expectedVersion: before.version, confirmed: true, destinationId: 'reddit-2' }); await blocked;
     const racing = await f.request(route + '/default', { expectedVersion: otherSnapshot.version, confirmed: true, destinationId: 'reddit-1' }); assert.equal(racing.status, 409); assert.equal(racing.data.error.code, 'DESTINATION_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(f.writes().length, 1);
-    release(); assert.equal((await pending).status, 200); assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM zernio_destination_mutations').get().n, 0);
+    release(); assert.equal((await pending).status, 200); assert.equal((await f.app.sql.get('SELECT count(*) AS n FROM zernio_destination_mutations')).n, 0);
   } finally { release?.(); await f.close(); }
+});
+
+test('parallel duplicate destination creates and defaults reach the provider once', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  // The first write is held at the provider so the duplicate arrives while its receipt is still pending.
+  const hold = (method, suffix) => { let entered, release; const reached = new Promise(resolve => { entered = resolve; }), gate = new Promise(resolve => { release = resolve; }); let held = false; f.state.hook = async (url, options) => { if (!held && options.method === method && url.pathname.endsWith(suffix)) { held = true; entered(); await gate; } }; return { reached, release }; };
+  const outcome = result => result.data.error?.code ?? result.data.operation.status;
+  try {
+    const before = (await f.get('youtube')).data, body = { expectedVersion: before.version, confirmed: true, settings: { title: 'Parallel playlist', description: '', privacy: 'private' } }, key = randomUUID(), created = hold('POST', '/youtube-playlists');
+    const sameKey = await Promise.all([f.request(f.route('youtube') + '/create', body, key), created.reached.then(async () => { const duplicate = await f.request(f.route('youtube') + '/create', body, key); created.release(); return duplicate; })]);
+    assert.deepEqual(sameKey.map(outcome), ['complete', 'OPERATION_UNCERTAIN']); assert.equal(sameKey[0].status, 200);
+    assert.equal(f.calls.filter(call => call.method === 'POST' && call.url.pathname.endsWith('/youtube-playlists')).length, 1);
+    const defaulted = hold('PUT', '/pinterest-boards');
+    const differentKeys = await Promise.all([f.write('pinterest', 'default', 'board-1'), defaulted.reached.then(async () => { const duplicate = await f.write('pinterest', 'default', 'board-1'); defaulted.release(); return duplicate; })]);
+    assert.deepEqual(differentKeys.map(outcome), ['complete', 'OPERATION_NOT_SENT']); assert.equal(differentKeys[1].data.operation.status, 'failed');
+    assert.equal(f.calls.filter(call => call.method === 'PUT' && call.url.pathname.endsWith('/pinterest-boards')).length, 1);
+  } finally { await f.close(); }
 });
 
 const source = await readFile(new URL('../src/ZernioDestinations.tsx', import.meta.url), 'utf8');
@@ -303,9 +322,9 @@ test('mounted destination responses and retained saves respect newer edits, comm
   const ui = await destinationBrowser(); ui.change('New saved account default', 'id-social'); ui.review(); ui.check(); const retained = ui.button('Apply reviewed change').props.onClick; ui.change('New saved account default', 'id-marketing'); await retained(); await ui.tick(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
 });
 
-test('all managed destination snapshots reject identity changes during the destination read', async () => {
+test('all managed destination snapshots reject identity changes during the destination read', { skip: postgresSkip }, async t => {
   for (const platform of ['pinterest', 'youtube']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       const account = f.accounts.find(row => row.platform === platform);
       f.state.hook = (url, options) => { if ((options.method || 'GET') === 'GET' && url.pathname.endsWith(platform === 'pinterest' ? '/pinterest-boards' : '/youtube-playlists')) account.platformUserId = 'changed-native-account'; };

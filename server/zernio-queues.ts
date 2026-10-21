@@ -1,5 +1,6 @@
 import type { OperationContext, ZernioApi } from './provider-core.ts';
 import { createHash } from 'node:crypto';
+import { sql } from 'drizzle-orm';
 import { fail, reportObject as object, IntegrationError, operation, validProviderInstant } from './provider-core.ts';
 
 const validId = (value: any) => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
@@ -55,10 +56,9 @@ export function assertQueueReceipt(remote: any, post: any, profileId: any) {
   if (remote.status !== 'scheduled' || !validProviderInstant(remote.scheduledFor) || Date.parse(remote.scheduledFor) <= Date.now() || remote.queueId != null && String(remote.queueId?._id || remote.queueId) !== post.queueId || remote.queuedFromProfile != null && String(remote.queuedFromProfile?._id || remote.queuedFromProfile) !== profileId) fail(502, 'QUEUE_ASSIGNMENT_NOT_CONFIRMED', 'Zernio did not confirm a future queue assignment for this post. Review the provider receipt before retrying.', true);
 }
 function uncertain(error: any): never { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
-function unresolved(context: OperationContext & { body: any }) {
-  if (!context.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operations'").get()) return;
+async function unresolved(context: OperationContext & { body: any }) {
   // ponytail: an unknown queue mutation blocks this project until reviewed; persist per-queue locks if simultaneous recovery is needed.
-  if (context.db.prepare("SELECT id FROM integration_operations WHERE project_id=? AND request_key<>? AND status IN ('pending','uncertain') AND action_path LIKE 'POST /integrations/queues/%'").get(context.project.id, context.req.headers['idempotency-key'] as string)) fail(409, 'QUEUE_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous publishing queue change before changing another schedule. This new change has not been sent.');
+  if ((await context.db.execute(sql`SELECT id FROM integration_operations WHERE project_id=${context.project.id} AND request_key<>${context.req.headers['idempotency-key'] as string} AND status IN ('pending','uncertain') AND action_path LIKE 'POST /integrations/queues/%'`)).rowCount) fail(409, 'QUEUE_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous publishing queue change before changing another schedule. This new change has not been sent.');
 }
 function editable(body: any) {
   if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 200 || /[\u0000-\u001f\u007f]/.test(body.name) || !timezone(body.timezone) || typeof body.active !== 'boolean') fail(400, 'INVALID_QUEUE_SETTINGS', 'Enter a queue name, IANA timezone and active state.');
@@ -92,7 +92,7 @@ export async function handleZernioQueues(context: OperationContext & { body: any
   if (deleting && body.confirmDelete !== queueId) fail(400, 'QUEUE_DELETE_CONFIRMATION_REQUIRED', 'Confirm the exact publishing queue before deleting it.');
   if (!create && !deleting && (typeof body.setAsDefault !== 'boolean' || typeof body.reshuffleExisting !== 'boolean' || body.reshuffleExisting && body.confirmReshuffle !== true || body.confirmReshuffle !== undefined && typeof body.confirmReshuffle !== 'boolean')) fail(400, 'QUEUE_RESHUFFLE_CONFIRMATION_REQUIRED', 'Choose the default and rescheduling options explicitly. Confirm before moving existing queued posts.');
   const result = await operation(context, async key => {
-    unresolved(context);
+    await unresolved(context);
     const before = await queueList(api, profileId), current = create ? null : before.queues.find((row: any) => row._id === queueId);
     if (!create && !current) fail(403, 'QUEUE_OUTSIDE_PROJECT', 'This publishing queue no longer belongs to the current profile.');
     expectedVersion(create ? body.expectedListVersion : body.expectedVersion, create ? before.version : current.version);

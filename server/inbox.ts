@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { IntegrationError, fail, reportObject as plain, operation, redact, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
-import type { DatabaseSync } from 'node:sqlite';
+import { sql } from 'drizzle-orm';
+import { advisoryLock } from './auth.ts';
 import { listWhatsAppTemplates, validateWhatsAppTemplate } from './direct-providers.ts';
 import { publicMediaUrl, assetDeliveryIssue } from '../shared/social-posts.ts';
 
@@ -129,19 +130,19 @@ async function slackMembers(api: ZernioApi, account: ProviderRecord, search = ''
   if (new Set(members.map((row: any) => row.id)).size !== members.length) invalid();
   return members;
 }
-function permittedContact(context: ProviderRecord, channel: string, contactId: string): ProviderRecord {
-  const contact = context.contacts?.get(context.project.id, id(contactId));
+async function permittedContact(context: ProviderRecord, channel: string, contactId: string): Promise<ProviderRecord> {
+  const contact = await context.contacts?.get(context.project.id, id(contactId));
   if (!contact || !/^\+[1-9]\d{6,14}$/.test(contact.phone || '') || contact.consents?.[channel] !== true || contact.suppression?.[channel]) fail(409, 'RECIPIENT_PERMISSION_REQUIRED', 'Choose a project contact with recorded permission for this channel and no suppression.');
   return contact;
 }
-async function startConversation(context: ProviderRecord, api: ZernioApi, account: ProviderRecord, env: ProviderRecord, assertMapping: () => void, key?: string) {
+async function startConversation(context: ProviderRecord, api: ZernioApi, account: ProviderRecord, env: ProviderRecord, assertMapping: () => Promise<void>, key?: string) {
   const { body } = context;
   supported(account, 'start'); fields(body, ['accountId', 'participantUsername', 'participantId', 'contactId', 'message', 'templateName', 'templateLanguage', 'templateComponents', 'confirmSend']);
   if (body.confirmSend !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Review the recipient and message before confirming this send.');
   const payload: ProviderRecord = { accountId: account._id };
   if (['sms', 'whatsapp'].includes(account.platform)) {
     if (body.participantId !== undefined || body.participantUsername !== undefined) fail(400, 'INVALID_RECIPIENT', 'Choose a contact rather than supplying an unverified phone number.');
-    payload.participantId = permittedContact(context, account.platform, body.contactId).phone.replace(/^\+/, '');
+    payload.participantId = (await permittedContact(context, account.platform, body.contactId)).phone.replace(/^\+/, '');
   } else {
     if (body.contactId !== undefined || Boolean(body.participantId) === Boolean(body.participantUsername)) fail(400, 'INVALID_RECIPIENT', 'Choose exactly one recipient identity.');
     if (account.platform === 'slack') {
@@ -170,7 +171,7 @@ async function startConversation(context: ProviderRecord, api: ZernioApi, accoun
     payload.message = str(body.message, 'opening message', inboxCapabilities(account.platform).messageLimit);
   }
   // Check the current local opt-out again after recipient/template lookups, immediately before dispatch.
-  if (['sms', 'whatsapp'].includes(account.platform) && permittedContact(context, account.platform, body.contactId).phone.replace(/^\+/, '') !== payload.participantId) fail(409, 'RECIPIENT_CHANGED', 'This contact’s phone number changed. Reload recipients and review the new destination.');
+  if (['sms', 'whatsapp'].includes(account.platform) && (await permittedContact(context, account.platform, body.contactId)).phone.replace(/^\+/, '') !== payload.participantId) fail(409, 'RECIPIENT_CHANGED', 'This contact’s phone number changed. Reload recipients and review the new destination.');
   const result = await api('/inbox/conversations', {}, payload, key);
   if (result.success !== true || !plain(result.data) || !valid(result.data.messageId) || !valid(result.data.conversationId)) invalid(true);
   if (['participantId', 'participantName', 'participantUsername'].some(field => result.data[field] != null && typeof result.data[field] !== 'string')) invalid(true);
@@ -178,12 +179,12 @@ async function startConversation(context: ProviderRecord, api: ZernioApi, accoun
   if (payload.participantId && ['twitter', 'slack'].includes(account.platform) && result.data.participantId != null && result.data.participantId !== payload.participantId) invalid(true);
   return { sent: true, ...pick(result.data, ['messageId', 'conversationId', 'participantId', 'participantName', 'participantUsername']), accountId: account._id, platform: account.platform };
 }
-function conversationContact(context: ProviderRecord, row: ProviderRecord, incoming = false) {
+async function conversationContact(context: ProviderRecord, row: ProviderRecord, incoming = false) {
   if (row.platform !== 'facebook' || !valid(row.participantId)) return undefined;
   const identity: ProviderRecord = { accountId: row.accountId, participantId: row.participantId, conversationId: row.id, ...(typeof row.participantName === 'string' ? { name: row.participantName.slice(0, 200) } : {}) };
   if (row.participantPicture) try { identity.avatarUrl = publicMediaUrl(row.participantPicture); } catch { /* A missing profile picture must not prevent reading a conversation. */ }
-  if (incoming) context.contacts?.fromMessenger?.(context.project.id, identity);
-  return context.contacts?.findMessenger?.(context.project.id, row.accountId, row.participantId) || undefined;
+  if (incoming) await context.contacts?.fromMessenger?.(context.project.id, identity);
+  return await context.contacts?.findMessenger?.(context.project.id, row.accountId, row.participantId) || undefined;
 }
 async function conversation(api: ZernioApi, accounts: ProviderRecord[], account: ProviderRecord, conversationId: string) {
   const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}`, { accountId: account._id }), row = result.data;
@@ -245,30 +246,29 @@ function deletionVersion(row: ProviderRecord, messages: ProviderRecord[]) {
   const latest = [...messages].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id.localeCompare(a.id));
   return createHash('sha256').update(JSON.stringify([inboxConversationVersion(row), latest.map(message => inboxMessageVersion(message, row.accountId))])).digest('hex');
 }
-function deletionTable(db: DatabaseSync): void {
-  db.exec(`CREATE TABLE IF NOT EXISTS inbox_conversation_deletions(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,conversation_id TEXT NOT NULL,status TEXT NOT NULL,operation_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(project_id,profile_id,account_id,conversation_id))`);
-  if (!db.prepare('PRAGMA table_info(inbox_conversation_deletions)').all().some((column: any) => column.name === 'operation_id')) db.exec("ALTER TABLE inbox_conversation_deletions ADD COLUMN operation_id TEXT NOT NULL DEFAULT ''");
-}
 async function deleteConversation(context: ProviderRecord, api: ZernioApi, account: ProviderRecord, conversationId: string, row: ProviderRecord, key?: string) {
   const { body, db, project } = context;
   fields(body, ['accountId', 'expectedDeleteVersion', 'confirmConversationId']);
   const latest = await history(api, account, conversationId, {}, row.id);
   if (latest.sortOrderApplied !== 'desc' || !deletionVersion(row, latest.messages) || body.expectedDeleteVersion !== deletionVersion(row, latest.messages) || body.confirmConversationId !== conversationId) fail(409, 'CONVERSATION_DELETE_REVIEW_REQUIRED', 'Refresh the latest messages and confirm this stored conversation before deleting it.');
-  deletionTable(db);
-  const binding = [project.id, project.zernioProfileId, account._id, row.id];
-  const previous = db.prepare('SELECT status,operation_id FROM inbox_conversation_deletions WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?').get(...binding);
-  if (previous && (!['pending', 'uncertain'].includes(previous.status) || db.prepare('SELECT status FROM integration_operations WHERE id=? AND project_id=?').get(previous.operation_id, project.id)?.status !== 'reviewed-not-applied')) fail(409, 'CONVERSATION_DELETE_RECORDED', 'A deletion of this stored conversation is already complete or needs reconciliation. A new action key cannot repeat it until an operator verifies the original action was not applied.');
-  if (previous) db.prepare('DELETE FROM inbox_conversation_deletions WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?').run(...binding);
-  const original = db.prepare('SELECT id FROM integration_operations WHERE project_id=? AND request_key=?').get(project.id, context.req.headers['idempotency-key']);
-  db.prepare("INSERT INTO inbox_conversation_deletions(project_id,profile_id,account_id,conversation_id,status,operation_id) VALUES(?,?,?,?,'pending',?)").run(...binding, original.id);
+  const scope = sql`project_id=${project.id} AND profile_id=${project.zernioProfileId} AND account_id=${account._id} AND conversation_id=${row.id}`;
+  await db.transaction(async (tx: any) => {
+    // Two keys (or conversation aliases) deleting the same stored conversation must not both pass the check below.
+    await advisoryLock(tx, 'inbox:conversation-deletion:' + JSON.stringify([project.id, project.zernioProfileId, account._id, row.id]));
+    const previous = (await tx.execute(sql`SELECT status,operation_id FROM inbox_conversation_deletions WHERE ${scope}`)).rows[0];
+    if (previous && (!['pending', 'uncertain'].includes(previous.status) || (await tx.execute(sql`SELECT status FROM integration_operations WHERE id=${previous.operation_id} AND project_id=${project.id}`)).rows[0]?.status !== 'reviewed-not-applied')) fail(409, 'CONVERSATION_DELETE_RECORDED', 'A deletion of this stored conversation is already complete or needs reconciliation. A new action key cannot repeat it until an operator verifies the original action was not applied.');
+    if (previous) await tx.execute(sql`DELETE FROM inbox_conversation_deletions WHERE ${scope}`);
+    const original = (await tx.execute(sql`SELECT id FROM integration_operations WHERE project_id=${project.id} AND request_key=${context.req.headers['idempotency-key']}`)).rows[0];
+    await tx.execute(sql`INSERT INTO inbox_conversation_deletions(project_id,profile_id,account_id,conversation_id,status,operation_id) VALUES(${project.id},${project.zernioProfileId},${account._id},${row.id},'pending',${original.id})`);
+  });
   try {
     const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}`, { accountId: account._id }, undefined, key, 'DELETE'), receipt = result.data;
     if (result.success !== true || !plain(receipt) || ![conversationId, row.id].includes(receipt.id) || receipt.accountId !== account._id || receipt.platform !== account.platform || !Number.isSafeInteger(receipt.deletedMessages) || receipt.deletedMessages < 0) invalid(true);
-    db.prepare("UPDATE inbox_conversation_deletions SET status='deleted' WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?").run(...binding);
+    await db.execute(sql`UPDATE inbox_conversation_deletions SET status='deleted' WHERE ${scope}`);
     return { accepted: true, deleted: true, scope: 'zernio_copy', conversationId, deletedMessages: receipt.deletedMessages };
   } catch (error: any) {
-    if (!(error instanceof IntegrationError) || error.uncertain) db.prepare("UPDATE inbox_conversation_deletions SET status='uncertain' WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?").run(...binding);
-    else db.prepare('DELETE FROM inbox_conversation_deletions WHERE project_id=? AND profile_id=? AND account_id=? AND conversation_id=?').run(...binding);
+    if (!(error instanceof IntegrationError) || error.uncertain) await db.execute(sql`UPDATE inbox_conversation_deletions SET status='uncertain' WHERE ${scope}`);
+    else await db.execute(sql`DELETE FROM inbox_conversation_deletions WHERE ${scope}`);
     throw error;
   }
 }
@@ -298,21 +298,21 @@ async function attachment(context: ProviderRecord, api: ZernioApi, accounts: Pro
   const abort = new AbortController(), closed = () => abort.abort(); context.res.once('close', closed);
   try {
     response = await fetch(target, { headers: { Authorization: `Bearer ${apiKey}` }, redirect: 'error', signal: AbortSignal.any([AbortSignal.timeout(20000), abort.signal]) });
-    context.assertProjectMapping?.(context.project.zernioProfileId);
+    await context.assertProjectMapping?.(context.project.zernioProfileId);
     if (!response.ok) fail(response.status === 400 || response.status === 404 ? 410 : 502, 'ATTACHMENT_UNAVAILABLE', response.status === 400 || response.status === 404 ? 'WhatsApp no longer serves this attachment. It cannot be recovered by retrying.' : 'WhatsApp could not provide this attachment. Try again later.');
     const mime = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase(), details = downloadTypes.get(mime!), expected = item.type === 'sticker' ? 'image' : item.type, length = response.headers.get('content-length');
     if (!details || details[0] !== expected || item.mimeType && item.mimeType.split(';')[0].toLowerCase() !== mime || length !== null && (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) < 1 || Number(length) > details[2] * 1024 * 1024)) fail(502, 'ATTACHMENT_UNAVAILABLE', 'WhatsApp returned an unsupported file type or an attachment beyond its download limit.');
     const maximum = details[2] * 1024 * 1024;
     reader = response.body?.[Symbol.asyncIterator](); let part = await reader?.next();
     if (!part || part.done || !part.value.length || part.value.length > maximum) fail(502, 'ATTACHMENT_UNAVAILABLE', 'WhatsApp did not return an attachment within its download limit.');
-    context.assertProjectMapping?.(context.project.zernioProfileId);
+    await context.assertProjectMapping?.(context.project.zernioProfileId);
     context.res.writeHead(200, { 'Content-Type': mime, 'Content-Disposition': `attachment; filename="inbox-attachment.${details[1]}"`, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
     let size = 0;
     while (!part.done) {
       const chunk = part.value;
       size += chunk.length;
       if (size > maximum) fail(502, 'ATTACHMENT_UNAVAILABLE', 'This attachment exceeds its download limit.');
-      context.assertProjectMapping?.(context.project.zernioProfileId);
+      await context.assertProjectMapping?.(context.project.zernioProfileId);
       if (context.res.destroyed) throw new Error();
       if (!context.res.write(chunk)) await new Promise<void>((resolve, reject) => {
         const cleanup = () => { context.res.off('drain', drain); context.res.off('close', close); }, drain = () => { cleanup(); resolve(); }, close = () => { cleanup(); reject(new Error('Download closed')); };
@@ -467,11 +467,11 @@ async function findComment(api: ZernioApi, accounts: ProviderRecord[], account: 
   }
   fail(503, 'INCOMPLETE_PROVIDER_DATA', 'This post exceeds the comment scope-check limit. Open it in the provider dashboard.');
 }
-function priorHiddenComment(context: ProviderRecord, account: ProviderRecord, post: ProviderRecord, commentId: string) {
+async function priorHiddenComment(context: ProviderRecord, account: ProviderRecord, post: ProviderRecord, commentId: string) {
   if (account.platform !== 'instagram' && post.placement !== 'instagram') return null;
   // Instagram via Facebook Login omits hidden comments. Only this app's completed, scoped hide receipt can substitute for a missing fresh row.
   // ponytail: search the latest 500 receipts; use an indexed resource table if operators need older hidden-comment recovery.
-  const receipts = context.db.prepare("SELECT response FROM integration_operations WHERE project_id=? AND status='complete' ORDER BY rowid DESC LIMIT 500").all(context.project.id);
+  const receipts = (await context.db.execute(sql`SELECT response FROM integration_operations WHERE project_id=${context.project.id} AND status='complete' ORDER BY seq DESC LIMIT 500`)).rows;
   for (const receipt of receipts) {
     const proof = JSON.parse(receipt.response)?.hiddenCommentProof;
     if (proof?.profileId === context.project.zernioProfileId && proof.accountId === account._id && proof.postId === post.id && proof.comment?.id === commentId) return proof.hidden === true ? { row: proof.comment, thread: { meta: proof.meta } } : null;
@@ -484,40 +484,40 @@ function privateCommentEligible(row: ProviderRecord): boolean {
   const age = Date.now() - Date.parse(row.createdTime);
   return ['facebook', 'instagram'].includes(row.platform) && valid(row.from?.id) && row.from?.isOwner === false && row.canReply !== false && age >= 0 && age < 7 * 86400000;
 }
-function privateReplyTable(db: DatabaseSync): void {
-  db.exec(`CREATE TABLE IF NOT EXISTS inbox_private_replies(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,post_id TEXT NOT NULL,comment_id TEXT NOT NULL,status TEXT NOT NULL,operation_id TEXT NOT NULL,PRIMARY KEY(project_id,profile_id,account_id,post_id,comment_id))`);
-}
-function claimCommentReaction(context: ProviderRecord, account: ProviderRecord, postId: string, commentId: string, action: string, reactionType = ''): void {
+async function claimCommentReaction(context: ProviderRecord, account: ProviderRecord, postId: string, commentId: string, action: string, reactionType = ''): Promise<void> {
   const { db, project, req } = context, nativeId = account.platformUserId ?? '';
   if (account.platformUserId != null && !valid(nativeId)) invalid();
-  db.exec(`CREATE TABLE IF NOT EXISTS inbox_comment_reactions(operation_id TEXT PRIMARY KEY,platform TEXT NOT NULL,account_id TEXT NOT NULL,native_account_id TEXT NOT NULL,post_id TEXT NOT NULL,comment_id TEXT NOT NULL,action TEXT NOT NULL,reaction_type TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS inbox_comment_reactions_target ON inbox_comment_reactions(platform,post_id,comment_id);`);
-  const operationId = db.prepare('SELECT id FROM integration_operations WHERE project_id=? AND request_key=?').get(project.id, req.headers['idempotency-key']).id;
-  // ponytail: missing native IDs conservatively fence the same platform target across aliases; record native IDs to separate accounts.
-  const previous = db.prepare(`SELECT r.operation_id FROM inbox_comment_reactions r LEFT JOIN integration_operations o ON o.id=r.operation_id
-    WHERE r.platform=? AND r.post_id=? AND r.comment_id=? AND (r.account_id=? OR r.native_account_id='' OR ?='' OR r.native_account_id=?)
-    AND (o.status IS NULL OR o.status NOT IN ('complete','failed','reviewed-not-applied','reviewed-applied') OR o.status='reviewed-applied' AND r.action=? AND r.reaction_type=?) LIMIT 1`).get(account.platform, postId, commentId, account._id, nativeId, nativeId, action, reactionType);
-  if (previous) fail(409, 'COMMENT_REACTION_UNCERTAIN', 'An earlier change on this native comment needs reconciliation before another edit, reaction or removal.');
-  // Earlier releases recorded project-scoped resources only. Preserve exact legacy uncertainty across project/account handoffs too.
-  const legacy = db.prepare(`SELECT o.resource_key,o.action_path,o.status FROM integration_operations o WHERE o.id<>? AND o.status IN ('pending','uncertain','reviewed-applied')
-    AND NOT EXISTS(SELECT 1 FROM inbox_comment_reactions r WHERE r.operation_id=o.id)
-    AND (o.action_path IN ('POST /integrations/inbox/comments/like','POST /integrations/inbox/comments/unlike','POST /integrations/inbox/comments/edit') OR o.action_path='' OR o.resource_key LIKE '%"inbox-comment"%')`).all(operationId);
-  for (const row of legacy) {
-    if (row.status === 'reviewed-applied' && row.action_path && row.action_path !== 'POST /integrations/inbox/comments/' + action) continue;
-    let resource; try { resource = JSON.parse(row.resource_key || 'null')?.[1]; } catch { /* An unreadable legacy identity cannot establish a different target. */ }
-    if (Array.isArray(resource) && resource[0] === 'inbox-comment' && (resource[2] !== postId || resource[3] !== commentId)) continue;
-    if (Array.isArray(resource) && resource[0] !== 'inbox-comment' && row.action_path === '') continue;
-    fail(409, 'COMMENT_REACTION_UNCERTAIN', 'An earlier comment change needs reconciliation before this native target can be changed.');
-  }
-  // No await between the shared durable lookup and claim, or between this claim and provider dispatch.
-  db.prepare('INSERT INTO inbox_comment_reactions VALUES(?,?,?,?,?,?,?,?)').run(operationId, account.platform, account._id, nativeId, postId, commentId, action, reactionType);
+  await db.transaction(async (tx: any) => {
+    // Parallel changes to one native comment (across account aliases) must not both pass the lookups before either claims it.
+    await advisoryLock(tx, 'inbox:comment-reaction:' + JSON.stringify([account.platform, postId, commentId]));
+    const operationId = (await tx.execute(sql`SELECT id FROM integration_operations WHERE project_id=${project.id} AND request_key=${req.headers['idempotency-key']}`)).rows[0].id;
+    // ponytail: missing native IDs conservatively fence the same platform target across aliases; record native IDs to separate accounts.
+    const previous = (await tx.execute(sql`SELECT r.operation_id FROM inbox_comment_reactions r LEFT JOIN integration_operations o ON o.id=r.operation_id
+      WHERE r.platform=${account.platform} AND r.post_id=${postId} AND r.comment_id=${commentId} AND (r.account_id=${account._id} OR r.native_account_id='' OR ${nativeId}='' OR r.native_account_id=${nativeId})
+      AND (o.status IS NULL OR o.status NOT IN ('complete','failed','reviewed-not-applied','reviewed-applied') OR o.status='reviewed-applied' AND r.action=${action} AND r.reaction_type=${reactionType}) LIMIT 1`)).rows[0];
+    if (previous) fail(409, 'COMMENT_REACTION_UNCERTAIN', 'An earlier change on this native comment needs reconciliation before another edit, reaction or removal.');
+    // Earlier releases recorded project-scoped resources only. Preserve exact legacy uncertainty across project/account handoffs too.
+    const legacy = (await tx.execute(sql`SELECT o.resource_key,o.action_path,o.status FROM integration_operations o WHERE o.id<>${operationId} AND o.status IN ('pending','uncertain','reviewed-applied')
+      AND NOT EXISTS(SELECT 1 FROM inbox_comment_reactions r WHERE r.operation_id=o.id)
+      AND (o.action_path IN ('POST /integrations/inbox/comments/like','POST /integrations/inbox/comments/unlike','POST /integrations/inbox/comments/edit') OR o.action_path='' OR o.resource_key LIKE '%"inbox-comment"%')`)).rows;
+    for (const row of legacy) {
+      if (row.status === 'reviewed-applied' && row.action_path && row.action_path !== 'POST /integrations/inbox/comments/' + action) continue;
+      let resource; try { resource = JSON.parse(row.resource_key || 'null')?.[1]; } catch { /* An unreadable legacy identity cannot establish a different target. */ }
+      if (Array.isArray(resource) && resource[0] === 'inbox-comment' && (resource[2] !== postId || resource[3] !== commentId)) continue;
+      if (Array.isArray(resource) && resource[0] !== 'inbox-comment' && row.action_path === '') continue;
+      fail(409, 'COMMENT_REACTION_UNCERTAIN', 'An earlier comment change needs reconciliation before this native target can be changed.');
+    }
+    // The lookups and this claim commit together under the target lock; the caller dispatches right after.
+    await tx.execute(sql`INSERT INTO inbox_comment_reactions VALUES(${operationId},${account.platform},${account._id},${nativeId},${postId},${commentId},${action},${reactionType})`);
+  });
 }
-function privateReplyThread(context: ProviderRecord, accounts: ProviderRecord[], account: ProviderRecord, post: ProviderRecord, result: ProviderRecord) {
+async function privateReplyThread(context: ProviderRecord, accounts: ProviderRecord[], account: ProviderRecord, post: ProviderRecord, result: ProviderRecord) {
   const accountId = post.isAd ? result.meta.platform === 'instagram' ? result.meta.instagramAccountId : result.meta.facebookAccountId : account._id, postId = post.isAd ? result.meta.effectiveStoryId : post.id;
-  const connected = accounts.some(row => row._id === accountId && row.isActive !== false && row.platform === result.meta.platform), exists = context.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_private_replies'").get();
-  const receipts = exists && context.db.prepare('SELECT r.status,o.status AS operationStatus FROM inbox_private_replies r LEFT JOIN integration_operations o ON r.operation_id=o.id AND r.project_id=o.project_id WHERE r.project_id=? AND r.profile_id=? AND r.account_id=? AND r.post_id=? AND r.comment_id=?');
+  const connected = accounts.some(row => row._id === accountId && row.isActive !== false && row.platform === result.meta.platform);
+  // One read for the thread, keyed by comment id, instead of a lookup per comment.
+  const receipts = new Map((await context.db.execute(sql`SELECT r.comment_id,r.status,o.status AS "operationStatus" FROM inbox_private_replies r LEFT JOIN integration_operations o ON r.operation_id=o.id AND r.project_id=o.project_id WHERE r.project_id=${context.project.id} AND r.profile_id=${context.project.zernioProfileId} AND r.account_id=${accountId || ''} AND r.post_id=${postId || ''}`)).rows.map((receipt: any) => [receipt.comment_id, receipt]));
   const decorate = (row: ProviderRecord): ProviderRecord => {
-    const receipt = receipts && receipts.get(context.project.id, context.project.zernioProfileId, accountId || '', postId || '', row.id), prior = receipt && !(receipt.operationStatus === 'reviewed-not-applied' && ['pending', 'uncertain'].includes(receipt.status)) ? receipt : null;
+    const receipt: any = receipts.get(row.id), prior = receipt && !(receipt.operationStatus === 'reviewed-not-applied' && ['pending', 'uncertain'].includes(receipt.status)) ? receipt : null;
     return { ...row, ...(row.platform === 'reddit' ? { editVersion: editableCommentVersion(account, post.id, row) } : {}), ...(['facebook', 'instagram'].includes(row.platform) ? { privateReplyVersion: privateCommentVersion(row), privateReplyEligible: connected && valid(postId) && !prior && privateCommentEligible(row), ...(prior ? { privateReplyStatus: prior.status } : {}) } : {}), ...(row.replies ? { replies: row.replies.map(decorate) } : {}) };
   };
   return { ...result, comments: result.comments.map(decorate), ...(result.parent ? { parent: decorate(result.parent) } : {}) };
@@ -551,21 +551,25 @@ async function privateCommentReply(context: ProviderRecord, api: ZernioApi, acco
   const fresh = await scopedAccounts(api, project.zernioProfileId);
   for (const original of [account, moderationAccount]) { const current = requireAccount(fresh, original._id); supported(current, 'commentPrivateReply'); if (current.platform !== original.platform) fail(409, 'PRIVATE_REPLY_ACCOUNT_CHANGED', 'This comment’s connected account changed. Refresh before replying.'); }
   if (!privateCommentEligible(target.row)) fail(422, 'PRIVATE_REPLY_INELIGIBLE', 'This comment is outside the seven-day private reply window.');
-  privateReplyTable(db);
-  const binding = [project.id, project.zernioProfileId, moderationAccount._id, moderationPostId, target.row.id], previous = db.prepare('SELECT status,operation_id FROM inbox_private_replies WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').get(...binding);
-  if (previous && (!['pending', 'uncertain'].includes(previous.status) || db.prepare('SELECT status FROM integration_operations WHERE id=? AND project_id=?').get(previous.operation_id, project.id)?.status !== 'reviewed-not-applied')) fail(409, 'PRIVATE_REPLY_RECORDED', 'This comment’s private reply was already sent, consumed or needs reconciliation. Check the original receipt and conversation before another action.');
-  if (previous) db.prepare('DELETE FROM inbox_private_replies WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(...binding);
-  const original = db.prepare('SELECT id FROM integration_operations WHERE project_id=? AND request_key=?').get(project.id, context.req.headers['idempotency-key']);
-  if (!db.prepare("INSERT OR IGNORE INTO inbox_private_replies(project_id,profile_id,account_id,post_id,comment_id,status,operation_id) VALUES(?,?,?,?,?,'pending',?)").run(...binding, original.id).changes) fail(409, 'PRIVATE_REPLY_RECORDED', 'Another private reply to this comment is already in progress.');
-  const update = (status: string) => db.prepare('UPDATE inbox_private_replies SET status=? WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(status, ...binding);
+  const scope = sql`project_id=${project.id} AND profile_id=${project.zernioProfileId} AND account_id=${moderationAccount._id} AND post_id=${moderationPostId} AND comment_id=${target.row.id}`;
+  await db.transaction(async (tx: any) => {
+    // A comment allows one private reply: parallel keys must not both pass this check and replace each other's claim.
+    await advisoryLock(tx, 'inbox:private-reply:' + JSON.stringify([project.id, project.zernioProfileId, moderationAccount._id, moderationPostId, target.row.id]));
+    const previous = (await tx.execute(sql`SELECT status,operation_id FROM inbox_private_replies WHERE ${scope}`)).rows[0];
+    if (previous && (!['pending', 'uncertain'].includes(previous.status) || (await tx.execute(sql`SELECT status FROM integration_operations WHERE id=${previous.operation_id} AND project_id=${project.id}`)).rows[0]?.status !== 'reviewed-not-applied')) fail(409, 'PRIVATE_REPLY_RECORDED', 'This comment’s private reply was already sent, consumed or needs reconciliation. Check the original receipt and conversation before another action.');
+    if (previous) await tx.execute(sql`DELETE FROM inbox_private_replies WHERE ${scope}`);
+    const original = (await tx.execute(sql`SELECT id FROM integration_operations WHERE project_id=${project.id} AND request_key=${context.req.headers['idempotency-key']}`)).rows[0];
+    if (!(await tx.execute(sql`INSERT INTO inbox_private_replies(project_id,profile_id,account_id,post_id,comment_id,status,operation_id) VALUES(${project.id},${project.zernioProfileId},${moderationAccount._id},${moderationPostId},${target.row.id},'pending',${original.id}) ON CONFLICT DO NOTHING`)).rowCount) fail(409, 'PRIVATE_REPLY_RECORDED', 'Another private reply to this comment is already in progress.');
+  });
+  const update = (status: string) => db.execute(sql`UPDATE inbox_private_replies SET status=${status} WHERE ${scope}`);
   try {
     const result = await api(`/inbox/comments/${encodeURIComponent(moderationPostId)}/${encodeURIComponent(target.row.id)}/private-reply`, {}, payload, key);
     if (result.status !== 'success' || !valid(result.messageId) || result.commentId !== target.row.id || result.platform !== moderationAccount.platform) invalid(true);
-    update('sent'); return { sent: true, accountId: account._id, moderationAccountId: moderationAccount._id, postId: post.id, commentId: target.row.id, messageId: result.messageId, platform: result.platform };
+    await update('sent'); return { sent: true, accountId: account._id, moderationAccountId: moderationAccount._id, postId: post.id, commentId: target.row.id, messageId: result.messageId, platform: result.platform };
   } catch (error: any) {
-    if (error.privateReplyConsumed === true) { update('consumed'); fail(409, 'PRIVATE_REPLY_CONSUMED', 'The provider reports this comment’s single private reply is consumed. Do not retry it; check the conversation.'); }
-    if (!(error instanceof IntegrationError) || error.uncertain || error.privateReplyOutcome === 'unknown') { update('uncertain'); if (error instanceof IntegrationError) error.uncertain = true; }
-    else db.prepare('DELETE FROM inbox_private_replies WHERE project_id=? AND profile_id=? AND account_id=? AND post_id=? AND comment_id=?').run(...binding);
+    if (error.privateReplyConsumed === true) { await update('consumed'); fail(409, 'PRIVATE_REPLY_CONSUMED', 'The provider reports this comment’s single private reply is consumed. Do not retry it; check the conversation.'); }
+    if (!(error instanceof IntegrationError) || error.uncertain || error.privateReplyOutcome === 'unknown') { await update('uncertain'); if (error instanceof IntegrationError) error.uncertain = true; }
+    else await db.execute(sql`DELETE FROM inbox_private_replies WHERE ${scope}`);
     throw error;
   }
 }
@@ -583,11 +587,11 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
     const mutation = Boolean(path === 'conversations/start' || route && ['reply', 'read', 'status', 'thread-control', 'accept', 'typing', 'delete'].includes(route[2]) || messageAction || action);
     if (req.method !== (mutation ? 'POST' : 'GET')) fail(405, 'METHOD_NOT_ALLOWED', 'This inbox action does not support that method.');
     if (mutation && !WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this inbox action.');
-    const env = { ...(context.config?.env || process.env), ...(context.config || {}) }, profileId = project.zernioProfileId, assertMapping = () => context.assertProjectMapping?.(profileId);
+    const env = { ...(context.config?.env || process.env), ...(context.config || {}) }, profileId = project.zernioProfileId, assertMapping = async () => { await context.assertProjectMapping?.(profileId); };
     if (path === 'updates') {
       const accountId = id(url.searchParams.get('accountId')), after = url.searchParams.has('after') ? Number(url.searchParams.get('after')) : undefined;
       if (after !== undefined && (!Number.isSafeInteger(after) || after < 0)) fail(400, 'INVALID_INBOX_FILTER', 'Choose a valid update cursor.');
-      assertMapping(); send(200, context.webhooks?.updates?.(project.id, { accountId, after, limit: 100 }) || { updates: [], cursor: after || 0, hasMore: false, checkedAt: new Date().toISOString() }); return true;
+      await assertMapping(); send(200, await context.webhooks?.updates?.(project.id, { accountId, after, limit: 100 }) || { updates: [], cursor: after || 0, hasMore: false, checkedAt: new Date().toISOString() }); return true;
     }
     if (path === 'status' && (!env.ZERNIO_API_KEY || !profileId)) { send(200, { configured: Boolean(env.ZERNIO_API_KEY), mapped: Boolean(profileId), webhookConfigured: Boolean(env.ZERNIO_WEBHOOK_SECRET), accounts: [] }); return true; }
     if (!env.ZERNIO_API_KEY) fail(503, 'ZERNIO_NOT_CONFIGURED', 'Configure Zernio in Integrations to open the inbox.');
@@ -609,12 +613,13 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
       if (path === 'conversations/recipients') {
         supported(account, 'start');
         if (account.platform === 'slack') return { recipients: await slackMembers(api, account, url.searchParams.get('query') || '') };
-        if (['sms', 'whatsapp'].includes(account.platform)) return { recipients: (context.contacts?.list(project.id) || []).filter((contact: any) => contact.consents?.[account.platform] === true && !contact.suppression?.[account.platform] && /^\+[1-9]\d{6,14}$/.test(contact.phone || '')).map((contact: any) => ({ id: contact.id, name: contact.name || contact.phone, phone: contact.phone })) };
+        if (['sms', 'whatsapp'].includes(account.platform)) return { recipients: (await context.contacts?.list(project.id) || []).filter((contact: any) => contact.consents?.[account.platform] === true && !contact.suppression?.[account.platform] && /^\+[1-9]\d{6,14}$/.test(contact.phone || '')).map((contact: any) => ({ id: contact.id, name: contact.name || contact.phone, phone: contact.phone })) };
         return { recipients: [] };
       }
       if (path === 'conversations') {
         supported(account, 'messages'); const result = await aggregate(api, accounts, account, 'conversations', query(url, 'conversations'));
-        return { conversations: result.rows.map((row: any) => ({ ...pick(row, conversationFields), ...(conversationContact(context, row) ? { contact: conversationContact(context, row) } : {}) })), pagination: result.pagination, meta: result.meta };
+        const contacts = await Promise.all(result.rows.map((row: any) => conversationContact(context, row)));
+        return { conversations: result.rows.map((row: any, index: number) => ({ ...pick(row, conversationFields), ...(contacts[index] ? { contact: contacts[index] } : {}) })), pagination: result.pagination, meta: result.meta };
       }
       if (messageAction) {
         supported(account, 'messages'); const conversationId = decodedId(messageAction[1]), row = await conversation(api, accounts, account, conversationId);
@@ -622,13 +627,13 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
       }
       if (route) {
         supported(account, 'messages'); const conversationId = decodedId(route[1]), row = await conversation(api, accounts, account, conversationId);
-        if (!route[2]) return { conversation: conversationView(account, row), contact: conversationContact(context, row) };
+        if (!route[2]) return { conversation: conversationView(account, row), contact: await conversationContact(context, row) };
         if (route[2] === 'messages') {
           const result = await history(api, account, conversationId, query(url, 'messages'), row.id), incoming = result.messages.some((message: any) => message.direction === 'incoming' && message.senderId === row.participantId);
           let windowAge = Infinity;
-          if (['facebook', 'instagram'].includes(account.platform)) try { windowAge = incomingAge(await recentHistory(api, account, conversationId, row.id)); } catch (error: any) { assertMapping(); if (!(error instanceof IntegrationError) || error.code === 'INVALID_PROVIDER_SCOPE') throw error; /* History remains readable when reaction eligibility cannot be verified. */ }
+          if (['facebook', 'instagram'].includes(account.platform)) try { windowAge = incomingAge(await recentHistory(api, account, conversationId, row.id)); } catch (error: any) { await assertMapping(); if (!(error instanceof IntegrationError) || error.code === 'INVALID_PROVIDER_SCOPE') throw error; /* History remains readable when reaction eligibility cannot be verified. */ }
           const latest = !url.searchParams.get('cursor') && result.sortOrderApplied === 'desc' ? result : await history(api, account, conversationId, {}, row.id);
-          return { ...result, messages: result.messages.map((message: any) => ({ ...message, version: inboxMessageVersion(message, accountId), actions: messageActions(account, message, windowAge) })), conversation: { ...conversationView(account, row), deleteVersion: latest.sortOrderApplied === 'desc' ? deletionVersion(row, latest.messages) : null }, contact: conversationContact(context, row, incoming) };
+          return { ...result, messages: result.messages.map((message: any) => ({ ...message, version: inboxMessageVersion(message, accountId), actions: messageActions(account, message, windowAge) })), conversation: { ...conversationView(account, row), deleteVersion: latest.sortOrderApplied === 'desc' ? deletionVersion(row, latest.messages) : null }, contact: await conversationContact(context, row, incoming) };
         }
         if (route[2] === 'delete') return deleteConversation(context, api, account, conversationId, row, key);
         if (route[2] === 'typing') {
@@ -701,7 +706,7 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
             payload.messagingType = 'MESSAGE_TAG'; payload.messageTag = body.messageTag;
           } else if (account.platform !== 'tiktok' && !(age >= 0 && age <= 86400000)) fail(409, 'MESSAGING_WINDOW_CLOSED', account.platform === 'whatsapp' ? 'Choose an approved WhatsApp template outside the 24-hour reply window.' : 'Choose a permitted non-promotional message tag outside the 24-hour reply window.');
         } else if (body.messageTag) fail(422, 'MESSAGE_TAG_UNSUPPORTED', 'Message tags are only available for Facebook and Instagram.');
-        if (payload.attachmentUrl && context.store?.list(project.id, 'assets').some((asset: any) => asset.deliveryUrl === payload.attachmentUrl && assetDeliveryIssue(asset))) fail(409, 'ATTACHMENT_EXPIRED', 'This hosted delivery file has expired or has no verified expiry. Upload it again before sending.');
+        if (payload.attachmentUrl && (await context.store?.list(project.id, 'assets'))?.some((asset: any) => asset.deliveryUrl === payload.attachmentUrl && assetDeliveryIssue(asset))) fail(409, 'ATTACHMENT_EXPIRED', 'This hosted delivery file has expired or has no verified expiry. Upload it again before sending.');
         const result = await api(`/inbox/conversations/${encodeURIComponent(conversationId)}/messages`, {}, payload, key);
         if (result.success !== true || !plain(result.data) || account.platform !== 'reddit' && !valid(result.data.messageId) || result.data.accountId !== undefined && result.data.accountId !== accountId || result.data.platform !== undefined && result.data.platform !== account.platform || result.data.conversationId !== undefined && !valid(result.data.conversationId) || !['facebook', 'instagram', 'bluesky', 'reddit'].includes(account.platform) && result.data.conversationId !== undefined && ![conversationId, row.id].includes(result.data.conversationId)) invalid(true);
         if (result.warnings != null && (!Array.isArray(result.warnings) || result.warnings.length > 100 || result.warnings.some(warning => typeof warning !== 'string' && (!plain(warning) || ['code', 'param', 'message'].some(field => warning[field] != null && typeof warning[field] !== 'string'))))) invalid(true);
@@ -717,13 +722,13 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
       if (path === 'comments/thread' || action?.[1] === 'comments') {
         supported(account, 'comments'); const postId = id(req.method === 'GET' ? url.searchParams.get('postId') : body.postId), post = await findRow(api, accounts, account, 'comments', postId);
         const verb = action?.[2]; let target: any = null;
-        if (req.method === 'GET') return privateReplyThread(context, accounts, account, post, await thread(api, accounts, account, post, { ...query(url, 'comments'), ...(url.searchParams.get('commentId') ? { commentId: id(url.searchParams.get('commentId')) } : {}) }));
+        if (req.method === 'GET') return await privateReplyThread(context, accounts, account, post, await thread(api, accounts, account, post, { ...query(url, 'comments'), ...(url.searchParams.get('commentId') ? { commentId: id(url.searchParams.get('commentId')) } : {}) }));
         fields(body, verb === 'edit' ? ['accountId', 'postId', 'commentId', 'content', 'expectedCommentVersion', 'confirmEdit'] : verb === 'private-reply' ? ['accountId', 'postId', 'commentId', 'message', 'expectedCommentVersion', 'confirmSend', 'buttons', 'quickReplies'] : ['accountId', 'postId', 'commentId', 'message', 'moderationStatus', 'banAuthor', ...(verb === 'like' ? ['reactionType'] : [])]);
         if (body.reactionType !== undefined && (account.platform !== 'linkedin' || !LINKEDIN_REACTIONS.has(body.reactionType))) fail(400, 'INVALID_COMMENT_REACTION', 'Choose one of the six supported LinkedIn reactions. Reaction types are only available for LinkedIn likes.');
         if (body.commentId) {
           const commentId = id(body.commentId);
           try { target = await findComment(api, accounts, account, post, commentId); }
-          catch (error: any) { if (verb !== 'unhide' || error.code !== 'COMMENT_OUTSIDE_POST' || !(target = priorHiddenComment(context, account, post, commentId))) throw error; }
+          catch (error: any) { if (verb !== 'unhide' || error.code !== 'COMMENT_OUTSIDE_POST' || !(target = await priorHiddenComment(context, account, post, commentId))) throw error; }
         }
         if (verb !== 'reply' && !target) fail(400, 'COMMENT_REQUIRED', 'Choose a comment first.');
         let moderationAccount = account, moderationPostId = post.id;
@@ -742,8 +747,8 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
           const freshAccounts = await scopedAccounts(api, profileId), freshAccount = requireAccount(freshAccounts, accountId);
           supported(freshAccount, 'commentEdit');
           if (freshAccount.platform !== account.platform || (freshAccount.platformUserId ?? null) !== (account.platformUserId ?? null)) fail(409, 'INBOX_ACCOUNT_CHANGED', 'This connected account changed. Refresh before editing its comment.');
-          assertMapping();
-          claimCommentReaction(context, freshAccount, post.id, target.row.id, 'edit');
+          await assertMapping();
+          await claimCommentReaction(context, freshAccount, post.id, target.row.id, 'edit');
           const receipt = await api(commentEndpoint, {}, { accountId, platform: 'reddit', content }, key, 'PATCH');
           if (receipt.status !== 'success' || receipt.commentId !== target.row.id || receipt.platform !== 'reddit') invalid(true);
           let fresh;
@@ -771,7 +776,7 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
           if (platform === 'linkedin' && verb === 'like') payload.reactionType = body.reactionType || 'LIKE';
           if (platform === 'bluesky') { if (!valid(verb === 'like' ? target.row.cid : target.row.likeUri)) fail(409, 'COMMENT_REFERENCE_REQUIRED', 'Refresh this Bluesky comment before changing its like.'); if (verb === 'like') payload.cid = target.row.cid; else payload.likeUri = target.row.likeUri; }
           let result;
-          claimCommentReaction(context, freshModeration, moderationPostId, target.row.id, verb, payload.reactionType);
+          await claimCommentReaction(context, freshModeration, moderationPostId, target.row.id, verb, payload.reactionType);
           try { result = await api(`${commentEndpoint}/like`, verb === 'unlike' ? payload : {}, verb === 'like' ? payload : undefined, key, verb === 'like' ? 'POST' : 'DELETE'); }
           catch (error: any) {
             if (platform === 'linkedin' && error.providerStatus === 403) fail(403, 'LINKEDIN_REACTION_PERMISSION_REQUIRED', 'LinkedIn could not authorize this reaction. Check inbox access and reconnect the account with social-feed permissions.');

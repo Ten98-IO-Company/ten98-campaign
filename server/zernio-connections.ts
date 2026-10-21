@@ -1,4 +1,4 @@
-import type { DatabaseSync } from 'node:sqlite';
+import { sql } from 'drizzle-orm';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 type Ctx = OperationContext & { body: any };
 import { IntegrationError, operation, scopedAccounts, mediaUrl, fail, reportObject as object } from './provider-core.ts';
@@ -16,9 +16,6 @@ function callback(context: Ctx) {
   let origin; try { origin = new URL(context.config?.appUrl || context.config?.env?.APP_URL || 'http://127.0.0.1:3000'); } catch { fail(503, 'INVALID_CALLBACK', 'Configure a valid app origin.'); }
   if (origin.username || origin.password || origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname))) fail(503, 'INVALID_CALLBACK', 'Configure a valid app origin.');
   const url = new URL('/', origin); url.search = new URLSearchParams({ view: 'integrations', project: context.project.id }) as unknown as string; return url.href;
-}
-function codeStore(db: DatabaseSync) {
-  db.exec('CREATE TABLE IF NOT EXISTS integration_telegram_codes (project_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, code TEXT NOT NULL, expires_at TEXT NOT NULL)');
 }
 async function confirmed(api: ZernioApi, profileId: string, platform: any, response: any, expectedUsername?: any) {
   const receipt = response.account;
@@ -51,17 +48,17 @@ export async function handleZernioConnections(context: Ctx, api: ZernioApi, prof
     send(200, { authUrl: authUrl.href }); return true;
   }
   if (task === 'code') {
-    if (platform !== 'telegram') fail(400, 'INVALID_CONNECTION', 'Access codes are only available for Telegram.'); fields(body, []); codeStore(db);
+    if (platform !== 'telegram') fail(400, 'INVALID_CONNECTION', 'Access codes are only available for Telegram.'); fields(body, []);
     const outcome = await operation(context, async () => {
       const response = await api('/connect/telegram', { profileId });
       if (!token(response.code) || !/^[A-Za-z0-9_]{5,32}$/.test(response.botUsername || '') || !Number.isFinite(Date.parse(response.expiresAt)) || Date.parse(response.expiresAt) <= Date.now() || Date.parse(response.expiresAt) > Date.now() + 16 * 60000 || !Array.isArray(response.instructions) || response.instructions.length > 20 || response.instructions.some((row: ProviderRecord) => !text(row, 2000))) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned an unreadable Telegram access code.', true);
-      db.prepare('INSERT INTO integration_telegram_codes VALUES (?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET profile_id=excluded.profile_id, code=excluded.code, expires_at=excluded.expires_at').run(context.project.id, profileId, response.code, response.expiresAt);
+      await db.execute(sql`INSERT INTO integration_telegram_codes (project_id, profile_id, code, expires_at) VALUES (${context.project.id}, ${profileId}, ${response.code}, ${response.expiresAt}) ON CONFLICT (project_id) DO UPDATE SET profile_id = excluded.profile_id, code = excluded.code, expires_at = excluded.expires_at`);
       return { code: response.code, botUsername: response.botUsername, expiresAt: response.expiresAt, instructions: response.instructions };
     }, 'telegram-code'); send(outcome.status, outcome.data); return true;
   }
   if (task === 'status') {
-    if (platform !== 'telegram') fail(400, 'INVALID_CONNECTION', 'Access-code status is only available for Telegram.'); fields(body, ['code']); codeStore(db);
-    const saved = db.prepare('SELECT * FROM integration_telegram_codes WHERE project_id=?').get(context.project.id) as ProviderRecord;
+    if (platform !== 'telegram') fail(400, 'INVALID_CONNECTION', 'Access-code status is only available for Telegram.'); fields(body, ['code']);
+    const saved = (await db.execute(sql`SELECT * FROM integration_telegram_codes WHERE project_id = ${context.project.id}`)).rows[0] as ProviderRecord;
     if (!token(body.code) || !saved || saved.profile_id !== profileId || saved.code !== body.code) fail(403, 'CODE_OUTSIDE_PROJECT', 'Generate a Telegram code for this project before checking it.');
     if (Date.parse(saved.expires_at) <= Date.now()) { send(200, { status: 'expired' }); return true; }
     const response = await api('/connect/telegram', { code: saved.code }, undefined, undefined, 'PATCH');
@@ -79,8 +76,12 @@ export async function handleZernioConnections(context: Ctx, api: ZernioApi, prof
   } else if (platform === 'shopify') { payload.shop = shopDomain(body.shop); path = '/connect/shopify/token'; }
   else if (platform === 'whop') { path = '/connect/whop-ads/credentials'; expected = 'whopads'; }
   else if (platform === 'telegram') { if (!/^(?:-?\d{1,20}|@[A-Za-z0-9_]{5,32})$/.test(body.chatId)) fail(400, 'INVALID_CONNECTION', 'Use a Telegram chat ID or @channel username.'); path = '/connect/telegram'; }
-  if (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operations'").get() as ProviderRecord && db.prepare("SELECT id FROM integration_operations WHERE project_id=? AND request_key<>? AND status IN ('pending','uncertain') AND action_path='POST /integrations/connections/:id/credentials'").get(context.project.id, req.headers['idempotency-key'] as string) as ProviderRecord) fail(409, 'OPERATION_UNCERTAIN', 'Review the previous unconfirmed connection before submitting another credential request.');
+  const unresolved = async () => { if ((await db.execute(sql`SELECT id FROM integration_operations WHERE project_id = ${context.project.id} AND request_key <> ${req.headers['idempotency-key'] as string} AND status IN ('pending','uncertain') AND action_path = 'POST /integrations/connections/:id/credentials'`)).rowCount) fail(409, 'OPERATION_UNCERTAIN', 'Review the previous unconfirmed connection before submitting another credential request.'); };
+  await unresolved();
   const outcome = await operation(context, async key => {
+    // Parallel credential requests for different platforms both pass the check above; each re-checks after its own
+    // receipt is committed, so at least one sees the other pending and neither pair can send concurrently.
+    await unresolved();
     if (platform === 'bluesky') {
       const users = await api('/users'); if (!token(users.currentUserId)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not identify the current API user.');
       payload.state = `${users.currentUserId}-${profileId}`; delete payload.profileId;

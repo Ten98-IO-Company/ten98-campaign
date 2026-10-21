@@ -34,7 +34,7 @@ function setup() {
     throw new Error(`Unexpected provider request: ${path}`);
   };
   async function request(action, method = 'GET') {
-    let response; const url = new URL(`http://localhost/api/projects/project-a/integrations/insights/${action}`), context = { req: { method }, url, project: { id: 'project-a' }, role: 'viewer', assertProjectMapping(expected) { assert.equal(expected, profileId); if (state.accessError) throw state.accessError; }, send(status, data) { response = { status, data }; } };
+    let response; const url = new URL(`http://localhost/api/projects/project-a/integrations/insights/${action}`), context = { req: { method }, url, project: { id: 'project-a' }, role: 'viewer', async assertProjectMapping(expected) { assert.equal(expected, profileId); if (state.accessError) throw state.accessError; }, send(status, data) { response = { status, data }; } };
     try { const handled = await handleZernioInsights(context, api, profileId, url.pathname.split('/insights/')[1]); return response || { handled }; }
     catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   }

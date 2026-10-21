@@ -11,19 +11,23 @@
     "dev:server": "node --env-file-if-exists=.env --watch server/index.ts",
     "build": "npm run check:architecture && tsc --noEmit && vite build",
     "start": "node --env-file-if-exists=.env server/index.ts",
+    "migrate": "node --env-file-if-exists=.env server/cli.ts migrate",
     "test": "npm run check:architecture && node --test tests/*.test.mjs",
     "check:architecture": "node node_modules/@ten98/runtime/check.mjs ."
   },
   "dependencies": {
-    "@ten98/runtime": "file:vendor/ten98-runtime-0.1.14.tgz",
+    "@ten98/runtime": "file:vendor/ten98-runtime-0.1.15.tgz",
     "@ten98/ui": "file:vendor/ten98-ui-0.5.4.tgz",
+    "drizzle-orm": "0.45.2",
     "openid-client": "6.8.8",
+    "pg": "8.23.0",
     "qrcode-generator": "2.0.4",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@types/node": "24.10.1",
+    "@types/pg": "8.15.6",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
     "typescript": "7.0.2",

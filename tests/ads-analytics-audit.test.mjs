@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { handleIntegration } from '../server/integrations.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
 // Provider contracts: https://docs.zernio.com/ad-campaigns/boost-post and /api/openapi.
-async function audit(run) {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, writes = [];
+async function audit(t, run) {
+  const { db } = await testDatabase(t), originalFetch = globalThis.fetch, writes = [];
   const project = { id: 'audit-project', zernioProfileId: 'audit-profile' };
   const account = { _id: 'audit-account', profileId: project.zernioProfileId, platform: 'facebook' };
   const campaign = { profileId: project.zernioProfileId, platform: 'facebook', platformCampaignId: 'audit-campaign', currency: 'USD', budgetLevel: 'campaign', campaignBudget: { amount: 500, type: 'lifetime' }, adSets: [{ platformAdSetId: 'audit-set', adSetName: 'Lifetime set', adSetBudget: { amount: 500, type: 'lifetime' } }] };
@@ -17,10 +17,10 @@ async function audit(run) {
     return response;
   }
   try { await run({ project, account, campaign, post, writes, invoke, mock(handler) { globalThis.fetch = async (target, options = {}) => { const url = new URL(target), method = options.method || 'GET', payload = options.body ? JSON.parse(options.body) : undefined; assert.equal(url.origin, 'https://zernio.com'); if (method !== 'GET') writes.push({ url, payload }); return handler(url, method, payload); }; } }); }
-  finally { globalThis.fetch = originalFetch; db.close(); }
+  finally { globalThis.fetch = originalFetch; }
 }
 
-test('published-post boosts place the chosen countries in Zernio targeting and preserve other audience selections', () => audit(async ({ account, post, mock, writes, invoke }) => {
+test('published-post boosts place the chosen countries in Zernio targeting and preserve other audience selections', { skip: postgresSkip }, t => audit(t, async ({ account, post, mock, writes, invoke }) => {
   mock((url, method, payload) => {
     if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [account] });
     if (url.pathname === '/api/v1/ads/accounts') return Response.json({ accounts: [{ id: 'native-account', currency: 'USD', selectable: true }] });
@@ -34,7 +34,7 @@ test('published-post boosts place the chosen countries in Zernio targeting and p
   assert.deepEqual(writes[0].payload.targeting, { countries: ['AE'], ageMin: 25, ageMax: 40 }); assert.equal(writes[0].payload.countries, undefined);
 }));
 
-test('daily budget editors do not convert the provider campaignBudget or adSetBudget lifetime allocations', () => audit(async ({ campaign, mock, writes, invoke }) => {
+test('daily budget editors do not convert the provider campaignBudget or adSetBudget lifetime allocations', { skip: postgresSkip }, t => audit(t, async ({ campaign, mock, writes, invoke }) => {
   mock((url, method, payload) => {
     if (url.pathname === '/api/v1/ads/tree') return Response.json({ campaigns: [campaign], pagination: { pages: 1 } });
     assert.equal(method, 'PUT'); return Response.json({ updated: 1, budget: payload.budget });
@@ -51,7 +51,7 @@ test('daily budget editors do not convert the provider campaignBudget or adSetBu
   assert.equal(campaignReview.status, 400); assert.equal(campaignReview.data.error.code, 'BUDGET_REVIEW_REQUIRED'); assert.equal((await update('adset')).status, 400); assert.equal(writes.length, 0, 'Both daily budget levels require their separate reviewed proposals before a provider write.');
 }));
 
-test('dashboard fields displayed as text reject objects before they can crash the report UI', () => audit(async ({ mock, invoke }) => {
+test('dashboard fields displayed as text reject objects before they can crash the report UI', { skip: postgresSkip }, t => audit(t, async ({ mock, invoke }) => {
   const report = { totals: { impressions: 0 }, daily: [], topPosts: [{ postId: 'report-post', platform: 'facebook', metrics: { impressions: 0 } }] };
   mock(() => Response.json(report));
   assert.equal((await invoke('analytics/dashboard?fromDate=2026-10-01&toDate=2026-10-02')).status, 200);

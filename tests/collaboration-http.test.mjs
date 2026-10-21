@@ -4,10 +4,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('HTTP invitation links safely onboard new accounts, require the existing identity, preserve workspace scope and cannot reset passwords', async () => {
-  const dataDir = await mkdtemp(join(tmpdir(), 'ten98-collaboration-http-')), origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, env: {}, appUrl: origin });
+test('HTTP invitation links safely onboard new accounts, require the existing identity, preserve workspace scope and cannot reset passwords', { skip: postgresSkip }, async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'ten98-collaboration-http-')), origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir, env: {}, appUrl: origin });
   await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); });
   const base = `http://127.0.0.1:${app.server.address().port}`, ownerPassword = 'fixture owner personal password'; let ownerCookie;
   async function request(path, { method = 'GET', body, cookie = ownerCookie, originHeader = origin } = {}) {
@@ -25,7 +25,7 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     assert.equal(created.status, 201); assert.equal(new URL(created.data.url).origin, origin);
     const inviteToken = token(created), invitation = '/api/invitations/' + inviteToken;
     assert.match(inviteToken, /^[A-Za-z0-9_-]{43}$/);
-    const stored = app.db.prepare('SELECT * FROM workspace_invitations WHERE id=?').get(created.data.invitation.id);
+    const stored = await app.sql.get('SELECT * FROM workspace_invitations WHERE id=?', created.data.invitation.id);
     assert.equal(stored.token_hash, createHash('sha256').update(inviteToken).digest('hex')); assert.equal(JSON.stringify(stored).includes(inviteToken), false);
     const publicRead = await request(invitation, { cookie: null, originHeader: null });
     assert.equal(publicRead.status, 200); assert.equal(publicRead.data.accountExists, false); assert.equal(publicRead.data.requiresSignIn, false); assert.equal(publicRead.data.invitation.email, 'new-colleague@example.test');
@@ -40,9 +40,9 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     const accepted = await request(invitation, { method: 'POST', body: signup, cookie: null });
     assert.equal(accepted.status, 200); assert.equal(accepted.data.created, true); assert.equal(accepted.data.role, 'editor'); assert.equal(accepted.data.workspaceId, workspaceId); assert.equal(accepted.data.user.isOperator, false);
     assert.ok(accepted.cookie); assert.match(accepted.cookieHeader, /HttpOnly/); assert.match(accepted.cookieHeader, /SameSite=Lax/);
-    const colleagueCookie = accepted.cookie, colleagueId = accepted.data.user.id, colleague = app.db.prepare('SELECT * FROM users WHERE id=?').get(colleagueId);
+    const colleagueCookie = accepted.cookie, colleagueId = accepted.data.user.id, colleague = await app.sql.get('SELECT * FROM users WHERE id=?', colleagueId);
     assert.match(colleague.password, /^scrypt\$/); assert.equal(colleague.password.includes(newPassword), false);
-    assert.equal(app.db.prepare('SELECT * FROM instance_operators WHERE user_id=?').get(colleagueId), undefined);
+    assert.equal(await app.sql.get('SELECT * FROM instance_operators WHERE user_id=?', colleagueId), undefined);
     const colleagueState = (await request('/api/state', { cookie: colleagueCookie })).data;
     assert.equal(colleagueState.user.id, colleagueId); assert.deepEqual(colleagueState.workspaces.map(workspace => [workspace.id, workspace.role]), [[workspaceId, 'editor']]);
     assert.equal((await request(`/api/projects/${projectId}/campaigns`, { method: 'POST', body: { name: 'Editor campaign' }, cookie: colleagueCookie })).status, 201);
@@ -54,11 +54,11 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     assert.equal((await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Uninvited', email: 'uninvited@example.test', password: newPassword }, cookie: null })).status, 409, 'Open signup remains closed after instance setup.');
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: colleague.email, password: ownerPassword }, cookie: null })).status, 401);
     const ownLogin = await request('/api/auth/login', { method: 'POST', body: { email: colleague.email, password: newPassword }, cookie: null }); assert.equal(ownLogin.status, 200); assert.equal(ownLogin.data.user.id, colleagueId);
-    assert.equal(app.db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(workspaceId, ownerState.user.id).role, 'owner');
+    assert.equal((await app.sql.get('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?', workspaceId, ownerState.user.id)).role, 'owner');
     assert.equal((await request(team + '/members')).status, 200);
 
-    const existingId = randomUUID(), ownerHash = app.db.prepare('SELECT password FROM users WHERE id=?').get(ownerState.user.id).password;
-    app.db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(existingId, 'Existing account', 'existing-colleague@example.test', ownerHash);
+    const existingId = randomUUID(), ownerHash = (await app.sql.get('SELECT password FROM users WHERE id=?', ownerState.user.id)).password;
+    await app.sql.run('INSERT INTO users VALUES(?,?,?,?)', existingId, 'Existing account', 'existing-colleague@example.test', ownerHash);
     const existingCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: ownerPassword }, cookie: null })).cookie;
     const separate = await request('/api/workspaces', { method: 'POST', body: { name: 'Existing private workspace' }, cookie: existingCookie }); assert.equal(separate.status, 201);
     assert.equal((await request(`/api/state?projectId=${separate.data.projectId}`)).status, 404);
@@ -73,9 +73,9 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     assert.equal((await request(existingPath, { cookie: existingCookie })).data.requiresSignIn, false);
     const joinedExisting = await request(existingPath, { method: 'POST', body: {}, cookie: existingCookie });
     assert.equal(joinedExisting.status, 200); assert.equal(joinedExisting.data.created, false); assert.equal(joinedExisting.data.user.id, existingId); assert.equal(joinedExisting.data.role, 'viewer'); assert.equal(joinedExisting.cookie, undefined, 'Accepting with an existing identity does not mint a replacement session.');
-    assert.equal(app.db.prepare('SELECT password FROM users WHERE id=?').get(existingId).password, ownerHash);
-    assert.equal(app.db.prepare('SELECT name FROM users WHERE id=?').get(existingId).name, 'Existing account');
-    assert.equal(app.db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(separate.data.workspace.id, existingId).role, 'owner');
+    assert.equal((await app.sql.get('SELECT password FROM users WHERE id=?', existingId)).password, ownerHash);
+    assert.equal((await app.sql.get('SELECT name FROM users WHERE id=?', existingId)).name, 'Existing account');
+    assert.equal((await app.sql.get('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?', separate.data.workspace.id, existingId)).role, 'owner');
     const existingState = (await request(`/api/state?projectId=${projectId}`, { cookie: existingCookie })).data;
     assert.equal(existingState.workspaces.find(workspace => workspace.id === workspaceId).role, 'viewer');
     assert.equal((await request(`/api/projects/${projectId}/campaigns`, { method: 'POST', body: { name: 'Blocked viewer campaign' }, cookie: existingCookie })).status, 403);
@@ -84,5 +84,5 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     assert.equal(JSON.stringify(list.data).includes(inviteToken), false); assert.equal(JSON.stringify(list.data).includes(token(existingInvitation)), false); assert.equal(JSON.stringify(list.data).includes('token_hash'), false);
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: newPassword }, cookie: null })).status, 401);
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: ownerPassword }, cookie: null })).status, 200);
-  } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
 });

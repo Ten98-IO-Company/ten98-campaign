@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('Meta interest HTTP reads project safe results only while account access stays current', async t => {
+test('Meta interest HTTP reads project safe results only while account access stays current', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-ad-targeting-')), origin = 'http://127.0.0.1:3018';
   const apiKey = 'synthetic-targeting-key', profileId = 'targeting-profile', accountId = 'meta-connection', adAccountId = 'native-account';
-  const app = createApp({ dataDir: directory, appUrl: origin, env: { ZERNIO_API_KEY: apiKey }, directScheduler: false });
+  const app = await testApp(t, { dataDir: directory, appUrl: origin, env: { ZERNIO_API_KEY: apiKey }, directScheduler: false });
   const originalFetch = globalThis.fetch, calls = [], password = 'a long targeting fixture password';
   const connected = () => ({ _id: accountId, profileId, platform: 'metaads', username: 'fixture-brand', isActive: true });
   const advertiser = () => ({ id: adAccountId, selectable: true });
@@ -101,14 +101,14 @@ test('Meta interest HTTP reads project safe results only while account access st
     });
 
     await t.test('session, membership, role, mapping and credential changes are checked across awaited reads', async () => {
-      const role = next => app.db.prepare('UPDATE memberships SET role=? WHERE workspace_id=? AND user_id=?').run(next, state.workspaces[0].id, state.user.id);
+      const role = next => app.sql.run('UPDATE memberships SET role=? WHERE workspace_id=? AND user_id=?', next, state.workspaces[0].id, state.user.id);
       for (const [pathname, occurrence] of [['/api/v1/accounts', 1], ['/api/v1/ads/accounts', 1], ['/api/v1/ads/targeting/search', 1], ['/api/v1/accounts', 2], ['/api/v1/ads/accounts', 2], ['/api/v1/accounts', 3]]) {
-        try { const result = await during(pathname, () => role('viewer'), occurrence); assert.equal(result.status, 403); } finally { role('owner'); }
+        try { const result = await during(pathname, () => role('viewer'), occurrence); assert.equal(result.status, 403); } finally { await role('owner'); }
       }
-      try { const result = await during('/api/v1/ads/targeting/search', () => app.db.prepare('DELETE FROM memberships WHERE workspace_id=? AND user_id=?').run(state.workspaces[0].id, state.user.id)); assert.ok([403, 404].includes(result.status)); }
-      finally { app.db.prepare("INSERT OR REPLACE INTO memberships VALUES(?,?,'owner')").run(state.workspaces[0].id, state.user.id); }
-      try { const result = await during('/api/v1/ads/targeting/search', () => app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('foreign-profile', state.projectId)); assert.equal(result.status, 409); }
-      finally { app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, state.projectId); }
+      try { const result = await during('/api/v1/ads/targeting/search', () => app.sql.run('DELETE FROM memberships WHERE workspace_id=? AND user_id=?', state.workspaces[0].id, state.user.id)); assert.ok([403, 404].includes(result.status)); }
+      finally { await app.sql.run("INSERT INTO memberships (workspace_id, user_id, role) VALUES (?,?,'owner') ON CONFLICT (workspace_id, user_id) DO UPDATE SET role=excluded.role", state.workspaces[0].id, state.user.id); }
+      try { const result = await during('/api/v1/ads/targeting/search', () => app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'foreign-profile', state.projectId)); assert.equal(result.status, 409); }
+      finally { await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', profileId, state.projectId); }
       try { const result = await during('/api/v1/ads/targeting/search', async () => { assert.equal((await http('/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-synthetic-key' } } })).status, 200); }); assert.equal(result.status, 409); }
       finally { assert.equal((await http('/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey } } })).status, 200); }
       const revoker = (await http('/auth/login', { method: 'POST', body: { email: 'targeting@example.test', password } })).cookie;
@@ -123,5 +123,5 @@ test('Meta interest HTTP reads project safe results only while account access st
       assert.equal(result.status, 200); assert.deepEqual(result.data, reply); assert.equal(searchCalls().at(-1).url.searchParams.get('geoType'), 'city');
     });
     assert.ok(calls.length > 0); assert.ok(calls.every(call => call.method === 'GET'), 'No provider POST, PUT, PATCH or DELETE is allowed.');
-  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });

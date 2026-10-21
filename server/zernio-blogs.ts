@@ -1,6 +1,6 @@
 import type { OperationContext, ZernioApi, ProviderRecord } from './provider-core.ts';
 import { createHash } from 'node:crypto';
-import { fail, reportObject as object, IntegrationError, operation, scopedAccounts, requireAccount } from './provider-core.ts';
+import { fail, reportObject as object, IntegrationError, operation, claimFence, scopedAccounts, requireAccount } from './provider-core.ts';
 
 const numeric = (value: any) => typeof value === 'string' && /^\d{1,100}$/.test(value);
 const nativeId = (value: any) => numeric(value) ? String(BigInt(value)) : Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
@@ -12,8 +12,8 @@ const invalid = () => fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio returned un
 const hash = (value: any) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const identity = (account: any) => [account._id, account.platform, String(account.profileId?._id || account.profileId), account.platformUserId ?? null, account.username ?? null, account.displayName ?? null, account.isActive ?? null, account.needsReconnection ?? null];
 
-function access(context: OperationContext & { body: any }, profileId: any) {
-  try { context.assertProjectMapping?.(profileId); context.assertIntegrationSettings?.(); }
+async function access(context: OperationContext & { body: any }, profileId: any) {
+  try { await context.assertProjectMapping?.(profileId); await context.assertIntegrationSettings?.(); }
   catch (error: any) { fail(error.status === 403 ? 403 : 409, error.status === 403 ? 'PROJECT_ACCESS_CHANGED' : 'PROJECT_CONNECTION_CHANGED', 'Your project access or connection changed. Refresh before continuing.'); }
 }
 function accountRow(account: any) {
@@ -21,9 +21,9 @@ function accountRow(account: any) {
   return { id: account._id, platform: account.platform, name: account.displayName || account.username || account.platform, isActive: account.isActive !== false, needsReconnection: account.needsReconnection === true };
 }
 async function accounts(context: OperationContext & { body: any }, api: ZernioApi, profileId: any) {
-  access(context, profileId);
+  await access(context, profileId);
   const rows = await scopedAccounts(api, profileId);
-  access(context, profileId);
+  await access(context, profileId);
   if (rows.length > 10000 || new Set(rows.map(row => row._id)).size !== rows.length) invalid();
   return rows.filter(row => ['shopify', 'wordpress'].includes(row.platform)).map(row => { accountRow(row); return row; });
 }
@@ -36,9 +36,9 @@ function scope(value: any, account: any, profileId: any) {
   if (!object(value) || value.platform !== account.platform || value.accountId != null && String(value.accountId?._id || value.accountId) !== account._id || value.profileId != null && String(value.profileId?._id || value.profileId) !== profileId) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned blog content outside this project or account.');
 }
 async function read(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, account: any, path: any, query = {}) {
-  access(context, profileId);
+  await access(context, profileId);
   const response = await api(path, query);
-  access(context, profileId);
+  await access(context, profileId);
   const fresh = await selected(context, api, profileId, account._id);
   if (JSON.stringify(identity(fresh)) !== JSON.stringify(identity(account))) fail(409, 'BLOG_ACCOUNT_CHANGED', 'The connected store or site changed. Load its blogs again.');
   scope(response, account, profileId);
@@ -111,22 +111,19 @@ export async function handleZernioBlogs(context: OperationContext & { body: any 
   if (!list && url.search) fail(400, 'INVALID_BLOG_QUERY', 'This blog action does not accept filters.');
   if (create) {
     if (!object(body) || Object.keys(body).some(key => !['title', 'bodyHtml', 'version', 'confirmCreate'].includes(key)) || body.confirmCreate !== true || !text(body.title, 500) || !body.title.trim() || /[\r\n\t]/.test(body.title) || !text(body.bodyHtml, 500000) || !/^[a-f0-9]{64}$/.test(body.version || '')) fail(400, 'BLOG_DRAFT_REVIEW_REQUIRED', 'Review the selected blog, title and HTML body, then confirm creation of a draft.');
-    access(context, profileId);
-    // ponytail: this native-site fence shares operation's single-process ceiling; use transactional resource locks before multiple server processes.
-    db.exec('CREATE TABLE IF NOT EXISTS zernio_blog_creates(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
+    await access(context, profileId);
     const outcome = await operation(context, async key => {
       const before = await snapshot(context, api, profileId, accountId, blogId);
       if (before.version !== body.version) fail(409, 'BLOG_CHANGED', 'The connected site or blog changed. Load and review its details again.');
       if (!before.account.platformUserId?.trim()) fail(409, 'BLOG_SITE_IDENTITY_UNAVAILABLE', 'The site identity could not be verified. Refresh or reconnect this account before creating a draft.');
       const resource = JSON.stringify([before.account.platform, before.account.platformUserId, blogId]);
-      const previous = db.prepare('SELECT o.status FROM zernio_blog_creates b LEFT JOIN integration_operations o ON o.project_id=b.project_id AND o.request_key=b.request_key WHERE b.resource=?').get(resource) as ProviderRecord | undefined;
-      if (previous && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED', 'This request was not sent. Review the earlier blog draft outcome before creating another draft.');
-      access(context, profileId);
-      db.prepare('INSERT INTO zernio_blog_creates VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, context.project.id, key);
+      // One draft creation per native blog at a time; the fence stays held until a later claim finds this receipt resolved.
+      if (!await claimFence(db, 'zernio_blog_creates', resource, context.project.id, key)) fail(409, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED', 'This request was not sent. Review the earlier blog draft outcome before creating another draft.');
+      await access(context, profileId);
       const path = `/accounts/${encodeURIComponent(accountId)}/blogs/${blogId}/articles`;
       const response = await api(path, {}, { title: body.title.trim(), bodyHtml: body.bodyHtml, isPublished: false }, key);
       try {
-        access(context, profileId); scope(response, before.account, profileId);
+        await access(context, profileId); scope(response, before.account, profileId);
         const receipt = articleRow(response.article, before.account, profileId, blogId); draft(response.article, receipt);
         const result = await read(context, api, profileId, before.account, `${path}/${receipt.id}`), article = articleRow(result.article, before.account, profileId, blogId, receipt.id); draft(result.article, article);
         if (article.title !== receipt.title || article.bodyHtml !== receipt.bodyHtml) fail(502, 'BLOG_DRAFT_NOT_CONFIRMED', 'The created draft changed before its content could be confirmed.', true);
@@ -140,9 +137,7 @@ export async function handleZernioBlogs(context: OperationContext & { body: any 
   if (mutate) {
     const confirmation = update ? 'confirmUpdate' : schedule ? 'confirmSchedule' : cancelSchedule ? 'confirmCancelSchedule' : edit === 'publish' ? 'confirmPublish' : 'confirmUnpublish';
     if (!object(body) || Object.keys(body).some(key => ![...(update ? ['title', 'bodyHtml'] : schedule ? ['publishDate'] : []), 'version', confirmation].includes(key)) || body[confirmation] !== true || update && (!text(body.title, 500) || !body.title.trim() || /[\r\n\t]/.test(body.title) || !text(body.bodyHtml, 500000)) || schedule && !offsetInstant(body.publishDate) || !/^[a-f0-9]{64}$/.test(body.version || '')) fail(400, update ? 'BLOG_DRAFT_REVIEW_REQUIRED' : schedule || cancelSchedule ? 'BLOG_SCHEDULE_REVIEW_REQUIRED' : 'BLOG_PUBLICATION_REVIEW_REQUIRED', update ? 'Review this existing article, title and HTML body, then confirm the update.' : schedule ? 'Review this article and a future ISO 8601 publication time with an explicit offset or Z, then confirm scheduling.' : 'Load and review this article, then explicitly confirm the publication change.');
-    access(context, profileId);
-    // ponytail: this native-article fence shares operation's single-process ceiling; use transactional resource locks before multiple server processes.
-    db.exec('CREATE TABLE IF NOT EXISTS zernio_blog_updates(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
+    await access(context, profileId);
     const outcome = await operation(context, async key => {
       const before = await snapshot(context, api, profileId, accountId, blogId, articleId);
       if (before.version !== body.version) fail(409, 'BLOG_ARTICLE_CHANGED', 'The connected site, blog or article changed. Load and review this article again.');
@@ -161,16 +156,15 @@ export async function handleZernioBlogs(context: OperationContext & { body: any 
       const ready = await snapshot(context, api, profileId, accountId, blogId, articleId);
       if (ready.version !== before.version) fail(409, 'BLOG_ARTICLE_CHANGED', 'This article changed before the change could be sent. Load and review it again.');
       verifyBefore(ready);
-      access(context, profileId);
+      await access(context, profileId);
       if (schedule && Date.parse(body.publishDate) <= Date.now()) fail(409, 'BLOG_SCHEDULE_DATE_ELAPSED', 'The reviewed publication time has passed. Review a new future time before scheduling.');
-      const previous = db.prepare('SELECT o.status FROM zernio_blog_updates b LEFT JOIN integration_operations o ON o.project_id=b.project_id AND o.request_key=b.request_key WHERE b.resource=?').get(resource) as ProviderRecord | undefined;
-      if (previous && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED', 'This change was not sent. Review the earlier article outcome before changing this article again.');
-      db.prepare('INSERT INTO zernio_blog_updates VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, context.project.id, key);
+      // One change per native article at a time; the fence stays held until a later claim finds this receipt resolved.
+      if (!await claimFence(db, 'zernio_blog_updates', resource, context.project.id, key)) fail(409, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED', 'This change was not sent. Review the earlier article outcome before changing this article again.');
       const path = `/accounts/${encodeURIComponent(accountId)}/blogs/${blogId}/articles/${articleId}`;
       // Zernio has no atomic conditional article update: external edits after the last read can change reviewed content before this write.
       const response = await api(path, {}, update ? { title: body.title.trim(), bodyHtml: body.bodyHtml } : schedule ? { publishDate: body.publishDate } : { isPublished: edit === 'publish' }, key, 'PATCH');
       try {
-        access(context, profileId); scope(response, before.account, profileId);
+        await access(context, profileId); scope(response, before.account, profileId);
         const verifyAfter = (raw: any, article: any) => {
           if (publishedUpdate) { if (!article.canEditPublished || Date.parse(raw.publishedAt) !== Date.parse(before.rawArticle.publishedAt) || !article.title.trim() || typeof article.bodyHtml !== 'string') fail(502, 'BLOG_PUBLISHED_CONTENT_NOT_CONFIRMED', 'The provider did not confirm the updated article with its original publication state and time.', true); }
           else if (update) draft(raw, article);

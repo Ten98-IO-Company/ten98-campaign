@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { providerRequest, operation } from '../server/provider-core.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
 const encoder = new TextEncoder(), maxBytes = 8 * 1024 * 1024;
 const invalidUtf8 = () => new Uint8Array([...encoder.encode('{"value":"'), 255, ...encoder.encode('"}')]);
@@ -72,16 +72,14 @@ test('Twilio rejection codes and private-reply consumption evidence remain sanit
   }
 });
 
-test('unreadable successful paid writes retain an uncertain receipt and never dispatch a retry', async t => {
-  const db = new DatabaseSync(':memory:'); let dispatches = 0;
+test('unreadable successful paid writes retain an uncertain receipt and never dispatch a retry', { skip: postgresSkip }, async t => {
+  const { db, sql } = await testDatabase(t); let dispatches = 0;
   t.mock.method(globalThis, 'fetch', async () => { dispatches++; return new Response(invalidUtf8()); });
   const context = { db, project: { id: 'response-project' }, req: { method: 'POST', headers: { 'idempotency-key': 'response-receipt' } }, url: new URL('https://app.example.test/api/projects/response-project/integrations/ads/create'), body: { reviewed: true } };
   const send = () => operation(context, () => providerRequest('https://zernio.com/api/v1/ads/create', { method: 'POST' }));
-  try {
-    const result = await send();
-    assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
-    assert.equal(db.prepare('SELECT status FROM integration_operations').get().status, 'uncertain');
-    await assert.rejects(send, error => error.code === 'OPERATION_UNCERTAIN');
-    assert.equal(dispatches, 1);
-  } finally { db.close(); }
+  const result = await send();
+  assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
+  assert.equal((await sql.get('SELECT status FROM integration_operations')).status, 'uncertain');
+  await assert.rejects(send, error => error.code === 'OPERATION_UNCERTAIN');
+  assert.equal(dispatches, 1);
 });

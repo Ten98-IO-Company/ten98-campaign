@@ -6,13 +6,16 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
 // Type checking does not prove Node can strip and load the TypeScript modules; boot the real entrypoint.
-test('the production entrypoint boots on Node 24 and serves a request', { timeout: 60000 }, async () => {
+test('the production entrypoint boots on Node 24 and serves a request', { timeout: 60000, skip: postgresSkip }, async t => {
   assert.equal(process.versions.node.split('.')[0], '24');
   const port = await new Promise(resolve => { const probe = createServer().listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); }); });
+  // The entrypoint refuses to start without DATABASE_URL naming a migrated database. Windows sockets need SystemRoot.
+  const { url } = await testDatabase(t);
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-boot-')), origin = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/index.ts', import.meta.url))], { env: { PATH: process.env.PATH, DATA_DIR: dataDir, PORT: String(port), APP_URL: origin }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../server/index.ts', import.meta.url))], { env: { PATH: process.env.PATH, ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}), DATA_DIR: dataDir, DATABASE_URL: url, PORT: String(port), APP_URL: origin }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
   const exited = new Promise(resolve => child.once('exit', resolve));
   try {

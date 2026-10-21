@@ -1,9 +1,9 @@
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 type Ctx = OperationContext & { body: any };
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount, reportObject as object , fail } from './provider-core.ts';
+import { IntegrationError, operation, claimFence, scopedAccounts, requireAccount, reportObject as object , fail } from './provider-core.ts';
 import { validPostInstant } from '../shared/social-posts.ts';
-import { transaction } from './database.ts';
+import { sql } from 'drizzle-orm';
 
 const text = (value: any, max: any) => typeof value === 'string' && value.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(value);
 const nullableText = (value: any, max: any) => value == null || text(value, max);
@@ -21,8 +21,8 @@ function providerReadError(error: any, stock = false): never {
   throw error;
 }
 
-function access(context: Ctx, profileId: string) {
-  try { context.assertProjectMapping?.(profileId); context.assertIntegrationSettings?.(); }
+async function access(context: Ctx, profileId: string) {
+  try { await context.assertProjectMapping?.(profileId); await context.assertIntegrationSettings?.(); }
   catch (error: any) { fail(error.status === 403 ? 403 : 409, error.status === 403 ? 'PROJECT_ACCESS_CHANGED' : 'PROJECT_CONNECTION_CHANGED', 'Your project access or connection changed. Refresh before continuing.'); }
 }
 function accountRow(account: ProviderRecord) {
@@ -30,9 +30,9 @@ function accountRow(account: ProviderRecord) {
   return { id: account._id, platform: 'shopify', name: account.displayName || account.username || 'Shopify', isActive: account.isActive !== false, needsReconnection: account.needsReconnection === true };
 }
 async function accounts(context: Ctx, api: ZernioApi, profileId: string) {
-  access(context, profileId);
+  await access(context, profileId);
   const rows = await scopedAccounts(api, profileId).catch(providerReadError);
-  access(context, profileId);
+  await access(context, profileId);
   if (rows.length > 10000 || new Set(rows.map((row: ProviderRecord) => row._id)).size !== rows.length) invalid();
   return rows.filter((row: ProviderRecord) => row.platform === 'shopify').map((row: ProviderRecord) => { accountRow(row); return row; });
 }
@@ -45,9 +45,9 @@ function scope(value: any, account: ProviderRecord, profileId: string) {
   if (!object(value) || value.platform !== undefined && value.platform !== 'shopify' || value.accountId !== undefined && value.accountId !== account._id || value.profileId !== undefined && String(value.profileId?._id || value.profileId) !== profileId) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned store products outside this project or account.');
 }
 async function read(context: Ctx, api: ZernioApi, profileId: string, account: ProviderRecord, path: any, query: any, stock = false) {
-  access(context, profileId);
+  await access(context, profileId);
   const response = await api(path, query).catch((error: any) => providerReadError(error, stock));
-  access(context, profileId);
+  await access(context, profileId);
   const fresh = await selected(context, api, profileId, account._id);
   if (identity(fresh) !== identity(account)) fail(409, 'PRODUCT_ACCOUNT_CHANGED', 'The connected store changed. Load its products again.');
   scope(response, account, profileId);
@@ -67,12 +67,11 @@ async function storeRead(context: Ctx, api: ZernioApi, profileId: string, accoun
 function permission(store: any, write?: any) {
   for (const capability of write ? ['products.read', `products.${write}`] : ['products.read']) if (!store.capabilities.includes(capability) || store.missingCapabilities.includes(capability)) fail(403, capability === 'products.read' ? 'PRODUCT_READ_PERMISSION_REQUIRED' : write === 'create' ? 'PRODUCT_CREATE_PERMISSION_REQUIRED' : write === 'price' ? 'PRODUCT_PRICE_PERMISSION_REQUIRED' : write === 'status' ? 'PRODUCT_STATUS_PERMISSION_REQUIRED' : 'PRODUCT_UPDATE_PERMISSION_REQUIRED', 'This store has not granted the required product permissions. Ask a workspace administrator to reconnect it or review its permissions.');
 }
-function claimProduct(context: Ctx, account: ProviderRecord, productId: any, key: any) {
+// One change per native product across projects and aliases; the fence stays held until a later claim finds its receipt resolved.
+async function claimProduct(context: Ctx, account: ProviderRecord, productId: any, key: any) {
   const nativeProductId = /^\d{1,500}$/.test(productId) ? String(BigInt(productId)) : productId;
-  const resource = JSON.stringify(['shopify', account.platformUserId, nativeProductId]), { db } = context;
-  const previous = db.prepare('SELECT o.status FROM zernio_product_updates p LEFT JOIN integration_operations o ON o.project_id=p.project_id AND o.request_key=p.request_key WHERE p.resource=?').get(resource) as ProviderRecord;
-  if (previous && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED', 'This change was not sent. Review the earlier product outcome before changing this product again.');
-  db.prepare('INSERT INTO zernio_product_updates VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, context.project.id, key);
+  const resource = JSON.stringify(['shopify', account.platformUserId, nativeProductId]);
+  if (!await claimFence(context.db, 'zernio_product_updates', resource, context.project.id, key)) fail(409, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED', 'This change was not sent. Review the earlier product outcome before changing this product again.');
 }
 function editable(product: any) {
   if (product.status === 'deleted') fail(409, 'PRODUCT_DELETED', 'A deleted product cannot be updated. Load and review another product.');
@@ -123,13 +122,13 @@ async function snapshot(context: Ctx, api: ZernioApi, profileId: string, account
   const product = productRow(result.product, account, profileId, store.currency, productId), after = await storeRead(context, api, profileId, account);
   permission(after);
   if (JSON.stringify(after) !== JSON.stringify(store)) fail(409, 'PRODUCT_STORE_CHANGED', 'The store details or permissions changed. Load its products again.');
-  access(context, profileId);
+  await access(context, profileId);
   return { account, product, store, version: hash([profileId, identity(account), store, product]) };
 }
 async function creationSnapshot(context: Ctx, api: ZernioApi, profileId: string, accountId: string): Promise<ProviderRecord> {
   const account = await selected(context, api, profileId, accountId), store = await storeRead(context, api, profileId, account), after = await storeRead(context, api, profileId, account);
   if (JSON.stringify(after) !== JSON.stringify(store)) fail(409, 'PRODUCT_STORE_CHANGED', 'The store details or permissions changed. Load its products again.');
-  access(context, profileId);
+  await access(context, profileId);
   return { account, store, version: hash([profileId, identity(account), store]) };
 }
 function createdDraft(product: any, title: any, price: any) {
@@ -215,18 +214,14 @@ async function collectionSnapshot(context: Ctx, api: ZernioApi, profileId: strin
   const collection = await collectionRead(context, api, profileId, account, id), after = await storeRead(context, api, profileId, account);
   collectionPermission(after, true);
   if (JSON.stringify(after) !== JSON.stringify(store)) fail(409, 'COLLECTION_STORE_CHANGED', 'The store details or permissions changed. Load and review the collection again.');
-  access(context, profileId);
+  await access(context, profileId);
   return { account, store, collection, version: hash([profileId, identity(account), store, collection]) };
 }
-function claimCollection(context: Ctx, account: ProviderRecord, id: any, key: any) {
+async function claimCollection(context: Ctx, account: ProviderRecord, id: any, key: any) {
   const numeric = id.match(/^(?:gid:\/\/shopify\/Collection\/)?(\d+)$/)?.[1];
-  const resource = JSON.stringify(['shopify', account.platformUserId, numeric ? String(BigInt(numeric)) : id]), { db } = context;
+  const resource = JSON.stringify(['shopify', account.platformUserId, numeric ? String(BigInt(numeric)) : id]);
   // Claim and inspect atomically across connections, aliases and projects; pending outcomes survive process restarts.
-  transaction(db, () => {
-    const previous = db.prepare('SELECT o.status FROM zernio_collection_updates c LEFT JOIN integration_operations o ON o.project_id=c.project_id AND o.request_key=c.request_key WHERE c.resource=?').get(resource) as ProviderRecord;
-    if (previous && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'COLLECTION_PREVIOUS_OUTCOME_UNRESOLVED', 'This rename was not sent. Review the earlier collection outcome before renaming this collection again.');
-    db.prepare('INSERT INTO zernio_collection_updates VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, context.project.id, key);
-  });
+  if (!await claimFence(context.db, 'zernio_collection_updates', resource, context.project.id, key)) fail(409, 'COLLECTION_PREVIOUS_OUTCOME_UNRESOLVED', 'This rename was not sent. Review the earlier collection outcome before renaming this collection again.');
 }
 function collectionPage(url: any): ProviderRecord {
   for (const key of url.searchParams.keys()) if (!['limit', 'cursor', 'query'].includes(key) || url.searchParams.getAll(key).length !== 1) fail(400, 'INVALID_COLLECTION_QUERY', 'Use only the collection page and search controls.');
@@ -249,11 +244,10 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
     if (!rename) {
       if (!object(body) || Object.keys(body).length || Number(req.headers?.['content-length'] || 0) > 0 || req.headers?.['transfer-encoding']) fail(400, 'INVALID_COLLECTION_QUERY', 'Review the collection without a request body.');
       const { store, collection, version } = await collectionSnapshot(context, api, profileId, accountId, id);
-      access(context, profileId); send(200, { accountId, store, collection, version }); return true;
+      await access(context, profileId); send(200, { accountId, store, collection, version }); return true;
     }
     if (!object(body) || Object.keys(body).some(key => !['version', 'title'].includes(key)) || !/^[a-f0-9]{64}$/.test(body.version || '') || !text(body.title, 10000) || !body.title.trim() || /[\r\n\t]/.test(body.title)) fail(400, 'COLLECTION_REVIEW_REQUIRED', 'Review the current collection and enter a nonblank, single line title.');
-    access(context, profileId);
-    db.exec('CREATE TABLE IF NOT EXISTS zernio_collection_updates(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
+    await access(context, profileId);
     const outcome = await operation(context, async key => {
       const before = await collectionSnapshot(context, api, profileId, accountId, id), title = body.title.trim();
       if (before.version !== body.version) fail(409, 'COLLECTION_CHANGED', 'The connected store or collection changed. Load and review its current title again.');
@@ -261,20 +255,20 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
       if (!text(before.account.platformUserId, 2000) || !before.account.platformUserId.trim() || before.account.platformUserId !== before.account.platformUserId.trim()) fail(409, 'COLLECTION_STORE_IDENTITY_UNAVAILABLE', 'The native store identity could not be verified. Refresh or reconnect this account before renaming a collection.');
       const ready = await collectionSnapshot(context, api, profileId, accountId, id);
       if (ready.version !== before.version) fail(409, 'COLLECTION_CHANGED', 'The collection changed before its rename could be sent. Load and review it again.');
-      access(context, profileId); claimCollection(context, ready.account, id, key);
+      await access(context, profileId); await claimCollection(context, ready.account, id, key);
       // Zernio has no conditional collection PATCH: an external edit after the final read can race this rename.
       const response = await api('/commerce/collections/' + encodeURIComponent(id), {}, { accountId, title }, key, 'PATCH');
       try {
-        access(context, profileId); scope(response, before.account, profileId);
+        await access(context, profileId); scope(response, before.account, profileId);
         const receipt = collectionRow(response.collection, before.account, profileId, id);
         if (receipt.title !== title) fail(502, 'COLLECTION_RENAME_NOT_CONFIRMED', 'The provider did not confirm the requested collection title.');
         const after = await collectionSnapshot(context, api, profileId, accountId, id);
         if (identity(after.account) !== identity(before.account) || JSON.stringify(after.store) !== JSON.stringify(before.store) || after.collection.title !== title) fail(502, 'COLLECTION_RENAME_NOT_CONFIRMED', 'The collection title, store identity or permissions changed before confirmation.');
-        access(context, profileId);
+        await access(context, profileId);
         return { accountId, collection: after.collection, store: after.store, version: after.version, readback: true };
       } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
     }, `zernio-collection-update:${accountId}:${id}`);
-    access(context, profileId); send(outcome.status, outcome.data); return true;
+    await access(context, profileId); send(outcome.status, outcome.data); return true;
   }
   if (parts[1] === 'collections' && [2, 3].includes(parts.length)) {
     if (req.method !== 'GET') fail(405, 'METHOD_NOT_ALLOWED', 'Use the collection reading controls.');
@@ -298,7 +292,7 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
       const after = await storeRead(context, api, profileId, account);
       collectionPermission(after);
       if (JSON.stringify(after) !== JSON.stringify(store)) fail(409, 'COLLECTION_STORE_CHANGED', 'The store details or permissions changed. Load its collections again.');
-      access(context, profileId); send(200, { accountId, store: after, ...response }); return true;
+      await access(context, profileId); send(200, { accountId, store: after, ...response }); return true;
     } catch (error) {
       if (error instanceof IntegrationError && error.code === 'PRODUCT_READ_PERMISSION_REQUIRED') fail(403, 'COLLECTION_READ_PERMISSION_REQUIRED', 'This store’s collections could not be read. Check its connection and collection reading permissions.');
       if (error instanceof IntegrationError && error.providerStatus === 404) fail(404, 'COLLECTION_NOT_FOUND', 'This collection or connected store could not be found. Refresh before continuing.');
@@ -312,7 +306,7 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
   if (action === 'accounts') {
     if (url.search) fail(400, 'INVALID_PRODUCT_QUERY', 'The connected stores do not accept filters.');
     const result = (await accounts(context, api, profileId)).map(accountRow);
-    access(context, profileId); send(200, { accounts: result }); return true;
+    await access(context, profileId); send(200, { accounts: result }); return true;
   }
   let accountId, productId;
   try { accountId = decodeURIComponent(parts[0]); productId = parts[1] === undefined ? undefined : decodeURIComponent(parts[1]); } catch { fail(400, 'INVALID_PRODUCT_ID', 'Choose a connected store and returned product.'); }
@@ -331,13 +325,11 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
     stockPermission(after);
     if (JSON.stringify(after) !== JSON.stringify(before.store)) fail(409, 'PRODUCT_STORE_CHANGED', 'The store details or permissions changed. Load its stock again.');
     const rows = stockRows(locationResponse, inventoryResponse, before.account, profileId, productId);
-    access(context, profileId); send(200, { accountId, product: before.product, store: after, ...rows, coverage: stockCoverage }); return true;
+    await access(context, profileId); send(200, { accountId, product: before.product, store: after, ...rows, coverage: stockCoverage }); return true;
   }
   if (create) {
     if (!object(body) || Object.keys(body).some(key => !['version', 'confirmCreate', 'title', 'descriptionHtml', 'price'].includes(key)) || body.confirmCreate !== true || !/^[a-f0-9]{64}$/.test(body.version || '') || !text(body.title, 10000) || !body.title.trim() || /[\r\n\t]/.test(body.title) || !text(body.price, 100) || body.price !== body.price.trim() || !/^\d+(\.\d{1,2})?$/.test(body.price) || Object.hasOwn(body, 'descriptionHtml') && !text(body.descriptionHtml, 1000000)) fail(400, 'PRODUCT_DRAFT_REVIEW_REQUIRED', 'Review the current store, title, optional HTML and price, then explicitly confirm creation of a draft.');
-    access(context, profileId);
-    // ponytail: this native-store fence shares operation's single-process ceiling; use transactional resource locks before multiple server processes.
-    db.exec('CREATE TABLE IF NOT EXISTS zernio_product_creates(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL); CREATE TABLE IF NOT EXISTS zernio_product_create_receipts(project_id TEXT NOT NULL,request_key TEXT NOT NULL,account_id TEXT NOT NULL,native_product_id TEXT,PRIMARY KEY(project_id,request_key))');
+    await access(context, profileId);
     const outcome = await operation(context, async key => {
       const before = await creationSnapshot(context, api, profileId, accountId);
       if (before.version !== body.version) fail(409, 'PRODUCT_STORE_CHANGED', 'The connected store changed. Load and review it again before creating a draft.');
@@ -345,40 +337,39 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
       if (!text(before.account.platformUserId, 2000) || !before.account.platformUserId.trim() || before.account.platformUserId !== before.account.platformUserId.trim()) fail(409, 'PRODUCT_STORE_IDENTITY_UNAVAILABLE', 'The native store identity could not be verified. Refresh or reconnect this account before creating a product.');
       const ready = await creationSnapshot(context, api, profileId, accountId);
       if (ready.version !== before.version) fail(409, 'PRODUCT_STORE_CHANGED', 'The connected store changed before draft creation. Load and review it again.');
-      permission(ready.store, 'create'); access(context, profileId);
+      permission(ready.store, 'create'); await access(context, profileId);
       const resource = JSON.stringify(['shopify', ready.account.platformUserId]);
-      const previous = db.prepare('SELECT o.status FROM zernio_product_creates p LEFT JOIN integration_operations o ON o.project_id=p.project_id AND o.request_key=p.request_key WHERE p.resource=?').get(resource) as ProviderRecord;
-      if (previous && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED', 'This draft was not sent. Review the earlier creation outcome before creating another product in this store.');
-      db.prepare('INSERT INTO zernio_product_creates VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, context.project.id, key);
-      db.prepare('INSERT INTO zernio_product_create_receipts VALUES(?,?,?,NULL)').run(context.project.id, key, accountId);
+      // One draft creation per native store at a time; the fence stays held until a later claim finds this receipt resolved.
+      if (!await claimFence(db, 'zernio_product_creates', resource, context.project.id, key)) fail(409, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED', 'This draft was not sent. Review the earlier creation outcome before creating another product in this store.');
+      await db.execute(sql`INSERT INTO zernio_product_create_receipts (project_id, request_key, account_id, native_product_id) VALUES (${context.project.id}, ${key}, ${accountId}, NULL)`);
+      // The provider transport calls observeReceipt synchronously; the native ID write it starts is awaited before any outcome is recorded.
+      let recorded: Promise<unknown> | undefined;
       const observeReceipt = (response: any) => {
         try {
           scope(response, before.account, profileId); scope(response.product, before.account, profileId);
-          if (response.product.accountId === accountId && response.product.platform === 'shopify' && identifier(response.product.id)) db.prepare('UPDATE zernio_product_create_receipts SET native_product_id=? WHERE project_id=? AND request_key=?').run(response.product.id, context.project.id, key);
+          if (response.product.accountId === accountId && response.product.platform === 'shopify' && identifier(response.product.id)) recorded = db.execute(sql`UPDATE zernio_product_create_receipts SET native_product_id=${response.product.id} WHERE project_id=${context.project.id} AND request_key=${key}`);
         } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
       };
-      const title = body.title.trim(), response = await api('/commerce/products', {}, { accountId, title, ...(Object.hasOwn(body, 'descriptionHtml') ? { descriptionHtml: body.descriptionHtml } : {}), status: 'draft', variants: [{ price: body.price }] }, key, 'POST', observeReceipt);
+      const title = body.title.trim(), response = await api('/commerce/products', {}, { accountId, title, ...(Object.hasOwn(body, 'descriptionHtml') ? { descriptionHtml: body.descriptionHtml } : {}), status: 'draft', variants: [{ price: body.price }] }, key, 'POST', observeReceipt).finally(() => recorded);
       try {
-        observeReceipt(response);
-        access(context, profileId);
+        observeReceipt(response); await recorded;
+        await access(context, profileId);
         const receipt = productRow(response.product, before.account, profileId, before.store.currency);
         createdDraft(receipt, title, body.price);
         if (Object.hasOwn(body, 'descriptionHtml') && (body.descriptionHtml ? typeof receipt.descriptionHtml !== 'string' : receipt.descriptionHtml !== '' && receipt.descriptionHtml !== null)) fail(502, 'PRODUCT_DRAFT_NOT_CONFIRMED', 'The provider did not confirm the submitted description HTML.');
         const after = await snapshot(context, api, profileId, accountId, receipt.id);
         permission(after.store, 'create'); createdDraft(after.product, title, body.price);
         if (identity(after.account) !== identity(before.account) || JSON.stringify(after.store) !== JSON.stringify(before.store) || after.product.descriptionHtml !== receipt.descriptionHtml || after.product.variants[0].id !== receipt.variants[0].id) fail(502, 'PRODUCT_DRAFT_NOT_CONFIRMED', 'The created draft, store identity or permissions changed before confirmation.');
-        access(context, profileId);
+        await access(context, profileId);
         return { accountId, store: after.store, product: after.product, readback: true };
       } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
     }, `zernio-product-create:${accountId}`);
-    access(context, profileId); send(outcome.status, outcome.data); return true;
+    await access(context, profileId); send(outcome.status, outcome.data); return true;
   }
   if (deactivate || archive || activate || deleteProduct) {
     const stateAction = deleteProduct ? 'delete' : archive ? 'archive' : activate ? 'activate' : 'deactivate', targetState = archive ? 'archived' : activate ? 'active' : 'draft', confirmation = deleteProduct ? 'confirmDelete' : archive ? 'confirmArchive' : activate ? 'confirmActivate' : 'confirmDeactivate', notConfirmed = deleteProduct ? 'PRODUCT_DELETE_NOT_CONFIRMED' : archive ? 'PRODUCT_ARCHIVE_NOT_CONFIRMED' : activate ? 'PRODUCT_ACTIVATE_NOT_CONFIRMED' : 'PRODUCT_DEACTIVATE_NOT_CONFIRMED';
     if (!object(body) || Object.keys(body).some(key => !['version', confirmation].includes(key)) || body[confirmation] !== true || typeof body.version !== 'string' || body.version.length !== 64 || !/^[a-f0-9]{64}$/.test(body.version)) fail(400, deleteProduct ? 'PRODUCT_DELETE_REVIEW_REQUIRED' : archive ? 'PRODUCT_ARCHIVE_REVIEW_REQUIRED' : activate ? 'PRODUCT_ACTIVATE_REVIEW_REQUIRED' : 'PRODUCT_DEACTIVATE_REVIEW_REQUIRED', deleteProduct ? 'Review the current Archived Shopify product, then explicitly confirm its irreversible permanent deletion.' : archive ? 'Review the current Active or Draft Shopify product, then explicitly confirm archiving it.' : activate ? 'Review the current Draft Shopify product, then explicitly confirm activating it.' : 'Review the current active Shopify product, then explicitly confirm moving it to draft.');
-    access(context, profileId);
-    // ponytail: the shared native-product fence has operation's single-process ceiling; use transactional resource locks before multiple server processes.
-    db.exec('CREATE TABLE IF NOT EXISTS zernio_product_updates(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
+    await access(context, profileId);
     const outcome = await operation(context, async key => {
       const before = await snapshot(context, api, profileId, accountId, productId, deleteProduct ? 'archived' : activate ? 'draft' : deactivate ? 'active' : undefined);
       if (archive && (!['active', 'draft'].includes(before.product.status) || before.product.platformStatus !== before.product.status.toUpperCase())) fail(409, 'PRODUCT_STATE_CHANGED', 'Only an exact Active or Draft Shopify product can be archived. Load and review its current details again.');
@@ -387,12 +378,12 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
       if (!text(before.account.platformUserId, 2000) || !before.account.platformUserId.trim() || before.account.platformUserId !== before.account.platformUserId.trim()) fail(409, 'PRODUCT_STORE_IDENTITY_UNAVAILABLE', 'The native store identity could not be verified. Refresh or reconnect this account before changing a product state.');
       const ready = await snapshot(context, api, profileId, accountId, productId, before.product.status);
       if (ready.version !== before.version) fail(409, 'PRODUCT_CHANGED', 'This product changed before its state could be changed. Load and review it again.');
-      permission(ready.store, 'status'); access(context, profileId);
-      claimProduct(context, ready.account, productId, key);
+      permission(ready.store, 'status'); await access(context, profileId);
+      await claimProduct(context, ready.account, productId, key);
       // Zernio has no atomic conditional state update: an external edit after the final read can race this POST.
       const response = await api('/commerce/products/state', {}, { accountId, productIds: [productId], action: stateAction }, key, 'POST');
       try {
-        access(context, profileId); scope(response, before.account, profileId);
+        await access(context, profileId); scope(response, before.account, profileId);
         if (response.action !== stateAction || !Array.isArray(response.succeeded) || response.succeeded.length !== 1 || response.succeeded[0] !== productId || !Array.isArray(response.failed) || response.failed.length) fail(502, notConfirmed, 'The provider did not confirm the exact requested product state change.');
         if (deleteProduct) {
           const readable = await storeRead(context, api, profileId, before.account);
@@ -405,23 +396,21 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
           const after = await storeRead(context, api, profileId, before.account);
           permission(after, 'status');
           if (JSON.stringify(after) !== JSON.stringify(before.store)) fail(502, notConfirmed, 'The store identity or permissions changed during the absence check.');
-          access(context, profileId);
+          await access(context, profileId);
           return { accountId, store: after, readback: true, deletionAcceptance: { productId, platform: 'shopify', action: 'delete', absenceVerified: true, checkedAt: new Date().toISOString() } };
         }
         const after = await snapshot(context, api, profileId, accountId, productId, targetState);
         permission(after.store, 'status');
         if (identity(after.account) !== identity(before.account) || JSON.stringify(after.store) !== JSON.stringify(before.store)) fail(502, notConfirmed, 'The store identity or permissions changed before confirmation.');
-        access(context, profileId);
+        await access(context, profileId);
         return { accountId, product: after.product, store: after.store, version: after.version, readback: true };
       } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
     }, `zernio-product-update:${accountId}:${productId}`);
-    access(context, profileId); send(outcome.status, outcome.data); return true;
+    await access(context, profileId); send(outcome.status, outcome.data); return true;
   }
   if (price) {
     if (!object(body) || Object.keys(body).some(key => !['version', 'confirmPrice', 'variantId', 'price'].includes(key)) || body.confirmPrice !== true || !/^[a-f0-9]{64}$/.test(body.version || '') || !identifier(body.variantId) || !text(body.price, 100) || !/^\d+(?:\.\d{1,2})?$/.test(body.price) || /\s/.test(body.price)) fail(400, 'PRODUCT_PRICE_REVIEW_REQUIRED', 'Review one existing variant and its decimal price, then explicitly confirm the price update.');
-    access(context, profileId);
-    // ponytail: the shared native-product fence has operation's single-process ceiling; use transactional resource locks before multiple server processes.
-    db.exec('CREATE TABLE IF NOT EXISTS zernio_product_updates(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
+    await access(context, profileId);
     const outcome = await operation(context, async key => {
       const before = await snapshot(context, api, profileId, accountId, productId);
       if (before.version !== body.version) fail(409, 'PRODUCT_CHANGED', 'The connected store or product changed. Load and review its current details again.');
@@ -432,12 +421,12 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
       if (decimal(variant.price.amount) === decimal(body.price)) fail(400, 'EMPTY_PRODUCT_PRICE_UPDATE', 'Enter a price that changes the selected variant.');
       const ready = await snapshot(context, api, profileId, accountId, productId);
       if (ready.version !== before.version || !ready.product.variants.some((row: ProviderRecord) => row.id === body.variantId && row.price.currency === before.store.currency)) fail(409, 'PRODUCT_CHANGED', 'This product changed before the price update could be sent. Load and review it again.');
-      permission(ready.store, 'price'); editable(ready.product); access(context, profileId);
-      claimProduct(context, ready.account, productId, key);
+      permission(ready.store, 'price'); editable(ready.product); await access(context, profileId);
+      await claimProduct(context, ready.account, productId, key);
       // Zernio has no atomic conditional price update: an external edit after the final read can race this POST.
       const response = await api(`/commerce/products/${encodeURIComponent(productId!)}/price`, {}, { accountId, variants: [{ id: body.variantId, price: body.price }] }, key, 'POST');
       try {
-        access(context, profileId); scope(response, before.account, profileId);
+        await access(context, profileId); scope(response, before.account, profileId);
         const receipt = productRow(response.product, before.account, profileId, before.store.currency, productId);
         const confirmedPrice = (product: any) => product.variants.some((row: ProviderRecord) => row.id === body.variantId && row.price.currency === before.store.currency && decimal(row.price.amount) === decimal(body.price));
         editable(receipt);
@@ -445,19 +434,17 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
         const after = await snapshot(context, api, profileId, accountId, productId);
         permission(after.store, 'price'); editable(after.product);
         if (identity(after.account) !== identity(before.account) || JSON.stringify(after.store) !== JSON.stringify(before.store) || !confirmedPrice(after.product)) fail(502, 'PRODUCT_PRICE_NOT_CONFIRMED', 'The selected variant price, store identity or permissions changed before confirmation.');
-        access(context, profileId);
+        await access(context, profileId);
         return { accountId, product: after.product, store: after.store, readback: true };
       } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
     }, `zernio-product-update:${accountId}:${productId}`);
-    access(context, profileId); send(outcome.status, outcome.data); return true;
+    await access(context, profileId); send(outcome.status, outcome.data); return true;
   }
   if (update) {
     const fields = object(body) ? ['title', 'descriptionHtml', 'vendor', 'productType', 'tags'].filter(key => Object.hasOwn(body, key)) : [];
     // These are local app bounds shared with product reads, not provider limits.
     if (!object(body) || Object.keys(body).some(key => !['version', 'confirmUpdate', 'title', 'descriptionHtml', 'vendor', 'productType', 'tags'].includes(key)) || body.confirmUpdate !== true || !/^[a-f0-9]{64}$/.test(body.version || '') || !fields.length || fields.includes('title') && (!text(body.title, 10000) || !body.title.trim() || /[\r\n\t]/.test(body.title)) || fields.includes('descriptionHtml') && !text(body.descriptionHtml, 1000000) || fields.includes('vendor') && (!text(body.vendor, 10000) || /[\r\n\t]/.test(body.vendor)) || fields.includes('productType') && (!text(body.productType, 10000) || /[\r\n\t]/.test(body.productType)) || fields.includes('tags') && (!Array.isArray(body.tags) || body.tags.length > 1000 || body.tags.some((value: any) => !text(value, 2000)))) fail(400, 'PRODUCT_REVIEW_REQUIRED', 'Review the current product and selected title, description HTML, vendor, product type or complete tag list, then explicitly confirm the update.');
-    access(context, profileId);
-    // ponytail: this durable native-product fence shares operation's single-process ceiling; use transactional resource locks before multiple server processes.
-    db.exec('CREATE TABLE IF NOT EXISTS zernio_product_updates(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
+    await access(context, profileId);
     const outcome = await operation(context, async key => {
       const before = await snapshot(context, api, profileId, accountId, productId);
       if (before.version !== body.version) fail(409, 'PRODUCT_CHANGED', 'The connected store or product changed. Load and review its current details again.');
@@ -470,13 +457,13 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
       if (ready.version !== before.version) fail(409, 'PRODUCT_CHANGED', 'This product changed before the update could be sent. Load and review it again.');
       permission(ready.store, 'update');
       editable(ready.product);
-      access(context, profileId);
-      claimProduct(context, ready.account, productId, key);
+      await access(context, profileId);
+      await claimProduct(context, ready.account, productId, key);
       const path = `/commerce/products/${encodeURIComponent(productId!)}`;
       // Zernio has no atomic conditional product update: an external edit after the final read can race this PATCH.
       const response = await api(path, {}, { accountId, ...changed }, key, 'PATCH');
       try {
-        access(context, profileId); scope(response, before.account, profileId);
+        await access(context, profileId); scope(response, before.account, profileId);
         const receipt = productRow(response.product, before.account, profileId, before.store.currency, productId);
         editable(receipt);
         if (Object.hasOwn(changed, 'title') && receipt.title !== changed.title || Object.hasOwn(changed, 'descriptionHtml') && typeof receipt.descriptionHtml !== 'string' || Object.hasOwn(changed, 'vendor') && receipt.vendor !== changed.vendor || Object.hasOwn(changed, 'productType') && receipt.productType !== changed.productType || Object.hasOwn(changed, 'tags') && !sameTags(receipt.tags, changed.tags)) fail(502, 'PRODUCT_UPDATE_NOT_CONFIRMED', 'The provider did not confirm the requested product content.');
@@ -484,17 +471,17 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
         permission(after.store, 'update');
         editable(after.product);
         if (identity(after.account) !== identity(before.account) || JSON.stringify(after.store) !== JSON.stringify(before.store) || after.product.title !== receipt.title || after.product.descriptionHtml !== receipt.descriptionHtml || after.product.vendor !== receipt.vendor || after.product.productType !== receipt.productType || !sameTags(after.product.tags, receipt.tags)) fail(502, 'PRODUCT_UPDATE_NOT_CONFIRMED', 'The product content, store identity or permissions changed before confirmation.');
-        access(context, profileId);
+        await access(context, profileId);
         return { accountId, product: after.product, store: after.store, readback: true };
       } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
     }, `zernio-product-update:${accountId}:${productId}`);
-    access(context, profileId); send(outcome.status, outcome.data); return true;
+    await access(context, profileId); send(outcome.status, outcome.data); return true;
   }
   if (productId !== undefined && productId !== 'store') {
     const { product, store, version } = await snapshot(context, api, profileId, accountId, productId);
-    access(context, profileId); send(200, { product, store, version, archiveVersion: hash(['archive', version]), activateVersion: hash(['activate', version]), deleteVersion: hash(['delete', version]), coverage }); return true;
+    await access(context, profileId); send(200, { product, store, version, archiveVersion: hash(['archive', version]), activateVersion: hash(['activate', version]), deleteVersion: hash(['delete', version]), coverage }); return true;
   }
-  if (productId === 'store') { const { store, version } = await creationSnapshot(context, api, profileId, accountId); access(context, profileId); send(200, { store, creationVersion: version }); return true; }
+  if (productId === 'store') { const { store, version } = await creationSnapshot(context, api, profileId, accountId); await access(context, profileId); send(200, { store, creationVersion: version }); return true; }
   const query = parts.length === 1 ? page(url) : {}, account = await selected(context, api, profileId, accountId), store = await storeRead(context, api, profileId, account);
   permission(store);
   if (query.collectionId !== undefined) collectionPermission(store);
@@ -512,5 +499,5 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
   permission(after);
   if (collection !== undefined) collectionPermission(after);
   if (JSON.stringify(after) !== JSON.stringify(store)) fail(409, 'PRODUCT_STORE_CHANGED', 'The store details or permissions changed. Load its products again.');
-  access(context, profileId); send(200, { ...response, ...(collection === undefined ? {} : { accountId, store: after, collection }) }); return true;
+  await access(context, profileId); send(200, { ...response, ...(collection === undefined ? {} : { accountId, store: after, collection }) }); return true;
 }

@@ -4,11 +4,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('account updates, password changes, session revocation and host recovery preserve account boundaries', async () => {
+test('account updates, password changes, session revocation and host recovery preserve account boundaries', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-account-')), origin = 'http://127.0.0.1:3018';
-  const app = createApp({ dataDir, env: {}, appUrl: origin });
+  const app = await testApp(t, { dataDir, env: {}, appUrl: origin });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`, initial = 'initial password for account checks', changed = 'changed password for account checks', recovered = 'recovered password for account checks';
   let cookie;
@@ -35,12 +35,12 @@ test('account updates, password changes, session revocation and host recovery pr
     cookie = updated.cookie; assert.equal((await api('/account')).data.localPassword, true);
     assert.equal((await api('/auth/login', 'POST', { email: 'account@example.test', password: initial })).status, 401);
     const result = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ['server/cli.ts', 'reset-password'], { cwd: new URL('..', import.meta.url), env: { ...process.env, DATA_DIR: dataDir }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn(process.execPath, ['server/cli.ts', 'reset-password'], { cwd: new URL('..', import.meta.url), env: { ...process.env, DATABASE_URL: app.database.url }, stdio: ['pipe', 'pipe', 'pipe'] });
       let output = ''; child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; }); child.on('error', reject); child.on('close', code => resolve({ code, output }));
       child.stdin.end(JSON.stringify({ email: 'account@example.test', password: recovered }));
     });
     assert.equal(result.code, 0); assert.equal(result.output.includes(recovered), false);
     assert.equal((await api('/account')).status, 401);
     assert.equal((await api('/auth/login', 'POST', { email: 'account@example.test', password: recovered })).status, 200);
-  } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
 });

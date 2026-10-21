@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('legacy inbox routes and sample records stay private while campaign agent access remains explicitly scoped', async () => {
+test('legacy inbox routes and sample records stay private while campaign agent access remains explicitly scoped', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-inbox-removal-')), origin = 'http://127.0.0.1:3000';
-  const app = createApp({ dataDir, appUrl: origin, env: { ZERNIO_API_KEY: 'never-used-inbox-key', OPENROUTER_API_KEY: 'mock-agent-key', OPENROUTER_MODEL: 'fixture/model' } });
+  const app = await testApp(t, { dataDir, appUrl: origin, env: { ZERNIO_API_KEY: 'never-used-inbox-key', OPENROUTER_API_KEY: 'mock-agent-key', OPENROUTER_MODEL: 'fixture/model' } });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`, originalFetch = globalThis.fetch, modelCalls = []; let cookie;
   globalThis.fetch = async (target, options = {}) => {
@@ -25,10 +25,10 @@ test('legacy inbox routes and sample records stay private while campaign agent a
     assert.equal(setup.status, 201); cookie = setup.cookie;
     const initial = (await request('/api/state')).data, projectId = initial.projectId, project = `/api/projects/${projectId}`;
     assert.equal(Object.hasOwn(initial, 'conversations'), false);
-    assert.equal(app.db.prepare("SELECT count(*) AS count FROM records WHERE collection='conversations'").get().count, 0, 'New sample projects must not create inbox data.');
-    assert.throws(() => app.store.create(projectId, 'conversations', {}), /Unknown collection/);
+    assert.equal((await app.sql.get("SELECT count(*) AS count FROM records WHERE collection='conversations'")).count, 0, 'New sample projects must not create inbox data.');
+    await assert.rejects(app.store.create(projectId, 'conversations', {}), /Unknown collection/);
     const legacy = { id: 'legacy-private-thread', projectId, contact: 'PRIVATE_LEGACY_CONTACT', messages: [{ content: 'PRIVATE_LEGACY_MESSAGE' }], sample: true };
-    app.db.prepare('INSERT INTO records VALUES(?,?,?,?)').run(legacy.id, projectId, 'conversations', JSON.stringify(legacy));
+    await app.sql.run('INSERT INTO records (id, project_id, collection, data) VALUES(?,?,?,?)', legacy.id, projectId, 'conversations', JSON.stringify(legacy));
     for (const suffix of ['/inbox/cache', '/integrations/inbox', '/integrations/inbox/thread/messages?accountId=account-a', '/engagement/status', '/engagement/accounts', '/engagement/comments', '/engagement/reviews', '/engagement/updates?accountId=account-a&kind=comments', '/conversations', `/conversations/${legacy.id}`]) assert.equal((await request(project + suffix)).status, 404, suffix);
     for (const suffix of ['/integrations/inbox/thread/reply', '/integrations/inbox/thread/archive', '/integrations/inbox/thread/reopen', '/engagement/comments/reply', '/engagement/reviews/reply', '/conversations']) assert.equal((await request(project + suffix, 'POST', { accountId: 'account-a', message: 'Never sent', contact: 'Never created' })).status, 404, suffix);
     assert.equal((await request(`${project}/conversations/${legacy.id}`, 'PATCH', { status: 'resolved' })).status, 404);
@@ -42,6 +42,6 @@ test('legacy inbox routes and sample records stay private while campaign agent a
     const denied = modelCalls[1].messages.find(message => message.role === 'tool' && message.tool_call_id === 'forbidden-inbox');
     assert.ok(JSON.parse(denied.content).error); assert.equal(JSON.stringify(modelCalls).includes('PRIVATE_LEGACY'), false);
     assert.equal((await request(project + '/sample-data', 'DELETE')).status, 200);
-    assert.deepEqual(JSON.parse(app.db.prepare('SELECT data FROM records WHERE id=?').get(legacy.id).data), legacy, 'Legacy records must not be silently imported or deleted by the new inbox.');
-  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+    assert.deepEqual((await app.sql.get('SELECT data FROM records WHERE id=?', legacy.id)).data, legacy, 'Legacy records must not be silently imported or deleted by the new inbox.');
+  } finally { globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); }
 });

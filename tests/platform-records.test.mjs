@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('platform drafts keep metadata and explicit resets, protect DAM references, and enforce request schemas', async () => {
+test('platform drafts keep metadata and explicit resets, protect DAM references, and enforce request schemas', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-platform-records-')), origin = 'http://127.0.0.1:3000';
-  const app = createApp({ dataDir, env: {}, appUrl: origin });
+  const app = await testApp(t, { dataDir, env: {}, appUrl: origin });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`; let cookie;
   async function request(path, method = 'GET', body) {
@@ -38,5 +38,5 @@ test('platform drafts keep metadata and explicit resets, protect DAM references,
     response = await request(path + '/posts', 'POST', { content: 'x'.repeat(70000), platforms: ['facebook'] });
     assert.equal(response.status, 201, 'Long or incomplete drafts can be saved; publishing enforces destination restrictions.');
     assert.equal((await request(path + '/posts', 'POST', { content: 'x'.repeat(2 * 1024 * 1024), platforms: ['facebook'] })).status, 413);
-  } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
