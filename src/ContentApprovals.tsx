@@ -1,5 +1,5 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Disclosure, EmptyState, FeatureControls, Field, FormActions, Heading, Inline, Link, List, ListItem, Option, Progress, SegmentedControl, Select, StatusLine, Stack, Switch, Text, Textarea } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Disclosure, EmptyState, FeatureControls, Field, FormActions, Heading, Inline, Link, List, ListItem, Option, Progress, SegmentedControl, Select, StatusLine, Stack, Switch, Text, Textarea, ValidationSummary, type ValidationTarget } from '@ten98/ui';
 import { PostVariantPreview } from './PostComposer';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { reviewKeyAction } from './review-keys';
@@ -15,6 +15,9 @@ const lines = (text: unknown) => <Text preserveWhitespace>{String(text ?? '')}</
 const approveBlocked = (item: any) => Boolean(item.post.queueId && !item.queue?.ready) || (item.assets || (item.asset ? [item.asset] : [])).some((asset: any) => asset.missing || asset.approval !== 'approved');
 // Bulk review ported from pendpost/pendpost@42ac77b29f7720a912bdce1507b16a2a56fca74f app/src/components/Freigaben.jsx:1013-1100 and 1213-1276 (MIT):
 // it touches only the visible, actionable, selected posts and sends each one the single-card review request in turn.
+type Restriction = { platform?: string; field?: string; message: string; accountId?: string };
+// One validation target per platform and account, as the server reports the restrictions that refused an approval.
+const restrictionTargets = (rows: Restriction[]): ValidationTarget[] => Object.values(rows.reduce<Record<string, ValidationTarget>>((targets, row, index) => { const key = (row.platform || '') + ':' + (row.accountId || ''), target = targets[key] ||= { id: key, target: [row.platform ? PLATFORM_RULES[row.platform]?.label || row.platform : 'Post', row.accountId && 'Account ' + row.accountId].filter(Boolean).join(' · '), status: 'error', messages: [] }; target.messages = [...(target.messages || []), { id: String(index), text: row.message }]; return targets; }, {}));
 const postName = (item: any) => String(item.post.content || '').trim().slice(0, 60) || item.post.id;
 const options = (platform: string, values: Record<string, unknown>) => Object.entries(values).map(([key, value]) => ({ key, term: PLATFORM_RULES[platform]?.options.find((option: any) => option.key === key)?.label || key, description: value && typeof value === 'object' ? <CodeBlock code={JSON.stringify(value, null, 2)} label={key} wrap/> : <Stack gap={0}>{lines(typeof value === 'boolean' ? value ? 'On' : 'Off' : String(value))}</Stack> }));
 
@@ -23,6 +26,7 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
   const [focusId, setFocusId] = useState(''), advance = useRef<{ id: string; index: number } | null>(null);
   const [selected, setSelected] = useState<string[]>([]), [bulk, setBulk] = useState<{ done: number; total: number } | null>(null), [bulkResult, setBulkResult] = useState<{ decision: string; ok: number; skipped: number; failed: { id: string; name: string; message: string }[] } | null>(null);
   const [sort, setSort] = useState('requested'), [platform, setPlatform] = useState('');
+  const [restrictions, setRestrictions] = useState<Record<string, Restriction[]>>({});
   const active = useRef(true), readVersion = useRef(0), path = `/projects/${encodeURIComponent(projectId)}/approvals`, canReview = ['owner', 'admin'].includes(role), canRequest = ['owner', 'admin', 'editor'].includes(role);
   function acceptItem(item: any) { if (active.current) setData((previous: any) => previous ? { ...previous, posts: previous.posts.map((entry: any) => entry.post.id === item.post.id ? item : entry) } : previous); }
   async function load() {
@@ -31,9 +35,15 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
     catch (err) { if (active.current && read === readVersion.current) throw err; }
   }
   useEffect(() => { active.current = true; const loading = load(), read = readVersion.current; loading.catch(err => { if (active.current && read === readVersion.current) setError(err.message); }); return () => { active.current = false; }; }, [projectId]);
+  // A refused approval returns the publishing restrictions that blocked it; keep them beside that post until its next attempt.
+  function noteRestrictions(postId: string, failure: unknown) {
+    const problem = failure as { code?: string; details?: unknown } | null;
+    const rows = problem?.code === 'APPROVAL_POST_RESTRICTIONS' && Array.isArray(problem.details) ? problem.details.filter((row: any) => row && typeof row.message === 'string' && row.message && ['platform', 'field', 'accountId'].every(key => row[key] === undefined || typeof row[key] === 'string')).slice(0, 100) : [];
+    setRestrictions(previous => { const { [postId]: _previous, ...rest } = previous; return rows.length ? { ...rest, [postId]: rows } : rest; });
+  }
   async function action(name: string, run: () => Promise<void>) {
-    if (busy || !active.current) return; readVersion.current++; setBusy(name); setError(''); setNotice('');
-    try { await run(); } catch (err) { if (active.current) setError((err as Error).message || 'This review could not be saved.'); }
+    if (busy || !active.current) return; readVersion.current++; setBusy(name); setError(''); setNotice(''); noteRestrictions(name, null);
+    try { await run(); } catch (err) { if (active.current) { setError((err as Error).message || 'This review could not be saved.'); noteRestrictions(name, err); } }
     finally { if (active.current) setBusy(''); }
   }
   async function review(item: any, decision: string) {
@@ -59,12 +69,12 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
       try {
         for (const item of targets) {
           try { const result = await request(`${path}/posts/${encodeURIComponent(item.post.id)}/review`, 'POST', { decision, note: notes[item.post.id] || '', reviewId: item.review.id }); if (!active.current) return; acceptItem(result.item); succeeded.push(item.post.id); }
-          catch (err) { if (!active.current) return; failed.push({ id: item.post.id, name: postName(item), message: (err as Error).message || 'This review could not be saved.' }); }
+          catch (err) { if (!active.current) return; noteRestrictions(item.post.id, err); failed.push({ id: item.post.id, name: postName(item), message: (err as Error).message || 'This review could not be saved.' }); }
           setBulk({ done: succeeded.length + failed.length, total: targets.length });
         }
       } finally { if (active.current) setBulk(null); }
       // Failed posts stay selected so they can be retried; skipped (blocked) posts were never sent.
-      setSelected(previous => previous.filter(id => !succeeded.includes(id))); setNotes(previous => ({ ...previous, ...Object.fromEntries(succeeded.map(id => [id, ''])) }));
+      setSelected(previous => previous.filter(id => !succeeded.includes(id))); setRestrictions(previous => Object.fromEntries(Object.entries(previous).filter(([id]) => !succeeded.includes(id)))); setNotes(previous => ({ ...previous, ...Object.fromEntries(succeeded.map(id => [id, ''])) }));
       setBulkResult({ decision, ok: succeeded.length, skipped: chosen.length - targets.length, failed });
       await onChanged?.(); await load();
     });
@@ -113,6 +123,7 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
       {reviewData && <Stack gap={1}><Text tone="muted" size="sm">Requested by {reviewData.requestedBy?.name || 'Team member'} · {when(reviewData.requestedAt)}{reviewData.reviewedAt && <> · {label(reviewData.status)} by {reviewData.reviewedBy?.name || 'Administrator'} · {when(reviewData.reviewedAt)}</>}</Text>{reviewData.note && <Stack gap={0}>{lines(reviewData.note)}</Stack>}</Stack>}
       {item.status === 'stale' && <Text tone="muted" size="sm">The current draft differs from the reviewed version. Request review again after your edits are ready.</Text>}
       {!submitted && canRequest && !['pending', 'approved'].includes(item.status) && <Inline><Button variant="secondary" disabled={Boolean(busy) || Boolean(post.queueId && !item.queue?.ready)} onClick={() => action(post.id, async () => { const result = await request(`${path}/posts/${encodeURIComponent(post.id)}/request`, 'POST', {}); if (!active.current) return; acceptItem(result.item); setNotice('Review requested. An owner or administrator can approve or request changes.'); await onChanged?.(); await load(); })}>{busy === post.id ? 'Saving…' : 'Request review'}</Button></Inline>}
+      {restrictions[post.id] && <ValidationSummary title="Publishing restrictions blocked this approval" items={restrictionTargets(restrictions[post.id])}/>}
       {canReview && item.status === 'pending' && <Stack as="fieldset" gap={3} disabled={Boolean(busy)}><Field label="Review note (optional)"><Textarea rows={2} maxLength={2000} value={notes[post.id] || ''} onChange={event => setNotes(previous => ({ ...previous, [post.id]: event.target.value }))}/></Field><FormActions><Button disabled={approveBlocked(item)} onClick={() => review(item, 'approved')}>Approve post</Button><Button variant="secondary" onClick={() => review(item, 'rejected')}>Request changes</Button></FormActions></Stack>}
     </Stack></Card>; })}
     {data && !posts.length && <EmptyState title="No posts in this review view." description="Create a post draft in Publishing, then request review here."/>}

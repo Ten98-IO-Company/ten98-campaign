@@ -91,7 +91,7 @@ async function api(path: string, method = 'GET', body?: unknown, key?: string) {
   const response = await fetch('/api' + path, { method, credentials: 'same-origin', headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(key ? { 'Idempotency-Key': key } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
   const data = await response.json().catch(() => { throw new Error('The server returned an unreadable response.'); });
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('The server returned an unreadable response.');
-  if (!response.ok) throw Object.assign(new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'The request could not be completed.'), { status: response.status, code: data.error?.code, operation: data.operation, run: data.run });
+  if (!response.ok) throw Object.assign(new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'The request could not be completed.'), { status: response.status, code: data.error?.code, details: data.error?.details, operation: data.operation, run: data.run });
   return data;
 }
 const money = (n: unknown, currency = 'AED') => numeric(n) ? new Intl.NumberFormat('en-AE', { style: 'currency', currency, minimumFractionDigits: 0 }).format(n) : '—';
