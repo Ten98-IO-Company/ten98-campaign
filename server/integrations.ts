@@ -690,7 +690,7 @@ function saveDriveFiles(db: any, projectId: any, files: any, assertMapping: any)
   });
 }
 
-export const SOCIAL_UPDATE_FIELDS = ['content', 'tags', 'mediaItems', 'assetId', 'platformOverrides', 'accountOverrides', 'confirmReplaceVariants', 'mode', 'scheduledAt'];
+const SOCIAL_UPDATE_FIELDS = ['content', 'tags', 'mediaItems', 'assetId', 'platformOverrides', 'accountOverrides', 'confirmReplaceVariants', 'mode', 'scheduledAt'];
 // The post a social/update would leave behind: the provider copy's model merged with the update body. Content review of
 // a proposed update (council #30 Q2) fingerprints this same object, so an approval authorises exactly this update.
 async function proposedSocialUpdate(store: any, projectId: string, post: any, remote: any, body: any) {
@@ -716,16 +716,50 @@ function assertProposedDestinations(changed: any, remote: any, body: any) {
   for (const [id, variant] of Object.entries(normalizeAccountVariants(changed))) if (!remote.platforms.some((target: any) => String(target.accountId?._id || target.accountId) === id && target.platform === variant.platform)) fail(400, 'ACCOUNT_VARIANT_MISMATCH', 'Every account customization must match an existing destination and platform on this post.');
   if (body.mode === 'scheduled') try { assertAccountSchedules(changed); } catch (error: any) { fail(400, 'ACCOUNT_SCHEDULE_INVALID', error.message); }
 }
-// Reads the provider copy and returns the proposed post of a social/update body after that route's local validation.
+// The body fields of each provider update that takes a content review, without the post ID and confirmations.
+export const PROPOSAL_FIELDS: Record<string, string[]> = { 'social/update': SOCIAL_UPDATE_FIELDS, 'social/edit-published': ['accountId', 'content'], 'social/update-metadata': ['accountId', 'videoId', 'title', 'tags'] };
+const EDITABLE_PUBLISHED_PLATFORMS = ['twitter', 'discord', 'facebook', 'reddit', 'linkedin', 'telegram', 'pinterest', 'googlebusiness', 'youtube', 'slack'];
+function publishedCopy(remote: any, accountId: string) {
+  const matches = remote.platforms.filter((item: any) => String(item.accountId?._id || item.accountId) === accountId), target = matches[0];
+  if (matches.length > 1) fail(409, 'AMBIGUOUS_POST_DESTINATIONS', 'This account has multiple destinations on the post. Manage each copy in Zernio until it can be identified separately here.');
+  if (!target || target.status !== 'published') fail(403, 'POST_ACCOUNT_NOT_PUBLISHED', 'Choose a published copy belonging to this project.');
+  return target;
+}
+// The post a social/edit-published or social/update-metadata body would leave behind: the provider copy's model with
+// the edit applied. `publishedEdit` records exactly what the provider request changes, so the review fingerprint
+// (postSnapshot) covers every field; an edited text is also applied to its account copy for the platform rules.
+async function proposedPublishedEdit(store: any, projectId: string, post: any, remote: any, path: string, body: any) {
+  const accountId = identifier(body.accountId, 'account ID'), target = publishedCopy(remote, accountId), model = await remotePostModel(store, projectId, post, remote);
+  if (path === 'social/edit-published') {
+    if (!EDITABLE_PUBLISHED_PLATFORMS.includes(target.platform)) fail(422, 'POST_ACTION_UNSUPPORTED', 'This platform does not support this action through Zernio. Use its native dashboard.');
+    const content = text(body.content, 'post content', 100000), copy = { ...(model.accountOverrides?.[accountId] || { platform: target.platform }), content };
+    return { videoId: '', metadata: {} as any, changed: { ...model, accountOverrides: { ...model.accountOverrides, [accountId]: copy }, publishedEdit: { path, accountId, platform: target.platform, content } } };
+  }
+  if (target.platform !== 'youtube') fail(422, 'POST_ACTION_UNSUPPORTED', 'Published metadata changes are available for YouTube videos.');
+  const videoId = identifier(body.videoId, 'YouTube video ID'), metadata: any = {};
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) fail(400, 'INVALID_VIDEO', 'Use the published copy’s 11-character YouTube video ID.');
+  if (Object.hasOwn(body, 'title')) {
+    metadata.title = text(body.title, 'YouTube title', 100);
+    if (/[\u0000-\u001f\u007f]/u.test(metadata.title)) fail(400, 'INVALID_INPUT', 'Use a YouTube title without control characters.');
+  }
+  if (Object.hasOwn(body, 'tags')) {
+    try { metadata.tags = normalizePostTags(body.tags, { preserve: true }); }
+    catch (error: any) { fail(400, 'INVALID_POST_TAGS', error.message); }
+  }
+  if (!Object.keys(metadata).length) fail(400, 'EMPTY_METADATA_UPDATE', 'Select a title or keyword-tag change.');
+  return { videoId, metadata, changed: { ...model, publishedEdit: { path, accountId, platform: target.platform, videoId, ...metadata } } };
+}
+// Reads the provider copy and returns the proposed post of a provider update body after that route's local validation.
 // Provider-side preflight (variant replacement, destinations, platform validation) still runs when the update is sent.
-export async function socialUpdateProposal(context: any, post: any, body: any) {
+export async function providerUpdateProposal(context: any, post: any, path: string, body: any) {
   const env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) };
   if (!env.ZERNIO_API_KEY) fail(503, 'ZERNIO_NOT_CONFIGURED', 'Configure a Zernio API key to connect providers.');
   if (!context.project.zernioProfileId) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
   const profileId = String(context.project.zernioProfileId), api = zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping?.(profileId));
   if (sample(post)) fail(400, 'SAMPLE_RECORD', 'Sample posts cannot be sent to live providers.');
-  const remote = await scopedPost(api, profileId, post, body.mode === 'scheduled');
+  const published = path !== 'social/update', remote = await scopedPost(api, profileId, post, published || body.mode === 'scheduled', path === 'social/update-metadata' ? identifier(body.accountId, 'account ID') : undefined);
   await assertRecyclingSeedEditable(remote, null as any);
+  if (published) return (await proposedPublishedEdit(context.store, context.project.id, post, remote, path, body)).changed;
   const { changed } = await proposedSocialUpdate(context.store, context.project.id, post, remote, body);
   assertProposedDestinations(changed, remote, body);
   return changed;
@@ -1126,7 +1160,7 @@ export async function handleIntegration(context: any) {
       send(200, { post: updated, provider: { id: post.externalId, status: remote.status } }); return true;
     }
     if (req.method === 'POST' && ['social/update', 'social/cancel', 'social/retry', 'social/edit-published', 'social/update-metadata', 'social/unpublish'].includes(path)) {
-      const allowed = path === 'social/update' ? ['postId', ...SOCIAL_UPDATE_FIELDS] : path === 'social/retry' ? ['postId', 'confirmPublish'] : path === 'social/edit-published' ? ['postId', 'accountId', 'content', 'confirmEdit'] : path === 'social/update-metadata' ? ['postId', 'accountId', 'videoId', 'title', 'tags', 'confirmEdit'] : path === 'social/unpublish' ? ['postId', 'accountId', 'confirmRemoval'] : ['postId', 'confirmCancellation'];
+      const allowed = path === 'social/update' ? ['postId', ...SOCIAL_UPDATE_FIELDS] : path === 'social/retry' ? ['postId', 'confirmPublish'] : ['social/edit-published', 'social/update-metadata'].includes(path) ? ['postId', ...PROPOSAL_FIELDS[path], 'confirmEdit'] : path === 'social/unpublish' ? ['postId', 'accountId', 'confirmRemoval'] : ['postId', 'confirmCancellation'];
       fields(body, allowed, 'post action');
       const postId = identifier(body.postId, 'post ID');
       const outcome = await operation(context, async key => {
@@ -1219,31 +1253,21 @@ export async function handleIntegration(context: any) {
           await store.activity(project.id, 'Retried a failed social post through Zernio.');
           return { post: updated, provider: { id: post.externalId, status: result.post.status }, validationWarnings: [...new Set(validation.warnings.map(item => item.message))] };
         }
-        const accountId = identifier(body.accountId, 'account ID'), matches = remote.platforms.filter((item: any) => String(item.accountId?._id || item.accountId) === accountId), target = matches[0];
-        if (matches.length > 1) fail(409, 'AMBIGUOUS_POST_DESTINATIONS', 'This account has multiple destinations on the post. Manage each copy in Zernio until it can be identified separately here.');
-        if (!target || target.status !== 'published') fail(403, 'POST_ACCOUNT_NOT_PUBLISHED', 'Choose a published copy belonging to this project.');
+        const accountId = identifier(body.accountId, 'account ID'), target = publishedCopy(remote, accountId);
         if (path === 'social/update-metadata') {
           await context.assertProviderPostEdit?.();
           if (target.platform !== 'youtube') fail(422, 'POST_ACTION_UNSUPPORTED', 'Published metadata changes are available for YouTube videos.');
           if (body.confirmEdit !== true) fail(400, 'POST_ACTION_CONFIRMATION_REQUIRED', 'Review and confirm the selected YouTube metadata changes.');
-          const videoId = identifier(body.videoId, 'YouTube video ID'), metadata: any = {};
-          if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) fail(400, 'INVALID_VIDEO', 'Use the published copy’s 11-character YouTube video ID.');
-          if (Object.hasOwn(body, 'title')) {
-            metadata.title = text(body.title, 'YouTube title', 100);
-            if (/[\u0000-\u001f\u007f]/u.test(metadata.title)) fail(400, 'INVALID_INPUT', 'Use a YouTube title without control characters.');
-          }
-          if (Object.hasOwn(body, 'tags')) {
-            try { metadata.tags = normalizePostTags(body.tags, { preserve: true }); }
-            catch (error: any) { fail(400, 'INVALID_POST_TAGS', error.message); }
-          }
-          const requestedFields = Object.keys(metadata);
-          if (!requestedFields.length) fail(400, 'EMPTY_METADATA_UPDATE', 'Select a title or keyword-tag change.');
+          const { videoId, metadata, changed } = await proposedPublishedEdit(store, project.id, post, remote, path, body), requestedFields = Object.keys(metadata);
+          // With approval required, the proposed metadata needs its own approved review; checked again before sending.
+          await assertProposedPostApproval(context, changed);
           const assertCopy = (snapshot: any, uncertain = false) => {
             const selected = snapshot.platforms.filter((copy: any) => String(copy.accountId?._id || copy.accountId) === accountId);
             if (!['published', 'partial'].includes(snapshot.status) || selected.length !== 1 || selected[0].platform !== 'youtube' || selected[0].status !== 'published' || selected[0].removedFromPlatformAt || selected[0].platformPostId !== videoId) throw new IntegrationError(409, 'YOUTUBE_COPY_CHANGED', 'The selected published YouTube video could not be confirmed. Refresh and review its identity before continuing.', uncertain);
           };
           assertCopy(remote);
           const fresh = await scopedPost(api, profileId, post, true, accountId); assertCopy(fresh); await assertRecyclingSeedEditable(fresh, context); await context.assertProviderPostEdit?.();
+          await assertProposedPostApproval(context, changed);
           if (canonical(await store.get(project.id, 'posts', post.id)) !== canonical(post)) fail(409, 'POST_CHANGED', 'The local post changed. Refresh and review it before continuing.');
           const result = await api(endpoint + '/update-metadata', {}, { platform: 'youtube', accountId, ...metadata }, key);
           if (!reportObject(result) || result.success !== true || !Array.isArray(result.updatedFields) || result.updatedFields.length !== requestedFields.length || new Set(result.updatedFields).size !== requestedFields.length || requestedFields.some(field => !result.updatedFields.includes(field)) || [['platform', 'youtube'], ['accountId', accountId], ['postId', post.externalId], ['videoId', videoId]].some(([field, expected]) => Object.hasOwn(result, field) && result[field] !== expected)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the selected YouTube metadata fields and scope. Review the provider outcome before another attempt.', true);
@@ -1256,15 +1280,19 @@ export async function handleIntegration(context: any) {
           await store.activity(project.id, 'Zernio accepted selected YouTube metadata changes; live values remain unverified.');
           return { post: updated, metadataAcceptance: { postId, accountId, videoId, requested: metadata, updatedFields: result.updatedFields, message: 'Accepted by Zernio; live values unverified.' }, provider: { id: post.externalId, status: confirmed.status, accountId, action: 'metadata-accepted' } };
         }
-        const editing = path === 'social/edit-published', supported = editing ? ['twitter', 'discord', 'facebook', 'reddit', 'linkedin', 'telegram', 'pinterest', 'googlebusiness', 'youtube', 'slack'] : ['threads', 'facebook', 'twitter', 'linkedin', 'youtube', 'pinterest', 'reddit', 'bluesky', 'googlebusiness', 'telegram'];
+        const editing = path === 'social/edit-published', supported = editing ? EDITABLE_PUBLISHED_PLATFORMS : ['threads', 'facebook', 'twitter', 'linkedin', 'youtube', 'pinterest', 'reddit', 'bluesky', 'googlebusiness', 'telegram'];
         if (editing) await context.assertProviderPostEdit?.();
         if (!supported.includes(target.platform)) fail(422, 'POST_ACTION_UNSUPPORTED', 'This platform does not support this action through Zernio. Use its native dashboard.');
         if (body[editing ? 'confirmEdit' : 'confirmRemoval'] !== true) fail(400, 'POST_ACTION_CONFIRMATION_REQUIRED', editing ? 'Confirm the text change to this published copy.' : 'Confirm permanent removal of this published copy.');
         const payload: any = { platform: target.platform, accountId, ...(editing ? { content: text(body.content, 'post content', 100000) } : {}) }; let validationWarnings = [];
         if (editing) {
+          // With approval required, the edited text needs its own approved review; checked again before sending.
+          const { changed } = await proposedPublishedEdit(store, project.id, post, remote, path, body);
+          await assertProposedPostApproval(context, changed);
           const checkPayload = remoteRestrictionPayload(post, { ...remote, platforms: [{ ...target, customContent: payload.content }] }), assets = await postAssets(store, project.id, post), providerOwnedMediaUrls = providerPostMediaUrls(remote);
           validateRemotePayload(checkPayload, assets, post, providerOwnedMediaUrls); const validation = await providerPostValidation(api, checkPayload, { assets, providerOwnedMediaUrls }); assertPostRestrictions(validation); validationWarnings = [...new Set(validation.warnings.map(item => item.message))];
           await context.assertProviderPostEdit?.();
+          await assertProposedPostApproval(context, changed);
           validateRemotePayload(checkPayload, await postAssets(store, project.id, post), post, providerPostMediaUrls(await scopedPost(api, profileId, post, true)));
         }
         const result = await api(endpoint + (editing ? '/edit' : '/unpublish'), {}, payload, key);
