@@ -20,6 +20,28 @@ async function find(db: Executor, token: string, lock = false): Promise<Provider
   if (!mayGrantWorkspaceRole(await memberRole(db, row.workspace_id, row.inviter_id), row.role)) fail(410, 'The person who invited you can no longer grant this access. Ask a workspace owner for a new invitation.');
   return row;
 }
+/** Locks the invitation's workspace, then the invitation row, and re-checks the invitation and its inviter's grant there. */
+export async function lockInvitation(tx: Executor, token: string, workspaceId?: string): Promise<ProviderRecord> {
+  await lockWorkspace(tx, workspaceId ?? (await find(tx, token)).workspace_id);
+  return find(tx, token, true);
+}
+/** Joins a user to a locked invitation's workspace and marks it used; returns the role the user already held, if any. */
+export async function joinInvitation(tx: Executor, invite: ProviderRecord, userId: string): Promise<string | undefined> {
+  const role = await memberRole(tx, invite.workspace_id, userId);
+  if (!role) await tx.execute(sql`INSERT INTO memberships VALUES (${invite.workspace_id}, ${userId}, ${invite.role})`);
+  await tx.execute(sql`UPDATE workspace_invitations SET accepted_at = ${Date.now()} WHERE id = ${invite.id}`);
+  return role;
+}
+/**
+ * Under the workspace lock, after a member's role changes (role null: removed): revokes the member's pending invitations
+ * for roles they can no longer grant and, on removal, pending invitations addressed to them. Acceptance takes the same
+ * lock, so it completes before the change or finds the invitation revoked.
+ */
+export async function revokeMemberInvitations(tx: Executor, workspaceId: string, userId: string, role: string | null): Promise<void> {
+  const now = Date.now(), { rows } = await tx.execute(sql`SELECT id, role FROM workspace_invitations WHERE workspace_id = ${workspaceId} AND inviter_id = ${userId} AND accepted_at IS NULL AND revoked_at IS NULL`);
+  for (const row of rows as ProviderRecord[]) if (!mayGrantWorkspaceRole(role, row.role)) await tx.execute(sql`UPDATE workspace_invitations SET revoked_at = ${now} WHERE id = ${row.id} AND accepted_at IS NULL AND revoked_at IS NULL`);
+  if (role === null) await tx.execute(sql`UPDATE workspace_invitations SET revoked_at = ${now} WHERE workspace_id = ${workspaceId} AND email = (SELECT email FROM users WHERE id = ${userId}) AND accepted_at IS NULL AND revoked_at IS NULL`);
+}
 function object(body: any, allowed: string[]) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'Use only the fields shown in the invitation form.');
 }
@@ -45,7 +67,7 @@ export async function handleInvitations(context: ProviderRecord) {
   if (!publicRoute && !teamRoute) return false;
   if (publicRoute) {
     if (!['GET', 'POST'].includes(req.method)) fail(405, 'This invitation action is unavailable.');
-    await auth.limit('invitation:' + req.method + ':' + (req.socket?.remoteAddress || 'local'), req.method === 'GET' ? 120 : 30);
+    await auth.limit('invitation:' + req.method + ':' + (auth.clientAddress(req) || 'local'), req.method === 'GET' ? 120 : 30);
     const token = publicRoute[1], invite = await find(db, token), existing = await account(db, invite.email), signedIn = user && existing && user.id === existing.id && user.email === invite.email;
     if (req.method === 'GET') {
       send(200, { invitation: { email: invite.email, role: invite.role, workspaceName: invite.workspace_name, expiresAt: new Date(invite.expires_at).toISOString() }, accountExists: Boolean(existing), requiresSignIn: Boolean(existing && !signedIn) });
@@ -63,16 +85,13 @@ export async function handleInvitations(context: ProviderRecord) {
     } else if (Object.keys(body).length) fail(400, 'Accept with your existing account. Invitation links cannot change your name or password.');
     // Lock order: workspace → invitation → email; the invitation row lock makes acceptance single use.
     const accepted = await db.transaction(async tx => {
-      await lockWorkspace(tx, invite.workspace_id);
-      const current = await find(tx, token, true);
+      const current = await lockInvitation(tx, token, invite.workspace_id);
       await advisoryLock(tx, 'email:' + current.email);
       const target = await account(tx, current.email);
       if ((!existing && target) || (existing && (!target || target.id !== existing.id))) fail(409, 'The invited account changed. Sign in with that account and open the invitation again.');
       const joined = target || { id: randomUUID(), name: name!, email: current.email, isOperator: false };
       if (!target) await tx.execute(sql`INSERT INTO users VALUES (${joined.id}, ${joined.name}, ${joined.email}, ${hash})`);
-      const role = await memberRole(tx, current.workspace_id, joined.id);
-      if (!role) await tx.execute(sql`INSERT INTO memberships VALUES (${current.workspace_id}, ${joined.id}, ${current.role})`);
-      await tx.execute(sql`UPDATE workspace_invitations SET accepted_at = ${Date.now()} WHERE id = ${current.id}`);
+      const role = await joinInvitation(tx, current, joined.id);
       if (!target) await establish(joined.id, tx);
       return { user: publicUser(joined), workspaceId: current.workspace_id, role: role || current.role, alreadyMember: Boolean(role), created: !target };
     });

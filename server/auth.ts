@@ -4,15 +4,20 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sql } from 'drizzle-orm';
+import { parseTrustedProxies, resolveClientAddress } from '@ten98/runtime';
 import type { Database, Executor } from './database.ts';
+import { joinInvitation, lockInvitation } from './invitations.ts';
 
-export interface AuthConfig { appUrl: string; sessionSecret: string; bootstrapToken?: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[] }
+export interface AuthConfig { appUrl: string; sessionSecret: string; bootstrapToken?: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[]; trustedProxies?: string | string[] }
 export interface PublicUser { id: string; name: string; email: string; isOperator: boolean }
 type UserRow = { id: string; name: string; email: string; password?: string | null; isOperator?: unknown; expiresAt?: number };
 type OidcFlow = { state: string; verifier: string; nonce: string; invite_hash: string | null };
 
 const derive = promisify(scrypt) as (password: string, salt: string, keylen: number, options: { N: number; maxmem: number }) => Promise<Buffer>;
 const maxAge = 7 * 86400, oidcWindow = 600, callbackPath = '/api/auth/oidc/callback';
+// Password sign-in attempts per 15 minutes. One client reaches at most 10 attempts per account in a window (20 across two
+// overlapping windows), so only failures from several clients can reach the account-wide limit.
+export const signInLimits = { client: 30, clientAccount: 10, account: 50 };
 export class HttpError extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } }
 export const publicUser = (user: UserRow | null | undefined): PublicUser | null => user ? { id: user.id, name: user.name, email: user.email, isOperator: Boolean(user.isOperator) } : null;
 function storedSecret(dataDir: string, provided: string | undefined, filename: string, label: string): string {
@@ -57,6 +62,10 @@ type OpenIdClient = typeof import('openid-client');
 // The OIDC client loader is injectable so tests can exercise the real flow without an identity provider.
 export function createAuth(db: Database, config: AuthConfig, { openidClient = () => import('openid-client') }: { openidClient?: () => Promise<OpenIdClient> } = {}) {
   const digest = (value: string) => createHmac('sha256', config.sessionSecret).update(value).digest('hex');
+  const proxies = (() => { try { return parseTrustedProxies([config.trustedProxies ?? ''].flat().join(',')); } catch { throw new Error('TRUSTED_PROXIES must be a comma-separated list of IP addresses or CIDR ranges.'); } })();
+  // The shared resolver ignores X-Forwarded-For unless the peer is a trusted proxy. It returns null when the address is
+  // unknown (an invalid peer, or a missing, malformed or all-trusted chain behind a trusted proxy); those share one bucket.
+  const clientAddress = (req: IncomingMessage): string => resolveClientAddress(req.socket?.remoteAddress, req.headers?.['x-forwarded-for'] as string | undefined, proxies) ?? 'unknown';
   // Cookies are shared across ports; include the configured origin so local instances can coexist.
   const scope = createHash('sha256').update(new URL(config.appUrl).origin).digest('hex').slice(0, 16), sessionName = 'ten98_session_' + scope, oidcName = 'ten98_oidc_' + scope, inviteName = 'ten98_oidc_invite_' + scope;
   function cookie(name: string, value: string, age = maxAge, path = '/') {
@@ -99,7 +108,8 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   let oidcConfig: import('openid-client').Configuration | undefined;
   async function oidc() {
     const client = await openidClient();
-    if (!oidcConfig) oidcConfig = await client.discovery(new URL(config.oidcIssuer), config.oidcClientId, config.oidcClientSecret || undefined);
+    // ID token signatures are checked against the issuer's JWKS rather than relying on the TLS channel alone.
+    if (!oidcConfig) oidcConfig = await client.discovery(new URL(config.oidcIssuer), config.oidcClientId, config.oidcClientSecret || undefined, undefined, { execute: [client.enableNonRepudiationChecks] });
     return { client, provider: oidcConfig };
   }
   // The invitation token rides in a callback-scoped cookie as "<expiresAt>.<token>"; the database keeps only its keyed hash.
@@ -109,7 +119,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     return timingSafeEqual(Buffer.from(digest(value)), Buffer.from(stored)) ? token : '';
   }
   return {
-    user, establish, limit,
+    user, establish, limit, clientAddress,
     /** The stored key of this request's session cookie, or '' when it carries none, for guards that join on sessions. */
     sessionKey(req: IncomingMessage): string { const token = sessionToken(req); return token && /^[\w-]{43}$/.test(token) ? digest(token) : ''; },
     requireSetupProof(token: unknown): void {
@@ -137,12 +147,13 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       });
     },
     async login(req: IncomingMessage, res: ServerResponse, body: { email: string; password: string }): Promise<PublicUser | null> {
-      await limit('ip:' + req.socket.remoteAddress, 30); await limit('email:' + digest(body.email));
+      const client = clientAddress(req), account = body.email.toLowerCase(), clientAccount = 'client-email:' + digest(JSON.stringify([client, account]));
+      await limit('ip:' + client, signInLimits.client); await limit(clientAccount, signInLimits.clientAccount); await limit('email:' + digest(account), signInLimits.account);
       const found = await first<UserRow>(db.execute(sql`SELECT u.*, EXISTS (SELECT 1 FROM instance_operators o WHERE o.user_id = u.id) AS "isOperator" FROM users u WHERE email = ${body.email}`));
       if (!await verify(body.password, found?.password)) throw new HttpError(401, 'Email or password is incorrect.');
       return db.transaction(async tx => {
         if ((await lockUser(tx, found!.id))?.password !== found!.password) throw new HttpError(401, 'Your password changed. Sign in again.');
-        await tx.execute(sql`DELETE FROM login_limits WHERE key = ${'email:' + digest(body.email)}`);
+        await tx.execute(sql`DELETE FROM login_limits WHERE key = ${clientAccount}`);
         await establish(res, found!.id, req, tx); return publicUser(found);
       });
     },
@@ -154,7 +165,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     },
     async oidcStart(req: IncomingMessage, res: ServerResponse): Promise<void> {
       if (!config.oidcEnabled || !(await db.execute(sql`SELECT id FROM users LIMIT 1`)).rowCount) throw new HttpError(400, 'Identity sign-in is unavailable.');
-      await limit('oidc:' + req.socket.remoteAddress, 30);
+      await limit('oidc:' + clientAddress(req), 30);
       const { client, provider } = await oidc();
       const invite = new URL(req.url || '/api/auth/oidc/start', config.appUrl).searchParams.get('invite');
       if (invite && !/^[A-Za-z0-9_-]{43}$/.test(invite)) throw new HttpError(400, 'Use a valid invitation link before signing in.');
@@ -186,23 +197,30 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
         const tokens = await client.authorizationCodeGrant(provider, url, { pkceCodeVerifier: flow.verifier, expectedState: state, expectedNonce: flow.nonce, idTokenExpected: true });
         const claims = tokens.claims();
         if (!claims?.sub || typeof claims.sub !== 'string' || claims.sub.length > 1024) throw new Error('Missing subject.');
+        let joined = false;
         await db.transaction(async tx => {
+          // A usable invitation (re-checked under its workspace and row locks) provisions its exact verified email into that
+          // workspace only; an unusable one leaves the allowlist rules in place.
+          const invited = invite ? await lockInvitation(tx, invite).catch(error => { if (error instanceof HttpError) return undefined; throw error; }) : undefined;
           await advisoryLock(tx, 'oidc:' + JSON.stringify([claims.iss, claims.sub]));
           const existing = await first<{ user_id: string }>(tx.execute(sql`SELECT user_id FROM oidc_identities WHERE issuer = ${claims.iss} AND subject = ${claims.sub}`));
           if (existing) return establish(res, existing.user_id, req, tx);
           const email = typeof claims.email === 'string' ? claims.email.trim().toLowerCase() : '';
-          if (claims.email_verified !== true || !config.oidcAllowedEmails.includes(email) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.');
+          if (claims.email_verified !== true || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.');
+          if (invited && invited.email !== email) throw new HttpError(403, `This invitation is for ${invited.email}. Sign in with that identity to accept it.`);
+          if (!invited && !config.oidcAllowedEmails.includes(email)) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.');
           await advisoryLock(tx, 'email:' + email);
           if ((await tx.execute(sql`SELECT id FROM users WHERE email = ${email}`)).rowCount) throw new HttpError(403, 'This email already has an account. Automatic identity linking is disabled.');
           const id = randomUUID(), workspace = randomUUID();
           await tx.execute(sql`INSERT INTO users VALUES (${id}, ${typeof claims.name === 'string' ? claims.name.slice(0, 120) : email}, ${email}, NULL)`);
           await tx.execute(sql`INSERT INTO oidc_identities VALUES (${claims.iss}, ${claims.sub}, ${id})`);
+          if (invited) { await joinInvitation(tx, invited, id); joined = true; return establish(res, id, req, tx); }
           await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspace}, 'My workspace')`);
           await tx.execute(sql`INSERT INTO memberships VALUES (${workspace}, ${id}, 'owner')`);
           await tx.execute(sql`INSERT INTO projects (id, workspace_id, name) VALUES (${randomUUID()}, ${workspace}, 'My project')`);
           return establish(res, id, req, tx);
         });
-        res.writeHead(302, { Location: config.appUrl + '/' + (invite ? '?invite=' + encodeURIComponent(invite) : '') }); res.end();
+        res.writeHead(302, { Location: config.appUrl + '/' + (invite && !joined ? '?invite=' + encodeURIComponent(invite) : '') }); res.end();
       } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, 'Identity sign-in could not be verified. Start again.'); }
     },
   };

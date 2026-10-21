@@ -12,7 +12,7 @@ import { seedSample } from './seed.ts';
 import { handleIntegration } from './integrations.ts';
 import { IntegrationError, mediaUrl, type ProviderRecord, type OperationContext } from './provider-core.ts';
 import { createIntegrationSettings } from './integration-settings.ts';
-import { handleInvitations } from './invitations.ts';
+import { handleInvitations, revokeMemberInvitations } from './invitations.ts';
 import { handleOperationRecovery } from './operation-recovery.ts';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from './approvals.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.ts';
@@ -132,7 +132,7 @@ export async function createApp(options: AppOptions = {}) {
   if (!['on', 'off'].includes(directScheduler)) throw new Error('DIRECT_SCHEDULER must be on or off.');
   const { pool, db } = options.database || getDatabase(env.DATABASE_URL), store = createStore(db);
   await assertSchema(pool);
-  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean) };
+  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean), trustedProxies: env.TRUSTED_PROXIES || '' };
   config.oidcEnabled = Boolean(config.oidcIssuer && config.oidcClientId);
   if (!await claimed(db)) config.bootstrapToken = bootstrapToken(dataDir, env.BOOTSTRAP_TOKEN);
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
@@ -189,7 +189,7 @@ export async function createApp(options: AppOptions = {}) {
           return send(200, { user: publicUser(current), setupRequired: !await claimed(db), oidcEnabled: config.oidcEnabled, ...(sessionEnded ? { sessionEnded: true } : {}) });
         }
         if (path === '/api/auth/setup' && req.method === 'POST') {
-          await auth.limit('setup:' + req.socket.remoteAddress, 10);
+          await auth.limit('setup:' + auth.clientAddress(req), 10);
           if (await claimed(db)) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
           auth.requireSetupProof(body.token);
           const name = text(body.name, 'Name'), mail = email(body.email), hash = await hashPassword(password(body.password));
@@ -279,6 +279,7 @@ export async function createApp(options: AppOptions = {}) {
             if (previous === 'owner' && requested !== 'owner' && (await first<{ count: number }>(tx.execute(sql`SELECT count(*) AS count FROM memberships WHERE workspace_id=${memberRoute[1]} AND role='owner'`)))!.count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
             if (req.method === 'DELETE') await tx.execute(sql`DELETE FROM memberships WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
             else await tx.execute(sql`UPDATE memberships SET role=${requested} WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
+            await revokeMemberInvitations(tx, memberRoute[1], target.id, requested);
             const activityStore = createStore(tx);
             for (const project of (await tx.execute(sql`SELECT id FROM projects WHERE workspace_id=${memberRoute[1]}`)).rows as { id: string }[]) await activityStore.activity(project.id, 'Workspace team membership updated.');
           });
