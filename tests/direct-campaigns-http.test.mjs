@@ -122,6 +122,19 @@ test('a scheduler tick reads only due campaigns and the next pending delivery, w
   } finally { await f.close(); }
 });
 
+test('a complaint recorded at Cloudflare before the first email send stops that send without a manual refresh', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const contact = await f.person(), campaign = await f.draft({ channel: 'email', emailPurpose: 'transactional', subject: 'Receipt for {{name}}', text: 'Your requested receipt.' });
+    assert.equal((await f.arm(campaign, 'send', { transactionalConfirmed: true })).data.campaign.status, 'scheduled');
+    f.setSuppressions([{ id: 'suppression-complaint', email: contact.email, reason: 'complaint', scope: { type: 'account' }, expires_at: null }]);
+    await f.app.direct.processPending({ now: Date.now() + 7200000 });
+    assert.equal(f.calls.filter(call => call.url.endsWith('/email/sending/send')).length, 0, 'No email reaches Cloudflare for a complained-about recipient.');
+    assert.equal(f.calls.filter(call => call.url.includes('/suppressions')).length, 1);
+    const detail = await f.request(f.path + `/campaigns/${campaign.id}`); assert.equal(detail.data.deliveries[0].status, 'suppressed');
+  } finally { await f.close(); }
+});
+
 test('Cloudflare email enforces transactional purpose, reports true receipts, appends unsubscribe and preserves bounce suppressions', pg, async t => {
   const f = await fixture(t);
   try {

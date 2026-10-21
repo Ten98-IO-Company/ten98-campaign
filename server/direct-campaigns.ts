@@ -169,6 +169,13 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       });
     } finally { active = false; }
   }
+  // Cloudflare's suppression list (bounces, complaints) applied to this project's contacts. Refresh runs it, and so does the
+  // worker before an email campaign's first send and every 15 minutes while it sends, so a new complaint stops later sends.
+  async function applyEmailSuppressions(projectId: string, assertMapping: () => unknown) {
+    const result = await syncEmailSuppressions({ env: { ...env }, assertMapping }), domain = env.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase();
+    const suppressed = (result.suppressions || []).filter((row: any) => (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()) && (row.scope?.type !== 'sending_domain' || row.scope.value.toLowerCase() === domain));
+    for (const contact of await contacts.list(projectId)) { const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (match) await contacts.suppress(projectId, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason); }
+  }
   async function sendDue(now: number, limit: number) {
     const rows = (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns WHERE data->>'status' IN ('scheduled', 'sending') ORDER BY seq`))).map(row => row.data).filter((campaign: any) => ['scheduled', 'sending'].includes(campaign.status) && Date.parse(campaign.scheduledAt) <= now);
     for (const campaign of rows.slice(0, Math.max(1, Math.min(25, limit)))) {
@@ -199,6 +206,8 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           for (const delivery of pending) if (selected.some((contact: any) => contact.id === delivery.contactId)) { delivery.status = result.status === 'failed' ? 'failed' : 'accepted'; delivery.providerId = campaign.providerId; await putDelivery(delivery); }
           await finish(campaign);
         } else {
+          // A failed sync leaves this tick's send waiting rather than sending past a fresh complaint.
+          if (campaign.channel === 'email' && !(Date.parse(campaign.suppressionsSyncedAt) > Date.now() - 900000)) { await applyEmailSuppressions(campaign.projectId, assertMapping); campaign.suppressionsSyncedAt = new Date().toISOString(); await save(campaign); }
           const [delivery] = (await resultRows(db.execute(sql`SELECT data FROM direct_deliveries WHERE campaign_id = ${campaign.id} AND data->>'status' = 'pending' ORDER BY seq LIMIT 1`))).map(row => row.data);
           if (!delivery) { await finish(campaign); continue; }
           const contact: any = await contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, campaign.channel);
@@ -313,7 +322,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           await recordSms(campaign, latest); if (result.errorCode === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
         }
       }
-      if (campaign.channel === 'email' && ready('email')) { const result = await syncEmailSuppressions({ env: { ...env }, assertMapping: () => context.assertIntegrationSettings() }); const suppressed = (result.suppressions || []).filter((row: any) => (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()) && (row.scope?.type !== 'sending_domain' || row.scope.value.toLowerCase() === env.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase())); for (const contact of await contacts.list(project.id)) { const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (match) await contacts.suppress(project.id, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason); } }
+      if (campaign.channel === 'email' && ready('email')) await applyEmailSuppressions(project.id, () => context.assertIntegrationSettings());
       await context.assertIntegrationSettings(); await finishLatest(project.id, id); send(200, { campaign: await decorate(await find(project.id, id)), deliveries: await deliveries(id) }); return true;
     }
     return false;
