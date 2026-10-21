@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
+import { SegmentedControl, Text } from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 
@@ -76,27 +77,26 @@ test('post cards name only saved recipient IDs using current project names and m
   assert.equal(recipients({ ...post, accounts: [] }, accounts), 'No accounts selected');
   assert.equal(recipients({ platforms: ['facebook'], providerResults: post.providerResults, accountOverrides: post.accountOverrides }, accounts), 'Choose connected accounts');
   assert.deepEqual({ post, accounts }, before, 'Display resolution does not change saved identities or loaded accounts.');
-  const markup = appSource.match(/<p className="post-meta"><span>Recipients: \{postRecipients\(p, remote\.accounts\?\.accounts \|\| \[\]\)\}<\/span><\/p>/)?.[0];
+  const markup = appSource.match(/<Text tone="muted" size="sm">Recipients: \{postRecipients\(p, remote\.accounts\?\.accounts \|\| \[\]\)\}<\/Text>/)?.[0];
   assert.ok(markup, 'Cards render recipient identities visibly.');
   const { code } = await transformWithOxc('const render = (p, remote) => ' + markup, 'PostRecipients.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', 'postRecipients', code + '; return render;')(React, recipients);
+  const render = new Function('React', 'postRecipients', 'Text', code + '; return render;')(React, recipients, Text);
   const html = renderToStaticMarkup(render({ accounts: ['<unknown>'] }, {}));
   assert.match(html, /Recipients: &lt;unknown&gt;/); assert.doesNotMatch(html, /<unknown>/);
 });
 
-test('post status buttons remain a subordinate pressed group with their actual local filter callbacks', async () => {
-  const appSource = source(), start = appSource.indexOf('<div className="button-wrap" role="group" aria-label="Post status">'), end = appSource.indexOf('</div>', start) + 6;
+test('post status filter is one labelled segmented control bound to the local filter', async () => {
+  const appSource = source(), start = appSource.indexOf('<SegmentedControl label="Post status"'), end = appSource.indexOf('/>', start) + 2;
   assert.ok(start > 0 && end > start);
   const { code } = await transformWithOxc('const render = (tab, setTab) => ' + appSource.slice(start, end), 'PostStatus.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', 'title', code + '; return render;')(React, value => value[0].toUpperCase() + value.slice(1));
+  const render = new Function('React', 'SegmentedControl', 'title', code + '; return render;')(React, SegmentedControl, value => value[0].toUpperCase() + value.slice(1));
   const statuses = ['all', 'draft', 'scheduled', 'published', 'failed', 'cancelled']; let selected = 'all';
   for (const status of statuses) {
-    const group = render(selected, value => { selected = value; }), buttons = React.Children.toArray(group.props.children);
-    assert.equal(group.props.role, 'group'); assert.equal(group.props['aria-label'], 'Post status'); assert.equal(group.props.className, 'button-wrap');
-    assert.equal(buttons.length, statuses.length);
-    assert.equal(buttons.filter(button => button.props['aria-pressed']).length, 1);
-    for (const [index, button] of buttons.entries()) { assert.equal(button.props.type, 'button'); assert.equal(button.props['aria-pressed'], statuses[index] === selected); assert.equal(button.props.className, 'button' + (statuses[index] === selected ? ' primary' : '')); }
-    buttons[statuses.indexOf(status)].props.onClick(); assert.equal(selected, status);
+    const control = render(selected, value => { selected = value; });
+    assert.equal(control.type, SegmentedControl); assert.equal(control.props.label, 'Post status'); assert.equal(control.props.value, selected);
+    assert.deepEqual(control.props.options.map(option => option.value), statuses); assert.equal(control.props.options[0].label, 'All posts');
+    assert.equal((renderToStaticMarkup(control).match(/aria-checked="true"|aria-pressed="true"/g) || []).length, 1, 'Exactly one status is marked as chosen.');
+    control.props.onValueChange(status); assert.equal(selected, status);
   }
   const declaration = appSource.match(/^  const visiblePosts = .+;$/m)?.[0]; assert.ok(declaration);
   const filter = new Function('state', 'tab', 'filtered', declaration + '; return visiblePosts;');
