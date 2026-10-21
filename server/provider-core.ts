@@ -52,7 +52,7 @@ export function assertProviderPath(path: string, query = true) {
   const route = path.replace(/^https:\/\/[^/?#]*/i, ''), pathPart = query ? route.split('?')[0] : route;
   // Each segment is also checked as the provider sees it after one decoding, so '..%2Fx' cannot become '../x' there.
   const decoded = (segment: string) => { try { return decodeURIComponent(segment); } catch { return segment; } };
-  if (route.includes('#') || !query && route.includes('?') || pathPart.includes('\\') || pathPart.split('/').some(segment => decoded(segment).split(/[/\\]/).some(part => part === '.' || part === '..'))) INVALID_PATH();
+  if (route.includes('#') || !query && route.includes('?') || pathPart.includes('\\') || pathPart.split('/').some(segment => decoded(segment).includes('\\') || decoded(segment).split('/').some(part => part === '.' || part === '..'))) INVALID_PATH();
 }
 /** One provider path segment: encoded, and never '.' or '..', which URL parsing would resolve even when encoded. */
 export function pathSegment(value: unknown): string {

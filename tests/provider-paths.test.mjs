@@ -32,9 +32,10 @@ function assertContained(calls, before, prefix, id, suffix = '') {
 }
 
 test('the provider path guard refuses dot segments, backslashes and fragments, and keeps encoded IDs in one segment', () => {
-  for (const path of ['/posts/../accounts', '/posts/%2e%2e/accounts', '/posts/..%2Faccounts', '/posts/.', '/posts/a\\b', '/posts/a#b', '/posts/a?b']) assert.throws(() => assertProviderPath(path, false), error => error.code === 'INVALID_PROVIDER_PATH', path);
+  for (const path of ['/posts/../accounts', '/posts/%2e%2e/accounts', '/posts/..%2Faccounts', '/posts/.', '/posts/a\\b', '/posts/a%5Cb', '/posts/a#b', '/posts/a?b', '/posts/a?b=1']) assert.throws(() => assertProviderPath(path, false), error => error.code === 'INVALID_PROVIDER_PATH', path);
   for (const url of ['https://www.googleapis.com/calendar/v3/calendars/../events', 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/%2e%2e/x.json', 'https://www.googleapis.com/drive/v3/files/a#b']) assert.throws(() => assertProviderPath(url), error => error.code === 'INVALID_PROVIDER_PATH', url);
-  for (const path of ['/posts/abc123', `/commerce/products/${encodeURIComponent('gid://shopify/Product/1')}`, `/inbox/conversations/${encodeURIComponent('a%2Fb')}`]) assert.doesNotThrow(() => assertProviderPath(path, false), path);
+  // An encoded slash stays allowed inside one segment: Shopify collection GIDs and opaque Zernio IDs are sent that way.
+  for (const path of ['/posts/abc123', `/commerce/collections/${encodeURIComponent('gid://shopify/Collection/7001')}`, `/inbox/conversations/${encodeURIComponent('a%2Fb')}`]) assert.doesNotThrow(() => assertProviderPath(path, false), path);
   assert.doesNotThrow(() => assertProviderPath('https://www.googleapis.com/calendar/v3/calendars/a%40b.test/events?maxResults=1&q=../x'));
   for (const value of ['', '.', '..']) assert.throws(() => pathSegment(value), error => error.code === 'INVALID_PROVIDER_PATH', value);
   assert.equal(pathSegment('a/b?c'), 'a%2Fb%3Fc');
