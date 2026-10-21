@@ -5,6 +5,7 @@ import { IntegrationError } from '../server/provider-core.ts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import pg from 'pg';
 import { createApp } from '../server/index.ts';
 import { postgresSkip, testApp, testDatabase } from './postgres.mjs';
 
@@ -243,7 +244,12 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     const review = async article => { const result = await request(route(article)); assert.equal(result.status, 200, JSON.stringify(result)); assert.match(result.data.version, /^[a-f0-9]{64}$/); return { title: 'Reviewed title', bodyHtml: '<p>Reviewed <strong>HTML</strong></p>', version: result.data.version, confirmUpdate: true }; };
     const publicationReview = async (article, action, accountId) => { const result = await request(route(article, accountId)); assert.equal(result.status, 200, JSON.stringify(result)); return { version: result.data.version, [action === 'schedule' ? 'confirmSchedule' : action === 'cancel-schedule' ? 'confirmCancelSchedule' : action === 'publish' ? 'confirmPublish' : 'confirmUnpublish']: true }; };
     for (const platform of ['wordpress', 'shopify']) {
-      const article = addArticle(platform), body = await review(article), key = 'successful-http-edit-' + platform, before = writes().length;
+      // One article read makes five provider calls, each guarded before and after; guards with no I/O between them share one
+      // database read, so the read costs a bounded number of queries (#54: it was 32, mostly repeated guards).
+      let queries = 0; const query = pg.Client.prototype.query; pg.Client.prototype.query = function (...args) { queries++; return query.apply(this, args); };
+      const article = addArticle(platform); let body; try { body = await review(article); } finally { pg.Client.prototype.query = query; }
+      assert.ok(queries <= 12, `One article read ran ${queries} queries.`);
+      const key = 'successful-http-edit-' + platform, before = writes().length;
       const result = await request(route(article) + '/update', { body, key }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.article.id, article.id); assert.equal(result.data.article.title, body.title); assert.equal(result.data.article.bodyHtml, body.bodyHtml); assert.equal(result.data.article.isPublished, false); assert.equal(result.data.blog.id, article.blogId); assert.equal(result.data.accountId, platform + '-account');
       assert.equal(writes().length, before + 1); assert.equal(writes().at(-1).method, 'PATCH'); assert.deepEqual(writes().at(-1).payload, { title: body.title, bodyHtml: body.bodyHtml });
       assert.deepEqual((await request(route(article) + '/update', { body, key })).data, result.data); assert.equal(writes().length, before + 1);
