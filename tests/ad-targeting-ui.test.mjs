@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { AppField as Field } from '@ten98/ui/app';
+import { AppField } from '@ten98/ui/app';
+import * as ui from '@ten98/ui';
+import { Checkbox } from '@ten98/ui';
 import { transformWithOxc } from 'vite';
 
 // Exercise the complete composer with its actual JSX, fields and mocked request boundary.
@@ -23,23 +25,27 @@ async function browser(respond = async () => ({ results: [interest()] })) {
   const ref = initial => { const index = cursor++; return hooks[index] ||= { current: initial }; };
   const effect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = async (...args) => { calls.push(args); if (args[0] === 'accounts') return { accounts }; if (args[0].startsWith('ads/accounts?')) return { accounts: advertisers }; return respond(...args); };
-  const Component = new Function('React', 'Field', 'useState', 'useRef', 'useEffect', 'FormData', code + '; return AdComposer;')(React, Field, state, ref, effect, class { constructor(form) { return Object.entries(form); } });
+  const scope = { ...ui, AppField, React, useState: state, useRef: ref, useEffect: effect, FormData: class { constructor(form) { return Object.entries(form); } } };
+  const Component = new Function(...Object.keys(scope), code + '; return AdComposer;')(...Object.values(scope));
   function paint() { if (unmounted) return; for (let pass = 0; dirty; pass++) { assert.ok(pass < 25, 'Rendering settles.'); dirty = false; cursor = 0; tree = Component({ request, onCreated() { created++; }, onCancel() {}, ...props }); while (queued.length) queued.shift()(); } }
   // React may call the component for a same-value update, then retain the previous committed JSX.
   const discardRender = () => { cursor = 0; Component({ request, onCreated() { created++; }, onCancel() {}, ...props }); assert.equal(queued.length, 0); };
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
   const html = () => renderToStaticMarkup(tree);
-  const button = label => nodes(tree).find(node => node.type === 'button' && (node.props['aria-label'] === label || text(node) === label));
-  const input = label => { const wrapper = nodes(tree).find(node => node.type === 'label' && nodes(node).some(child => child.type === 'span' && text(child) === label)); return nodes(wrapper).find(node => ['input', 'select'].includes(node.type)); };
+  // Interests are picked in the library MultiCombobox; "Add/Remove <name>" drive its options and values as a pick or tag removal would.
+  const picker = () => nodes(tree).find(node => node.type === ui.MultiCombobox);
+  const choice = label => { const box = picker(), adding = label.startsWith('Add '), name = label.slice(adding ? 4 : 7), option = box && (adding ? box.props.options : box.props.values).find(item => item.label === name); if (!option) return undefined; const picked = box.props.values.some(item => item.value === option.value); return { props: { disabled: !!box.props.disabled || (adding ? picked : !picked), onClick: () => box.props.onValuesChange(adding ? [...box.props.values, option] : box.props.values.filter(item => item.value !== option.value)) } }; };
+  const button = label => nodes(tree).find(node => node.type === ui.Button && (node.props['aria-label'] === label || text(node) === label)) || (/^(Add|Remove) /.test(label) ? choice(label) : undefined);
+  const input = label => { const wrapper = nodes(tree).find(node => node.type === ui.Field && node.props.label === label.replace(/ \*$/, '')); return nodes(wrapper).find(node => [ui.Input, ui.Select].includes(node.type)); };
   const change = async (label, value) => { const field = input(label); assert.ok(field, label); field.props.onChange({ target: { value } }); paint(); await tick(); };
   const click = label => { const control = button(label); assert.ok(control, label); assert.equal(!!control.props.disabled, false, label); const pending = control.props.onClick(); paint(); return pending; };
-  const form = () => nodes(tree).find(node => node.type === 'form');
+  const form = () => { const node = nodes(tree).find(node => node.type === ui.Form); return React.cloneElement(node, { onSubmit: event => node.props.onSubmit(undefined, event) }); };
   const event = (extra = {}) => ({ preventDefault() {}, currentTarget: { ...values, ...extra } });
   const submit = (extra = {}) => { const pending = form().props.onSubmit(event(extra)); paint(); return pending; };
   const choose = async (account = accounts[0]._id, advertiser = advertisers[0].id) => { await change('Connected channel *', account); await change('Advertising account *', advertiser); };
   const search = async (query = 'fitness') => { await change('Interest search', query); await click('Search interests'); await tick(); };
   paint(); await tick(); await choose();
-  return { calls, tick, html, input, button, change, click, form, event, submit, choose, search, discardRender, get created() { return created; }, get postUnmountUpdates() { return postUnmountUpdates; }, props: async next => { props = { ...props, ...next }; dirty = true; paint(); await tick(); }, unmount: () => { hooks.forEach(hook => hook.close?.()); unmounted = true; } };
+  return { calls, tick, html, input, button, picker, change, click, form, event, submit, choose, search, discardRender, get created() { return created; }, get postUnmountUpdates() { return postUnmountUpdates; }, props: async next => { props = { ...props, ...next }; dirty = true; paint(); await tick(); }, unmount: () => { hooks.forEach(hook => hook.close?.()); unmounted = true; } };
 }
 
 test('a discarded same-value render leaves committed search, selection and submit handlers usable', async () => {
@@ -113,7 +119,7 @@ test('unknown, empty, provider failure and malformed search responses remain dis
 test('opaque-ID deduplication preserves the original selected provider name and the 100-interest cap survives disabled handlers', async () => {
   let batch = 0, renamed = false; const ui = await browser(async path => path === 'ads/create' ? {} : { results: Array.from({ length: 25 }, (_, index) => interest(`opaque:${batch * 25 + index}`, `${renamed ? 'Renamed ' : ''}Interest ${batch * 25 + index}`)) });
   for (batch = 0; batch < 4; batch++) { await ui.search('batch ' + batch); for (let index = 0; index < 25; index++) { await ui.click('Add Interest ' + (batch * 25 + index)); await ui.tick(); } }
-  assert.match(ui.html(), /Selected interests: 100 \/ 100/); await ui.search('over the cap'); const disabled = ui.button('Add Interest 100'); assert.equal(disabled.props.disabled, true); disabled.props.onClick(); await ui.tick();
+  assert.match(ui.html(), /Selected interests: 100 \/ 100/); await ui.search('over the cap'); assert.equal(ui.button('Add Interest 100'), undefined, 'At the cap no further interests are offered.'); const box = ui.picker(); box.props.onValuesChange([...box.props.values, { value: 'opaque:100', label: 'Interest 100' }]); await ui.tick(); assert.match(ui.html(), /Selected interests: 100 \/ 100/);
   await ui.click('Remove Interest 99'); await ui.tick(); assert.match(ui.html(), /Selected interests: 99 \/ 100/);
   batch = 0; renamed = true; await ui.search('duplicate id'); assert.equal(ui.button('Add Renamed Interest 0').props.disabled, true); ui.button('Add Renamed Interest 0').props.onClick(); await ui.tick(); await ui.submit(); await ui.tick();
   assert.equal(ui.calls.at(-1)[1].targeting.interests.length, 99); assert.deepEqual(ui.calls.at(-1)[1].targeting.interests[0], { id: 'opaque:0', name: 'Interest 0' });
@@ -123,7 +129,7 @@ test('verified lead-form metadata survives interest selection and boosts omit th
   const leadForm = { id: 'form-1', name: 'Provider lead form', version: 'a'.repeat(64), status: 'ACTIVE', privacyPolicyUrl: 'https://example.test/privacy', questions: [] };
   const ui = await browser(async path => path.startsWith('leads/') ? path.includes('/forms?') ? { forms: [leadForm], pagination: { hasMore: false } } : { form: leadForm } : path.startsWith('ads/targeting?') ? { results: [interest()] } : {});
   await ui.search(); await ui.click('Add Provider interest'); await ui.tick(); await ui.change('Campaign goal', 'lead_generation'); await ui.change('Verified forms *', leadForm.id);
-  const review = nodes(ui.form()).find(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.checked === false && !node.props.name); assert.ok(review); review.props.onChange({ target: { checked: true } }); await ui.tick();
+  const review = nodes(ui.form()).find(node => node.type === Checkbox && node.props.checked === false && !node.props.name); assert.ok(review); review.props.onChange({ target: { checked: true } }); await ui.tick();
   await ui.submit({ linkUrl: '' }); await ui.tick(); const leadPayload = ui.calls.at(-1)[1]; assert.equal(ui.calls.at(-1)[0], 'ads/create'); assert.equal(leadPayload.status, 'PAUSED'); assert.equal(leadPayload.leadGenFormId, leadForm.id); assert.deepEqual(leadPayload.leadFormReview, { id: leadForm.id, name: leadForm.name, version: leadForm.version }); assert.deepEqual(leadPayload.targeting.interests, [{ id: 'opaque / interest', name: 'Provider interest' }]); assert.deepEqual(leadPayload.countries, ['AE', 'SA']);
   await ui.props({ posts: [{ id: 'post-1', externalId: 'provider-post', status: 'published' }] }); await ui.change('Campaign source', 'boost'); assert.doesNotMatch(ui.html(), /Interest search|Selected interests/); await ui.submit({ postId: 'post-1' }); await ui.tick(); assert.deepEqual(ui.calls.at(-1), ['ads/boost', { platform: 'facebook', accountId: accounts[0]._id, adAccountId: advertisers[0].id, name: values.name, goal: 'traffic', budgetAmount: 50, budgetType: 'daily', countries: ['AE', 'SA'], status: 'PAUSED', currency: 'AED', postId: 'post-1' }]);
 });
