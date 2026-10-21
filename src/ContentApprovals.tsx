@@ -41,9 +41,10 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
     const rows = problem?.code === 'APPROVAL_POST_RESTRICTIONS' && Array.isArray(problem.details) ? problem.details.filter((row: any) => row && typeof row.message === 'string' && row.message && ['platform', 'field', 'accountId'].every(key => row[key] === undefined || typeof row[key] === 'string')).slice(0, 100) : [];
     setRestrictions(previous => { const { [postId]: _previous, ...rest } = previous; return rows.length ? { ...rest, [postId]: rows } : rest; });
   }
+  // A failed action also drops a pending keyboard move, so a later refresh cannot jump focus to another card.
   async function action(name: string, run: () => Promise<void>) {
     if (busy || !active.current) return; readVersion.current++; setBusy(name); setError(''); setNotice(''); noteRestrictions(name, null);
-    try { await run(); } catch (err) { if (active.current) { setError((err as Error).message || 'This review could not be saved.'); noteRestrictions(name, err); } }
+    try { await run(); } catch (err) { if (active.current) { setError((err as Error).message || 'This review could not be saved.'); noteRestrictions(name, err); } advance.current = null; }
     finally { if (active.current) setBusy(''); }
   }
   async function review(item: any, decision: string) {
