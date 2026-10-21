@@ -106,22 +106,19 @@ test('post status buttons remain a subordinate pressed group with their actual l
 });
 
 test('Overview campaign totals and channel counts use singular only for one campaign', async () => {
-  const appSource = source();
-  const active = appSource.match(/<span><span className="status-dot green"\/>\{activeCampaigns\}[^\r\n]+?across your project<\/span><\/span>/)?.[0]; assert.ok(active);
-  const start = appSource.indexOf('<div className="channel-breakdown">'), end = appSource.indexOf('</div><button className="text-link"', start) + 6;
-  assert.ok(start > 0 && end > start);
-  const { code } = await transformWithOxc('const active = activeCampaigns => ' + active + '; const renderChannels = state => ' + appSource.slice(start, end), 'CampaignCounts.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', 'channels', code + '; return { active, channels: renderChannels };')(React, { social: 'Social media' });
+  const appSource = source(), declaration = appSource.match(/^const plural = .+;$/m)?.[0]; assert.ok(declaration);
+  const plural = runInNewContext(stripTypeScriptTypes(declaration) + '; plural');
+  assert.match(appSource, /\{plural\(activeCampaigns, 'active campaign'\)\}/); assert.match(appSource, /formatCount=\{count => plural\(count, 'campaign'\)\}/);
   for (const count of [0, 1, 2]) {
     const word = count === 1 ? 'campaign' : 'campaigns';
-    assert.match(renderToStaticMarkup(render.active(count)), new RegExp(count + ' active ' + word + ' '));
-    assert.ok(renderToStaticMarkup(render.channels({ campaigns: Array.from({ length: count }, () => ({ channel: 'social' })) })).includes('<strong>' + count + ' <small>' + word + '</small></strong>'));
+    assert.equal(plural(count, 'active campaign'), `${count} active ${word}`); assert.equal(plural(count, 'campaign'), `${count} ${word}`);
   }
 });
 
 test('local campaign results distinguish missing metrics from zero and never display NaN rates', () => {
-  const appSource = source(), start = appSource.indexOf('<h2>Campaign results</h2>'), row = appSource.slice(start, appSource.indexOf('</tbody>', start));
-  const cells = [...row.matchAll(/<td>\{([^{}]+)\}<\/td>/g)].slice(0, 5).map(match => match[1]);
+  const appSource = source(), start = appSource.indexOf('<DataTable ariaLabel="Campaign results"'), row = appSource.slice(start, appSource.indexOf(']}/>', start) + 1);
+  // The metric columns' render expressions, after the campaign name column.
+  const cells = row.split('render: c => ').slice(2).map(segment => segment.slice(0, segment.lastIndexOf(' }')));
   assert.equal(cells.length, 5);
   const declaration = appSource.match(/^const numeric = .+;$/m)[0].replace('(value: unknown): value is number', '(value)');
   const numeric = runInNewContext(declaration + '; numeric');
