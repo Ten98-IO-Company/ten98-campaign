@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
 import { createStore, type Executor } from './database.ts';
-import { fail, IntegrationError, targetConfiguration, zernioClient, type OperationContext, type ProviderRecord } from './provider-core.ts';
+import { fail, IntegrationError, postRestrictions, targetConfiguration, zernioClient, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
 import { queueList, reviewedQueue } from './zernio-queues.ts';
 import { SOCIAL_UPDATE_FIELDS, socialUpdateProposal } from './integrations.ts';
@@ -59,6 +59,19 @@ async function localPost(context: ApprovalContext, id: string) {
 }
 function assetApproved(snapshot: ProviderRecord) {
   if (snapshot.assets.some((asset: ProviderRecord) => asset.missing || asset.approval !== 'approved')) fail(409, 'APPROVAL_ASSET_REQUIRED', 'Approve every referenced creative asset before approving or publishing this post.');
+}
+// The local per-platform restriction check publishing runs, so a post that would fail to publish cannot be approved.
+// Only customised accounts carry their platform locally, so they are checked per account and the base variant on platforms
+// without one; publishing's own check covers an uncustomised account on a customised platform. A retry checks only its failed copies.
+function assertPlatformRules(post: ProviderRecord, assets: ProviderRecord[], failed?: ProviderRecord[]) {
+  let overrides: ProviderRecord = {}; try { overrides = normalizeAccountVariants(post); } catch { /* reported by the restriction check below */ }
+  const targets = Object.entries(overrides).map(([_id, copy]) => ({ _id, platform: copy.platform })), base = (post.platforms || []).filter((platform: string) => !targets.some(target => target.platform === platform));
+  // Media in a failed copy was already delivered, so its hosted-file expiry is checked by the retry against the provider copy.
+  const owned = new Set<string>(failed ? assets.map(asset => asset.deliveryUrl) : []);
+  let errors: ProviderRecord[];
+  try { errors = failed ? postRestrictions(post, [...new Set<string>(failed.map(copy => copy.platform))], assets, failed, owned).errors : [...(base.length || !targets.length ? postRestrictions(post, base, assets).errors : []), ...(targets.length ? postRestrictions(post, [], assets, targets).errors : [])]; }
+  catch (error) { if (error instanceof IntegrationError) fail(422, 'APPROVAL_POST_RESTRICTIONS', error.message); throw error; }
+  if (errors.length) fail(422, 'APPROVAL_POST_RESTRICTIONS', errors.map(item => item.platform ? `${item.platform}: ${item.message}` : item.message).join(' ').slice(0, 4000));
 }
 function approvalAccounts(post: ProviderRecord) {
   if (!Array.isArray(post.accounts) || !post.accounts.length) fail(409, 'APPROVAL_ACCOUNTS_REQUIRED', 'Edit this post, select its connected publishing accounts, and save it before requesting approval or publishing.');
@@ -177,6 +190,8 @@ async function decide(context: ApprovalContext, { post, review, snapshot, hash, 
   if (body.decision === 'approved' && proposing) {
     if ((await policy(db, project.id)).requireApproval) approvalAccounts(snapshot);
     assetApproved(snapshot);
+    // The proposal snapshot is the post the provider update would send, with every variant already resolved.
+    assertPlatformRules(snapshot, []);
   } else if (body.decision === 'approved') {
     if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
     if (post.queueId) queue = reviewedQueue(post, await publishingQueues(context));
@@ -184,6 +199,8 @@ async function decide(context: ApprovalContext, { post, review, snapshot, hash, 
     if (fingerprint(await postSnapshot(context, await localPost(context, post.id))) !== hash || currentReview?.id !== review.id || currentReview?.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before approving it.');
     if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
     assetApproved(snapshot);
+    const failed = retryableFailure(post) ? post.providerResults.filter((copy: ProviderRecord) => copy.status === 'failed' && copy.platform) : [];
+    assertPlatformRules(post, (await assetRecords(context, post)).records.filter(Boolean), failed.length ? failed : undefined);
   }
   // The reviewer's role is re-checked under the workspace lock. The per-post lock serialises decisions with requests;
   // only a still-pending review takes a decision, so a parallel approve and reject cannot both apply.

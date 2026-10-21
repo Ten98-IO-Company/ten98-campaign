@@ -227,7 +227,7 @@ async function proposalFixture(t, members, poolOptions) {
   const review = (userId, reviewId, decision = 'approved') => invoke(`posts/${post.id}/review`, userId, { reviewId, decision, note: 'Checked the proposed update.' });
   const stored = reviewId => sql.get('SELECT status, note, requested_by, self_approved FROM post_approval_reviews WHERE id = ?', reviewId);
   const count = async () => Number((await sql.get('SELECT count(*) AS count FROM post_approval_reviews WHERE post_id = ?', post.id)).count);
-  return { request, review, stored, count };
+  return { sql, request, review, stored, count };
 }
 
 test('a submitted post still needs a proposal to request review, and an invalid proposal opens no review', { skip: postgresSkip }, async t => {
@@ -382,4 +382,38 @@ test('the pending-review count covers posts whose newest review awaits a decisio
   assert.deepEqual((await count()).data, { pending: 1 }, 'A decided newest review no longer counts, even with an older pending row.');
   await f.store.remove(f.project.id, 'posts', second.id);
   assert.deepEqual((await count()).data, { pending: 0 }, 'Reviews of deleted posts are not counted.');
+});
+
+// Approval runs publishing's per-platform restriction check, so a post that would fail to publish cannot be approved.
+test('approving a post that fails a platform restriction is refused, singly and in bulk, while rejecting it still works', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+  const image = { type: 'image', url: 'https://cdn.example.test/creative.jpg' }, decisions = async () => (await f.sql.all("SELECT message FROM activity WHERE project_id = ? AND message LIKE 'Content % by %' AND message NOT LIKE 'Content review requested%'", f.project.id)).length;
+  const create = fields => f.store.create(f.project.id, 'posts', { status: 'draft', mediaItems: [], ...fields });
+  const requestFor = async post => { const result = await f.invoke(`posts/${post.id}/request`, 'casey'); assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data.item.review.id; };
+  const medialess = await create({ content: 'Instagram needs media', platforms: ['instagram'], accounts: ['instagram-a'] }), medialessReview = await requestFor(medialess);
+  let result = await f.invoke(`posts/${medialess.id}/review`, 'blair', { reviewId: medialessReview, decision: 'approved' });
+  assert.equal(result.status, 422); assert.equal(result.data.error.code, 'APPROVAL_POST_RESTRICTIONS'); assert.match(result.data.error.message, /^instagram: Instagram requires media\./);
+  result = await f.invoke('bulk', 'blair', { decision: 'approved', items: [{ postId: medialess.id, reviewId: medialessReview }] });
+  assert.equal(result.data.results[0].status, 'failed'); assert.equal(result.data.results[0].error.code, 'APPROVAL_POST_RESTRICTIONS');
+  assert.deepEqual(await f.stored(medialessReview), { status: 'pending', self_approved: false }); assert.equal(await decisions(), 0);
+  assert.equal((await f.invoke(`posts/${medialess.id}/review`, 'blair', { reviewId: medialessReview, decision: 'rejected' })).status, 200, 'An unpublishable post can still be rejected.');
+  // A customised account is checked with its own copy; the base variant is checked on platforms without a customised account.
+  const tooLong = await create({ content: 'Shared caption', mediaItems: [image], platforms: ['facebook', 'instagram'], accounts: ['facebook-a', 'instagram-a'], accountOverrides: { 'instagram-a': { platform: 'instagram', content: 'x'.repeat(2201) } } }), tooLongReview = await requestFor(tooLong);
+  result = await f.invoke(`posts/${tooLong.id}/review`, 'blair', { reviewId: tooLongReview, decision: 'approved' });
+  assert.equal(result.status, 422); assert.match(result.data.error.message, /^instagram: Caption has 2,201 characters; Instagram allows 2,200\./);
+  const customised = await create({ content: 'x'.repeat(2201), mediaItems: [image], platforms: ['facebook', 'instagram'], accounts: ['facebook-a', 'instagram-a'], accountOverrides: { 'instagram-a': { platform: 'instagram', content: 'Short Instagram copy' } } });
+  assert.equal((await f.invoke(`posts/${customised.id}/review`, 'blair', { reviewId: await requestFor(customised), decision: 'approved' })).status, 200);
+});
+
+test('approving a proposal validates the proposed post against the platform restrictions', { skip: postgresSkip }, async t => {
+  const f = await proposalFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+  const requested = await f.request('casey', { proposal: { content: 'Proposed caption', mode: 'draft' } }); assert.equal(requested.status, 200, JSON.stringify(requested.data));
+  const reviewId = requested.data.item.review.id, snapshot = JSON.parse((await f.sql.get('SELECT snapshot FROM post_approval_reviews WHERE id = ?', reviewId)).snapshot);
+  // The reviewed snapshot is what approval binds (its fingerprint is the review's), so an unpublishable one must be refused.
+  await f.sql.run('UPDATE post_approval_reviews SET snapshot = ? WHERE id = ?', JSON.stringify({ ...snapshot, platformOverrides: { facebook: { ...snapshot.platformOverrides.facebook, content: 'x'.repeat(63207) } } }), reviewId);
+  const result = await f.review('blair', reviewId);
+  assert.equal(result.status, 422); assert.equal(result.data.error.code, 'APPROVAL_POST_RESTRICTIONS'); assert.match(result.data.error.message, /^facebook: Caption has 63,207 characters/);
+  assert.equal((await f.stored(reviewId)).status, 'pending');
+  await f.sql.run('UPDATE post_approval_reviews SET snapshot = ? WHERE id = ?', JSON.stringify(snapshot), reviewId);
+  assert.equal((await f.review('blair', reviewId)).status, 200);
 });
