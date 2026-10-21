@@ -5,6 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import * as UI from '@ten98/ui';
 
 const source = await readFile(new URL('../src/CampaignLinks.tsx', import.meta.url), 'utf8');
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
@@ -24,9 +25,11 @@ test('actual link creation preserves destination parameters, applies optional UT
 test('renames cannot alter a saved destination and disabling a link requires confirmation', async () => {
   const calls = [], accepted = [], context = { readOnly: false, editing: { id: 'link/a', name: 'Updated name' }, path, version: { current: 1 }, requester: { current: async (...args) => { calls.push(args); return { link: { id: 'link/a', archived: true } }; } }, action: async (_, run) => run(1), acceptLink: value => accepted.push(value), setEditing() {}, setNotice() {} };
   await compile(section('async function saveName(', '  async function archive('), context)(event); assert.deepEqual(calls[0], [path + '/link%2Fa', 'PATCH', { name: 'Updated name' }]);
-  let confirmed = false; const archive = compile(section('async function archive(', '  async function saveSettings('), { ...context, window: { confirm: () => confirmed } });
-  await archive({ id: 'link/a', archived: false }); assert.equal(calls.length, 1); confirmed = true; await archive({ id: 'link/a', archived: false }); assert.deepEqual(calls[1], [path + '/link%2Fa', 'PATCH', { archived: true }]);
-  await compile(section('async function archive(', '  async function saveSettings('), { ...context, readOnly: true, window: { confirm: () => true } })({ id: 'link/a' }); assert.equal(calls.length, 2);
+  assert.match(source, /onClick=\{\(\) => setArchiving\(item\)\}>\{item.archived \? 'Restore' : 'Disable'\}/, 'Disable and restore only open the confirmation.');
+  assert.match(source, /<ConfirmDialog open=\{!!archiving\}.*?'Disable this short link\?'.*?'Existing posts and QR codes will stop redirecting.'.*?onConfirm=\{\(\) => archive\(archiving!\)\}/, 'Only the confirmation dialog dispatches the archive request.');
+  const archive = compile(section('async function archive(', '  async function saveSettings('), context);
+  await archive({ id: 'link/a', archived: false }); assert.deepEqual(calls[1], [path + '/link%2Fa', 'PATCH', { archived: true }]);
+  await compile(section('async function archive(', '  async function saveSettings('), { ...context, readOnly: true })({ id: 'link/a' }); assert.equal(calls.length, 2);
 });
 
 test('settings restrict domain changes to the operator and late project responses cannot replace settings or reports', async () => {
@@ -45,16 +48,16 @@ test('local-address warnings and website snippet escaping use actual production 
 });
 
 test('link setup discloses configured administration while keeping unconfigured setup and public-address warnings visible', async () => {
-  const start = source.indexOf('    {settings && localShortAddress'), end = source.indexOf('    {!readOnly && <section className="panel links-create"', start);
+  const start = source.indexOf('    {settings && localShortAddress'), end = source.indexOf('    {!readOnly && <Card as="section" headingLevel={2} title="Create a short link"', start);
   assert.ok(start > 0 && end > start);
   const { code } = await transformWithOxc(`function Setup(props) { const { settings, settingsForm, canManageSettings, readOnly, canChangeDomain, busy, saveSettings, setSettingsForm, copy } = props; return <>${source.slice(start, end)}</>; }`, 'LinkSetup.tsx', { jsx: { runtime: 'classic' } });
-  const Setup = new Function('React', 'localShortAddress', 'siteSnippet', code + '; return Setup;')(React, compile(source.match(/const localShortAddress = (.+);/)[1]), compile(source.match(/const siteSnippet = (.+);/)[1]));
+  const Setup = new Function('React', 'localShortAddress', 'siteSnippet', ...Object.keys(UI), code + '; return Setup;')(React, compile(source.match(/const localShortAddress = (.+);/)[1]), compile(source.match(/const siteSnippet = (.+);/)[1]), ...Object.values(UI));
   const settings = { shortBaseUrl: 'https://go.example.com', allowedWebsiteOrigins: ['https://example.com'], scriptUrl: 'https://app.example/t/site.js', domainStatus: 'configured_unverified' };
   const props = { settings, settingsForm: { shortBaseUrl: settings.shortBaseUrl, allowedWebsiteOrigins: 'https://example.com' }, canManageSettings: true, readOnly: false, canChangeDomain: true, busy: '', saveSettings() {}, setSettingsForm() {}, copy() {} };
   const render = changes => renderToStaticMarkup(React.createElement(Setup, { ...props, ...changes }));
   const html = render(), disclosure = html.match(/<details[\s\S]*?<\/details>/)?.[0];
   assert.ok(disclosure, 'Setup must remain mounted inside a native disclosure.');
-  assert.match(disclosure, /<summary>Link and website setup<\/summary>/); assert.doesNotMatch(disclosure.match(/^<details[^>]*>/)[0], /\bopen=/);
+  assert.match(disclosure, /<summary[^>]*>[\s\S]*?Link and website setup[\s\S]*?<\/summary>/); assert.doesNotMatch(disclosure.match(/^<details[^>]*>/)[0], /\bopen=/);
   assert.match(disclosure, /Save link settings/); assert.match(disclosure, /Copy snippet/); assert.match(disclosure, /value="https:\/\/go\.example\.com"/);
   const outside = html.replace(disclosure, ''); assert.match(outside, /does not verify DNS or the certificate/); assert.doesNotMatch(disclosure, /does not verify DNS or the certificate/);
   for (const domainStatus of ['app_origin', 'unknown', undefined]) assert.match(render({ settings: { ...settings, domainStatus } }).replace(/<details[\s\S]*?<\/details>/, ''), /does not verify DNS or the certificate/);

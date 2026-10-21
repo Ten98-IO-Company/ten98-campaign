@@ -234,7 +234,6 @@ test('native integration and empty-state copy keeps light colors and readable da
   for (const [file, lightHash, selectors] of [
     ['inbox.css', 'dad771b504b2ee08bd03dab216771fa6b656091e466dbdde7e704700719b19c8', ['.inbox-conversation', '.inbox-conversation:hover,.inbox-conversation.selected', '.inbox-contact', '.inbox-message', '.inbox-message.outgoing', '.inbox-review blockquote']],
     ['direct-campaigns.css', 'ff69defeea5a8b4411dd1cb767f8710a4894c696970cb3766065752a152176f7', ['.direct-message-preview', '.direct-counts>span', '.direct-confirmation', '.direct-import-results']],
-    ['campaign-links.css', 'f02a8a438144376e93a36e5e2df3e3b718019983bb69827bc6b51785a05e1761', ['.links-snippet code', '.links-counts>span']],
   ]) {
     const sheet = await source(file), light = sheet.replace(/light-dark\((#[\da-f]{3,8}|white),var\(--[\w-]+\)\)/gi, '$1').replace(/\r\n/g, '\n');
     assert.equal(createHash('sha256').update(light).digest('hex'), lightHash, file + ' preserves every original light color and layout declaration');

@@ -11,11 +11,6 @@
     "element": 50,
     "styling": 26
   },
-  "src/CampaignLinks.tsx": {
-    "stylesheet": 1,
-    "element": 197,
-    "styling": 79
-  },
   "src/ContentApprovals.tsx": {
     "element": 84,
     "styling": 44
@@ -70,10 +65,6 @@
     "element": 368,
     "styling": 158
   },
-  "src/PostManagement.tsx": {
-    "element": 74,
-    "styling": 29
-  },
   "src/PublishingAgenda.tsx": {
     "stylesheet": 1,
     "element": 7,
@@ -91,10 +82,6 @@
     "stylesheet": 1,
     "element": 531,
     "styling": 250
-  },
-  "src/WhatsAppTemplate.tsx": {
-    "element": 19,
-    "styling": 6
   },
   "src/ZernioAccounts.tsx": {
     "element": 246,
@@ -139,10 +126,6 @@
   "src/ZernioMediaUpload.tsx": {
     "element": 30,
     "styling": 17
-  },
-  "src/ZernioPostLibrary.tsx": {
-    "element": 72,
-    "styling": 29
   },
   "src/ZernioProducts.tsx": {
     "element": 379,

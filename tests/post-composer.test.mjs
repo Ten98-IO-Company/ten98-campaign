@@ -13,7 +13,7 @@ const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url
 test('provider post updates and lifecycle actions display retained-media warnings returned by the server', async () => {
   const management = await readFile(new URL('../src/PostManagement.tsx', import.meta.url), 'utf8'), notices = [], saved = [], post = { id: 'post' }, warning = 'Existing provider media was retained. Its temporary library link has expired.';
   const context = { ambiguousCopies: false, divergentCopies: false, accountCopiesReady: true, replaceVariants: false, post, setBusy() {}, setError() {}, setNotice: value => notices.push(value), setCurrent: value => saved.push(value), requester: { current: async () => ({ post, validationWarnings: [warning, null] }) }, onChanged() {} };
-  for (const [name, next, args] of [['act', '  async function update(', ['social/retry', {}, 'Retry submitted.']], ['update', '\n  return <section>', [{ content: 'Caption', scheduledAt: '2070-01-02T00:00:00Z' }]]]) {
+  for (const [name, next, args] of [['act', '  async function update(', ['social/retry', {}, 'Retry submitted.']], ['update', '\n  return <Card as="section"', [{ content: 'Caption', scheduledAt: '2070-01-02T00:00:00Z' }]]]) {
     const start = management.indexOf('async function ' + name + '('), declaration = stripTypeScriptTypes(management.slice(start, management.indexOf(next, start)).trim());
     await new Function(...Object.keys(context), `return (${declaration});`)(...Object.values(context))(...args);
     assert.match(notices.at(-1), /Existing provider media was retained/);
@@ -246,7 +246,7 @@ test('YouTube keywords save and reopen as a shared field and reach unpublished u
   const invalid = renderToStaticMarkup(Composer({ post: { ...post, tags: ['x'.repeat(101)] }, canWrite: true, onSubmit: async () => {} }));
   assert.match(invalid, /aria-invalid="true"/); assert.match(invalid, /at most 100 characters/);
   const management = await readFile(new URL('../src/PostManagement.tsx', import.meta.url), 'utf8'), calls = [];
-  const action = management.slice(management.indexOf('async function update('), management.indexOf('\n  return <section>'));
+  const action = management.slice(management.indexOf('async function update('), management.indexOf('\n  return <Card as="section"'));
   const updateContext = { ambiguousCopies: false, divergentCopies: false, accountCopiesReady: true, replaceVariants: false, post: { id: 'post' }, setBusy() {}, setError() {}, setNotice() {}, setCurrent() {}, onChanged() {}, requester: { current: async (...args) => { calls.push(args); return { post }; } } };
   await new Function(...Object.keys(updateContext), `return (${stripTypeScriptTypes(action)});`)(...Object.values(updateContext))(values);
   assert.deepEqual(calls[0][1].tags, values.tags);
