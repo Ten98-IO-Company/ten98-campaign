@@ -32,14 +32,6 @@
     "element": 1,
     "styling": 2
   },
-  "src/MicrosoftAds.tsx": {
-    "element": 105,
-    "styling": 43
-  },
-  "src/NativeGoogleAds.tsx": {
-    "element": 135,
-    "styling": 47
-  },
   "src/OohMap.tsx": {
     "element": 16,
     "styling": 9

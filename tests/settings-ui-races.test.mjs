@@ -28,7 +28,7 @@ test('Microsoft create and edit cannot be overwritten by an older campaign read 
     const list = deferred(), write = deferred(), old = { id: 'campaign', name: 'Old', status: 'Paused', dailyBudget: 10 }, confirmed = { ...old, name: 'Confirmed', status: 'Active', dailyBudget: 20 };
     const ui = await view('MicrosoftAds', ['load', 'create', 'change'], async (path, method) => method === 'POST' ? write.promise : path.endsWith('/status') ? { configured: true, mapping: {}, latestReport: null } : list.promise, { 1: [old] });
     const cleanup = ui.mount(); await tick();
-    const saving = action === 'create' ? ui.create(event({ name: 'Confirmed', dailyBudget: '20', maxCpc: '1', finalUrl: 'https://example.com', headlines: 'One\nTwo\nThree', descriptions: 'First\nSecond', keywords: 'planner', matchType: 'Exact', locationIds: '1' })) : ui.change(event({ status: 'Active', dailyBudget: '20' }), old);
+    const saving = action === 'create' ? ui.create(event({ name: 'Confirmed', dailyBudget: '20', maxCpc: '1', finalUrl: 'https://example.com', headlines: 'One\nTwo\nThree', descriptions: 'First\nSecond', keywords: 'planner', matchType: 'Exact', locationIds: '1' })) : ui.change(old, { status: 'Active', dailyBudget: 20, confirmed: true });
     if (action === 'create') { if (lateFailure) list.reject(new Error('Obsolete campaign failure')); else list.resolve({ campaigns: [] }); await tick(); assert.deepEqual(ui.state[1], [old]); assert.equal(ui.errors(), ''); }
     write.resolve({ providerCampaign: confirmed, campaign: confirmed }); await saving;
     if (action === 'change') { if (lateFailure) list.reject(new Error('Obsolete campaign failure')); else list.resolve({ campaigns: [old] }); }

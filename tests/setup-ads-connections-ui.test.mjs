@@ -4,13 +4,15 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import * as ui from '@ten98/ui';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
-const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children)] : [];
-const button = (tree, text) => elements(tree).find(node => node.type === 'button' && node.props.children === text);
+const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children), ...elements(node.props.actions)] : [];
+const button = (tree, text) => elements(tree).find(node => node.type === ui.Button && node.props.children === text);
 class FormValues { constructor(values) { return new Map(Object.entries(values)); } }
 const event = values => ({ preventDefault() {}, currentTarget: values });
-const browser = { confirm: () => true };
+const browser = {};
+const isForm = node => node.props.as === 'form', isShoppingAccount = node => node.type?.name === 'ShoppingAccount';
 let rendering;
 
 // Execute the real transformed components and effects with controlled requests, following the repository's UI test pattern.
@@ -61,7 +63,7 @@ const variants = await Promise.all([
 ].map(async variant => {
   const source = await readFile(new URL(`../src/${variant.name}.tsx`, import.meta.url), 'utf8');
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace('export default function', 'function'), `${variant.name}.tsx`, { jsx: { runtime: 'classic' } });
-  const Component = new Function('React', ...Object.keys(hooks), 'FormData', 'window', `${code}; return ${variant.name};`)(React, ...Object.values(hooks), FormValues, browser);
+  const Component = new Function('React', ...Object.keys(hooks), ...Object.keys(ui), 'FormData', 'window', `${code}; return ${variant.name};`)(React, ...Object.values(hooks), ...Object.values(ui), FormValues, browser);
   return { ...variant, Component };
 }));
 const props = request => ({ projectId: 'project / exact', canWrite: true, isOperator: true, canManageProject: true, role: 'owner', request });
@@ -73,7 +75,7 @@ test('connection mode mounts and refreshes status only, even with mapped account
     let tree = await instance.update();
     const html = renderToStaticMarkup(tree);
     assert.doesNotMatch(html, /Create paused|Performance export|Shopping and standard Video performance|Check report status|Open integrations/);
-    assert.equal(elements(tree).some(node => typeof node.type === 'function'), false, 'Connection mode must not mount the Google account reader.');
+    assert.equal(elements(tree).some(isShoppingAccount), false, 'Connection mode must not mount the Google account reader.');
     assert.deepEqual(requests, [prefix + '/status']);
     await button(tree, variant.name === 'NativeGoogleAds' ? 'Refresh Google Shopping' : 'Refresh Microsoft account').props.onClick();
     tree = await instance.update();
@@ -95,12 +97,12 @@ test('default workflow hides all mapping editors, opens integrations, and preser
     };
     const instance = view(variant.Component, { ...props(request), onOpenIntegrations: () => { opened++; } });
     const tree = await instance.update();
-    assert.equal(elements(tree).some(node => node.type === 'input' && ['customerId', 'accountId'].includes(node.props.name)), false);
+    assert.equal(elements(tree).some(node => node.type === ui.Input && ['customerId', 'accountId'].includes(node.props.name)), false);
     const opening = button(tree, 'Open integrations'); assert.ok(opening); assert.equal(opening.props.type, 'button');
     const reads = requests.length; opening.props.onClick(); assert.equal(opened, 1); assert.equal(requests.length, reads);
     assert.equal(button(instance.render({ onOpenIntegrations: undefined }), 'Open integrations'), undefined);
     if (variant.name === 'NativeGoogleAds') {
-      const account = elements(tree).find(node => typeof node.type === 'function'); assert.ok(account);
+      const account = elements(tree).find(isShoppingAccount); assert.ok(account);
       const child = view(account.type, account.props), accountTree = await child.update();
       assert.match(renderToStaticMarkup(accountTree), /Create paused Standard Shopping campaign/);
       assert.match(renderToStaticMarkup(accountTree), /Linked Merchant Center account ID/);
@@ -120,9 +122,9 @@ test('connection editors keep operator/workspace permissions and Microsoft expli
   for (const variant of variants) for (const access of [{}, { isOperator: false }, { canManageProject: false, role: 'editor' }, { role: 'viewer', canManageProject: false }]) {
     const status = variant.name === 'NativeGoogleAds' ? { configured: true, mapped: false, customerId: '' } : { configured: true, mapping: null };
     const instance = view(variant.Component, { ...props(async () => status), ...access, mode: 'connection' });
-    const tree = await instance.update(), form = elements(tree).find(node => node.type === 'form');
+    const tree = await instance.update(), form = elements(tree).find(isForm);
     assert.equal(Boolean(form), Object.keys(access).length === 0);
-    if (form && variant.name === 'MicrosoftAds') assert.ok(elements(form).some(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.required));
+    if (form && variant.name === 'MicrosoftAds') assert.ok(elements(form).some(node => node.type === ui.Checkbox && node.props.required));
     instance.close();
   }
 });
@@ -137,7 +139,7 @@ test('Google connection mapping uses the existing exact project endpoint and ref
   };
   const instance = view(variant.Component, { ...props(request), mode: 'connection' });
   let tree = await instance.update();
-  elements(tree).find(node => node.type === 'form').props.onSubmit(event({ customerId: '1234567890' }));
+  elements(tree).find(isForm).props.onSubmit(event({ customerId: '1234567890' }));
   await tick(); tree = await instance.update();
   const writes = requests.filter(item => item.method === 'POST');
   assert.deepEqual(writes, [{ path: '/projects/project%20%2F%20exact/native-google-ads/connection', method: 'POST', body: { customerId: '1234567890' } }]);
@@ -148,14 +150,16 @@ test('Google connection keeps confirmed disconnection available when credentials
   const variant = variants[0], writes = [], status = { ...variant.status, configured: false };
   const instance = view(variant.Component, { ...props(async (_path, method, body) => { if (method === 'POST') writes.push(body); return status; }), mode: 'connection' });
   const tree = await instance.update(), nodes = elements(tree);
-  assert.equal(nodes.find(node => node.type === 'fieldset').props.disabled, false);
-  assert.equal(nodes.find(node => node.type === 'input' && node.props.name === 'customerId').props.disabled, true);
+  assert.equal(nodes.find(node => node.props.as === 'fieldset').props.disabled, false);
+  assert.equal(nodes.find(node => node.type === ui.Input && node.props.name === 'customerId').props.disabled, true);
   assert.equal(button(tree, 'Verify and map customer').props.disabled, true);
   const disconnect = button(tree, 'Disconnect customer'); assert.ok(disconnect); assert.notEqual(disconnect.props.disabled, true);
-  try {
-    browser.confirm = () => false; disconnect.props.onClick(); await tick(); assert.deepEqual(writes, []);
-    browser.confirm = () => true; disconnect.props.onClick(); await tick(); assert.deepEqual(writes, [{ customerId: '' }]);
-  } finally { browser.confirm = () => true; instance.close(); }
+  const dialog = () => elements(instance.render()).find(node => node.type === ui.ConfirmDialog);
+  assert.equal(dialog().props.open, false);
+  disconnect.props.onClick(); await tick(); assert.deepEqual(writes, [], 'Disconnection waits for confirmation.');
+  assert.equal(dialog().props.open, true); assert.match(dialog().props.title, /^Disconnect the native Google advertising customer/);
+  dialog().props.onOpenChange(false); assert.equal(dialog().props.open, false); assert.deepEqual(writes, []);
+  disconnect.props.onClick(); await dialog().props.onConfirm(); assert.deepEqual(writes, [{ customerId: '' }]); instance.close();
 });
 
 test('Microsoft connection assignment posts the original confirmed IDs and never loads campaigns afterward', async () => {
@@ -167,11 +171,11 @@ test('Microsoft connection assignment posts the original confirmed IDs and never
   };
   const instance = view(variant.Component, { ...props(request), mode: 'connection' });
   let tree = await instance.update();
-  await elements(tree).find(node => node.type === 'form').props.onSubmit(event({ customerId: '42', accountId: '314' }));
+  await elements(tree).find(isForm).props.onSubmit(event({ customerId: '42', accountId: '314' }));
   tree = await instance.update();
   assert.deepEqual(requests.filter(item => item.method === 'POST'), [{ path: '/projects/project%20%2F%20exact/microsoft-ads/connection', method: 'POST', body: { customerId: '42', accountId: '314', confirmed: true } }]);
   assert.equal(requests.length, 3); assert.match(renderToStaticMarkup(tree), /QA Microsoft account/);
-  assert.equal(elements(tree).some(node => node.type === 'form'), false, 'An existing Microsoft mapping stays fixed.'); instance.close();
+  assert.equal(elements(tree).some(isForm), false, 'An existing Microsoft mapping stays fixed.'); instance.close();
 });
 
 test('late connection status reads after unmount cannot dispatch workflow reads or update the closed screen', async () => {

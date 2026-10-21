@@ -9,6 +9,7 @@ import { testNativeGoogleAds } from '../server/native-google-ads.ts';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import * as ui from '@ten98/ui';
 
 const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_ADS_CLIENT_SECRET: 'fixture-client-secret', GOOGLE_ADS_REFRESH_TOKEN: 'fixture-refresh-token', GOOGLE_ADS_DEVELOPER_TOKEN: 'fixture-developer-token', GOOGLE_ADS_LOGIN_CUSTOMER_ID: '9999999999' };
 
@@ -154,10 +155,11 @@ test('native Google UI preserves action keys on unknown outcomes and rejects com
 test('Shopping report budgets and spend retain the mapped currency precision', async () => {
   const source = await readFile(new URL('../src/NativeGoogleAds.tsx', import.meta.url), 'utf8');
   const number = new Function(`return (${stripTypeScriptTypes(source.match(/const number = (.+);/)[1])});`)();
-  const start = source.indexOf('<table><thead><tr><th>Campaign</th><th>Type / state'), end = source.indexOf('</table>', start) + '</table>'.length;
+  const start = source.indexOf('const reportColumns = '), end = source.indexOf('\n];', start) + '\n];'.length;
   assert.ok(start > 0 && end > start);
-  const { code } = await transformWithOxc(`const render = (report, currency, digits) => (${source.slice(start, end)});`, 'ShoppingReport.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', 'number', code + '; return render;')(React, number);
+  const { code } = await transformWithOxc(source.slice(start, end), 'ShoppingReport.tsx', { jsx: { runtime: 'classic' } });
+  const columns = new Function('React', ...Object.keys(ui), 'number', code + '; return reportColumns;')(React, ...Object.values(ui), number);
+  const render = (report, currency, digits) => React.createElement(ui.DataTable, { searchable: false, sortable: false, pagination: false, ariaLabel: 'Campaigns', rows: report.campaigns, rowKey: row => row.id, columns: columns(currency, digits) });
   for (const [currency, micros, expected] of [['KWD', '1000', '0.001 KWD'], ['USD', '1230000', '1.23 USD'], ['JPY', '1000000', '1 JPY']]) {
     const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
     for (const budgetPeriod of ['DAILY', 'CUSTOM_PERIOD']) {
