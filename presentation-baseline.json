@@ -12,10 +12,6 @@
     "element": 301,
     "styling": 124
   },
-  "src/GoogleConversions.tsx": {
-    "element": 120,
-    "styling": 34
-  },
   "src/IntegrationSettings.tsx": {
     "element": 1,
     "styling": 2
@@ -53,10 +49,6 @@
   "src/ZernioLeads.tsx": {
     "element": 153,
     "styling": 57
-  },
-  "src/ZernioMeasurement.tsx": {
-    "element": 101,
-    "styling": 26
   },
   "src/ZernioQueues.tsx": {
     "element": 79,
