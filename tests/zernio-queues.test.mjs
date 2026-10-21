@@ -70,6 +70,9 @@ test('queue lifecycle scopes profile, enforces edit snapshots, manages defaults 
     assert.equal((await f.request(`${f.path}/${row._id}/update`, 'POST', body)).status, 400); assert.equal((await f.request(`${f.path}/foreign/delete`, 'POST', { confirmDelete: 'foreign', expectedVersion: row.version })).status, 403); assert.equal(f.writes().length, beforeInvalid);
     const reshuffled = await f.request(`${f.path}/${row._id}/update`, 'POST', { ...body, confirmReshuffle: true }); assert.equal(reshuffled.data.reshuffledCount, 2);
     const removed = await f.request(`${f.path}/${row._id}/delete`, 'POST', { expectedVersion: reshuffled.data.queue.version, confirmDelete: row._id }); assert.equal(removed.status, 200); assert.equal(removed.data.queues.length, 1); assert.equal(removed.data.queues[0].isDefault, true);
+    // The list's Pause button sends this exact update: current settings, only `active` changed, no reshuffle.
+    const remaining = removed.data.queues[0], paused = await f.request(`${f.path}/${remaining._id}/update`, 'POST', { name: remaining.name, timezone: remaining.timezone, slots: remaining.slots, active: false, expectedVersion: remaining.version, setAsDefault: remaining.isDefault, reshuffleExisting: false });
+    assert.equal(paused.status, 200, JSON.stringify(paused.data)); assert.equal(paused.data.queue.active, false); assert.equal(paused.data.queues.find(queue => queue._id === remaining._id).active, false);
     await f.app.sql.run("UPDATE memberships SET role='editor'"); const beforeEditor = f.calls.length; assert.equal((await f.request(`${f.path}/create`, 'POST', {})).status, 403); assert.equal(f.calls.length, beforeEditor); assert.equal((await f.request(f.path)).status, 200);
   } finally { await f.close(); }
 });

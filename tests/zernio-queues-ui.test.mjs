@@ -73,12 +73,12 @@ test('queue row actions keep short visible labels, full accessible identities an
   const queue = { _id: 'queue-one', name: 'Weekly launch queue for a long descriptive campaign', timezone: 'UTC', slots: [{ dayOfWeek: 1, time: '09:00' }], active: true, isDefault: true };
   const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
   function render(canManage, busy, row = queue) {
-    const calls = [], context = { React, ...library, queues: [row], canManage, busy, days: ['Sunday', 'Monday'], inspect: value => calls.push(['Preview', value]), choose: value => calls.push(['Edit', value]), remove: value => calls.push(['Delete', value]) };
+    const calls = [], context = { React, ...library, queues: [row], canManage, busy, days: ['Sunday', 'Monday'], inspect: value => calls.push(['Preview', value]), choose: value => calls.push(['Edit', value]), remove: value => calls.push(['Delete', value]), setActive: (value, active) => calls.push([active ? 'Activate' : 'Pause', value]) };
     const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context)), table = nodes(tree).find(node => node.type === library.DataTable);
     return { tree, table, calls, buttons: nodes(table.props.rowActions(row)).filter(node => node.type === library.Button) };
   }
   for (const canManage of [false, true]) for (const busy of [false, true]) {
-    const view = render(canManage, busy), actions = canManage ? ['Preview', 'Edit', 'Delete'] : ['Preview'];
+    const view = render(canManage, busy), actions = canManage ? ['Preview', 'Pause', 'Edit', 'Delete'] : ['Preview'];
     assert.deepEqual(view.buttons.map(button => button.props.children), actions);
     for (const [index, button] of view.buttons.entries()) {
       assert.equal(button.props['aria-label'], actions[index] + ' ' + queue.name); assert.equal(button.props.disabled, busy);

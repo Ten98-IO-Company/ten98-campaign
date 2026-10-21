@@ -25,3 +25,10 @@ test('a saved post enters its queue only through the reviewed confirmation', () 
   assert.ok(source.includes("!reviewed ? 'Check the statement above to continue.'"), 'Confirm explains the unchecked review.');
   assert.ok(source.includes("approvalRequired && item.status !== 'approved' || enqueueReviews[post.id] !== enqueueReviewKey(item, queue)) return;"), 'enqueue keeps its own review and approval guard.');
 });
+
+test('pausing or activating a queue sends the editor update with only active changed and the current version', () => {
+  const body = source.slice(source.indexOf('async function setActive('), source.indexOf('  function remove('));
+  assert.ok(body.includes('{ name: row.name, timezone: row.timezone, slots: row.slots.map(slot => ({ ...slot })), active, expectedVersion: row.version, setAsDefault: row.isDefault, reshuffleExisting: false }'), 'Same fields the server already validates for an update, without a reshuffle.');
+  assert.ok(body.includes("'queue');") && body.includes('if (!canManage) return;'));
+  assert.ok(source.includes("onClick={() => setActive(row, !row.active)}>{row.active ? 'Pause' : 'Activate'}</Button>"));
+});
