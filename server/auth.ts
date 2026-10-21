@@ -108,7 +108,8 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   let oidcConfig: import('openid-client').Configuration | undefined;
   async function oidc() {
     const client = await openidClient();
-    if (!oidcConfig) oidcConfig = await client.discovery(new URL(config.oidcIssuer), config.oidcClientId, config.oidcClientSecret || undefined);
+    // ID token signatures are checked against the issuer's JWKS rather than relying on the TLS channel alone.
+    if (!oidcConfig) oidcConfig = await client.discovery(new URL(config.oidcIssuer), config.oidcClientId, config.oidcClientSecret || undefined, undefined, { execute: [client.enableNonRepudiationChecks] });
     return { client, provider: oidcConfig };
   }
   // The invitation token rides in a callback-scoped cookie as "<expiresAt>.<token>"; the database keeps only its keyed hash.
