@@ -64,7 +64,6 @@
   },
   "src/main.tsx": {
     "stylesheet": 1,
-    "element": 56,
-    "styling": 18
+    "element": 25
   }
 }

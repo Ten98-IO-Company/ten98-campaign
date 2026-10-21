@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
-import { SegmentedControl, Text } from '@ten98/ui';
+import { Button, Card, FormActions, Grid, Inline, SegmentedControl, Stack, Text } from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 
@@ -216,12 +216,12 @@ test('Settings keeps its two existing columns and renders scoped receipt recover
   const api = () => assert.fail('Rendering Settings must not submit an operation');
   const activeProject = { current: 'project-a' }, pendingKeys = { current: new Map([['retained', 'key']]) };
   const context = { React, page: 'Settings', project: { id: 'project-a', name: 'Campaign project' }, state: { projectId: 'project-a', user: { id: 'viewer-a', isOperator: true } }, workspace: { id: 'workspace-a', role: 'admin', name: 'Workspace' }, session: { oidcEnabled: false }, canAdmin: true, sample: false, busy: false, activeProject, pendingKeys, api,
-    Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, AccountSettings, OperationRecovery, TeamSettings, title: value => value,
+    Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, Grid, Stack, Card, Inline, Text, Button, FormActions, AccountSettings, OperationRecovery, TeamSettings, title: value => value,
     run: () => assert.fail('Rendering must not run an action'), reload: () => assert.fail('Rendering must not reload'), setPage: () => {}, setModal: () => {}, clearSampleData: () => {} };
   const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context));
   assert.equal(tree.type, React.Fragment);
   const children = React.Children.toArray(tree.props.children), [grid, recovery] = children;
-  assert.equal(children.length, 2); assert.equal(grid.props.className, 'settings-grid'); assert.equal(recovery.type, OperationRecovery);
+  assert.equal(children.length, 2); assert.equal(grid.type, Grid); assert.equal(grid.props.columns, 2); assert.equal(recovery.type, OperationRecovery);
   assert.equal(React.Children.toArray(grid.props.children).length, 2, 'Project/account and workspace/access retain their columns.');
   assert.equal(nodes(grid).filter(node => node.type === AccountSettings).length, 1);
   assert.equal(nodes(grid).filter(node => node.type === TeamSettings).length, 1);
