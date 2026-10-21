@@ -40,7 +40,7 @@ test('AI ad suggestions stay private, reviewable and unsubmitted until the user 
 });
 
 test('the actual AI suggestion handler opens ad review without saving a campaign or applying stale results', async () => {
-  const source = await readFile(new URL('../src/CampaignAgent.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function applyDraft('), handler = source.slice(start, source.indexOf('  return <div', start));
+  const source = await readFile(new URL('../src/CampaignAgent.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function applyDraft('), handler = source.slice(start, source.indexOf('  return <', start));
   const opened = [], saved = [], active = { current: true }, context = { path: '/projects/p/agent', active, run: work => work(), request: async () => ({ adDraft: { platform: 'openai', name: 'Suggested card' } }), onOpenAdDraft: value => opened.push(value), history: async () => {}, onSaved: value => saved.push(value) };
   const apply = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(handler)});`)(...Object.values(context));
   await apply({ id: 'ad-action', collection: 'ads' }); assert.equal(opened[0].platform, 'openai'); assert.deepEqual(saved, []);

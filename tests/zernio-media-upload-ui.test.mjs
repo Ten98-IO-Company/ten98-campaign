@@ -5,7 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { Progress } from '@ten98/ui';
+import * as ui from '@ten98/ui';
 
 const source = await readFile(new URL('../src/ZernioMediaUpload.tsx', import.meta.url), 'utf8');
 function handler(name, next, context) {
@@ -130,11 +130,11 @@ test('resuming a ready or uncertain transfer lets the user choose the original f
 });
 
 test('shared transfer progress preserves unknown length, receipt uncertainty and native recovery controls', async () => {
-  const { code } = await transformWithOxc('function UploadView() {\n' + source.slice(source.indexOf('  return <section')), 'UploadView.tsx', { jsx: { runtime: 'classic' } });
+  const { code } = await transformWithOxc('function UploadView() {\n' + source.slice(source.indexOf('  return <')), 'UploadView.tsx', { jsx: { runtime: 'classic' } });
   const labels = new Function(stripTypeScriptTypes(source.match(/^const labels:[^\n]+/m)[0]) + '; return labels;')();
   const noop = () => {}, file = { name: baseAttempt.filename, type: baseAttempt.contentType, size: baseAttempt.size };
   function render(overrides = {}) {
-    const context = { React, Progress, assetId: 'asset-reviewed', configured: true, options: { ...fileOptions, asset: { id: 'asset-reviewed', name: 'Original creative' } }, disabled: false, busy: '', canChoose: true, file, attempt: { ...baseAttempt, status: 'transfer_uncertain', expiresAt: '2026-10-27T12:00:00Z' }, knownAttempt: { current: baseAttempt.id }, labels, progress: null, error: '', notice: '', terminal: false, setRefresh: noop, choose: noop, upload: noop, act: noop, check: noop, recover: noop, complete: noop, cancel: noop, ...overrides };
+    const context = { React, ...Object.fromEntries(Object.entries(ui).filter(([name]) => /^[A-Z]/.test(name))), assetId: 'asset-reviewed', configured: true, options: { ...fileOptions, asset: { id: 'asset-reviewed', name: 'Original creative' } }, disabled: false, busy: '', canChoose: true, file, attempt: { ...baseAttempt, status: 'transfer_uncertain', expiresAt: '2026-10-27T12:00:00Z' }, knownAttempt: { current: baseAttempt.id }, labels, progress: null, error: '', notice: '', terminal: false, setRefresh: noop, choose: noop, upload: noop, act: noop, check: noop, recover: noop, complete: noop, cancel: noop, ...overrides };
     const View = new Function(...Object.keys(context), code + '; return UploadView;')(...Object.values(context));
     return renderToStaticMarkup(React.createElement(View));
   }
@@ -146,10 +146,10 @@ test('shared transfer progress preserves unknown length, receipt uncertainty and
     assert.doesNotMatch(html, /Delivery asset saved|Metadata verified|Media changes pending/);
   }
   const unknown = render({ busy: 'retry' });
-  assert.match(unknown, /<progress max="100" aria-label="File transfer progress"><\/progress>/);
-  assert.doesNotMatch(unknown, /t98-progress|value="0"/);
+  assert.match(unknown, /<progress class="t98-progress" aria-label="File transfer progress" aria-busy="true"><\/progress>/);
+  assert.doesNotMatch(unknown, /value="|%<\/span>/);
   const recovery = render();
   for (const text of ['Its original link, tags and description are retained', 'Transfer needs checking', 'Temporary file expires', 'Check upload status', 'Recheck and save delivery asset', 'Retry transfer after checking', 'Cancel upload']) assert.ok(recovery.includes(text), text);
-  assert.match(recovery, /<input type="file" accept="\.jpg,\.jpeg,\.mp4,\.pdf"/);
+  assert.match(recovery, /<input[^>]* type="file"[^>]* accept="\.jpg,\.jpeg,\.mp4,\.pdf"/);
   assert.doesNotMatch(recovery, /<progress|Move earlier|Alt text/);
 });

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Alert, Button, Card, Field, Heading, InlineCode, Inline, Input, Option, Select, StatusLine, Stack, Text } from '@ten98/ui';
 
 export type InstagramPublishingToolsProps = {
   account: { id?: string; _id?: string; displayName?: string; username?: string; metadata?: { loginMethod?: string } } | null;
@@ -65,35 +66,34 @@ export default function InstagramPublishingTools({ account, mediaItems, options,
     setDetail(null); setNotice({ accountScope, message: `Audio ${audio.audioId} added to ${label} (${id}). Review and save the draft separately.` });
   }
 
-  return <section className="post-tiktok-permissions" aria-label="Instagram publishing tools">
-    <h4>Instagram publishing tools</h4>
-    {!id ? <p className="field-help">Choose one Instagram account to read its publishing tools.</p> : <>
-      <p className="field-help">Account: {label} · {id} · {facebookLogin ? 'Facebook Login' : 'Instagram Login'}</p>
-      <button className="button" type="button" disabled={disabled || loading} onClick={() => read('instagram-publishing-limit')}>Read publishing limit</button>
-      {quota?.accountScope === accountScope && <p role="status">Publishing quota: {quota.quotaUsage} / {quota.quotaTotal} used in the rolling {quota.quotaDurationSeconds}-second window. This is a snapshot; it does not reserve capacity or provide a reset time.</p>}
-      {!facebookLogin ? <p className="field-help">Catalog audio requires a Facebook Login connection. This account uses Instagram Login; its publishing limit is still available.</p> : <>
-        <h4>Find Instagram audio</h4>
-        <label className="field"><span>Audio catalog type</span><select value={audioType} disabled={disabled} onChange={event => setAudioType(event.target.value)}><option value="music">Music</option><option value="original_sound">Original sound</option></select></label>
-        <label className="field"><span>Audio search query</span><input value={query} maxLength={200} disabled={disabled} onChange={event => setQuery(event.target.value)}/></label>
-        <button className="button" type="button" disabled={disabled || loading || !query.trim() || query.trim().length > 200} onClick={() => read('instagram-audio')}>Search audio</button>
-        <button className="button" type="button" disabled={disabled || loading} onClick={() => read('instagram-audio', true)}>Read trending audio</button>
-        {rows && (!rows.length ? <p>No audio returned for this request.</p> : <ul>{rows.map(row => <li key={row.audioId}><p>{row.title ?? 'Title not reported'} · {row.displayArtist ?? row.igUsername ?? 'Artist not reported'} · {row.audioId}</p><button className="button" type="button" disabled={disabled || loading} onClick={() => { if (isCurrent() && !disabled) setAudioId(row.audioId); }}>Choose audio ID {row.audioId}</button></li>)}</ul>)}
-        <label className="field"><span>Instagram audio ID</span><input inputMode="numeric" maxLength={30} value={audioId} disabled={disabled} onChange={event => setAudioId(event.target.value)}/></label>
-        <button className="button" type="button" disabled={disabled || loading || !/^\d{1,30}$/.test(audioId)} onClick={() => read('instagram-audio-lookup')}>Look up audio ID</button>
-        {audio && <div>
-          <p><strong>{audio.title ?? 'Title not reported'}</strong> · Audio ID: {audio.audioId}</p>
-          <p>Type: {audio.audioType ?? 'Not reported'} · Artist: {audio.displayArtist ?? 'Not reported'} · Creator: {audio.igUsername ?? 'Not reported'}</p>
-          <p>Duration: {audio.durationInMs === null ? 'Not reported' : `${audio.durationInMs} ms`} · Ad eligibility metadata: {audio.isAdsEligible === null ? 'Not reported' : audio.isAdsEligible ? 'Eligible' : 'Not eligible'}</p>
-          <p style={{ overflowWrap: 'anywhere' }}>Download URL: {audio.downloadUrl ?? 'Not reported'}</p><p style={{ overflowWrap: 'anywhere' }}>Platform preview URL: {audio.onPlatformAudioPreviewLink ?? 'Not reported'}</p>
-        </div>}
-        {!eligible && <p className="field-help">Adding catalog audio requires a single video Reel. Choose one video and a format other than Story.</p>}
-        <button className="button" type="button" disabled={!canUse} onClick={useAudio}>Use this audio for this account</button>
-        <p className="field-help">Look up the current audio ID before choosing Use. Only Use changes this account’s draft audio ID and preserves its existing volume settings. Ad eligibility is provider metadata; it does not grant music rights or guarantee publishing. Preview and download URLs are shown as text.</p>
+  return <Card as="section" title="Instagram publishing tools" headingLevel={4} aria-label="Instagram publishing tools"><Stack gap={3}>
+    {!id ? <Text tone="muted" size="sm">Choose one Instagram account to read its publishing tools.</Text> : <>
+      <Text tone="muted" size="sm">Account: {label} · {id} · {facebookLogin ? 'Facebook Login' : 'Instagram Login'}</Text>
+      <Inline><Button variant="secondary" disabled={disabled || loading} onClick={() => read('instagram-publishing-limit')}>Read publishing limit</Button></Inline>
+      {quota?.accountScope === accountScope && <StatusLine>Publishing quota: {quota.quotaUsage} / {quota.quotaTotal} used in the rolling {quota.quotaDurationSeconds}-second window. This is a snapshot; it does not reserve capacity or provide a reset time.</StatusLine>}
+      {!facebookLogin ? <Text tone="muted" size="sm">Catalog audio requires a Facebook Login connection. This account uses Instagram Login; its publishing limit is still available.</Text> : <>
+        <Heading level={4}>Find Instagram audio</Heading>
+        <Field label="Audio catalog type"><Select value={audioType} disabled={disabled} onChange={event => setAudioType(event.target.value)}><Option value="music">Music</Option><Option value="original_sound">Original sound</Option></Select></Field>
+        <Field label="Audio search query"><Input value={query} maxLength={200} disabled={disabled} onChange={event => setQuery(event.target.value)}/></Field>
+        <Inline><Button variant="secondary" disabled={disabled || loading || !query.trim() || query.trim().length > 200} onClick={() => read('instagram-audio')}>Search audio</Button>
+        <Button variant="secondary" disabled={disabled || loading} onClick={() => read('instagram-audio', true)}>Read trending audio</Button></Inline>
+        {rows && (!rows.length ? <Text>No audio returned for this request.</Text> : <Stack as="ul" gap={2}>{rows.map(row => <Stack as="li" gap={1} key={row.audioId}><Text>{row.title ?? 'Title not reported'} · {row.displayArtist ?? row.igUsername ?? 'Artist not reported'} · {row.audioId}</Text><Inline><Button variant="secondary" size="sm" disabled={disabled || loading} onClick={() => { if (isCurrent() && !disabled) setAudioId(row.audioId); }}>Choose audio ID {row.audioId}</Button></Inline></Stack>)}</Stack>)}
+        <Field label="Instagram audio ID"><Input inputMode="numeric" maxLength={30} value={audioId} disabled={disabled} onChange={event => setAudioId(event.target.value)}/></Field>
+        <Inline><Button variant="secondary" disabled={disabled || loading || !/^\d{1,30}$/.test(audioId)} onClick={() => read('instagram-audio-lookup')}>Look up audio ID</Button></Inline>
+        {audio && <Stack gap={1}>
+          <Text><Text as="strong">{audio.title ?? 'Title not reported'}</Text> · Audio ID: {audio.audioId}</Text>
+          <Text>Type: {audio.audioType ?? 'Not reported'} · Artist: {audio.displayArtist ?? 'Not reported'} · Creator: {audio.igUsername ?? 'Not reported'}</Text>
+          <Text>Duration: {audio.durationInMs === null ? 'Not reported' : `${audio.durationInMs} ms`} · Ad eligibility metadata: {audio.isAdsEligible === null ? 'Not reported' : audio.isAdsEligible ? 'Eligible' : 'Not eligible'}</Text>
+          <Text>Download URL: <InlineCode>{audio.downloadUrl ?? 'Not reported'}</InlineCode></Text><Text>Platform preview URL: <InlineCode>{audio.onPlatformAudioPreviewLink ?? 'Not reported'}</InlineCode></Text>
+        </Stack>}
+        {!eligible && <Text tone="muted" size="sm">Adding catalog audio requires a single video Reel. Choose one video and a format other than Story.</Text>}
+        <Inline><Button disabled={!canUse} onClick={useAudio}>Use this audio for this account</Button></Inline>
+        <Text tone="muted" size="sm">Look up the current audio ID before choosing Use. Only Use changes this account’s draft audio ID and preserves its existing volume settings. Ad eligibility is provider metadata; it does not grant music rights or guarantee publishing. Preview and download URLs are shown as text.</Text>
       </>}
     </>}
-    {loading && <p className="field-help" role="status">Reading Instagram…</p>}
-    {error?.ticket === ticket && <p className="post-validation-error" role="alert">{error.message}</p>}
-    {notice?.accountScope === accountScope && <p className="field-help" role="status">{notice.message}</p>}
-    <p className="field-help">Reads do not change your draft, account settings or published posts.</p>
-  </section>;
+    {loading && <StatusLine busy>Reading Instagram…</StatusLine>}
+    {error?.ticket === ticket && <Alert tone="danger">{error.message}</Alert>}
+    {notice?.accountScope === accountScope && <StatusLine>{notice.message}</StatusLine>}
+    <Text tone="muted" size="sm">Reads do not change your draft, account settings or published posts.</Text>
+  </Stack></Card>;
 }

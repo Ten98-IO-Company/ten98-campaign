@@ -7,10 +7,6 @@
     "element": 186,
     "styling": 64
   },
-  "src/CampaignAgent.tsx": {
-    "element": 50,
-    "styling": 26
-  },
   "src/ContentApprovals.tsx": {
     "element": 84,
     "styling": 44
@@ -24,10 +20,6 @@
     "element": 120,
     "styling": 34
   },
-  "src/InstagramPublishingTools.tsx": {
-    "element": 41,
-    "styling": 21
-  },
   "src/IntegrationSettings.tsx": {
     "element": 1,
     "styling": 2
@@ -35,10 +27,6 @@
   "src/OohMap.tsx": {
     "element": 16,
     "styling": 9
-  },
-  "src/OperationRecovery.tsx": {
-    "element": 62,
-    "styling": 18
   },
   "src/PostComposer.tsx": {
     "stylesheet": 1,
@@ -48,10 +36,6 @@
   "src/SocialAnalytics.tsx": {
     "element": 87,
     "styling": 24
-  },
-  "src/TikTokPublishingTools.tsx": {
-    "element": 45,
-    "styling": 23
   },
   "src/UnifiedInbox.tsx": {
     "stylesheet": 1,
@@ -85,10 +69,6 @@
   "src/ZernioMeasurement.tsx": {
     "element": 101,
     "styling": 26
-  },
-  "src/ZernioMediaUpload.tsx": {
-    "element": 30,
-    "styling": 17
   },
   "src/ZernioQueues.tsx": {
     "element": 79,

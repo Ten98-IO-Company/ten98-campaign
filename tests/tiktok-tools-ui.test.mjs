@@ -4,9 +4,11 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import * as ui from '@ten98/ui';
 
 const source = await readFile(new URL('../src/TikTokPublishingTools.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace('export type ', 'type ').replace('export default function ', 'function '), 'TikTokPublishingTools.tsx', { jsx: { runtime: 'classic' } });
+const names = Object.keys(ui).filter(name => /^[A-Z]/.test(name));
 const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children)] : [];
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const account = { _id: 'tiktok/a', platform: 'tiktok', displayName: 'Our TikTok', metadata: { tiktokAccountType: 'creator' } };
@@ -19,13 +21,13 @@ function browser(respond = async () => assert.fail('Unexpected read'), extra = {
   const state = initial => { const index = cursor++; if (!hooks[index]) hooks[index] = { value: typeof initial === 'function' ? initial() : initial }; return [hooks[index].value, value => { const next = typeof value === 'function' ? value(hooks[index].value) : value; if (!Object.is(next, hooks[index].value)) { hooks[index].value = next; dirty = true; } }]; };
   const ref = initial => { const index = cursor++; return hooks[index] ||= { current: initial }; };
   const effect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; effects.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
-  const Component = new Function('React', 'useState', 'useRef', 'useEffect', code + '; return TikTokPublishingTools;')(React, state, ref, effect);
+  const Component = new Function('React', 'useState', 'useRef', 'useEffect', ...names, code + '; return TikTokPublishingTools;')(React, state, ref, effect, ...names.map(name => ui[name]));
   let props = { account, mediaItems: [{ type: 'video', url: 'https://example.test/video.mp4' }], options: { privacyLevel: 'PUBLIC_TO_EVERYONE', musicSoundInfo: { musicSoundId: 'old', musicSoundVolume: 60, musicSoundStart: 4 }, videoOriginalSoundVolume: 30, locationId: 'old-place', locationName: 'Old place' }, lookup: async (...args) => { calls.push(args); return respond(...args); }, onChange: value => changes.push(value), ...extra };
   function paint() { for (let pass = 0; dirty; pass++) { assert.ok(pass < 20, 'Rendering settles.'); dirty = false; cursor = 0; tree = Component(props); while (effects.length) effects.shift()(); } }
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
-  const button = label => { const found = elements(tree).find(node => node.type === 'button' && React.Children.toArray(node.props.children).join('') === label); assert.ok(found, label); return found; };
+  const button = label => { const found = elements(tree).find(node => node.type === ui.Button && React.Children.toArray(node.props.children).join('') === label); assert.ok(found, label); return found; };
   const click = label => { const found = button(label); assert.equal(!!found.props.disabled, false, label); const result = found.props.onClick(); paint(); return result; };
-  const change = (label, value) => { const field = elements(tree).find(node => node.type === 'label' && elements(node).some(child => child.type === 'span' && child.props.children === label)); assert.ok(field, label); const input = elements(field).find(node => ['input', 'select'].includes(node.type)); input.props.onChange({ target: { value } }); paint(); };
+  const change = (label, value) => { const field = elements(tree).find(node => node.type === ui.Field && node.props.label === label); assert.ok(field, label); const input = elements(field).find(node => [ui.Input, ui.Select].includes(node.type)); input.props.onChange({ target: { value } }); paint(); };
   paint();
   return { calls, changes, props: () => props, tick, button, click, change, html: () => renderToStaticMarkup(tree), update: patch => { props = { ...props, ...patch }; dirty = true; paint(); }, unmount: () => hooks.forEach(hook => hook.close?.()) };
 }

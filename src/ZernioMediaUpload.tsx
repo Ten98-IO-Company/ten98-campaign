@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Progress } from '@ten98/ui';
+import { Alert, Button, Card, Disclosure, FileField, FormActions, Inline, Progress, StatusLine, Stack, Text } from '@ten98/ui';
 
 type Format = { contentType: string; extensions: string[]; kind: 'image' | 'video' | 'document' };
 type Options = { maxSize: number; formats: Format[]; asset?: { id: string; name?: string; url?: string }; assetVersion?: string; attempts?: Attempt[] };
@@ -116,26 +116,25 @@ export default function ZernioMediaUpload({ projectId, configured, disabled = fa
     catch (failure) { setFile(null); setError((failure as Error).message); }
   }
   const terminal = attempt && ['cancelled', 'preparation_failed', 'expired'].includes(attempt.status), canChoose = !busy && (!attempt || terminal || ['awaiting_upload', 'transfer_uncertain'].includes(attempt.status));
-  return <section className="settings-panel" aria-label="Upload delivery media">
-    <h3>{assetId ? 'Replace delivery file' : 'Upload delivery file'}</h3>
-    <p className="field-help">Upload an image, video or PDF to Zernio for a public delivery URL. Submit a scheduled, queued or immediate post within seven days so Zernio can retain that post’s copy. Saving a draft does not retain the file. Re-upload this library file after it expires. Platform publishing limits still apply.</p>
-    {!configured ? <p>Configure Zernio and connect this project before uploading.</p> : <>
-      {!!options?.attempts?.filter(item => !['completed', 'cancelled', 'expired'].includes(item.status)).length && !knownAttempt.current && <details><summary>Resume an earlier upload</summary><ul>{options.attempts.filter(item => !['completed', 'cancelled', 'expired'].includes(item.status)).map(item => <li key={item.id}>{item.filename} · {labels[item.status] || 'Check status'} <button type="button" className="button" disabled={disabled || Boolean(busy)} onClick={() => act('check', async () => { accept(await request(path + '/' + encodeURIComponent(item.id)), item.id); })}>Review upload</button></li>)}</ul></details>}
-      {options?.asset && <p>Replacing the delivery file for <strong>{options.asset.name || options.asset.id}</strong>. Its original link, tags and description are retained; approval resets to pending.</p>}
-      <button type="button" className="button" disabled={Boolean(busy)} onClick={() => setRefresh(value => value + 1)}>Reload upload settings</button>
-      {options && <><label className="field"><span>Delivery file · up to {(options.maxSize / 1_000_000_000).toLocaleString()} GB</span><input type="file" accept={options.formats.flatMap(format => format.extensions.map(extension => '.' + extension.replace(/^\./, ''))).join(',')} disabled={disabled || !canChoose} onChange={event => choose(event.target.files?.[0] || null)}/></label>{file && <p className="field-help">{file.name} · {file.size.toLocaleString()} bytes</p>}</>}
-      {attempt && <p role="status">{labels[attempt.status]}{attempt.expiresAt ? ` · Temporary file expires ${new Date(attempt.expiresAt).toLocaleString()}` : ''}</p>}
-      {['upload', 'retry'].includes(busy) && <div>{progress === null ? <progress max={100} aria-label="File transfer progress"/> : <Progress value={progress} label="File transfer progress"/>}<p className="field-help">{progress === 100 ? 'File sent; waiting for the server to confirm receipt.' : progress === null ? 'Transferring file…' : `${progress}% transferred`}</p></div>}
-      <div className="button-row">
-        {!attempt && <button type="button" className="button" disabled={disabled || Boolean(busy) || !file || !options} onClick={upload}>{knownAttempt.current ? 'Retry upload preparation' : 'Upload file'}</button>}
-        {knownAttempt.current && attempt?.status !== 'completed' && <button type="button" className="button" disabled={disabled || Boolean(busy)} onClick={() => act('check', check)}>Check upload status</button>}
-        {attempt && ['uploading', 'transfer_uncertain'].includes(attempt.status) && <button type="button" className="button" disabled={disabled || Boolean(busy)} onClick={() => recover()}>Recheck and save delivery asset</button>}
-        {attempt && ['awaiting_upload', 'transfer_uncertain', 'preparation_failed'].includes(attempt.status) && <button type="button" className="button" disabled={disabled || Boolean(busy) || !file || !options} onClick={() => recover(true)}>Retry transfer after checking</button>}
-        {attempt?.status === 'uploaded' && <button type="button" className="button primary" disabled={disabled || Boolean(busy)} onClick={complete}>Save delivery asset with pending approval</button>}
-        {knownAttempt.current && (!attempt || !['completed', 'cancelled', 'expired'].includes(attempt.status)) && <button type="button" className="button" disabled={disabled || Boolean(busy) && !['upload', 'retry'].includes(busy)} onClick={cancel}>Cancel upload</button>}
-        {terminal && <button type="button" className="button" disabled={disabled || Boolean(busy)} onClick={() => { knownAttempt.current = ''; setAttempt(null); setProgress(null); setNotice(''); setError(''); }}>Start a new upload</button>}
-      </div>
+  return <Card as="section" title={assetId ? 'Replace delivery file' : 'Upload delivery file'} aria-label="Upload delivery media"><Stack gap={3}>
+    <Text tone="muted" size="sm">Upload an image, video or PDF to Zernio for a public delivery URL. Submit a scheduled, queued or immediate post within seven days so Zernio can retain that post’s copy. Saving a draft does not retain the file. Re-upload this library file after it expires. Platform publishing limits still apply.</Text>
+    {!configured ? <Text>Configure Zernio and connect this project before uploading.</Text> : <>
+      {!!options?.attempts?.filter(item => !['completed', 'cancelled', 'expired'].includes(item.status)).length && !knownAttempt.current && <Disclosure summary="Resume an earlier upload"><Stack as="ul" gap={2}>{options.attempts.filter(item => !['completed', 'cancelled', 'expired'].includes(item.status)).map(item => <Inline as="li" key={item.id}><Text as="span">{item.filename} · {labels[item.status] || 'Check status'}</Text><Button variant="secondary" size="sm" disabled={disabled || Boolean(busy)} onClick={() => act('check', async () => { accept(await request(path + '/' + encodeURIComponent(item.id)), item.id); })}>Review upload</Button></Inline>)}</Stack></Disclosure>}
+      {options?.asset && <Text>Replacing the delivery file for <Text as="strong">{options.asset.name || options.asset.id}</Text>. Its original link, tags and description are retained; approval resets to pending.</Text>}
+      <Inline><Button variant="secondary" disabled={Boolean(busy)} onClick={() => setRefresh(value => value + 1)}>Reload upload settings</Button></Inline>
+      {options && <><FileField label={`Delivery file · up to ${(options.maxSize / 1_000_000_000).toLocaleString()} GB`} accept={options.formats.flatMap(format => format.extensions.map(extension => '.' + extension.replace(/^\./, ''))).join(',')} disabled={disabled || !canChoose} onFiles={files => choose(files[0] || null)}/>{file && <Text tone="muted" size="sm">{file.name} · {file.size.toLocaleString()} bytes</Text>}</>}
+      {attempt && <StatusLine>{labels[attempt.status]}{attempt.expiresAt ? ` · Temporary file expires ${new Date(attempt.expiresAt).toLocaleString()}` : ''}</StatusLine>}
+      {['upload', 'retry'].includes(busy) && <Stack gap={1}><Progress value={progress ?? undefined} label="File transfer progress"/><Text tone="muted" size="sm">{progress === 100 ? 'File sent; waiting for the server to confirm receipt.' : progress === null ? 'Transferring file…' : `${progress}% transferred`}</Text></Stack>}
+      <FormActions>
+        {!attempt && <Button variant="secondary" disabled={disabled || Boolean(busy) || !file || !options} onClick={upload}>{knownAttempt.current ? 'Retry upload preparation' : 'Upload file'}</Button>}
+        {knownAttempt.current && attempt?.status !== 'completed' && <Button variant="secondary" disabled={disabled || Boolean(busy)} onClick={() => act('check', check)}>Check upload status</Button>}
+        {attempt && ['uploading', 'transfer_uncertain'].includes(attempt.status) && <Button variant="secondary" disabled={disabled || Boolean(busy)} onClick={() => recover()}>Recheck and save delivery asset</Button>}
+        {attempt && ['awaiting_upload', 'transfer_uncertain', 'preparation_failed'].includes(attempt.status) && <Button variant="secondary" disabled={disabled || Boolean(busy) || !file || !options} onClick={() => recover(true)}>Retry transfer after checking</Button>}
+        {attempt?.status === 'uploaded' && <Button disabled={disabled || Boolean(busy)} onClick={complete}>Save delivery asset with pending approval</Button>}
+        {knownAttempt.current && (!attempt || !['completed', 'cancelled', 'expired'].includes(attempt.status)) && <Button variant="secondary" disabled={disabled || Boolean(busy) && !['upload', 'retry'].includes(busy)} onClick={cancel}>Cancel upload</Button>}
+        {terminal && <Button variant="secondary" disabled={disabled || Boolean(busy)} onClick={() => { knownAttempt.current = ''; setAttempt(null); setProgress(null); setNotice(''); setError(''); }}>Start a new upload</Button>}
+      </FormActions>
     </>}
-    {error && <p className="alert" role="alert">{error}</p>}{notice && <p className="helper-note" role="status">{notice}</p>}
-  </section>;
+    {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}
+  </Stack></Card>;
 }
