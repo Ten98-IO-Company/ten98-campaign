@@ -51,6 +51,8 @@ function nextQueueSlot(slots: { dayOfWeek: number; time: string }[], timeZone: s
     // A daylight-saving change inside the week moves the wall clock; shift back onto the slot's own time.
     const drift = (target - wall(candidate) + week * 1.5) % week - week / 2;
     if (drift) candidate = new Date(candidate.getTime() + drift * 60000);
+    // A slot inside a spring-forward gap has no wall time; show the same offset after the gap after the gap (02:30 becomes 03:30).
+    if (wall(candidate) !== target) candidate = new Date(candidate.getTime() + ((target - wall(candidate) + week) % week) * 60000);
     if (!best || candidate < best) best = candidate;
   }
   return best;
