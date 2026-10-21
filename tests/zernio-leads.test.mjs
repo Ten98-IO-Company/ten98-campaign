@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 import { transformWithOxc } from 'vite';
 
 async function fixture() {
@@ -59,7 +59,7 @@ async function fixture() {
     const response = await originalFetch(base + path, { method, headers: { Origin: origin, ...(authenticated && cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...(method === 'POST' ? { 'Idempotency-Key': key } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
-  const setup = await request('/auth/setup', 'POST', { name: 'Lead owner', email: 'owner@example.test', password: 'synthetic lead acceptance passphrase', sample: false }); cookie = setup.cookie; const project = '/projects/' + setup.data.projectId;
+  const setup = await request('/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Lead owner', email: 'owner@example.test', password: 'synthetic lead acceptance passphrase', sample: false }); cookie = setup.cookie; const project = '/projects/' + setup.data.projectId;
   await request(project, 'PATCH', { zernioProfileId: 'lead-profile' });
   const path = project + '/integrations/leads', formPath = platform => `${path}/${platform}-account/forms`, selected = platform => `${formPath(platform)}/${state.forms[platform][0].id}`;
   return { app, state, calls, accounts, project, path, formPath, selected, request, query: '?adAccountId=advertiser-1', writes: () => calls.filter(row => row.method !== 'GET'), async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
@@ -177,7 +177,7 @@ test('unknown lead mutations retain durable fences across changed request bodies
     f.state.hook = (url, options) => url.pathname.endsWith('/ads/lead-forms') && options.method === 'POST' ? Response.json({ status: 'success', form: { id: null } }) : undefined;
     const unknown = await f.request(f.formPath('metaads') + '/create', 'POST', body, key); assert.equal(unknown.status, 409); assert.equal(unknown.data.operation.status, 'uncertain'); const count = f.writes().length;
     assert.equal((await f.request(f.formPath('metaads') + '/create', 'POST', body, key)).status, 409);
-    const blocked = await f.request(f.formPath('metaads') + '/create', 'POST', { ...body, name: 'Changed request body' }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'LEAD_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(blocked.data.operation.status, 'failed'); assert.equal(f.writes().length, count);
+    const blocked = await f.request(f.formPath('metaads') + '/create', 'POST', { ...body, name: 'Changed request body' }); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, unknown.data.operation.id); assert.equal(f.writes().length, count);
     const reviewed = await f.request(`${f.project}/operations/${unknown.data.operation.id}/review`, 'POST', { resolution: 'not_applied', confirmChecked: true, note: 'Synthetic fixture confirmed the malformed request persisted no form.', reference: 'synthetic-no-form' }); assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
     f.state.hook = null; const result = await f.request(f.formPath('metaads') + '/create', 'POST', { ...body, name: 'Reviewed new creation' }); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM zernio_lead_mutations').get().n, 0);
   } finally { await f.close(); }
@@ -211,9 +211,10 @@ test('test-lead confirmation belongs to the reviewed form version rather than a 
 const adSource = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8');
 const compile = (source, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source)});`)(...Object.values(context));
 const readableLeadForm = compile(adSource.match(/const readableLeadForm = (.+);/)[1], {});
-const adSubmitSource = adSource.slice(adSource.indexOf('async function submit('), adSource.indexOf('  return <form'));
+const adSubmitSource = adSource.match(/async function submit\([\s\S]*?\n  \}/)[0];
 async function submitLeadAd(form, request, extra = {}) {
-  const errors = [], saved = [], view = {}, context = { busy: false, budgetType: 'daily', bidding: 'automatic', setValidation() {}, isCurrent: () => true, FormData: class { constructor(value) { return Object.entries(value); } }, setError: value => errors.push(value), connection: { platform: 'metaads' }, adAccount: { id: 'advertiser-1' }, currency: 'AED', accountId: 'metaads-account', adAccountId: 'advertiser-1', platform: 'facebook', boosting: false, assets: false, format: 'image', goal: 'lead_generation', video: false, carousel: false, cards: 2, lines() {}, setBusy() {}, requester: { current: request }, onCreated: () => saved.push(true), leadForm: form, leadSelection: { current: view }, leadView: view, leadReview: form.version, usableLeadForm: row => row.status === 'ACTIVE', currentLeadView: () => true, ...extra };
+  const errors = [], saved = [], view = {}, frame = {}, context = { frame, currentFrame: { current: frame }, readOnly: false, loading: false, loadingAds: false, selectedInterests: [], busy: false, budgetType: 'daily', bidding: 'automatic', setValidation() {}, isCurrent: () => true, FormData: class { constructor(value) { return Object.entries(value); } }, setError: value => errors.push(value), connection: { platform: 'metaads' }, adAccount: { id: 'advertiser-1' }, currency: 'AED', accountId: 'metaads-account', adAccountId: 'advertiser-1', platform: 'facebook', boosting: false, assets: false, format: 'image', goal: 'lead_generation', video: false, carousel: false, cards: 2, lines() {}, setBusy() {}, requester: { current: request }, onCreated: () => saved.push(true), leadForm: form, leadSelection: { current: view }, leadView: view, leadReview: form.version, usableLeadForm: row => row.status === 'ACTIVE', currentLeadView: () => true, ...extra };
+  context.canInteract = compile(adSource.match(/\bcanInteract = (.+);/)[1], context);
   await compile(adSubmitSource, context)({ preventDefault() {}, currentTarget: { countries: 'AE', name: 'Reviewed native lead campaign', budgetAmount: '50', headline: 'Ask about our service', body: 'Submit your inquiry.', imageUrl: 'https://cdn.example.test/ad.jpg', callToAction: 'SIGN_UP' } });
   return { errors, saved };
 }
@@ -293,4 +294,19 @@ test('lead picker responses cannot cross account scopes, overwrite newer preview
   nodes.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange({ target: { checked: true } }); assert.equal(reviewed, form.version);
   assert.equal(nodes.some(node => node.type === 'button' && node.children.includes('Preview and verify this ID')), false);
   context.leadUnavailable = true; assert.equal(all(render()).some(node => node.type === 'button' && node.children.includes('Preview and verify this ID')), true); assert.doesNotMatch(adSource, /window\.confirm/);
+});
+
+
+test('lead terminal unsent recovery withdraws acknowledgements without discarding authored form and test answers', async () => {
+  const source = await readFile(new URL('../src/ZernioLeads.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function action('), actionSource = source.slice(start, source.indexOf('  async function loadForms(', start));
+  for (const problem of [{ code: 'OPERATION_NOT_SENT', operation: { status: 'failed' } }, { code: 'PREVIOUS_OUTCOME_UNRESOLVED', operation: { status: 'failed' } }, { code: 'OPERATION_UNCERTAIN', operation: { status: 'uncertain' } }]) {
+    const draft = { name: 'Authored form', privacyPolicyUrl: 'https://example.test/privacy' }, answers = { email: 'person@example.test' }, state = { import: true, create: true, archive: 'version-a', test: 'version-a', deletion: 'test-a', selected: { id: 'form-a' }, lead: { id: 'lead-a' }, draft, answers, notice: '', error: '' };
+    const context = { current: () => true, busyRef: { current: false }, setBusy() {}, setError: value => { state.error = value; }, setNotice: value => { state.notice = value; }, setConfirmImport: value => { state.import = value; }, setConfirmCreate: value => { state.create = value; }, setArchiveReview: value => { state.archive = value; }, setConfirmTest: value => { state.test = value; }, setDeleteTestReview: value => { state.deletion = value; }, setSelectedLead: value => { state.lead = value; }, setSelected: value => { state.selected = value; } };
+    const action = compile(actionSource, context); let attempts = 0;
+    await action(async () => { attempts++; throw new Error('Lost acknowledgement'); }); assert.equal(state.create, true, 'A lost reply alone does not establish that the request was unsent.');
+    await action(async () => { attempts++; throw Object.assign(new Error('Checked outcome'), problem); });
+    assert.equal(attempts, 2, 'Checking a result never starts an automatic retry.'); assert.equal(state.draft, draft); assert.equal(state.answers, answers);
+    if (problem.operation.status === 'failed') { assert.equal(state.create, false); assert.equal(state.import, false); assert.equal(state.archive, false); assert.equal(state.test, false); assert.equal(state.deletion, ''); assert.equal(state.selected, null); assert.equal(state.lead, null); assert.match(state.notice, /request was not sent.*draft and test answers are kept.*review and acknowledge/); }
+    else { assert.equal(state.create, true); assert.equal(state.import, true); assert.equal(state.selected.id, 'form-a'); }
+  }
 });

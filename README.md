@@ -1,8 +1,10 @@
 # ten98 Campaign
 
+Common architecture and server mechanisms are maintained in [ten98-code-system](https://github.com/Ten98-IO-Company/ten98-code-system). `npm run check:architecture` validates the installed shared contract; the normal test and build commands include it.
+
 An open-source, self-hosted campaign manager for social publishing, online advertising, out-of-home media, transactional email, SMS, WhatsApp, digital assets, and campaign planning. Workspaces contain projects; workspace membership controls access to every project in that workspace.
 
-Version 0.8.12 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter prepares optional content drafts. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
+Version 0.9.0 includes social publishing, advertising, OOH, Drive DAM, direct campaigns, a **Unified inbox** with two-way Twilio SMS and approved WhatsApp template replies, and campaign short links, QR codes and website tracking. Google Calendar supports shared planning; Broadsign handles OOH proposals/bookings; Google Maps shows locations; OpenRouter prepares optional content drafts. Cloudflare sends transactional email with an optional external reply address; WhatsApp broadcasts and conversations use Zernio. Voice calling and a receiving email inbox are excluded. The application is [MIT licensed](LICENSE). Provider accounts, API access, message charges, media spending, and model usage remain subject to their providers' terms and charges.
 
 ![Campaign ads manager](docs/ads-verification.png)
 
@@ -21,11 +23,13 @@ npm run build
 npm start
 ```
 
-Open [http://127.0.0.1:3018](http://127.0.0.1:3018) and create the first owner account. This account is also the instance operator. Public signup then closes. Optional sample records are marked and excluded from live publishing and calendar-plan sync. Owners/admins can remove all sample data from Project settings; cleanup refuses when your own work still refers to a sample record. Assigned campaigns, assets, and media providers must be unassigned before deletion so drafts and bookings keep valid references.
+Open [http://127.0.0.1:3018](http://127.0.0.1:3018) and create the first owner account using the host-held setup token. Before setup, the server generates `DATA_DIR/bootstrap-token` with private file permissions; read it locally (for Docker: `docker compose exec campaign cat /app/data/bootstrap-token`). Alternatively set `BOOTSTRAP_TOKEN` to 32–512 random non-whitespace characters. Keep the token private and out of URLs, logs and source control. Setup remains claimed after account deletion; existing installations are backfilled as claimed and continue to sign in normally. Failed transactions retain the unclaimed state so the same token can retry. This account is also the instance operator. Public signup then closes. Optional sample records are marked and excluded from live publishing and calendar-plan sync. Owners/admins can remove all sample data from Project settings; cleanup refuses when your own work still refers to a sample record. Assigned campaigns, assets, and media providers must be unassigned before deletion so drafts and bookings keep valid references.
 
 Signed-in accounts without project access can refresh after an invitation, create their own workspace, or manage their account from the starting screen.
 
-For development, run `npm run dev` and open [http://127.0.0.1:5178](http://127.0.0.1:5178). The runner starts the API and Vite with the matching browser origin. Configure provider credentials in **Integrations**, or use `.env` as an operator-managed fallback. Changes saved in the app apply immediately; Google Maps browser changes require a page reload. Editing `.env` requires restarting the server. Keep `.env` and `data/` private.
+Choose **Settings → Your account → Appearance** to switch between **System**, **Light** and **Dark**. System follows your device preference. The choice is saved in this browser; when browser storage is unavailable, it applies only until the page is reloaded.
+
+For development, run `npm run dev` and open [http://127.0.0.1:5178](http://127.0.0.1:5178). The runner starts the API and Vite with the matching browser origin. Configure provider credentials and project connections in **Integrations**, or use `.env` as an operator-managed credential fallback. Calendar, advertising and OOH pages link to this single setup location; their campaign, event and booking controls remain in the feature. Google Drive and Calendar share one credential editor, with separate connection tests. Changes saved in the app apply immediately; Google Maps browser changes require a page reload. Editing `.env` requires restarting the server. Keep `.env` and `data/` private.
 
 ## Included workflows
 
@@ -94,7 +98,7 @@ The ad editor supports these formats, subject to the connected account's permiss
 | Reddit | Image, video, carousel, and text. |
 | OpenAI / ChatGPT | Sponsored card with supported bidding and objectives. |
 
-New ads and boosts start **paused**. Budgets use the advertising account's currency; OpenAI supports daily and lifetime allocations. Review conversion tracking, targeting, creative approval, and provider-side settings before activation. Supported campaign/ad-group budgets, ad edits, targeting lookup, and status controls are available through Ads manager; unsupported combinations return an error. Niche creative types, custom-audience management, conversion installation, and comprehensive bulk editing remain provider-dashboard workflows. The Zernio API supports more options than this editor exposes. [Zernio ad creation contract](https://docs.zernio.com/ad-campaigns/create-standalone-ad).
+New ads and boosts start **paused**. Budgets use the advertising account's currency; OpenAI supports daily and lifetime allocations. Review conversion tracking, targeting, creative approval, and provider-side settings before activation. Ads manager supports bounded campaign/ad-group budgets, ad edits, targeting lookup and status controls. Meta daily ad-set budget changes in AED/USD require a fresh before/after review and explicit confirmation, followed by independent live readback; lifetime and campaign-owned allocations are excluded from that control. Google and ChatGPT budgets belong in the campaign editor. Unsupported combinations return an error. Niche creative types, custom-audience management, conversion installation, and comprehensive bulk editing remain provider-dashboard workflows. The Zernio API supports more options than this editor exposes. [Zernio ad creation contract](https://docs.zernio.com/ad-campaigns/create-standalone-ad).
 
 Google paid-search tools include keywords, campaign negatives, search terms, Keyword Planner, targeting and bidding. Native Google Standard Shopping creation and Microsoft Search campaigns have separate credentials and verified project mappings. Copilot eligibility comes through Microsoft; supported Google campaigns can qualify for Google's AI search inventory under provider rules. Standard Google Video creation is unavailable in its API; existing Video reporting and Zernio Demand Gen video creation are supported. Organic Search Console/SEO stays in ten98 Discover. See [advertising setup and limits](docs/advertising.md).
 
@@ -135,7 +139,7 @@ Approval never publishes automatically. With the policy enabled, publishing and 
 
 ## Unified inbox, comments and reviews
 
-Open **Unified inbox**, choose Messages, Comments or Reviews, select a connected account, then load its feed. Supported actions follow each platform's permissions: private replies and attachments, mark read/archive, public comment threads/replies/hide/like/delete/YouTube moderation, and review replies. Google Business supports replacing or removing the owner reply; a version check prevents silently overwriting a reply changed elsewhere.
+Open **Unified inbox**, choose Messages, Comments or Reviews, select a connected account, then load its feed. Supported actions follow each platform's permissions: private replies and attachments, mark read/archive, public comment threads/replies/hide/like/delete/YouTube moderation, and review replies. Google Business supports replacing or removing the owner reply; a version check prevents silently overwriting a reply changed elsewhere. For an existing WhatsApp conversation, expand **Reply buttons (optional)** to send text with one to three different button labels inside the customer’s 24-hour reply window. Review the exact message and buttons before sending. An uncertain send retains its original action; **Check reply outcome** only reads a recorded receipt and cannot send a new message.
 
 The **SMS replies** tab reads local Twilio conversations and delivery updates. Configure the project-specific incoming-message webhook displayed there. Replies are explicit, use the original sender, respect suppression, and retain durable receipts so uncertain submissions cannot be silently resent. Ambiguous shared-number messages remain unattributed instead of leaking into another project. See [inbox setup and limitations](docs/inbox.md).
 
@@ -208,12 +212,14 @@ For OIDC, configure `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, and t
 Provision a local account using the operator CLI, supplying one JSON object on standard input:
 
 ```sh
-node --env-file-if-exists=.env server/cli.mjs create-user
+node --env-file-if-exists=.env server/cli.ts create-user
 ```
 
-Input: `{"name":"Team member","email":"member@example.com","password":"a unique password of at least 12 characters"}`. Use a secure terminal or password-manager pipe, keeping real passwords out of shell arguments and history. The new account has no workspace membership until invited. The `grant-operator` command accepts `{"email":"operator@example.com"}` on standard input and grants instance authority without workspace membership.
+Input: `{"name":"Team member","email":"member@example.com","password":"a unique password of at least 12 characters"}`. Use a secure terminal or password-manager pipe, keeping real passwords out of shell arguments and history. The new account has no workspace membership until invited. The `grant-operator` and `revoke-operator` commands accept `{"email":"operator@example.com"}` on standard input and change instance authority without changing workspace membership. Revocation takes effect for existing sessions immediately. The host can revoke the final operator and later regrant authority to an existing account through this CLI.
 
-To recover a local password, run `node --env-file-if-exists=.env server/cli.mjs reset-password` with `{"email":"member@example.com","password":"a new unique password of at least 12 characters"}` on standard input. It works only for an existing local password account and revokes **all** that account's sessions. It cannot reset an OIDC identity's password. Operator access to the host and private data directory is required.
+Bootstrap and successful host operator commands append user ID, action, source and time to SQLite's `instance_operator_audit` in the same transaction as the grant or revocation. Repeated grant/revoke commands keep the role state idempotent and append another command event, matching Discover. An audit insertion failure fails the command and rolls back the transaction. Existing installations retain their operators and begin with an empty audit table; earlier operator history is unavailable. The source identifies host CLI or bootstrap provenance, not an authenticated human actor. Passwords, setup capabilities and session tokens are not audit fields.
+
+To recover a local password, run `node --env-file-if-exists=.env server/cli.ts reset-password` with `{"email":"member@example.com","password":"a new unique password of at least 12 characters"}` on standard input. It works only for an existing local password account and revokes **all** that account's sessions. It cannot reset an OIDC identity's password. Operator access to the host and private data directory is required.
 
 ## Deployment and operations
 

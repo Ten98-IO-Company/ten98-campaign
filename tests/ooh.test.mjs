@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { handleOoh } from '../server/ooh.mjs';
-import { createStore } from '../server/database.mjs';
-import { operation, IntegrationError } from '../server/integrations.mjs';
-import { handleOperationRecovery } from '../server/operation-recovery.mjs';
+import { handleOoh } from '../server/ooh.ts';
+import { createStore } from '../server/database.ts';
+import { operation, IntegrationError } from '../server/provider-core.ts';
+import { handleOperationRecovery } from '../server/operation-recovery.ts';
 
 test('Broadsign contracts, approved inventory, paid confirmation, and durable partial failures', async () => {
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, calls = [];
@@ -143,7 +143,7 @@ test('Broadsign contracts, approved inventory, paid confirmation, and durable pa
     cancellationStatus = 15; afterCancel = () => { failCancellationReadback = true; };
     result = await invoke(`bookings/${rejectedBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-read01' }); assert.equal(result.data.operation.status, 'uncertain'); afterCancel = undefined; failCancellationReadback = false;
     const readbackWrites = cancelCount();
-    result = await invoke(`bookings/${rejectedBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-read02' }); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(cancelCount(), readbackWrites);
+    result = await invoke(`bookings/${rejectedBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-read02' }); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(result.data.operation.status, 'failed'); assert.equal(cancelCount(), readbackWrites);
     state = 12; result = await invoke(`bookings/${rejectedBooking.id}/report`); assert.equal(result.data.booking.stage, 'cancelled');
     const changedCredentialsBooking = await anotherBooking('Credentials changed during cancellation', 'draft-cancel04'); let credentialsChanged = false; afterCancel = () => { credentialsChanged = true; };
     result = await invoke(`bookings/${changedCredentialsBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-creds01', selectedConfig: { ...config, assertIntegrationSettings() { if (credentialsChanged) throw new Error('Changed'); } } }); assert.equal(result.data.operation.status, 'uncertain'); afterCancel = undefined;
@@ -170,7 +170,7 @@ test('Broadsign contracts, approved inventory, paid confirmation, and durable pa
     assert.equal((await bookingView(recoverBooking.id)).canRetryCancellation, false, 'Reviewing a different booking cannot unlock this cancellation.');
     assert.equal((await bookingView(otherRecoverBooking.id)).canRetryCancellation, true);
     assert.equal((await reviewCancellation(recoveryId, 'applied')).status, 200); assert.equal((await bookingView(recoverBooking.id)).canRetryCancellation, false);
-    result = await invoke(`bookings/${recoverBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-applied2' }); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN');
+    result = await invoke(`bookings/${recoverBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-applied2' }); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(result.data.operation.status, 'failed'); assert.equal(cancelCount(), recoveryWrites + 1);
     const reviewedBooking = await anotherBooking('Not applied exact cancellation', 'draft-recover03');
     result = await invoke(`bookings/${reviewedBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-review01' }); assert.equal(result.data.operation.status, 'uncertain'); const reviewedId = result.data.operation.id;
     assert.equal((await reviewCancellation(reviewedId)).status, 200);
@@ -194,8 +194,9 @@ test('Broadsign contracts, approved inventory, paid confirmation, and durable pa
     result = await invoke(`bookings/${reviewedBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-reviewed-again' });
     assert.equal(result.data.operation.status, 'uncertain'); const secondUncertainId = result.data.operation.id;
     assert.equal(cancelCount(), beforeManualRetry + 2); assert.notEqual(secondUncertainId, reviewedId); assert.equal((await bookingView(reviewedBooking.id)).cancellationOperationId, secondUncertainId); assert.equal((await bookingView(reviewedBooking.id)).canRetryCancellation, false, 'A new uncertain request replaces the reviewed receipt and blocks further cancellation until its own outcome is reviewed.');
-    result = await invoke(`bookings/${reviewedBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-reviewed-block' }); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(cancelCount(), beforeManualRetry + 2);
+    result = await invoke(`bookings/${reviewedBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-reviewed-block' }); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(result.data.operation.status, 'failed'); const blockedCancellation = result.data; assert.equal(cancelCount(), beforeManualRetry + 2);
     assert.equal((await reviewCancellation(secondUncertainId)).status, 200); assert.equal((await bookingView(reviewedBooking.id)).canRetryCancellation, true);
+    assert.deepEqual((await invoke(`bookings/${reviewedBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-reviewed-block' })).data, blockedCancellation); assert.equal(cancelCount(), beforeManualRetry + 2);
     failure = ''; cancellationStatus = 15; state = 9;
     result = await invoke(`bookings/${reviewedBooking.id}/cancel`, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-reviewed-final' });
     assert.equal(result.status, 200); assert.equal(cancelCount(), beforeManualRetry + 3); assert.equal(result.data.booking.stage, 'cancelling'); assert.equal(result.data.cancellation.confirmed, false);
@@ -206,7 +207,7 @@ test('Broadsign contracts, approved inventory, paid confirmation, and durable pa
     const partial = { ...draft, name: 'Partial draft' };
     result = await invoke('bookings', { method: 'POST', body: partial, key: 'partial-001' }); assert.equal(result.data.operation.status, 'uncertain');
     const writes = calls.filter(call => call.url.pathname === '/api/v1/proposal').length;
-    result = await invoke('bookings', { method: 'POST', body: partial, key: 'partial-002' }); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(calls.filter(call => call.url.pathname === '/api/v1/proposal').length, writes);
+    result = await invoke('bookings', { method: 'POST', body: partial, key: 'partial-002' }); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(result.data.operation.status, 'failed'); assert.equal(calls.filter(call => call.url.pathname === '/api/v1/proposal').length, writes);
     result = await invoke('bookings'); assert.equal(result.data.bookings.some(item => item.stage === 'proposal-created' && item.proposalId), true, 'A partial provider creation retains its known ID for reconciliation.');
     result = await invoke('status', { selectedConfig: { ...config, BROADSIGN_ENVIRONMENT: 'https://evil.invalid' } }); assert.equal(result.status, 200);
     const before = calls.length;

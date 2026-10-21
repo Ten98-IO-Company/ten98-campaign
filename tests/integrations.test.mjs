@@ -2,7 +2,65 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { generateKeyPairSync, verify } from 'node:crypto';
-import { handleIntegration, providerRequest, scopedAccounts, adAccounts } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.ts';
+import { providerRequest, zernioClient, scopedAccounts, adAccounts, remotePostModel, remoteRestrictionPayload, savePostSnapshot, operation } from '../server/provider-core.ts';
+
+test('only documented exact product GET absence codes survive and revoked access cannot prove deletion', async () => {
+  const originalFetch = globalThis.fetch; let code = 'product_not_found', status = 404, revoked = false, revoke = false;
+  const api = zernioClient('qa-key', () => { if (revoked) throw Object.assign(new Error('PRIVATE_ACCESS'), { status: 403 }); });
+  globalThis.fetch = async () => { if (revoke) revoked = true; return Response.json({ error: 'PRIVATE_PROVIDER_BODY', code }, { status }); };
+  try {
+    for (const [path, method, nextStatus, nextCode, expected] of [
+      ['/commerce/products/9501', 'GET', 404, 'product_not_found', 'product_not_found'], ['/commerce/products/9501', 'GET', 404, 'account_not_found', 'account_not_found'],
+      ['/commerce/products/9501', 'GET', 404, 'other', undefined], ['/commerce/products/9501', 'GET', 404, { unsafe: true }, undefined],
+      ['/commerce/products/9501', 'GET', 403, 'product_not_found', undefined], ['/commerce/products/9501', 'POST', 404, 'product_not_found', undefined],
+      ['/commerce/products', 'GET', 404, 'product_not_found', undefined], ['/commerce/products/9501/inventory', 'GET', 404, 'product_not_found', undefined],
+    ]) { status = nextStatus; code = nextCode; await assert.rejects(api(path, {}, undefined, undefined, method), error => error.providerCode === expected && error.providerStatus === status && !error.message.includes('PRIVATE')); }
+    status = 404; code = 'product_not_found'; revoke = true;
+    await assert.rejects(api('/commerce/products/9501'), error => error.code === 'PROJECT_ACCESS_CHANGED' && error.providerCode === undefined && !error.message.includes('PRIVATE'));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('receipt-only outcome checks can never become first dispatches and still bind the exact action', async () => {
+  const db = new DatabaseSync(':memory:'); let writes = 0;
+  const context = { db, project: { id: 'receipt-project' }, req: { method: 'POST', headers: { 'idempotency-key': 'retained-key' } }, url: new URL('https://campaign.example.test/api/projects/receipt-project/integrations/products/store/product/archive?check=1'), body: { version: 'reviewed-version', confirmArchive: true } };
+  const send = () => operation(context, async () => { writes++; return { accepted: true }; }, ['native-product']);
+  try {
+    await assert.rejects(send, error => error.code === 'OPERATION_OUTCOME_UNAVAILABLE');
+    assert.equal(writes, 0); assert.equal(db.prepare('SELECT count(*) AS count FROM integration_operations').get().count, 0);
+    context.url.search = ''; const accepted = await send(); assert.equal(writes, 1);
+    context.url.search = '?check=1'; assert.deepEqual(await send(), accepted); assert.equal(writes, 1);
+    context.body = { ...context.body, confirmArchive: false }; await assert.rejects(send, error => error.code === 'IDEMPOTENCY_CONFLICT');
+    context.req.headers['idempotency-key'] = 'different-key'; await assert.rejects(send, error => error.code === 'OPERATION_OUTCOME_UNAVAILABLE');
+    context.url.search = '?check=1&check=1'; await assert.rejects(send, error => error.code === 'INVALID_OUTCOME_CHECK');
+    assert.equal(writes, 1); assert.equal(db.prepare('SELECT count(*) AS count FROM integration_operations').get().count, 1);
+  } finally { db.close(); }
+});
+
+test('successful write references are observed before access rejection while observer and parsing failures remain uncertain', async () => {
+  const originalFetch = globalThis.fetch; let revoked = false, mode = 'valid', observations = 0;
+  const api = zernioClient('PRIVATE_KEY', () => { if (revoked) throw Object.assign(new Error('PRIVATE_ACCESS_DETAIL'), { status: 403 }); });
+  globalThis.fetch = async () => { revoked = true; return mode === 'malformed' ? new Response('not json') : Response.json({ product: { id: '9002' } }); };
+  try {
+    await assert.rejects(api('/commerce/products', {}, { accountId: 'store' }, 'observed-key', 'POST', receipt => { observations++; assert.equal(receipt.product.id, '9002'); }), error => error.code === 'PROJECT_CONNECTION_CHANGED' && error.uncertain === true && !error.message.includes('PRIVATE'));
+    assert.equal(observations, 1);
+    revoked = false;
+    await assert.rejects(api('/commerce/products', {}, { accountId: 'store' }, 'observer-failure', 'POST', () => { throw new Error('PRIVATE_RECORD_ERROR'); }), error => error.code === 'PROVIDER_REFERENCE_NOT_RECORDED' && error.uncertain === true && !error.message.includes('PRIVATE'));
+    revoked = false; mode = 'malformed';
+    await assert.rejects(api('/commerce/products', {}, { accountId: 'store' }, 'invalid-response', 'POST', () => { observations++; }), error => error.code === 'INVALID_PROVIDER_RESPONSE' && error.uncertain === true);
+    assert.equal(observations, 1, 'Unreadable provider JSON cannot establish a reference.');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('provider keyword strings survive the shared social model, preflight payload and saved snapshot unchanged', async () => {
+  const post = { id: 'local-tags', projectId: 'project-tags', externalId: 'remote-tags', zernioProfileId: 'profile-tags', tags: ['launch', 'product'], content: 'Video', platforms: ['youtube'], accounts: ['channel'] };
+  const remote = { _id: post.externalId, status: 'failed', content: post.content, tags: [' #launch, product ', 'launch'], platforms: [{ platform: 'youtube', accountId: 'channel', status: 'failed' }] };
+  let current = post;
+  const store = { get() { return current; }, update(projectId, collection, id, data) { current = { ...current, ...data }; return current; } };
+  const model = await remotePostModel(store, post.projectId, post, remote); assert.deepEqual(model.tags, remote.tags);
+  assert.deepEqual(remoteRestrictionPayload(model, remote).tags, remote.tags);
+  assert.deepEqual((await savePostSnapshot(store, post.projectId, post, remote)).tags, remote.tags);
+});
 
 test('shared connected-account reads reject unreadable labels and activity flags while preserving optional values and profile scope', async () => {
   const base = { _id: 'account-a', platform: 'whatsapp', profileId: 'profile-a' }, read = account => scopedAccounts(async () => ({ accounts: [account] }), 'profile-a');
@@ -281,6 +339,21 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     };
     result = await invoke('connect?platform=instagram&redirect_url=https://evil.example', { role: 'admin', config: { ZERNIO_API_KEY: 'sk_PRIVATE', appUrl: 'https://campaign.example.com' } });
     assert.equal(result.data.authUrl, 'https://www.instagram.com/oauth/authorize?state=server-state');
+    for (const loginMethod of ['instagram_login', 'facebook_login']) {
+      provider = async url => {
+        assert.equal(url.pathname, '/api/v1/connect/instagram');
+        assert.deepEqual([...url.searchParams.keys()].sort(), ['loginMethod', 'profileId', 'redirect_url']);
+        assert.equal(url.searchParams.get('loginMethod'), loginMethod); assert.equal(url.searchParams.get('profileId'), 'profile-a');
+        const callback = new URL(url.searchParams.get('redirect_url')); assert.equal(callback.searchParams.get('project'), project.id);
+        return { authUrl: 'https://provider.example.test/authorize?method=' + loginMethod };
+      };
+      result = await invoke('connect?platform=instagram&loginMethod=' + loginMethod, { role: 'admin' });
+      assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(new URL(result.data.authUrl).searchParams.get('method'), loginMethod);
+    }
+    for (const query of ['platform=instagram&loginMethod=', 'platform=instagram&loginMethod=invalid', 'platform=instagram&loginMethod=instagram_login&loginMethod=facebook_login', 'platform=facebook&loginMethod=facebook_login', 'platform=facebook&kind=ads&loginMethod=facebook_login']) {
+      const before = calls.length; result = await invoke('connect?' + query, { role: 'admin' });
+      assert.equal(result.status, 400, query); assert.equal(result.data.error.code, 'INVALID_INSTAGRAM_LOGIN_METHOD'); assert.equal(calls.length, before);
+    }
     for (const [platform, connection] of [['google', 'googleads'], ['reddit', 'redditads']]) {
       provider = async url => { assert.equal(url.pathname, `/api/v1/connect/${connection}/ads`); assert.equal(url.searchParams.get('profileId'), 'profile-a'); return { authUrl: 'https://provider.example.test/authorize' }; };
       result = await invoke(`connect?platform=${platform}&kind=ads`, { role: 'admin' }); assert.equal(result.status, 200); assert.equal(result.data.authUrl, 'https://provider.example.test/authorize');
@@ -354,7 +427,7 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
   const project = { id: 'project-a', zernioProfileId: 'profile-a' };
   const accounts = ['metaads', 'googleads', 'linkedinads', 'tiktokads', 'xads', 'openaiads', 'redditads', 'pinterestads', 'facebook'].map(platform => ({ _id: platform, platform, profileId: 'profile-a', isActive: true }));
   const store = { create(projectId, collection, data) { const value = { ...data, projectId, collection, id: `local-${records.length}` }; records.push(value); return value; }, get(projectId, collection, id) { return records.find(item => item.id === id && item.projectId === projectId && item.collection === collection); }, list(projectId, collection) { return records.filter(item => item.projectId === projectId && item.collection === collection); }, update(projectId, collection, id, data) { const value = this.get(projectId, collection, id); Object.assign(value, data); return value; }, activity() {} };
-  const campaign = { platformCampaignId: 'native-campaign', platform: 'facebook', profileId: 'profile-a', currency: 'AED', status: 'paused', adSets: [{ platformAdSetId: 'native-set', adSetName: 'Website visitors', budget: { amount: 20, type: 'daily' } }] };
+  const campaign = { platformCampaignId: 'native-campaign', platform: 'facebook', profileId: 'profile-a', accountId: 'metaads', platformAdAccountId: 'native-account', currency: 'AED', status: 'paused', adSets: [{ platformAdSetId: 'native-set', adSetName: 'Website visitors', budget: { amount: 20, type: 'daily' } }] };
   const leadForm = { id: 'lead-form', name: 'Verified inquiry form', status: 'ACTIVE', privacy_policy_url: 'https://example.com/privacy', questions: [{ type: 'EMAIL' }] };
   let currentAd = { _id: 'ad-in-project', platform: 'facebook', profileId: 'profile-a', platformCampaignId: campaign.platformCampaignId, status: 'paused', configuredStatus: 'ACTIVE', creative: {} }, uncertainCreate = false, confirmStatus = true, mappedProfile = 'profile-a', remapAt = '';
   globalThis.fetch = async (target, options = {}) => {
@@ -451,7 +524,7 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     uncertainCreate = true;
     assert.equal((await invoke('ads/create', { ...metaVideo, name: 'Uncertain upload' }, 'uncertain-video-01')).data.operation.status, 'uncertain');
     const uncertainSent = writes.length;
-    assert.equal((await invoke('ads/create', { ...metaVideo, name: 'Uncertain upload' }, 'uncertain-video-02')).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(writes.length, uncertainSent); uncertainCreate = false;
+    assert.equal((await invoke('ads/create', { ...metaVideo, name: 'Uncertain upload' }, 'uncertain-video-02')).data.error.code, 'OPERATION_NOT_SENT'); assert.equal(writes.length, uncertainSent); uncertainCreate = false;
 
     let result = await invoke('ads/items?campaignId=native-campaign&platform=facebook'); assert.equal(result.status, 200); assert.deepEqual(result.data.ads.map(ad => ad._id), ['ad-in-project']);
     campaign.profileId = 'profile-b'; result = await invoke('ads'); assert.equal(result.status, 502); assert.equal(result.data.error.code, 'INVALID_PROVIDER_SCOPE'); assert.equal(result.data.campaigns, undefined);
@@ -489,12 +562,17 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     confirmStatus = false;
     assert.equal((await invoke('ads/status', { campaignId: 'native-campaign', platform: 'facebook', status: 'paused' }, 'unconfirmed-switch-01')).data.operation.status, 'uncertain');
     const unconfirmed = writes.length;
-    assert.equal((await invoke('ads/status', { campaignId: 'native-campaign', platform: 'facebook', status: 'paused' }, 'unconfirmed-switch-02')).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(writes.length, unconfirmed); confirmStatus = true;
+    assert.equal((await invoke('ads/status', { campaignId: 'native-campaign', platform: 'facebook', status: 'paused' }, 'unconfirmed-switch-02')).data.error.code, 'OPERATION_NOT_SENT'); assert.equal(writes.length, unconfirmed); confirmStatus = true;
+    db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE status='uncertain'").run();
     assert.equal((await invoke('ads/adset', { campaignId: 'native-campaign', platform: 'facebook', adSetId: 'other-set', name: 'Outside' })).status, 403);
-    assert.equal((await invoke('ads/adset', { campaignId: 'native-campaign', platform: 'facebook', adSetId: 'native-set', name: 'New audience name', budget: { amount: 25, type: 'daily' } })).status, 200);
-    assert.deepEqual(writes.at(-1).payload, { platform: 'facebook', name: 'New audience name', budget: { amount: 25, type: 'daily' } });
+    const beforeMixedBudget = writes.length;
+    assert.equal((await invoke('ads/adset', { campaignId: 'native-campaign', platform: 'facebook', adSetId: 'native-set', name: 'New audience name', budget: { amount: 25, type: 'daily' } })).status, 400);
+    assert.equal(writes.length, beforeMixedBudget, 'A budget cannot bypass review through the legacy rename path.');
+    assert.equal((await invoke('ads/adset', { campaignId: 'native-campaign', platform: 'facebook', adSetId: 'native-set', name: 'New audience name' })).status, 200);
+    assert.deepEqual(writes.at(-1).payload, { platform: 'facebook', name: 'New audience name' });
     const beforeWrongBudgetLevel = writes.length;
-    assert.equal((await invoke('ads/campaign', { campaignId: 'native-campaign', platform: 'facebook', budget: { amount: 30, type: 'daily' } })).status, 422); assert.equal(writes.length, beforeWrongBudgetLevel);
+    const unreviewedCampaignBudget = await invoke('ads/campaign', { campaignId: 'native-campaign', platform: 'facebook', budget: { amount: 30, type: 'daily' } });
+    assert.equal(unreviewedCampaignBudget.status, 400); assert.equal(unreviewedCampaignBudget.data.error.code, 'BUDGET_REVIEW_REQUIRED'); assert.equal(writes.length, beforeWrongBudgetLevel);
     campaign.platform = 'google';
     assert.equal((await invoke('ads/campaign', { campaignId: 'native-campaign', platform: 'google', budget: { amount: 30, type: 'daily' } })).status, 200);
     assert.deepEqual(writes.at(-1).payload, { platform: 'google', budget: { amount: 30, type: 'daily' } }); campaign.platform = 'facebook';

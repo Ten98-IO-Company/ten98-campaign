@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { transformWithOxc } from 'vite';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 const sid = (prefix, number) => prefix + String(number).padStart(32, '0');
 
@@ -34,7 +34,7 @@ test('protected SMS media downloads use project access and server-held credentia
     return originalFetch(base + path, { method, headers: { Origin: origin, ...(auth ? { Cookie: auth } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
   }
   try {
-    const setup = await request('/api/auth/setup', 'POST', { name: 'SMS media operator', email: 'sms-media@example.test', password: 'isolated fixture passphrase', sample: false });
+    const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'SMS media operator', email: 'sms-media@example.test', password: 'isolated fixture passphrase', sample: false });
     assert.equal(setup.status, 201); cookie = setup.headers.get('set-cookie').split(';')[0]; const { projectId, user } = await setup.json();
     app.smsInbox.recordOutbound({ id: randomUUID(), projectId, accountSid: env.TWILIO_ACCOUNT_SID, sender: env.TWILIO_FROM_NUMBER, recipient: '+12025550123', providerId: sid('SM', 10), message: 'Original campaign message' });
     const messageSid = sid('MM', 11), mediaUrl = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages/${messageSid}/Media/${sid('ME', 1)}`;

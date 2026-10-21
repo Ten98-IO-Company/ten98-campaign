@@ -2,8 +2,8 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { createContacts } from '../server/contacts.mjs';
-import { createWebhookService } from '../server/webhooks.mjs';
+import { createContacts } from '../server/contacts.ts';
+import { createWebhookService } from '../server/webhooks.ts';
 
 const env = { ZERNIO_WEBHOOK_SECRET: 'signed-inbox-fixture-secret' };
 const originalFetch = globalThis.fetch;

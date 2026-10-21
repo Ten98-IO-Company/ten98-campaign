@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { PostVariantPreview } from './PostComposer';
-import { PLATFORM_RULES } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES } from '../shared/social-posts.ts';
 
 type Row = Record<string, any>;
 type Props = { projectId: string; canManage: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void> };

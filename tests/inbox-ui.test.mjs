@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
+import { AppliedFilters } from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 
@@ -11,6 +12,218 @@ const section = (start, end) => source.slice(source.indexOf(start), source.index
 function compile(code, context = {}) { return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context)); }
 const event = { preventDefault() {} }, path = '/projects/project-a/integrations/inbox';
 const merge = (before, after) => [...new Map([...before, ...after].map(row => [row.id, row])).values()];
+
+const linkedInReactions = { LIKE: 'Like', PRAISE: 'Celebrate', EMPATHY: 'Love', INTEREST: 'Insightful', APPRECIATION: 'Support', ENTERTAINMENT: 'Funny' };
+
+function whatsappButtonContext() {
+  const calls = [], errors = [], notices = [], context = { projectId: 'project-a', path, keys: { current: new Map() }, crypto, version: { current: 1 }, buttonScope: { current: { key: '', generation: 0 } }, account: { platform: 'whatsapp', name: 'QA WhatsApp' }, capabilities: { replyButtons: true }, accountId: 'wa', tab: 'messages', selected: { id: 'thread-1', participantName: 'QA customer' }, readOnly: false, canReply: true, message: 'Choose one', messageLimit: 4096, replyButtons: ['Yes', 'No'], buttonReview: '', templateMode: false, selectedTemplate: null, templateComponents: [], templateRestriction: () => '', attachmentUrl: '', attachmentType: 'image', attachmentName: '', attachmentPreview: '', messageTag: '', replyTarget: null, confirmReplace: false, action: async (_, run) => run(context.version.current), setError: value => errors.push(value), setNotice: value => notices.push(value), resetTemplate() {}, refreshAfterWrite: async () => {} };
+  for (const field of ['message', 'messageTag', 'replyButtons', 'buttonReview', 'attachmentUrl', 'attachmentType', 'attachmentName', 'attachmentPreview', 'replyTarget', 'confirmReplace']) context['set' + field[0].toUpperCase() + field.slice(1)] = value => { context[field] = typeof value === 'function' ? value(context[field]) : value; };
+  context.requester = { current: async (...args) => { calls.push(args); return { operation: { status: 'complete' }, sent: true, accountId: args[2].accountId, platform: 'whatsapp', messageId: 'wamid.accepted', conversationId: 'thread-1' }; } };
+  context.commit = () => {
+    const key = compile('function scope() {' + source.match(/^  const buttonScopeKey = .*;$/m)[0] + ' return buttonScopeKey; }', context)();
+    context.buttonGeneration = context.buttonScope.current.generation + (context.buttonScope.current.key === key ? 0 : 1); context.buttonScopeKey = key; Object.assign(context.buttonScope.current, { key, generation: context.buttonGeneration });
+    context.buttonReviewKey = compile('function reviewKey() {' + source.match(/^  const buttonReviewKey = .*;$/m)[0] + ' return buttonReviewKey; }', context)();
+    context.retainedButtonReply = compile('function retained() {' + source.match(/^  const retainedButtonReply = .*;$/m)[0] + ' return retainedButtonReply; }', context)();
+  };
+  context.handler = () => { context.write = compile(section('async function write(', '  async function loadAccounts('), context); return compile(section('async function reply(', '  async function conversationAction('), context); };
+  context.review = () => { context.buttonReview = context.buttonReviewKey; }; context.commit(); context.review();
+  return { context, calls, errors, notices };
+}
+
+test('native WhatsApp reply controls preview and send exactly reviewed generated-ID buttons', async () => {
+  const { context, calls } = whatsappButtonContext(); context.replyButtons = []; context.commit();
+  const start = source.indexOf('{retainedButtonReply && <p'), end = source.indexOf("{account?.platform === 'whatsapp' && <label", start); assert.ok(end > start);
+  const { code } = await transformWithOxc(`function Buttons(props) { const { retainedButtonReply, reply, account, capabilities, replyButtons, templateMode, attachmentUrl, setReplyButtons, buttonReview, buttonScopeKey, buttonReviewKey, setButtonReview, message, selected } = props; return <>${source.slice(start, end)}</>; }`, 'WhatsAppButtons.tsx', { jsx: { runtime: 'classic' } });
+  const Buttons = new Function('React', 'accountLabel', code + '; return Buttons;')(React, account => account.name);
+  const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children)] : [];
+  const render = () => { context.commit(); return Buttons({ ...context, reply: context.handler() }); };
+  const add = () => elements(render()).find(node => node.type === 'button' && node.props.children === 'Add reply button');
+  for (let index = 0; index < 3; index++) { assert.equal(add().props.disabled, false); add().props.onClick(); }
+  assert.equal(add().props.disabled, true); assert.equal(context.replyButtons.length, 3);
+  const remove = elements(render()).filter(node => node.type === 'button' && Array.isArray(node.props.children) && node.props.children.join('') === 'Remove reply button 3')[0]; remove.props.onClick(); assert.equal(context.buttonReview, '');
+  for (const [index, title] of ['<Yes>', 'No'].entries()) elements(render()).filter(node => node.type === 'input' && node.props.maxLength === 20)[index].props.onChange({ target: { value: title } });
+  const html = renderToStaticMarkup(render()); assert.match(html, /Reply buttons \(optional\)/); assert.match(html, /WhatsApp reply button preview/); assert.match(html, /QA WhatsApp.*QA customer/); assert.match(html, /&lt;Yes&gt;/); assert.doesNotMatch(html, /payload|reply_1|type="url"/);
+  elements(render()).find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange({ target: { checked: true } });
+  await context.handler()(event); assert.deepEqual(calls[0][2], { accountId: 'wa', message: 'Choose one', buttons: [{ type: 'postback', title: '<Yes>', payload: 'reply_1' }, { type: 'postback', title: 'No', payload: 'reply_2' }] }); assert.deepEqual(context.replyButtons, []); assert.equal(context.message, '');
+  assert.match(source, /!readOnly && canReply && selected\.folder !== 'requests' && <form className="inbox-reply"/);
+});
+
+test('WhatsApp button drafts reject invalid, mixed, unreviewed and stale callbacks without sending', async () => {
+  for (const change of [{ replyButtons: ['Same', 'Same'] }, { replyButtons: [''] }, { replyButtons: [' Yes'] }, { replyButtons: ['Yes\nNo'] }, { replyButtons: ['x'.repeat(21)] }, { replyButtons: ['1', '2', '3', '4'] }, { message: '🙂'.repeat(257) }, { attachmentUrl: 'https://example.test/file' }, { templateMode: true }, { messageTag: 'HUMAN_AGENT' }, { account: { platform: 'instagram' } }, { capabilities: {} }, { readOnly: true }]) {
+    const { context, calls } = whatsappButtonContext(); Object.assign(context, change); context.commit(); context.review(); await context.handler()(event); assert.equal(calls.length, 0, JSON.stringify(change));
+  }
+  const { context, calls } = whatsappButtonContext(); context.buttonReview = ''; await context.handler()(event); assert.equal(calls.length, 0);
+  context.review(); const old = context.handler(); context.selected = { id: 'other' }; context.commit(); context.selected = { id: 'thread-1', participantName: 'QA customer' }; context.commit(); context.review(); await old(event); assert.equal(calls.length, 0, 'A-B-A selection cannot revive an old send callback.');
+  const unmounted = context.handler(); context.buttonScope.current.generation++; await unmounted(event); assert.equal(calls.length, 0);
+  assert.match(source, /return \(\) => \{ buttonScope\.current\.generation\+\+; \}/);
+});
+
+test('fresh WhatsApp send handlers cannot reuse approval after message or label edits return to the original draft', async () => {
+  for (const field of ['message', 'replyButtons']) {
+    const { context, calls, errors } = whatsappButtonContext(), original = structuredClone(context[field]);
+    context[field] = field === 'message' ? 'Temporary changed message' : ['Temporary label']; context.commit();
+    context[field] = original; context.commit(); await context.handler()(event);
+    assert.equal(calls.length, 0, field + ' A-B-A edits require a new explicit review even with a fresh callback.'); assert.match(errors.at(-1), /Review this account/);
+    context.review(); await context.handler()(event); assert.equal(calls.length, 1, 'Only renewed approval permits one send.');
+  }
+});
+
+test('unknown button replies keep one exact body and key, and outcome checks cannot replace a newer draft', async () => {
+  const { context, calls } = whatsappButtonContext(); context.requester.current = async (...args) => { calls.push(args); throw new TypeError('Browser acknowledgement lost'); };
+  await assert.rejects(context.handler()(event), /lost/); const original = calls[0][2], key = calls[0][3]; assert.equal(context.keys.current.size, 1); assert.deepEqual(context.replyButtons, ['Yes', 'No']);
+  context.message = 'Keep newer draft'; context.replyButtons = ['Changed']; context.commit(); context.review(); await context.handler()(event); assert.equal(calls.length, 1, 'A changed body cannot create a new key while the first outcome is unknown.');
+  context.requester.current = async (...args) => { calls.push(args); throw Object.assign(new Error('No matching receipt'), { status: 409, code: 'OPERATION_OUTCOME_UNAVAILABLE' }); };
+  await assert.rejects(context.handler()(event, true), /No matching/); assert.deepEqual(calls[1].slice(2), [original, key]); assert.match(calls[1][0], /reply\?check=1$/); assert.equal(context.keys.current.size, 1);
+  context.commit(); context.requester.current = async (...args) => { calls.push(args); return { operation: { status: 'complete' }, sent: true, accountId: 'wa', platform: 'whatsapp', messageId: 'wamid.accepted', conversationId: 'thread-1' }; };
+  await context.handler()(event, true); assert.deepEqual(calls[2].slice(2), [original, key]); assert.equal(context.keys.current.size, 0); assert.equal(context.message, 'Keep newer draft'); assert.deepEqual(context.replyButtons, ['Changed']);
+});
+
+test('a late accepted button reply cannot erase changed labels or a newly read-only draft', async () => {
+  for (const change of [{ replyButtons: ['New label'] }, { readOnly: true }]) {
+    const { context, calls } = whatsappButtonContext(); let finish; context.requester.current = async (...args) => { calls.push(args); return new Promise(resolve => { finish = resolve; }); };
+    const pending = context.handler()(event); Object.assign(context, change); context.commit(); finish({ operation: { status: 'complete' }, sent: true, accountId: 'wa', platform: 'whatsapp', messageId: 'wamid.accepted', conversationId: 'thread-1' }); await pending;
+    assert.equal(context.message, 'Choose one'); assert.deepEqual(context.replyButtons, change.replyButtons || ['Yes', 'No']); assert.equal(calls.length, 1);
+  }
+});
+
+test('Reddit edit receipts retain the same action key until exact account, target and new text are verified', async () => {
+  const keys = { current: new Map() }, calls = [], body = { accountId: 'rd', postId: 'post', commentId: 'comment', content: 'Corrected text', expectedCommentVersion: 'review', confirmEdit: true };
+  const good = { operation: { status: 'complete' }, edited: true, accountId: 'rd', postId: 'post', commentId: 'comment', platform: 'reddit', content: body.content, comment: { id: 'comment', message: body.content, platform: 'reddit', from: { isOwner: true }, editVersion: 'a'.repeat(64) } }; let result = good;
+  const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, account: { platform: 'reddit' }, requester: { current: async (...args) => { calls.push(args); return result; } } });
+  for (const patch of [{ operation: { status: 'uncertain' } }, { edited: false }, { accountId: 'other' }, { postId: 'other' }, { commentId: 'other' }, { platform: 'facebook' }, { content: 'Wrong text' }, { comment: { ...good.comment, id: 'other' } }, { comment: { ...good.comment, message: 'Old text' } }, { comment: { ...good.comment, editVersion: '' } }, { comment: { ...good.comment, from: { isOwner: false } } }]) {
+    result = { ...good, ...patch }; await assert.rejects(write('comments/edit', body), /draft and action key have been retained/); assert.equal(keys.current.size, 1);
+  }
+  result = good; await write('comments/edit', body); assert.equal(keys.current.size, 0); assert.equal(new Set(calls.map(call => call[3])).size, 1);
+});
+
+test('Reddit edit handler retains failed and newer drafts and rejects stale committed identities', async () => {
+  const reviewed = { id: 'comment', editVersion: 'review', message: 'Original', content: 'Corrected' }; reviewed.confirmed = JSON.stringify(['rd', 'post', reviewed.id, reviewed.editVersion, reviewed.message, reviewed.content]);
+  const body = { accountId: 'rd', postId: 'post', commentId: 'comment', content: reviewed.content, expectedCommentVersion: 'review', confirmEdit: true }, writes = [], cleared = [], version = { current: 1 };
+  const scope = { current: { generation: 1, readOnly: false, edit: reviewed, rows: [{ id: 'comment', from: { isOwner: true }, editVersion: 'review' }] } };
+  const context = { path, keys: { current: new Map() }, commentEdit: reviewed, commentScope: scope, commentGeneration: 1, readOnly: false, selected: { id: 'post' }, account: { platform: 'reddit' }, accountId: 'rd', version, action: async (_, run) => run(1), write: async (...args) => writes.push(args), setCommentEdit: value => cleared.push(value), setNotice() {}, refreshAfterWrite: async () => {} };
+  const send = changes => compile(section('async function editComment(', '  async function commentAction('), { ...context, ...changes })(body);
+  for (const patch of [{ readOnly: true }, { accountId: 'other' }, { selected: { id: 'other' } }, { account: { platform: 'facebook' } }, { commentGeneration: 0 }, { commentEdit: { ...reviewed, confirmed: '' } }]) await send(patch);
+  assert.equal(writes.length, 0);
+  const failure = Object.assign(new Error('Known rejection'), { status: 400, operation: { status: 'failed' } }); await assert.rejects(send({ write: async () => { throw failure; } })); assert.equal(cleared.length, 1); const failedDraft = cleared.pop()(reviewed); assert.equal(failedDraft.content, reviewed.content); assert.equal(failedDraft.needsRefresh, true); assert.equal(failedDraft.confirmed, ''); assert.equal(failedDraft.blocked, false);
+  const unknown = new Error('Receipt unreadable'); let draft = reviewed; await assert.rejects(send({ write: async () => { throw unknown; }, setCommentEdit: update => { draft = update(draft); } })); assert.equal(draft.content, 'Corrected'); assert.equal(draft.blocked, true);
+  await send({ write: async () => { scope.current.edit = { ...reviewed, content: 'Newer unsent edit' }; } }); assert.deepEqual(cleared, []);
+  scope.current.edit = reviewed; await send({ write: async () => { scope.current.generation++; } }); assert.deepEqual(cleared, []);
+  scope.current.generation = 1; await send(); assert.deepEqual(writes[0], ['comments/edit', body]); assert.deepEqual(cleared, [null]);
+});
+
+test('Reddit inline edit exposes before and after review only for owned comments', async () => {
+  const markup = section("{tab === 'comments' && selected && <section", '\n      {privateReplyTarget'), { code } = await transformWithOxc('function Comments() { return (' + markup.trim().slice(1, -1) + '); }', 'Comments.tsx', { jsx: { runtime: 'classic' } });
+  const row = { id: 'comment', message: 'Original', from: { isOwner: true }, editVersion: 'review', depth: 0 }, commentEdit = { ...row, accountId: 'rd', postId: 'post', content: 'Corrected', confirmed: '' };
+  const render = changes => {
+    const context = { React, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'rd', account: { platform: 'reddit', name: 'Reddit account' }, capabilities: { commentEdit: true }, canReply: false, threadRows: [row], detail: {}, commentEdit, when: () => '', link: () => '', ...changes };
+    return renderToStaticMarkup(new Function(...Object.keys(context), code + '; return Comments;')(...Object.values(context))());
+  };
+  const html = render(); assert.match(html, /Edit comment/); assert.match(html, /<strong>Before/); assert.match(html, /<span>After/); assert.match(html, /Original/); assert.match(html, /Corrected/); assert.match(html, /I reviewed this account and the before and after text/); assert.match(html, /disabled="">Save comment edit/); assert.match(html, /after this review can be overwritten/);
+  assert.match(render({ commentEdit: { ...commentEdit, blocked: true, pendingBody: {} } }), /type="button">Check this edit/);
+  for (const changes of [{ readOnly: true, commentEdit: null }, { threadRows: [{ ...row, from: { isOwner: false } }], commentEdit: null }, { account: { platform: 'facebook' }, commentEdit: null }]) assert.doesNotMatch(render(changes), />Edit comment</);
+});
+
+test('lost Reddit edit acknowledgments can check the exact retained request without resending newer local text', async () => {
+  const original = { id: 'comment', accountId: 'rd', postId: 'post', editVersion: 'review', message: 'Original', content: 'Corrected' }; original.confirmed = JSON.stringify(['rd', 'post', original.id, original.editVersion, original.message, original.content]);
+  const body = { accountId: 'rd', postId: 'post', commentId: 'comment', content: original.content, expectedCommentVersion: 'review', confirmEdit: true }, keys = { current: new Map() }, calls = [], version = { current: 1 }; let draft = original, result, lost = true;
+  const scope = { current: { generation: 1, readOnly: false, edit: original, rows: [{ id: 'comment', from: { isOwner: true }, editVersion: 'review' }] } };
+  const context = { readOnly: false, path, keys, crypto, account: { platform: 'reddit' }, accountId: 'rd', selected: { id: 'post' }, commentScope: scope, commentGeneration: 1, version, action: async (_, run) => run(1), setCommentEdit: update => { draft = typeof update === 'function' ? update(draft) : update; scope.current.edit = draft; }, setNotice() {}, refreshAfterWrite: async () => {}, requester: { current: async (...args) => { calls.push(args); if (lost) throw new TypeError('Browser lost completed response'); if (result instanceof Error) throw result; return result; } } };
+  context.write = compile(section('async function write(', '  async function loadAccounts('), context);
+  const run = (body, checking = false, changes = {}) => compile(section('async function editComment(', '  async function commentAction('), { ...context, commentEdit: draft, ...changes })(body, checking);
+  await assert.rejects(run(body), /lost completed/); assert.equal(draft.blocked, true); assert.deepEqual(draft.pendingBody, body); assert.equal(keys.current.size, 1);
+  const pendingBody = draft.pendingBody; draft = { ...draft, content: 'A newer local correction', confirmed: '' }; scope.current.edit = draft;
+  lost = false; result = Object.assign(new Error('Still uncertain'), { status: 409, code: 'OPERATION_UNCERTAIN' }); await assert.rejects(run(pendingBody, true), /Still uncertain/);
+  assert.equal(calls.length, 2); assert.deepEqual(calls[1][2], body); assert.equal(calls[1][3], calls[0][3]); assert.equal(draft.content, 'A newer local correction'); assert.equal(keys.current.size, 1);
+  const count = calls.length; for (const changes of [{ readOnly: true }, { accountId: 'other' }, { selected: { id: 'other' } }, { commentGeneration: 0 }]) await run(pendingBody, true, changes); assert.equal(calls.length, count);
+  result = { operation: { status: 'complete' }, edited: true, accountId: 'rd', postId: 'post', commentId: 'comment', platform: 'reddit', content: body.content, comment: { id: 'comment', platform: 'reddit', message: body.content, from: { isOwner: true }, editVersion: 'b'.repeat(64) } };
+  await run(pendingBody, true); assert.equal(calls.length, count + 1); assert.equal(calls.at(-1)[3], calls[0][3]); assert.equal(keys.current.size, 0); assert.equal(draft.content, 'A newer local correction'); assert.equal(draft.message, body.content); assert.equal(draft.editVersion, result.comment.editVersion); assert.equal(draft.blocked, false); assert.equal(draft.pendingBody, undefined); assert.equal(draft.confirmed, '');
+  await run(pendingBody, true); assert.equal(calls.length, count + 1, 'A closed check cannot create a new action key.');
+  draft = { ...original }; scope.current.edit = draft; lost = true; await assert.rejects(run(body));
+  lost = false; result = Object.assign(new Error('Provider rejected the original edit'), { status: 400, operation: { status: 'failed' } }); await assert.rejects(run(draft.pendingBody, true), /rejected the original/);
+  assert.equal(draft.content, body.content); assert.equal(draft.blocked, false); assert.equal(draft.pendingBody, undefined); assert.equal(draft.confirmed, ''); assert.equal(keys.current.size, 0);
+  const failedCount = calls.length; await run(body); assert.equal(calls.length, failedCount, 'A known failed check requires fresh explicit review before retrying.');
+});
+
+test('LinkedIn comment controls require one of six explicit reactions and never infer a live reaction type', async () => {
+  const component = section('function LinkedInCommentReaction(', 'function ZernioInbox('), { code } = await transformWithOxc(component, 'LinkedInCommentReaction.tsx', { jsx: { runtime: 'classic' } });
+  const Component = new Function('React', 'useState', 'linkedInReactions', `${code}; return LinkedInCommentReaction;`)(React, React.useState, linkedInReactions);
+  const html = renderToStaticMarkup(React.createElement(Component, { comment: { id: 'comment', isLiked: true, reactionType: 'PRAISE' }, busy: false, onChange() {} }));
+  assert.equal((html.match(/<option value="[A-Z]+"/g) || []).length, 6); assert.match(html, /Choose a reaction/); assert.match(html, /required=""/); assert.match(html, /Current reaction type is unknown/); assert.match(html, /Remove reaction/); assert.match(html, /<button class="button" disabled="">Add reaction/);
+  for (const reactionType of Object.keys(linkedInReactions)) {
+    const calls = [], render = new Function('React', 'useState', 'linkedInReactions', `${code}; return LinkedInCommentReaction;`)(React, () => [reactionType, () => {}], linkedInReactions);
+    render({ comment: { id: 'comment' }, busy: false, onChange: (...args) => calls.push(args) }).props.onSubmit(event);
+    assert.deepEqual(calls, [['like', { id: 'comment' }, reactionType]]);
+  }
+  assert.match(renderToStaticMarkup(React.createElement(Component, { comment: { id: 'comment', isLiked: true }, busy: true, onChange() {} })), /<select required="" disabled=""/);
+  assert.match(source, /!readOnly && capabilities\.commentLike && item\.canLike && \(account\?\.platform === 'linkedin' \? <LinkedInCommentReaction/);
+});
+
+test('comment reactions validate exact scoped receipts and retain one action key after malformed or lost acknowledgments', async () => {
+  const keys = { current: new Map() }, calls = [], body = { accountId: 'li', postId: 'post', commentId: 'comment', reactionType: 'PRAISE' };
+  let result = { operation: { status: 'complete' }, ...body, platform: 'linkedin', liked: true, alreadyReacted: true }, lost = false;
+  const context = { readOnly: false, path, keys, crypto, account: { platform: 'linkedin' }, linkedInReactions, requester: { current: async (...args) => { calls.push(args); if (lost) throw new TypeError('Lost acknowledgment'); return result; } } };
+  const write = compile(section('async function write(', '  async function loadAccounts('), context), good = { ...result };
+  for (const mutation of [{ accountId: 'other' }, { postId: 'other' }, { commentId: 'other' }, { platform: 'facebook' }, { liked: false }, { reactionType: 'LIKE' }, { reactionType: undefined }, { alreadyReacted: 'yes' }, { operation: { status: 'pending' } }]) {
+    result = { ...good, ...mutation }; await assert.rejects(write('comments/like', body), /action key has been retained/); assert.equal(keys.current.size, 1);
+  }
+  lost = true; await assert.rejects(write('comments/like', body), /Lost acknowledgment/); lost = false;
+  assert.equal(new Set(calls.map(call => call[3])).size, 1);
+  for (const reactionType of Object.keys(linkedInReactions)) { result = { ...good, reactionType }; assert.equal((await write('comments/like', { ...body, reactionType })).reactionType, reactionType); }
+  assert.equal(keys.current.size, 0);
+  result = { operation: { status: 'complete' }, accountId: 'li', postId: 'post', commentId: 'comment', platform: 'linkedin', liked: false }; await write('comments/unlike', { accountId: 'li', postId: 'post', commentId: 'comment' }); assert.equal(keys.current.size, 0);
+});
+
+test('retained comment handlers cannot write after role, account, post, comment or A-B-A scope changes', async () => {
+  const scope = { current: { key: '', generation: 0, rows: [], readOnly: false } }, calls = [], notices = [], context = { projectId: 'project-a', accountId: 'li', account: { platform: 'linkedin' }, tab: 'comments', selected: { id: 'post-a' }, focusedComment: '', readOnly: false, version: { current: 1 }, threadRows: [{ id: 'comment', canLike: true }], commentEdit: null };
+  const capture = changes => compile('function capture() {' + section('const commentScope = useRef(', '  const appliedReviewFilters = [') + ' return commentGeneration; }', { ...context, ...changes, useRef: () => scope, useLayoutEffect: effect => effect() })();
+  const generation = capture(), handlerContext = { ...context, commentScope: scope, commentGeneration: generation, linkedInReactions, action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { reactionType: 'PRAISE', alreadyReacted: true }; }, setNotice: value => notices.push(value), refreshAfterWrite: async () => {} };
+  const retained = compile(section('async function commentAction(', '  async function deleteReviewReply('), handlerContext);
+  await retained('like', { id: 'comment' }, 'PRAISE'); assert.deepEqual(calls[0], ['comments/like', { accountId: 'li', postId: 'post-a', commentId: 'comment', reactionType: 'PRAISE' }]); assert.match(notices[0], /Celebrate reaction already present/);
+  for (const changes of [{ readOnly: true }, { accountId: 'other' }, { selected: { id: 'post-b' } }, { projectId: 'project-b' }]) { capture(changes); await retained('like', { id: 'comment' }, 'PRAISE'); capture({}); await retained('like', { id: 'comment' }, 'PRAISE'); }
+  assert.equal(calls.length, 1, 'Returning to the original scope does not revive its retained handler.');
+  const current = compile(section('async function commentAction(', '  async function deleteReviewReply('), { ...handlerContext, commentGeneration: scope.current.generation });
+  scope.current.rows = []; await current('like', { id: 'comment' }, 'PRAISE'); scope.current.rows = [{ id: 'comment', canLike: false }]; await current('like', { id: 'comment' }, 'PRAISE'); assert.equal(calls.length, 1);
+  scope.current.rows = [{ id: 'comment', canLike: true }]; await current('like', { id: 'comment' }, 'INVALID'); await current('unlike', { id: 'comment' }, 'PRAISE'); assert.equal(calls.length, 1);
+  const changedBeforeDispatch = compile(section('async function commentAction(', '  async function deleteReviewReply('), { ...handlerContext, commentGeneration: scope.current.generation, action: async (_, run) => { scope.current.generation++; await run(1); } });
+  await changedBeforeDispatch('like', { id: 'comment' }, 'PRAISE'); assert.equal(calls.length, 1);
+});
+
+test('mention loading keeps opaque pages and newest-first scope while ignoring stale accounts', async () => {
+  const calls = [], state = { rows: [], pagination: null }, version = { current: 1 };
+  const context = { tab: 'mentions', accountId: 'li/account', historyFilter: null, path, version, merge, requester: { current: async route => { calls.push(route); return { mentions: [{ id: calls.length === 1 ? 'mention-document' : 'next-mention', content: 'Loaded content' }], pagination: { hasMore: calls.length === 1, nextCursor: calls.length === 1 ? 'opaque +/next' : null } }; } }, setRows: update => { state.rows = update(state.rows); }, setPagination: value => { state.pagination = value; }, setMeta() {}, setLoaded() {} };
+  const load = compile(section('async function fetchList(', '  async function loadList('), context);
+  await load(1); await load(1, 'opaque +/next'); assert.deepEqual(state.rows.map(row => row.id), ['mention-document', 'next-mention']);
+  assert.deepEqual(Object.fromEntries(new URL(calls[0], 'https://app.example').searchParams), { accountId: 'li/account', sortOrder: 'desc' });
+  assert.deepEqual(Object.fromEntries(new URL(calls[1], 'https://app.example').searchParams), { accountId: 'li/account', sortOrder: 'desc', cursor: 'opaque +/next' });
+  const before = structuredClone(state); let finish;
+  context.requester.current = async () => new Promise(resolve => { finish = resolve; });
+  const stale = load(1); version.current++; context.accountId = 'another-account'; finish({ mentions: [{ id: 'foreign-mention' }], pagination: {} }); await stale; assert.deepEqual(state, before);
+  const start = source.indexOf("    if (!accountId || tab === 'mentions') return;"), effect = source.slice(start, source.indexOf('  }, [projectId, accountId, tab,', start));
+  assert.ok(start > 0); assert.equal(compile('function mentionPolling() {' + effect + '}', { tab: 'mentions', accountId: 'li/account' })(), undefined, 'Mentions never start the message/comment/review webhook poller.');
+});
+
+test('loaded mention search covers content and nullable author identity without provider search', () => {
+  const matches = compile(section('function conversationMatches(', 'function SmsInbox('));
+  const row = { content: 'Campaign research', authorName: 'Sam Example', authorUsername: 'sam-example' };
+  assert.equal(matches(row, 'RESEARCH'), true); assert.equal(matches(row, 'sam example'), true); assert.equal(matches(row, 'sam-example'), true); assert.equal(matches({ ...row, authorName: null, authorUsername: null }, 'sam'), false); assert.equal(matches(row, 'unrelated'), false);
+});
+
+test('mention cards expand locally for readers and expose only returned safe LinkedIn post links', async () => {
+  const safeLink = compile(section('const link = ', '\nconst merge = ').replace('const link = ', '').trim().replace(/;$/, ''));
+  const accepted = 'https://www.linkedin.com/feed/update/urn:li:activity:123';
+  assert.equal(safeLink(accepted, true), accepted); assert.equal(safeLink('https://linkedin.com/posts/example', true), 'https://linkedin.com/posts/example');
+  for (const unsafe of [null, '', '/posts/123', 'javascript:alert(1)', 'http://www.linkedin.com/post', 'https://user:secret@www.linkedin.com/post', 'https://linkedin.com.evil.test/post', 'https://evil.test/linkedin.com/post']) assert.equal(safeLink(unsafe, true), undefined, String(unsafe));
+  assert.equal(safeLink('https://example.test/attachment'), 'https://example.test/attachment', 'Other inbox links retain their existing HTTPS behavior.');
+  const start = source.indexOf('<div className="inbox-public-list">'), markup = source.slice(start, source.indexOf("\n      {tab === 'comments' && selected", start));
+  const code = await transformWithOxc('function MentionCards() { return (' + markup + '); }', 'MentionCards.tsx', { jsx: { runtime: 'classic' } });
+  const rows = [{ id: 'mention-document', content: '<Campaign update>', authorName: null, authorUsername: null, publishedAt: null, permalink: accepted }, { id: 'another-document', content: 'More content', authorName: 'Sam', permalink: null }, { id: 'unsafe-document', permalink: 'https://evil.test/post' }];
+  const component = new Function('React', 'visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', code.code + '; return MentionCards;')(React, rows, 'mentions', { name: 'Connected account' }, () => 'Time unavailable', safeLink, true);
+  const html = renderToStaticMarkup(React.createElement(component));
+  assert.equal((html.match(/<details/g) || []).length, 3); assert.match(html, /<summary>Read mention/); assert.match(html, /LinkedIn author/); assert.match(html, /Time unavailable/); assert.match(html, /&lt;Campaign update&gt;/); assert.match(html, /Connected account/); assert.match(html, /Open post on LinkedIn/); assert.match(html, /target="_blank" rel="noreferrer"/); assert.equal((html.match(/href=/g) || []).length, 1); assert.equal((html.match(/Post link unavailable/g) || []).length, 2); assert.doesNotMatch(html, /<button|<textarea|<form|evil\.test/);
+  const mentions = markup.slice(markup.indexOf("tab === 'mentions' ?"), markup.indexOf(" : tab === 'comments' ?"));
+  assert.doesNotMatch(mentions, /onClick|onToggle|openItem|fetchThread|prepareReply|authorUrn|organizationalEntity/, 'Expansion is native and cannot turn a mention document or author URN into a thread or fabricated URL.');
+  assert.ok(source.includes("const canReply = tab === 'mentions' ? false")); assert.ok(source.includes('An account listed here is not confirmation that it is an organization.'));
+});
 
 test('private comment replies keep the exact operation key until the scoped platform receipt is confirmed', async () => {
   const keys = { current: new Map() }, calls = [], body = { accountId: 'fb', postId: 'post', commentId: 'comment', message: 'Reply privately', expectedCommentVersion: 'version', confirmSend: true };
@@ -31,7 +244,7 @@ test('private comment composer submits only its exact reviewed recipient, commen
   await compile(handler, { ...context, mode: 'text', elements: [] })(event); assert.equal(Object.hasOwn(sent[1], 'buttons'), false); assert.equal(Object.hasOwn(sent[1], 'quickReplies'), false);
   const { code } = await transformWithOxc(component, 'PrivateCommentReply.tsx', { jsx: { runtime: 'classic' } });
   let values = ['Preview message', 'buttons', elements, ''];
-  const render = new Function('React', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, () => [values.shift(), () => {}], value => value);
+  const render = new Function('React', 'useEffect', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, () => {}, () => [values.shift(), () => {}], value => value);
   const html = renderToStaticMarkup(render({ target: { ...target, platform: 'instagram', from: { name: 'Alex' }, message: 'Public question' }, current: { privateReplyEligible: true, privateReplyVersion: target.privateReplyVersion }, busy: false, onSend() {}, onCancel() {} }));
   assert.match(html, /Private message preview/); assert.match(html, /Preview message/); assert.match(html, /View details/); assert.match(html, /https:\/\/example.com\/details/); assert.match(html, /does not grant marketing permission/); assert.match(html, /Send private reply<\/button>/); assert.doesNotMatch(html, /Call a phone number/); assert.equal(sent.length, 2, 'Rendering a preview must never send.');
   assert.match(component, /JSON\.stringify\(\[target\.accountId, target\.postId, target\.id, target\.privateReplyVersion, message, mode, elements\]\)/, 'Review must be invalidated by a changed recipient, comment, caption, mode or button.');
@@ -57,7 +270,7 @@ test('consumed and unknown private reply failures immediately disable the compos
     await assert.rejects(send(body), error => error === failure); const current = detail.comments[0].replies[0];
     assert.equal(current.privateReplyEligible, false); assert.equal(detail.parent.privateReplyEligible, false); assert.equal(current.privateReplyStatus, failure.code === 'PRIVATE_REPLY_CONSUMED' ? 'consumed' : 'uncertain'); assert.deepEqual(cleared, []);
     const review = JSON.stringify([target.accountId, target.postId, target.id, target.privateReplyVersion, body.message, 'text', []]); let states = [body.message, 'text', [], review];
-    const render = new Function('React', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, () => [states.shift(), () => {}], value => value);
+    const render = new Function('React', 'useEffect', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, () => {}, () => [states.shift(), () => {}], value => value);
     const html = renderToStaticMarkup(render({ target, current, busy: false, onSend() {}, onCancel() {} })); assert.match(html, /Keep this private reply draft/); assert.match(html, /disabled="">Send private reply/); assert.match(html, /already has a private reply recorded/);
   }
   for (const failure of [Object.assign(new Error('Known input rejection.'), { status: 400, code: 'PROVIDER_REJECTED', operation: { status: 'failed' } }), Object.assign(new Error('Known preflight failure.'), { status: 502, operation: { status: 'failed' } })]) {
@@ -107,6 +320,18 @@ test('a refreshed message attachment remounts its resolver at the same message a
   assert.notEqual(render({ id: 'thread' }, { id: 'message' }, { type: 'image', url: 'https://cdn.example.test/a.jpg' }, 0).key, render({ id: 'thread' }, { id: 'message' }, { type: 'image', url: 'https://cdn.example.test/b.jpg' }, 0).key, 'Legacy responses without a version still reset on attachment identity changes.');
 });
 
+test('WhatsApp selected-button history renders escaped selection facts without guessing labels or exposing deleted responses', async () => {
+  const history = source.match(/<div className="inbox-message-history" aria-label="Message history">.*?<\/div>/s)[0];
+  const { code } = await transformWithOxc(`function History({ items, platform = 'whatsapp' }) { const detail = { messages: items }, account = { platform }, selected = { id: 'thread', participantName: 'Customer' }; return ${history}; }`, 'SelectedButtonHistory.tsx', { jsx: { runtime: 'classic' } });
+  const History = new Function('React', 'when', 'InboxAttachment', 'MessageActions', 'path', 'accountId', 'requester', 'busy', 'readOnly', 'prepareMessageAction', `${code}; return History;`)(React, () => 'Now', () => null, () => null, path, 'wa', { current() {} }, false, true, () => {});
+  const response = { id: 'button-response', direction: 'incoming', message: '', metadata: { interactiveType: 'button_reply', interactiveId: 'reply_2' } }, render = (items, platform) => renderToStaticMarkup(React.createElement(History, { items, platform }));
+  const empty = render([response]); assert.match(empty, /Reply button selected/); assert.match(empty, /ID: reply_2/); assert.doesNotMatch(empty, /<button|href=|<img/);
+  const escaped = render([{ ...response, message: '<b>Yes & please</b>', metadata: { interactiveType: 'button_reply', interactiveId: '<script>reply_1</script>' } }]); assert.match(escaped, /&lt;b&gt;Yes &amp; please&lt;\/b&gt;/); assert.match(escaped, /&lt;script&gt;reply_1&lt;\/script&gt;/); assert.doesNotMatch(escaped, /<script|<b>/);
+  for (const change of [{ isDeleted: true }, { metadata: { ...response.metadata, isDeleted: true } }, { deliveryStatus: 'deleted' }]) { const hidden = render([{ ...response, message: 'Deleted label', ...change }]); assert.doesNotMatch(hidden, /Reply button selected|reply_2|Deleted label/); assert.match(hidden, /This message was deleted/); }
+  for (const item of [{ ...response, direction: 'outgoing' }, { ...response, metadata: { interactiveType: 'list_reply', interactiveId: 'list-row' } }, { ...response, metadata: { interactiveType: 'button_reply', interactiveId: {} } }, { ...response, metadata: null }]) assert.doesNotMatch(render([item]), /Reply button selected/);
+  assert.doesNotMatch(render([response], 'facebook'), /Reply button selected/); assert.equal((empty.match(/Reply button selected/g) || []).length, 1);
+});
+
 test('typing and conversation deletion receipts retain keys until their exact result is verified', async () => {
   const keys = { current: new Map() }, calls = []; let result = { operation: { status: 'complete' }, accepted: true, conversationId: 'other-thread', deleted: true, deletedMessages: 2, scope: 'zernio_copy' };
   const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, requester: { current: async (...args) => { calls.push(args); return result; } } });
@@ -135,7 +360,7 @@ test('handover and request-acceptance handlers require review and retain drafts 
   await assert.rejects(control({ write: async () => { throw new Error('Outcome uncertain'); } }), /uncertain/); assert.deepEqual(cleared, []);
   await control(); assert.deepEqual(calls[0], ['conversations/thread/thread-control', { accountId: 'account-a', action: 'pass', expectedConversationVersion: 'conversation-version', confirmControl: true, targetAppId: '263902037430900', metadata: 'Customer asked for support' }]); assert.equal(controls[0].threadControl, 'other');
   await control({ controlAction: 'request', write: async () => ({ requested: true, conversation: selected }) }); assert.match(notices.at(-1), /must still transfer/);
-  const accept = changes => compile(section('async function submitAccept(', '  async function commentAction('), { ...context, ...changes })(event);
+  const accept = changes => compile(section('async function submitAccept(', '  async function editComment('), { ...context, ...changes })(event);
   const count = calls.length; await accept({ confirmAccept: false }); await accept({ selected: { ...selected, folder: undefined } }); assert.equal(calls.length, count);
   await accept(); assert.deepEqual(calls.at(-1), ['conversations/thread/accept', { accountId: 'account-a', message: 'Thanks for your request', expectedConversationVersion: 'conversation-version', confirmSend: true }]); assert.equal(threads[0].folder, undefined, 'Accepted requests cannot regain their old request-folder flag during refresh.'); assert.equal(controls.at(-1).folder, undefined); assert.ok(cleared.some(value => Array.isArray(value) && value.length === 0));
 });
@@ -163,7 +388,7 @@ test('conversation confirmations retain the reviewed version across refreshes an
       return { operation: { status: 'complete' }, accepted: true, conversation: selected, control: { owner: 'other' } };
     } },
   });
-  const submit = kind => compile(section(`async function submit${kind}(`, kind === 'Control' ? '  async function submitAccept(' : '  async function commentAction('), {
+  const submit = kind => compile(section(`async function submit${kind}(`, kind === 'Control' ? '  async function submitAccept(' : '  async function editComment('), {
     readOnly: false, selected, accountId: 'account', controlAction: 'pass', targetAppId: '263902037430900', controlNote: '', confirmControl, confirmAccept,
     capabilities: { acceptRequest: true }, message: 'Acceptance reply', action: async (_, run) => run(1), write, version,
     setSelected() {}, setConfirmControl: value => { confirmControl = value; }, setControlAction() {}, setNotice() {}, refreshAfterWrite() {},
@@ -232,15 +457,15 @@ test('shared inbox writes release explicit failed receipts but retain unknown ou
 });
 
 test('a missing second Meta message acknowledgement preserves the actual reply draft and action key', async () => {
-  const keys = { current: new Map() }, cleared = [], calls = [], context = { readOnly: false, canReply: true, account: { platform: 'instagram' }, tab: 'messages', templateMode: false, message: 'Do not lose this text', messageLimit: 1000, accountId: 'ig', selected: { id: 'thread' }, replyTarget: null, confirmReplace: false, attachmentUrl: 'https://cdn.example.com/photo.png', attachmentType: 'image', attachmentName: '', messageTag: '', path, keys, crypto, action: async (_, run) => run(1), version: { current: 1 }, setMessage: value => cleared.push(value), setAttachmentUrl: value => cleared.push(value), setAttachmentName: value => cleared.push(value), setAttachmentPreview() {}, setMessageTag() {}, setReplyTarget() {}, setConfirmReplace() {}, setNotice() {}, setError() {}, refreshAfterWrite: async () => {}, requester: { current: async (...args) => { calls.push(args); return { operation: { status: 'complete' }, sent: true, accountId: 'ig', platform: 'instagram', messageId: 'attachment-only' }; } } };
+  const keys = { current: new Map() }, cleared = [], calls = [], context = { replyButtons: [], readOnly: false, canReply: true, account: { platform: 'instagram' }, tab: 'messages', templateMode: false, message: 'Do not lose this text', messageLimit: 1000, accountId: 'ig', selected: { id: 'thread' }, replyTarget: null, confirmReplace: false, attachmentUrl: 'https://cdn.example.com/photo.png', attachmentType: 'image', attachmentName: '', messageTag: '', path, keys, crypto, action: async (_, run) => run(1), version: { current: 1 }, setMessage: value => cleared.push(value), setAttachmentUrl: value => cleared.push(value), setAttachmentName: value => cleared.push(value), setAttachmentPreview() {}, setAttachmentType() {}, setMessageTag() {}, setReplyTarget() {}, setConfirmReplace() {}, setNotice() {}, setError() {}, refreshAfterWrite: async () => {}, requester: { current: async (...args) => { calls.push(args); return { operation: { status: 'complete' }, sent: true, accountId: 'ig', platform: 'instagram', messageId: 'attachment-only' }; } } };
   context.write = compile(section('async function write(', '  async function loadAccounts('), context);
   for (let attempt = 0; attempt < 2; attempt++) await assert.rejects(compile(section('async function reply(', '  async function conversationAction('), context)(event), /draft and action key have been retained/);
   assert.deepEqual(cleared, []); assert.equal(keys.current.size, 1); assert.equal(calls[0][3], calls[1][3]);
 });
 
 test('partial Meta sends keep only the unsent text and an explicit follow-up cannot resend the accepted attachment', async () => {
-  const calls = [], notices = [], keys = { current: new Map() }, context = { account: { platform: 'instagram' }, templateMode: false, selectedTemplate: null, templateComponents: [], templateRestriction: () => '', resetTemplate() {}, readOnly: false, canReply: true, message: 'Keep this rejected text', messageLimit: 1000, accountId: 'ig', tab: 'messages', selected: { id: 'thread' }, replyTarget: null, confirmReplace: false, messageTag: 'HUMAN_AGENT', attachmentUrl: 'https://cdn.example.com/accepted.png', attachmentType: 'image', attachmentName: 'accepted.png', path, keys, crypto, version: { current: 1 }, action: async (_, run) => run(1), setReplyTarget() {}, setConfirmReplace() {}, setError() {}, refreshAfterWrite: async () => {}, setNotice: value => notices.push(value) };
-  for (const [setter, name] of [['setMessage', 'message'], ['setAttachmentUrl', 'attachmentUrl'], ['setAttachmentName', 'attachmentName'], ['setAttachmentPreview', 'attachmentPreview'], ['setMessageTag', 'messageTag']]) context[setter] = value => { context[name] = value; };
+  const calls = [], notices = [], keys = { current: new Map() }, context = { replyButtons: [], account: { platform: 'instagram' }, templateMode: false, selectedTemplate: null, templateComponents: [], templateRestriction: () => '', resetTemplate() {}, readOnly: false, canReply: true, message: 'Keep this rejected text', messageLimit: 1000, accountId: 'ig', tab: 'messages', selected: { id: 'thread' }, replyTarget: null, confirmReplace: false, messageTag: 'HUMAN_AGENT', attachmentUrl: 'https://cdn.example.com/accepted.png', attachmentType: 'image', attachmentName: 'accepted.png', path, keys, crypto, version: { current: 1 }, action: async (_, run) => run(1), setReplyTarget() {}, setConfirmReplace() {}, setError() {}, refreshAfterWrite: async () => {}, setNotice: value => notices.push(value) };
+  for (const [setter, name] of [['setMessage', 'message'], ['setAttachmentUrl', 'attachmentUrl'], ['setAttachmentName', 'attachmentName'], ['setAttachmentPreview', 'attachmentPreview'], ['setMessageTag', 'messageTag'], ['setAttachmentType', 'attachmentType']]) context[setter] = value => { context[name] = value; };
   context.requester = { current: async (...args) => { calls.push(args); return { operation: { status: 'complete' }, sent: true, accountId: 'ig', platform: 'instagram', messageId: calls.length === 1 ? 'attachment-sent' : 'text-sent', ...(calls.length === 1 ? { partialFailure: { part: 'text', error: 'Rejected text' } } : {}) }; } };
   context.write = compile(section('async function write(', '  async function loadAccounts('), context);
   await compile(section('async function reply(', '  async function conversationAction('), context)(event);
@@ -262,12 +487,29 @@ test('attachment fields expose supported audio, account limits and an explicit p
   const media = renderToStaticMarkup(React.createElement(Fields, { ...props, account: { platform: 'whatsapp' }, attachmentType: 'audio' })); assert.doesNotMatch(media, /Document filename/);
 });
 
+test('optional history search keeps conversation actions, active results and provider limits outside its native disclosure', async () => {
+  const start = source.lastIndexOf("    {tab === 'messages' &&", source.indexOf('<form onSubmit={searchHistory}>')), end = source.indexOf('\n    {starting &&', start);
+  assert.ok(start > 0 && end > start);
+  const { code } = await transformWithOxc(`function HistorySearch(props) { const { tab, historyQuery, historyDirection, busy, accountId, connected, historyFilter, readOnly, capabilities, starting, setHistoryQuery, setHistoryDirection, searchHistory, loadList, prepareConversation } = props; return <>${source.slice(start, end)}</>; }`, 'HistorySearch.tsx', { jsx: { runtime: 'classic' } });
+  const HistorySearch = new Function('React', code + '; return HistorySearch;')(React), props = { tab: 'messages', historyQuery: 'kept search draft', historyDirection: 'incoming', busy: '', accountId: 'account/one', connected: true, historyFilter: { query: 'invoice', direction: 'incoming' }, readOnly: false, capabilities: { start: true }, starting: false, setHistoryQuery() {}, setHistoryDirection() {}, searchHistory() {}, loadList() {}, prepareConversation() {} };
+  const render = changes => renderToStaticMarkup(React.createElement(HistorySearch, { ...props, ...changes }));
+  const html = render(), disclosure = html.match(/<details[\s\S]*?<\/details>/)?.[0]; assert.ok(disclosure, 'Search fields must stay mounted inside a native disclosure.');
+  assert.match(disclosure, /<summary>Search message history<\/summary>/); assert.doesNotMatch(disclosure.match(/^<details[^>]*>/)[0], /\bopen=/);
+  assert.match(disclosure, /value="kept search draft"/); assert.match(disclosure, /value="incoming" selected=""/); assert.match(disclosure, />Search history<\/button>/); assert.match(disclosure, /whole tokens/);
+  const outside = html.replace(disclosure, ''); for (const text of ['Return to conversations', 'New conversation', 'History results for', 'up to three recent matching messages', 'Live-only accounts may be skipped', 'history stored by Zernio']) assert.ok(outside.includes(text), text);
+  assert.doesNotMatch(disclosure, /Return to conversations|New conversation|History results for|Live-only accounts|up to three/);
+  const viewer = render({ readOnly: true }); assert.doesNotMatch(viewer, /New conversation/); assert.match(viewer, /Return to conversations/); assert.match(viewer, /Search history/);
+  assert.doesNotMatch(render({ historyFilter: null, capabilities: {} }), /Return to conversations|New conversation|History results for/);
+  assert.equal(render({ tab: 'comments' }).trim(), '');
+  assert.match(source.slice(0, start), /Provider reply windows and account permissions apply/); assert.match(source.slice(end), /Some connected accounts cannot be searched/);
+});
+
 test('full-history search uses the actual provider search loader, preserves page cursors and ignores previous-account results', async () => {
   const calls = [], rows = [], version = { current: 3 }, filters = [], context = { tab: 'messages', accountId: 'account/one', historyFilter: { query: 'old invoice', direction: 'incoming' }, conversationStatus: 'active', requester: { current: async route => { calls.push(route); return { conversations: [{ id: 'older-thread', matchCount: 1, matches: [{ id: 'old', text: 'old invoice' }] }], pagination: { hasMore: true, nextCursor: 'opaque +/' }, meta: { accountsSkipped: [] } }; } }, path, version, merge, setRows: value => rows.push(typeof value === 'function' ? value([]) : value), setPagination() {}, setMeta() {}, setLoaded() {} };
   const fetchList = compile(section('async function fetchList(', '  async function loadList('), context);
   await fetchList(3, 'opaque +/'); const query = new URL(calls[0], 'https://app.example').searchParams; assert.equal(query.get('cursor'), 'opaque +/'); assert.equal(query.get('query'), 'old invoice'); assert.equal(query.get('direction'), 'incoming'); assert.equal(query.has('status'), false); assert.match(calls[0], /conversations\/search\?/); assert.equal(rows[0][0].matches[0].text, 'old invoice');
   version.current = 4; await fetchList(3); assert.equal(rows.length, 1);
-  const search = compile(section('async function searchHistory(', '  async function prepareConversation('), { tab: 'messages', accountId: 'account/one', pending: { current: false }, historyQuery: '  old invoice  ', historyDirection: 'outgoing', version, setError() {}, action: async (_, run) => run(version.current), fetchList: async (...args) => filters.push(args), setHistoryFilter: value => filters.push(value), resetSelection: () => filters.push('selection cleared') });
+  const search = compile(section('async function searchHistory(', '  async function prepareConversation('), { tab: 'messages', accountId: 'account/one', pending: { current: false }, historyQuery: '  old invoice  ', switchSelection: change => change(), historyDirection: 'outgoing', version, setError() {}, action: async (_, run) => run(version.current), fetchList: async (...args) => filters.push(args), setHistoryFilter: value => filters.push(value), resetSelection: () => filters.push('selection cleared') });
   await search(event); assert.deepEqual(filters[0], [4, '', { query: 'old invoice', direction: 'outgoing' }]); assert.deepEqual(filters[1], { query: 'old invoice', direction: 'outgoing' }); assert.equal(version.current, 4);
 });
 
@@ -280,11 +522,12 @@ test('new-conversation preparation rejects stale results and does not overwrite 
 
 test('opening-message sends require review, retain failed drafts and separate accepted sends from a failed thread refresh', async () => {
   const calls = [], changed = [], notices = [], errors = [], version = { current: 1 }, context = { readOnly: false, capabilities: { start: true, messageLimit: 10000 }, accountId: 'x-account', account: { platform: 'twitter' }, recipient: '@alex', openingMessage: 'Hello Alex', confirmSend: true, openingTemplate: null, openingTemplateComponents: [], templateRestriction: () => '', action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { conversationId: 'existing-or-new', platform: 'twitter' }; }, version, setStarting: value => changed.push(value), setRecipient: value => changed.push(value), setOpeningMessage: value => changed.push(value), setConfirmSend() {}, setOpeningTemplateKey() {}, setOpeningTemplateComponents() {}, setNotice: value => notices.push(value), fetchThread: async () => { throw new Error('Temporary read failure'); }, setError: value => errors.push(value) };
-  const send = changes => compile(section('async function startConversation(', '  async function fetchList('), { ...context, ...changes })(event);
+  const send = changes => compile(section('async function startConversation(', '  async function fetchList('), { replyDraft: false, ...context, ...changes })(event);
   for (const changes of [{ confirmSend: false }, { readOnly: true }, { recipient: '' }, { openingMessage: '' }]) await send(changes); assert.equal(calls.length, 0);
   await assert.rejects(send({ write: async () => { throw new Error('Outcome uncertain'); } }), /uncertain/); assert.deepEqual(changed, [], 'An uncertain write retains recipient, text and reviewed state for recovery.');
   await send(); assert.deepEqual(calls[0], ['conversations/start', { accountId: 'x-account', participantUsername: '@alex', message: 'Hello Alex', confirmSend: true }]); assert.deepEqual(changed, [false, '', '']); assert.match(notices[0], /accepted/); assert.match(errors.at(-1), /was accepted/);
   const listed = []; await send({ historyFilter: null, conversationStatus: 'active', merge, fetchThread: async () => ({ id: 'existing-or-new', status: 'active', lastMessageAt: '2026-10-18T12:00:00Z' }), setRows: update => listed.push(update([{ id: 'old-thread' }])) }); assert.equal(listed[0][0].id, 'existing-or-new', 'A newly read-back conversation appears in the normal conversation list immediately.');
+  const kept = []; await send({ replyDraft: true, fetchThread: async () => kept.push('changed recipient') }); assert.deepEqual(kept, []); assert.match(notices.at(-1), /original conversation/);
   changed.length = 0; version.current = 2; await send(); assert.deepEqual(changed, [], 'A late send receipt cannot clear the next account’s opening draft.');
 });
 
@@ -300,7 +543,7 @@ test('actual reply handler uses scoped provider payloads, explicit review replac
   const handler = section('async function reply(', '  async function conversationAction(');
   async function run(changes = {}) {
     const calls = [], messages = [], targets = [], notices = [], errors = [];
-    const context = { account: {}, templateMode: false, selectedTemplate: null, templateComponents: [], templateRestriction: () => '', resetTemplate() {}, readOnly: false, canReply: true, message: 'Hello there', messageLimit: 10000, accountId: 'account', tab: 'messages', selected: { id: 'opaque/thread ?' }, replyTarget: null, confirmReplace: false, messageTag: 'HUMAN_AGENT', attachmentUrl: '', attachmentType: 'image', attachmentName: '', action: async (_, perform) => perform(1), write: async (...args) => calls.push(args), version: { current: 1 }, setMessage: value => messages.push(value), setAttachmentUrl() {}, setAttachmentName() {}, setAttachmentPreview() {}, setMessageTag() {}, setReplyTarget: value => targets.push(value), setConfirmReplace() {}, setNotice: value => notices.push(value), setError: value => errors.push(value), refreshAfterWrite: async () => {}, ...changes };
+    const context = { replyButtons: [], retainedButtonReply: null, buttonScopeKey: 'legacy', buttonGeneration: 0, buttonScope: { current: { key: 'legacy', generation: 0 } }, account: {}, templateMode: false, selectedTemplate: null, templateComponents: [], templateRestriction: () => '', resetTemplate() {}, readOnly: false, canReply: true, message: 'Hello there', messageLimit: 10000, accountId: 'account', tab: 'messages', selected: { id: 'opaque/thread ?' }, replyTarget: null, confirmReplace: false, messageTag: 'HUMAN_AGENT', attachmentUrl: '', attachmentType: 'image', attachmentName: '', action: async (_, perform) => perform(1), write: async (...args) => calls.push(args), version: { current: 1 }, setMessage: value => messages.push(value), setAttachmentUrl() {}, setAttachmentName() {}, setAttachmentPreview() {}, setAttachmentType() {}, setMessageTag() {}, setReplyTarget: value => targets.push(value), setConfirmReplace() {}, setNotice: value => notices.push(value), setError: value => errors.push(value), refreshAfterWrite: async () => {}, ...changes };
     await compile(handler, context)(event); return { calls, messages, targets, notices, errors };
   }
   const dm = await run(); assert.deepEqual(dm.calls[0], ['conversations/opaque%2Fthread%20%3F/reply', { accountId: 'account', message: 'Hello there', messageTag: 'HUMAN_AGENT' }]); assert.deepEqual(dm.messages, ['']);
@@ -330,9 +573,29 @@ test('actual list and thread loaders preserve opaque IDs, account scope and pagi
   assert.equal(threadQuery.get('postId'), 'urn:li:share:123/opaque'); assert.equal(threadQuery.get('commentId'), 'comment/parent'); assert.deepEqual(details[0].comments.map(item => item.id), ['old', 'new']);
 });
 
+test('review filters stay on first pages, pagination, manual loads and provider refreshes while stale scope results are ignored', async () => {
+  const calls = [], state = { rows: [], pagination: null }, version = { current: 1 }, reviewFilters = { minRating: '2', maxRating: '4', hasReply: 'false', sortBy: 'rating', sortOrder: 'asc' };
+  const context = { tab: 'reviews', accountId: 'gb/account', reviewFilters, historyFilter: null, path, version, merge, pending: { current: false }, requester: { current: async url => { calls.push(url); return { reviews: [{ id: calls.length === 2 ? 'next-review' : 'first-review' }], pagination: { hasMore: true, nextCursor: 'next +/cursor' } }; } }, setRows: update => { state.rows = typeof update === 'function' ? update(state.rows) : update; }, setPagination: value => { state.pagination = value; }, setMeta() {}, setLoaded() {}, setHistoryFilter() {}, resetSelection() {}, switchSelection: change => change(), action: async (_, run) => run(version.current) };
+  const list = (...args) => compile(section('async function fetchList(', '  async function loadList('), context)(...args);
+  context.fetchList = list;
+  await list(1); await list(1, 'next +/cursor'); assert.deepEqual(state.rows.map(row => row.id), ['first-review', 'next-review']);
+  await compile(section('async function loadList(', '  async function fetchThread('), context)('', true);
+  await compile(section('async function refreshAfterWrite(', '  function prepareReply('), { ...context, setError: assert.fail })(1);
+  const poll = section('const poll = async () =>', '    void poll();').replace('const poll = ', '').trim().replace(/;$/, '');
+  await compile(poll, { ...context, revision: { current: 0 }, checking: false, closed: false, generation: 1, cursor: undefined, loaded: true, selected: null, focusedComment: '', setNotice() {}, requester: { current: async () => ({ cursor: 1, updates: [{ event: 'review.updated' }] }) } })();
+  assert.equal(calls.length, 5);
+  for (const [index, url] of calls.entries()) assert.deepEqual(Object.fromEntries(new URL(url, 'https://app.example').searchParams), { accountId: 'gb/account', ...reviewFilters, ...(index === 1 ? { cursor: 'next +/cursor' } : {}) });
+  context.reviewFilters = {}; await list(1); assert.deepEqual(Object.fromEntries(new URL(calls.at(-1), 'https://app.example').searchParams), { accountId: 'gb/account' });
+  const before = structuredClone(state); let finish;
+  context.requester.current = async () => new Promise(resolve => { finish = resolve; });
+  const earlier = list(1, 'old-cursor'); version.current++; context.accountId = 'different-account'; context.reviewFilters = { hasReply: 'true' };
+  finish({ reviews: [{ id: 'obsolete-account-or-filter' }], pagination: { hasMore: false } }); await earlier; assert.deepEqual(state, before);
+  assert.ok(source.includes('loaded, historyFilter, reviewFilters, readOnly]'), 'Webhook refresh closures follow the active review filters.');
+});
+
 test('approved WhatsApp reply templates use their exact account/language and exclude free text or attachment drafts', async () => {
   const calls = [], notices = [], errors = [], resets = [], selectedTemplate = { name: 'service_update', language: 'en_GB' }, templateComponents = [{ type: 'body', parameters: [{ type: 'text', text: 'Jordan' }] }];
-  const context = { readOnly: false, canReply: true, account: { platform: 'whatsapp' }, templateMode: true, selectedTemplate, templateComponents, templateRestriction: () => '', message: 'Preserved text draft', attachmentUrl: 'https://example.com/file.pdf', attachmentType: 'file', attachmentName: 'draft.pdf', messageLimit: 0, messageTag: 'HUMAN_AGENT', accountId: 'whatsapp-account', tab: 'messages', selected: { id: 'closed/thread' }, replyTarget: null, confirmReplace: false, action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { sent: true }; }, version: { current: 1 }, setMessage() {}, setAttachmentUrl() {}, setAttachmentName() {}, setAttachmentPreview() {}, setMessageTag() {}, setReplyTarget() {}, setConfirmReplace() {}, resetTemplate: () => resets.push(true), setNotice: value => notices.push(value), setError: value => errors.push(value), refreshAfterWrite: async () => {} };
+  const context = { replyButtons: [], retainedButtonReply: null, buttonScopeKey: 'legacy', buttonGeneration: 0, buttonScope: { current: { key: 'legacy', generation: 0 } }, readOnly: false, canReply: true, account: { platform: 'whatsapp' }, templateMode: true, selectedTemplate, templateComponents, templateRestriction: () => '', message: 'Preserved text draft', attachmentUrl: 'https://example.com/file.pdf', attachmentType: 'file', attachmentName: 'draft.pdf', messageLimit: 0, messageTag: 'HUMAN_AGENT', accountId: 'whatsapp-account', tab: 'messages', selected: { id: 'closed/thread' }, replyTarget: null, confirmReplace: false, action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { sent: true }; }, version: { current: 1 }, setMessage() {}, setAttachmentUrl() {}, setAttachmentName() {}, setAttachmentPreview() {}, setAttachmentType() {}, setMessageTag() {}, setReplyTarget() {}, setConfirmReplace() {}, resetTemplate: () => resets.push(true), setNotice: value => notices.push(value), setError: value => errors.push(value), refreshAfterWrite: async () => {} };
   const reply = changes => compile(section('async function reply(', '  async function conversationAction('), { ...context, ...changes })(event);
   await reply(); assert.deepEqual(calls[0], ['conversations/closed%2Fthread/reply', { accountId: 'whatsapp-account', templateName: 'service_update', templateLanguage: 'en_GB', templateComponents }]); assert.match(notices[0], /accepted/); assert.equal(resets.length, 1);
   await reply({ selectedTemplate: null }); await reply({ templateRestriction: () => 'Unsupported' }); await reply({ readOnly: true }); assert.equal(calls.length, 1); assert.equal(errors.length, 2);
@@ -349,17 +612,27 @@ test('reply template loading keeps only approved scoped definitions and ignores 
 
 test('read/archive are explicit writes and destructive public changes require confirmation', async () => {
   const calls = [], rows = [], selected = { id: 'thread/opaque', status: 'active', unreadCount: 2 };
-  const context = { selected, readOnly: false, conversationStatus: 'active', accountId: 'account', version: { current: 1 }, action: async (_, run) => run(1), write: async (...args) => calls.push(args), setSelected() {}, setRows: update => rows.push(update([selected])), setNotice() {} };
+  const context = { selected, readOnly: false, conversationStatus: 'active', historyFilter: null, accountId: 'account', version: { current: 1 }, action: async (_, run) => run(1), write: async (...args) => calls.push(args), setSelected() {}, setRows: update => rows.push(update([selected])), setNotice() {} };
   const change = compile(section('async function conversationAction(', '  async function sendTyping('), context);
   await change('read'); assert.deepEqual(calls[0], ['conversations/thread%2Fopaque/read', { accountId: 'account' }]); assert.equal(rows[0][0].unreadCount, 0);
   await change('status'); assert.deepEqual(calls[1][1], { accountId: 'account', status: 'archived' }); assert.deepEqual(rows[1], []);
   const reopened = [], archiveContext = { ...context, selected: { ...selected, status: 'archived' }, setRows: update => reopened.push(update([])) };
   await compile(section('async function conversationAction(', '  async function sendTyping('), archiveContext)('status'); assert.equal(reopened[0][0].id, selected.id); assert.equal(reopened[0][0].status, 'active');
   const readArchived = []; await compile(section('async function conversationAction(', '  async function sendTyping('), { ...archiveContext, setRows: update => readArchived.push(update([])) })('read'); assert.deepEqual(readArchived[0], [], 'Marking the archived selected thread read must not insert it into the active list.');
-  let confirmed = false; const comment = compile(section('async function commentAction(', '  async function deleteReviewReply('), { ...context, window: { confirm: () => confirmed }, refreshAfterWrite: async () => {} });
+  let confirmed = false; const comment = compile(section('async function commentAction(', '  async function deleteReviewReply('), { ...context, commentScope: { current: { generation: 1, rows: [{ id: 'comment' }], readOnly: false } }, commentGeneration: 1, window: { confirm: () => confirmed }, refreshAfterWrite: async () => {} });
   await comment('delete', { id: 'comment' }); assert.equal(calls.length, 4); confirmed = true; await comment('delete', { id: 'comment' }); assert.deepEqual(calls[4], ['comments/delete', { accountId: 'account', postId: selected.id, commentId: 'comment' }]);
   const remove = compile(section('async function deleteReviewReply(', '  return <div className="unified-inbox">'), { ...context, window: { confirm: () => confirmed }, setReplyTarget() {}, setMessage() {}, refreshAfterWrite: async () => {} });
   await remove({ id: 'review', replyVersion: 'version' }); assert.deepEqual(calls[5], ['reviews/delete-reply', { accountId: 'account', reviewId: 'review', expectedReplyVersion: 'version', confirmReplace: true }]);
+});
+
+test('history search retains matching conversations after mark-read, archive and reopen', async () => {
+  for (const [kind, status, expectedStatus] of [['read', 'archived', 'archived'], ['status', 'active', 'archived'], ['status', 'archived', 'active']]) {
+    const selected = { id: 'archived-hit', status, unreadCount: 2, matches: [{ text: 'old invoice' }] }, other = { id: 'other-hit' };
+    let rows = [selected, other];
+    const context = { selected, readOnly: false, conversationStatus: 'active', historyFilter: { query: 'old invoice' }, accountId: 'account', version: { current: 1 }, action: async (_, run) => run(1), write: async () => {}, setSelected() {}, setRows: update => { rows = update(rows); }, setNotice() {} };
+    await compile(section('async function conversationAction(', '  async function sendTyping('), context)(kind);
+    assert.deepEqual(rows, [{ ...selected, status: expectedStatus, unreadCount: kind === 'read' ? 0 : 2 }, other], `${kind} on ${status} retains the history hit and its matching message`);
+  }
 });
 
 test('private reply limits follow account capabilities and attachment caption restrictions', () => {
@@ -374,7 +647,7 @@ test('private reply limits follow account capabilities and attachment caption re
 
 test('thread refresh preserves an unfinished reply and post-write read failures never claim the confirmed write failed', async () => {
   const cleared = [], selected = { id: 'thread' }, errors = [];
-  const context = { selected, focusedComment: '', tab: 'messages', version: { current: 1 }, action: async (_, run) => run(1), fetchThread: async () => {}, resetTemplate() {}, setReplyTarget() {}, setPrivateReplyTarget() {}, setMessage: value => cleared.push(value), setConfirmReplace() {}, setMessageTag() {}, setAttachmentUrl() {}, setAttachmentName() {}, setAttachmentPreview() {}, setMessageActionTarget() {}, setControlAction() {}, setTargetAppId() {}, setControlNote() {}, setConfirmControl() {}, setConfirmAccept() {} };
+  const context = { selected, focusedComment: '', tab: 'messages', switchSelection: change => change(), version: { current: 1 }, action: async (_, run) => run(1), fetchThread: async () => {}, resetTemplate() {}, setReplyButtons() {}, setButtonReview() {}, setReplyTarget() {}, setPrivateReplyTarget() {}, setCommentEdit() {}, setMessage: value => cleared.push(value), setConfirmReplace() {}, setMessageTag() {}, setAttachmentUrl() {}, setAttachmentName() {}, setAttachmentPreview() {}, setAttachmentType() {}, setMessageActionTarget() {}, setControlAction() {}, setTargetAppId() {}, setControlNote() {}, setConfirmControl() {}, setConfirmAccept() {} };
   const open = compile(section('async function openItem(', '  async function refreshAfterWrite('), context);
   await open(selected); assert.deepEqual(cleared, []); await open({ id: 'different-thread' }); assert.deepEqual(cleared, ['']);
   const refresh = compile(section('async function refreshAfterWrite(', '  function prepareReply('), { tab: 'messages', selected, focusedComment: '', version: { current: 1 }, fetchThread: async () => { throw new Error('Provider read failed'); }, setError: value => errors.push(value) });
@@ -437,7 +710,7 @@ test('a failed SMS thread selection keeps the current poll alive while rejecting
   const common = { rows: [selected], version, pending, revision, selected, requester, path: '/projects/p/sms-inbox', setRows() {}, setPagination() {}, setSelected: value => accepted.push(value), setDetail() {}, setMessage() {}, merge };
   const smsAction = compile(part('async function smsAction(', '  async function smsList('), { ...common, setBusy() {}, setError: value => errors.push(value), setNotice() {} });
   const smsThread = compile(part('async function smsThread(', '  async function openSms('), common);
-  const open = compile(part('async function openSms(', '  useEffect(() => {'), { ...common, smsAction, smsThread });
+  const open = compile(part('async function openSms(', '  useEffect(() => {'), { ...common, smsAction, smsThread, onSwitch: change => change() });
   const polling = part('const pollSms = async () =>', '    const timer = window.setInterval(pollSms').replace('const pollSms = ', '').trim().replace(/;$/, '');
   const poll = compile(polling, { ...common, generation: 1, checking: false, closed: false });
   const earlier = poll(); await open({ id: 'unavailable-thread' }); oldResolve({ conversations: [{ ...selected, blocked: false }], pagination: {} }); await earlier;
@@ -463,5 +736,128 @@ test('SMS polling retains the oldest loaded page cursors while updating messages
     await compile(handler, context)();
     assert.equal(pagination.nextCursor, '200', 'New conversations remain reachable even when a known conversation moves to the newest page.');
     assert.equal(detail.pagination.nextCursor, '201', 'A burst without overlap must expose the gap before older loaded messages.');
+  }
+});
+
+
+function selectionGuard(snapshot = 'draft') {
+  const context = { draft: { current: snapshot }, switching: { current: false }, pendingSwitch: null, props: {}, setSwitchBusy() {}, setPendingSwitch: value => { context.pendingSwitch = value; } };
+  for (const [name, next] of [['reportDraft', 'requestSwitch'], ['requestSwitch', 'keepEditing'], ['keepEditing', 'discardAndSwitch']]) context[name] = (...args) => compile(section(`function ${name}(`, `  function ${next}(`), context)(...args);
+  context.discardAndSwitch = () => compile(section('function discardAndSwitch(', '  const draftChanged ='), context)();
+  return context;
+}
+
+test('actual selection guard defers all work, keeps editing, rejects edited snapshots and blocks busy switches', async () => {
+  const guard = selectionGuard(), changed = [];
+  await guard.requestSwitch(() => changed.push('first')); assert.deepEqual(changed, []);
+  guard.keepEditing(); await guard.discardAndSwitch(); assert.deepEqual(changed, []);
+  await guard.requestSwitch(() => changed.push('obsolete'));
+  guard.reportDraft('edited draft'); await guard.discardAndSwitch(); assert.deepEqual(changed, []);
+  await guard.requestSwitch(() => changed.push('latest')); await guard.discardAndSwitch(); assert.deepEqual(changed, ['latest']);
+  guard.reportDraft('edited draft', true); await guard.requestSwitch(() => changed.push('busy')); await guard.discardAndSwitch(); assert.deepEqual(changed, ['latest']);
+  guard.reportDraft(''); await guard.requestSwitch(() => changed.push('clean')); assert.deepEqual(changed, ['latest', 'clean']);
+});
+
+test('dirty conversation switches preserve attachment and options until a confirmed successful read, and reject a stale scope', async () => {
+  const guard = selectionGuard(), version = { current: 1 }, pending = { current: false }, selected = { id: 'current' }, reads = [], cleared = [];
+  const draft = { replyButtons: ['Yes', 'No'], buttonReview: 'approved-old-thread', message: 'Unsent reply', attachmentUrl: 'https://example.test/voice.mp3', attachmentType: 'audio', attachmentName: 'voice', messageTag: 'HUMAN_AGENT', templateMode: true, templateComponents: [{ type: 'body', parameters: [] }] };
+  const context = { selected, focusedComment: '', tab: 'messages', version, pending, onSwitch: guard.requestSwitch, action: async (_, run) => run(version.current), fetchThread: async item => { reads.push(item.id); }, resetTemplate: () => cleared.push('template'), setReplyButtons: value => { draft.replyButtons = value; }, setButtonReview: value => { draft.buttonReview = value; }, setReplyTarget() {}, setPrivateReplyTarget() {}, setCommentEdit() {}, setMessage: value => { cleared.push('message'); draft.message = value; }, setConfirmReplace() {}, setMessageTag: value => { draft.messageTag = value; }, setAttachmentUrl: value => { draft.attachmentUrl = value; }, setAttachmentName: value => { draft.attachmentName = value; }, setAttachmentType: value => { draft.attachmentType = value; }, setAttachmentPreview() {}, setMessageActionTarget() {}, setControlAction() {}, setTargetAppId() {}, setControlNote() {}, setConfirmControl() {}, setConfirmAccept() {} };
+  context.switchSelection = change => compile(section('function switchSelection(', '  function resetTemplate('), context)(change);
+  const open = changes => compile(section('async function openItem(', '  async function refreshAfterWrite('), { ...context, ...changes });
+  const original = structuredClone(draft);
+  await open()({ id: 'next' }); assert.deepEqual(reads, []); assert.deepEqual(draft, original);
+  guard.keepEditing(); await guard.discardAndSwitch(); assert.deepEqual(reads, []); assert.deepEqual(draft, original);
+  await open()({ id: 'next' }); version.current++; await guard.discardAndSwitch(); assert.deepEqual(reads, []); assert.deepEqual(draft, original);
+  await open({ fetchThread: async () => { throw new Error('Read failed'); } })({ id: 'next' }); await assert.rejects(guard.discardAndSwitch(), /Read failed/); assert.deepEqual(draft, original);
+  await open()({ id: 'next' }); await guard.discardAndSwitch(); assert.deepEqual(reads, ['next']); assert.deepEqual(draft.replyButtons, []); assert.equal(draft.buttonReview, ''); assert.equal(draft.message, ''); assert.equal(draft.attachmentUrl, ''); assert.equal(draft.attachmentName, ''); assert.equal(draft.attachmentType, 'image'); assert.equal(draft.messageTag, ''); assert.deepEqual(cleared, ['message', 'template']);
+  draft.replyButtons = ['Keep on same thread']; draft.buttonReview = 'same-thread-approval'; cleared.length = 0; await open()(selected); await open()(selected, 'older'); assert.deepEqual(cleared, [], 'Refreshing and paging the current thread retain its draft.'); assert.deepEqual(draft.replyButtons, ['Keep on same thread']); assert.equal(draft.buttonReview, 'same-thread-approval');
+});
+
+test('actual account and feed handlers preserve their current selection until explicit discard', async () => {
+  const guard = selectionGuard(), changes = [], version = { current: 1 }, pending = { current: false };
+  const context = { accountId: 'account-a', version, pending, onSwitch: guard.requestSwitch, resetList: () => { changes.push('reset'); version.current++; }, setAccountId: value => changes.push(value) };
+  context.switchSelection = change => compile(section('function switchSelection(', '  function resetTemplate('), context)(change);
+  const start = source.indexOf('<span>Connected account</span>'), handlerStart = source.indexOf('onChange={', start) + 'onChange={'.length;
+  const change = compile(source.slice(handlerStart, source.indexOf('}><option', handlerStart)), context), selectionEvent = { target: { value: 'account-b' } };
+  change(selectionEvent); selectionEvent.target.value = 'account-c'; assert.deepEqual(changes, []);
+  guard.keepEditing(); await guard.discardAndSwitch(); assert.deepEqual(changes, []);
+  change({ target: { value: 'account-b' } }); await guard.discardAndSwitch(); assert.deepEqual(changes, ['reset', 'account-b'], 'Deferred selection captures the chosen account, never a later event value.');
+  const feedStart = source.indexOf('onClick={() => { if (tab !== item)'), feedHandler = source.slice(feedStart + 'onClick={'.length, source.indexOf('}>{item', feedStart));
+  const feed = compile(feedHandler, { tab: 'messages', item: 'sms', requestSwitch: guard.requestSwitch, reportDraft: guard.reportDraft, setTab: value => changes.push(value) });
+  feed(); assert.deepEqual(changes, ['reset', 'account-b']); await guard.discardAndSwitch(); assert.deepEqual(changes, ['reset', 'account-b', 'sms']); assert.equal(guard.draft.current, '');
+});
+
+test('native review filters capture deferred choices and preserve pending replies until the current draft is discarded', async () => {
+  const guard = selectionGuard(), version = { current: 1 }, pending = { current: false }, changes = [], context = { reviewFilters: { minRating: '2', maxRating: '4' }, version, pending, onSwitch: guard.requestSwitch, resetList: () => { changes.push('reset'); version.current++; }, setReviewFilters: filters => { context.reviewFilters = filters; changes.push(filters); } };
+  context.switchSelection = change => compile(section('function switchSelection(', '  function resetTemplate('), context)(change);
+  const change = (...args) => compile(section('function changeReviewFilter(', '  useEffect(() => {'), context)(...args);
+  const start = source.indexOf("onChange={event => changeReviewFilter('hasReply',"), handlerStart = start + 'onChange={'.length;
+  const select = compile(source.slice(handlerStart, source.indexOf('}', handlerStart)), { changeReviewFilter: change }), selectionEvent = { target: { value: 'false' } };
+  select(selectionEvent); selectionEvent.target.value = 'true'; assert.deepEqual(changes, []); assert.ok(guard.pendingSwitch);
+  guard.keepEditing(); await guard.discardAndSwitch(); assert.deepEqual(changes, []);
+  select({ target: { value: 'false' } }); guard.reportDraft('An edited reply'); await guard.discardAndSwitch(); assert.deepEqual(changes, []);
+  select({ target: { value: 'false' } }); version.current++; await guard.discardAndSwitch(); assert.deepEqual(changes, [], 'An obsolete account cannot apply a deferred filter.');
+  selectionEvent.target.value = 'false'; select(selectionEvent); selectionEvent.target.value = 'true'; await guard.discardAndSwitch();
+  assert.deepEqual(changes, ['reset', { minRating: '2', maxRating: '4', hasReply: 'false' }]);
+  changes.length = 0; pending.current = true; change('sortBy', 'rating'); assert.deepEqual(changes, []); pending.current = false;
+  guard.reportDraft(''); await change('minRating', ''); assert.deepEqual(context.reviewFilters, { maxRating: '4', hasReply: 'false' });
+  const controlsStart = source.indexOf('<section className="panel inbox-filters" aria-label="Review filters">'), controls = source.slice(controlsStart, source.indexOf('</section>', controlsStart) + '</section>'.length);
+  const { code } = await transformWithOxc('function ReviewFilters() { return (' + controls + '); }', 'ReviewFilters.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', 'reviewFilters', 'busy', 'changeReviewFilter', code + '; return ReviewFilters;')(React, { minRating: '2', maxRating: '4', hasReply: 'false' }, '', () => {}), html = renderToStaticMarkup(React.createElement(render));
+  assert.equal((html.match(/<select/g) || []).length, 5); assert.match(html, /value="false" selected="">Without a reply/); assert.match(html, /value="5" disabled=""/); assert.match(html, /value="1" disabled=""/);
+  const summaryLine = source.split('\n').find(line => line.includes('<AppliedFilters filters={appliedReviewFilters}')), summaryDeclaration = section('  const appliedReviewFilters =', '  const replyDraft =');
+  const summaryCode = await transformWithOxc('function ReviewSummary() {' + summaryDeclaration + 'return (' + summaryLine.trim().slice(1, -1) + '); }', 'ReviewSummary.tsx', { jsx: { runtime: 'classic' } });
+  function summary(reviewFilters, loaded = true, accountId = 'gb', tab = 'reviews') {
+    const component = new Function('React', 'AppliedFilters', 'reviewFilters', 'loaded', 'accountId', 'tab', summaryCode.code + '; return ReviewSummary;')(React, AppliedFilters, reviewFilters, loaded, accountId, tab);
+    return renderToStaticMarkup(React.createElement(component));
+  }
+  const applied = { minRating: '2', maxRating: '4', hasReply: 'false', sortBy: 'rating', sortOrder: 'asc' }, appliedHtml = summary(applied);
+  assert.match(appliedHtml, /class="t98-applied-filters"/); assert.match(appliedHtml, /aria-label="Loaded review filters"/);
+  for (const text of ['Minimum rating', '2/5', 'Maximum rating', '4/5', 'Without a reply', 'Review sort', 'Rating', 'Sort direction', 'Ascending']) assert.ok(appliedHtml.includes(text), text);
+  assert.doesNotMatch(appliedHtml, /<button|With a reply|Clear all filters/); assert.match(summary({ hasReply: 'true' }), /With a reply/);
+  for (const args of [[applied, false], [applied, true, ''], [applied, true, 'gb', 'comments'], [{}], [{ sortBy: 'date', sortOrder: 'desc' }]]) assert.equal(summary(...args), '', 'Only nondefault filters for loaded review results are labeled as applied.');
+});
+
+test('SMS selection waits for discard and cancels a deferred selection from an obsolete scope', async () => {
+  const guard = selectionGuard(), version = { current: 1 }, reads = [], cleared = [], selected = { id: 'current' };
+  const context = { selected, version, pending: { current: false }, onSwitch: guard.requestSwitch, smsAction: async (_, run) => run(version.current), smsThread: async item => reads.push(item.id), setMessage: value => cleared.push(value) };
+  const open = compile(section('async function openSms(', '  useEffect(() => {'), context);
+  await open({ id: 'next' }); assert.deepEqual(reads, []); guard.keepEditing(); await guard.discardAndSwitch(); assert.deepEqual(cleared, []);
+  await open({ id: 'next' }); version.current++; await guard.discardAndSwitch(); assert.deepEqual(reads, []);
+  const fresh = compile(section('async function openSms(', '  useEffect(() => {'), context); await fresh({ id: 'next' }); await guard.discardAndSwitch(); assert.deepEqual(reads, ['next']); assert.deepEqual(cleared, ['']);
+});
+
+
+test('the actual draft snapshot protects attachment-only and option-only drafts and invalidates reviewed changes', async () => {
+  const context = { replyButtons: [], buttonReview: '', retainedButtonReply: null, projectId: 'p', accountId: 'a', tab: 'messages', selected: { id: 'current' }, focusedComment: '', message: '', attachmentUrl: '', attachmentType: 'image', attachmentName: '', attachmentPreview: '', messageTag: '', templateMode: false, templateKey: '', templateComponents: [], replyTarget: null, privateReplyTarget: null, privateDraft: '', commentEdit: null, messageActionTarget: null, actionText: '', actionEmoji: '👍', controlAction: '', controlNote: '', targetAppId: '263902037430900', openingMessage: '', recipient: '', openingTemplateKey: '', openingTemplateComponents: [], confirmSend: false, confirmReplace: false, confirmControl: false, confirmAccept: false, confirmMessageAction: false, readOnly: false, historyQuery: 'old invoice', historyDirection: 'incoming' };
+  const code = section('  const replyDraft =', '  useEffect(() => { onDraftChange(draftSnapshot');
+  const snapshot = changes => compile('function snapshot() {' + code + ' return draftSnapshot; }', { ...context, ...changes })();
+  assert.equal(snapshot(), '');
+  for (const changes of [{ message: ' ' }, { attachmentUrl: 'https://example.test/file' }, { attachmentType: 'audio' }, { attachmentName: 'report.pdf' }, { messageTag: 'HUMAN_AGENT' }, { templateMode: true }, { templateKey: 'template' }, { templateComponents: [{}] }, { replyButtons: ['Yes'] }, { buttonReview: 'reviewed' }, { retainedButtonReply: { message: 'Unknown reply', buttons: [] } }]) assert.notEqual(snapshot(changes), '', JSON.stringify(changes));
+  assert.notEqual(snapshot({ message: 'draft', confirmAccept: false }), snapshot({ message: 'draft', confirmAccept: 'version' }));
+  assert.notEqual(snapshot({ privateReplyTarget: { id: 'comment' }, privateDraft: 'before' }), snapshot({ privateReplyTarget: { id: 'comment' }, privateDraft: 'after' }));
+  assert.notEqual(snapshot({ commentEdit: { id: 'comment', content: 'before' } }), snapshot({ commentEdit: { id: 'comment', content: 'after' } }));
+  for (const [field, setter, value] of [['historyQuery', 'setHistoryQuery', 'new invoice'], ['historyDirection', 'setHistoryDirection', 'outgoing']]) {
+    const guard = selectionGuard(snapshot({ message: 'Keep this reply' })), reads = [], cleared = [];
+    const active = { ...context, message: 'Keep this reply', pending: { current: false }, version: { current: 1 }, onSwitch: guard.requestSwitch, setError() {}, action: async (_, run) => run(1), fetchList: async (...args) => reads.push(args), setHistoryFilter() {}, resetSelection: () => cleared.push('draft cleared') };
+    active.switchSelection = change => compile(section('function switchSelection(', '  function resetTemplate('), active)(change);
+    active[setter] = next => { active[field] = next; guard.reportDraft(snapshot(active)); };
+    const search = () => compile(section('async function searchHistory(', '  async function prepareConversation('), active)(event);
+    await search(); assert.ok(guard.pendingSwitch); assert.deepEqual(reads, []);
+    const start = source.indexOf(`onChange={event => ${setter}(`) + 'onChange={'.length;
+    compile(source.slice(start, source.indexOf('}', start)), active)({ target: { value } });
+    await guard.discardAndSwitch(); assert.deepEqual(reads, [], `${field} edits must cancel the old pending query.`); assert.deepEqual(cleared, []); assert.equal(active.message, 'Keep this reply');
+    await search(); await guard.discardAndSwitch(); assert.deepEqual(reads, [[1, '', { query: active.historyQuery, direction: active.historyDirection }]]); assert.deepEqual(cleared, ['draft cleared']);
+  }
+});
+
+
+test('lost Reddit edit response terminal unsent receipt requires a fresh comment read and acknowledgment', async () => {
+  for (const terminal of [{ status: 409, code: 'OPERATION_NOT_SENT' }, { status: 502, code: 'PROVIDER_UNAVAILABLE' }]) {
+  const body = { accountId: 'rd', postId: 'post', commentId: 'comment', content: 'Keep my correction', expectedCommentVersion: 'version', confirmEdit: true }, keys = { current: new Map() }; let writes = 0, draft = { id: 'comment', editVersion: 'version', message: 'Before', content: body.content }; draft.confirmed = JSON.stringify(['rd', 'post', draft.id, draft.editVersion, draft.message, draft.content]);
+  const scope = { current: { generation: 1, readOnly: false, edit: draft, rows: [{ id: 'comment', from: { isOwner: true }, editVersion: 'version' }] } }, context = { readOnly: false, path, keys, crypto, account: { platform: 'reddit' }, accountId: 'rd', selected: { id: 'post' }, commentScope: scope, commentGeneration: 1, version: { current: 1 }, action: async (_, run) => run(1), setCommentEdit: update => { draft = update(draft); scope.current.edit = draft; }, setNotice() {}, refreshAfterWrite() {}, requester: { current: async () => { if (++writes === 1) throw new TypeError('Response lost'); throw Object.assign(new Error('Not sent'), { ...terminal, operation: { status: 'failed' } }); } } };
+  context.write = compile(section('async function write(', '  async function loadAccounts('), context); const run = (value, checking) => compile(section('async function editComment(', '  async function commentAction('), { ...context, commentEdit: draft })(value, checking);
+  await assert.rejects(run(body, false), /lost/); const pending = draft.pendingBody; await assert.rejects(run(pending, true), /Not sent/); assert.equal(draft.content, body.content); assert.equal(draft.blocked, false); assert.equal(draft.needsRefresh, true); assert.equal(draft.confirmed, ''); assert.equal(draft.pendingBody, undefined); assert.equal(keys.current.size, 0); await run(pending, true); await run(body, false); assert.equal(writes, 2);
+  const read = compile(section('async function fetchThread(', '  async function openItem('), { ...context, tab: 'comments', commentsWithDepth: rows => rows, setSelected() {}, setFocusedComment() {}, setDetail() {}, requester: { current: async () => ({ comments: [{ id: 'comment', message: 'Current text', editVersion: 'fresh-version', from: { isOwner: true } }] }) } }); await read({ id: 'post' }, 1); assert.equal(draft.needsRefresh, false); assert.equal(draft.editVersion, 'fresh-version'); assert.equal(draft.message, 'Current text'); assert.equal(draft.content, body.content); assert.equal(draft.confirmed, ''); await run({ ...body, expectedCommentVersion: 'fresh-version' }, false); assert.equal(writes, 2);
   }
 });

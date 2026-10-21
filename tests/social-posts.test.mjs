@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PLATFORM_RULES, normalizeMediaItems, normalizePostVariants, normalizeAccountVariants, assertAccountSchedules, normalizePlatformOptions, resolveVariant, buildPlatformEntry, validatePostForPlatforms, assetDeliveryIssue, providerPostMediaUrls, countCaption, captionLimitForVariant } from '../shared/social-posts.mjs';
+import { PLATFORM_RULES, normalizeMediaItems, normalizePostVariants, normalizePostTags, normalizeAccountVariants, assertAccountSchedules, normalizePlatformOptions, resolveVariant, buildPlatformEntry, validatePostForPlatforms, assetDeliveryIssue, providerPostMediaUrls, countCaption, captionLimitForVariant } from '../shared/social-posts.ts';
 
 const image = (extra = {}) => ({ type: 'image', url: 'https://cdn.example.com/creative.jpg', width: 1080, height: 1080, size: 100000, mimeType: 'image/jpeg', ...extra });
 const video = (extra = {}) => ({ type: 'video', url: 'https://cdn.example.com/video.mp4', width: 1080, height: 1920, duration: 30, size: 1000000, mimeType: 'video/mp4', ...extra });
@@ -172,4 +172,19 @@ test('nested options, threads, weighted counters and unknown metadata remain hon
   assert.equal(validatePostForPlatforms({ content: 'Unknown file metadata', mediaItems: [{ type: 'image', url: image().url }] }, ['instagram'], { requireMediaMetadata: true }).valid, false);
   const event = { title: 'Launch', schedule: { startDate: { year: 2026, month: 10, day: 18 }, endDate: { year: 2026, month: 10, day: 19 } } };
   assert.equal(valid({ content: 'Grand opening', platformOverrides: { googlebusiness: { options: { topicType: 'EVENT', event } } } }, ['googlebusiness']), true);
+});
+
+
+test('YouTube keywords normalize shared tags without silent truncation and enforce the provider limits', () => {
+  assert.deepEqual(normalizePostTags([' #launch, product ', 'launch', '', 'two words']), ['launch', 'product', 'two words']);
+  assert.deepEqual(normalizePostTags(), []);
+  const providerTags = [' #launch, product ', 'launch', '', 'two words'];
+  assert.deepEqual(normalizePostTags(providerTags, { preserve: true }), providerTags, 'Provider keyword evidence must retain each exact string.');
+  assert.throws(() => normalizePostTags(['x'.repeat(100) + ',y'], { preserve: true }), /YouTube keyword/);
+  assert.deepEqual(normalizePostTags(['x'.repeat(100), 'y'.repeat(100), 'z'.repeat(100), 'a'.repeat(100), 'b'.repeat(100)]).map(tag => tag.length), [100, 100, 100, 100, 100]);
+  for (const value of [null, 'launch', [123], ['x'.repeat(101)], ['bad\u0000tag'], [...Array.from({ length: 5 }, (_, index) => String(index).repeat(100)), 'extra']]) assert.throws(() => normalizePostTags(value), /YouTube keyword/);
+  const post = { content: 'Video description', mediaItems: [video()], tags: ['x'.repeat(101)] };
+  assert.ok(validatePostForPlatforms(post, ['youtube']).errors.some(issue => issue.field === 'tags'));
+  assert.equal(Object.hasOwn(buildPlatformEntry({ ...post, tags: ['launch'] }, 'youtube', 'channel'), 'tags'), false, 'Tags belong to the request root rather than the account target.');
+  assert.throws(() => normalizePostVariants({ platformOverrides: { youtube: { options: { tags: ['launch'] } } } }), /not a supported option/);
 });

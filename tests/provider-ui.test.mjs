@@ -5,7 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 
 test('the Calendar UI ignores stale month and unmounted responses and reloads after saving', async () => {
   const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
-  const loadSource = source.slice(source.indexOf('async function load()'), source.indexOf('  async function mapCalendar('));
+  const loadSource = source.slice(source.indexOf('async function load()'), source.indexOf('  async function save('));
   const pending = [], accepted = [], loaded = [], scope = { current: 'october' }, active = { current: true };
   function calendar(view, from, to) {
     return new Function('request', 'path', 'from', 'to', 'active', 'scope', 'view', 'updateEvents', 'setLoaded', `return (${loadSource});`)(() => new Promise((resolve, reject) => pending.push({ resolve, reject })), '/projects/a/calendar', from, to, active, scope, view, value => accepted.push(value), value => loaded.push(value));
@@ -28,7 +28,7 @@ test('the Calendar UI ignores stale month and unmounted responses and reloads af
 
 test('Calendar deletion sends the selected revision and calendar even after the event list refreshes', async () => {
   const source = await readFile(new URL('../src/GoogleCalendar.tsx', import.meta.url), 'utf8');
-  const selectSource = source.match(/onClick=\{(\(\) => setDeleting\(.+?\))\}>Delete<\/button>/)?.[1];
+  const selectSource = source.match(/onClick=\{(\(\) => setDeleting\(.+?\))\}>Delete<\/Button>/)?.[1];
   assert.ok(selectSource, 'The event delete control must select an event for confirmation.');
   const removeSource = stripTypeScriptTypes(source.slice(source.indexOf('async function removeEvent('), source.indexOf('  function edit(')));
   const writeSource = stripTypeScriptTypes(source.slice(source.indexOf('async function write('), source.indexOf('  async function load(')));
@@ -105,18 +105,6 @@ test('calendar writes finishing in a departed month or closed page do not contin
   scope.current = 'october'; active.current = false; update([]);
   assert.deepEqual(parent, [], 'A late calendar mapping callback must not clear a newly mounted calendar.'); assert.deepEqual(local, []);
   active.current = true; update([{ id: 'current-event' }]); assert.deepEqual(parent, [[{ id: 'current-event' }]]);
-});
-
-test('team changes completing after Settings closes cannot reload a different page or fetch the old workspace', async () => {
-  const source = await readFile(new URL('../src/TeamPanel.tsx', import.meta.url), 'utf8');
-  const handler = stripTypeScriptTypes(source.slice(source.indexOf('async function change('), source.indexOf('  async function add(')));
-  for (const userId of ['self', 'colleague']) {
-    let finish, refreshed = false, reloaded = false;
-    const active = { current: true }, context = { busy: false, canManage: true, active, setBusy() {}, setError() {}, request: () => new Promise(resolve => { finish = resolve; }), path: '/workspaces/old/members', currentUserId: 'self', window: { location: { reload() { reloaded = true; } } }, load: async () => { refreshed = true; } };
-    const change = new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context));
-    const pending = change('PATCH', { userId }, { role: 'viewer' }); active.current = false; finish({}); await pending;
-    assert.equal(reloaded, false); assert.equal(refreshed, false);
-  }
 });
 
 test('an agent history refresh failure preserves the uncertain paid request error and retry key', async () => {

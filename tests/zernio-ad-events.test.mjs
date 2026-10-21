@@ -9,11 +9,11 @@ import { stripTypeScriptTypes } from 'node:module';
 import { transformWithOxc } from 'vite';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createWebhookService } from '../server/webhooks.mjs';
-import { createContacts } from '../server/contacts.mjs';
-import { handleZernioAdEvents } from '../server/zernio-ad-events.mjs';
-import { IntegrationError } from '../server/integrations.mjs';
-import { createApp } from '../server/index.mjs';
+import { createWebhookService } from '../server/webhooks.ts';
+import { createContacts } from '../server/contacts.ts';
+import { handleZernioAdEvents } from '../server/zernio-ad-events.ts';
+import { IntegrationError } from '../server/provider-core.ts';
+import { createApp } from '../server/index.ts';
 
 const secret = 'synthetic-paid-events-secret', profileId = 'profile-a';
 const event = (name = 'ad.status_changed', extra = {}) => ({ id: randomUUID(), event: name, timestamp: '2026-10-18T12:00:00Z', profiles: [{ id: profileId, externalId: 'PRIVATE_EXTERNAL_ID' }], account: { accountId: 'meta-a', profileId, platform: 'metaads', username: 'PRIVATE_USERNAME', displayName: 'PRIVATE_NAME' }, ...(name === 'account.ads.initial_sync_completed' ? { sync: { status: 'success', totalAds: 10, synced: 9, failed: 1, error: 'PRIVATE_DIAGNOSTIC', errorCategory: 'permission_denied', errorCode: '10' } } : name === 'account.ads.sync_failed' ? { adAccount: { platformAdAccountId: 'act_123', name: 'PRIVATE_ADVERTISER_NAME' }, sync: { lastSuccessfulSyncAt: '2026-10-17T12:00:00Z', failureCount: 3, errorCategory: 'sync_error', error: 'PRIVATE_DIAGNOSTIC' } } : name === 'account.ads.sync_recovered' ? { adAccount: { platformAdAccountId: 'act_123', name: 'PRIVATE_ADVERTISER_NAME' }, sync: { lastSuccessfulSyncAt: '2026-10-18T12:00:00Z', failingSince: '2026-10-17T12:00:00Z' } } : name === 'ad.video.processed' ? { video: { id: '456', platformAdAccountId: 'act_123', status: 'ready', error: null, thumbnailUrl: 'https://cdn.example.test/PRIVATE_VIDEO' } } : name === 'lead.received' ? { account: { id: 'page-a', accountId: 'page-a', platform: 'facebook', profileId }, lead: { id: '000000000000000000000001', leadgenId: '901', formId: '801', formName: 'PRIVATE_FORM_NAME', adId: '701', campaignId: '601', fields: { PRIVATE_QUESTION: 'PRIVATE_ANSWER', email: 'private@example.test' }, isOrganic: false, createdAt: '2026-10-18T11:59:00Z' } } : { adObject: { level: 'AD', platformId: '701', platformAdAccountId: 'act_123' }, status: { raw: 'WITH_ISSUES' }, error: { code: '2643001', summary: 'PRIVATE_SUMMARY', message: 'PRIVATE_DIAGNOSTIC' } }), ...extra });
@@ -158,7 +158,7 @@ test('signed paid-ad HTTP delivery is minimized before acknowledgement and authe
   try {
     await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); origin = `http://127.0.0.1:${app.server.address().port}`;
     const request = async (path, body, authenticated = true, method = body ? 'POST' : 'GET') => { const result = await originalFetch(origin + '/api' + path, { method, headers: { Origin: 'https://ad-events.example.test', ...(authenticated && cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) }); const next = result.headers.get('set-cookie'); if (next) cookie = next.split(';')[0]; return { status: result.status, data: await result.json() }; };
-    const setup = await request('/auth/setup', { name: 'Paid event owner', email: 'ad-events@example.test', password: 'Synthetic paid event passphrase 2026!', sample: false }); assert.equal(setup.status, 201); const projectId = setup.data.projectId; app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, projectId);
+    const setup = await request('/auth/setup', { token: app.config.bootstrapToken, name: 'Paid event owner', email: 'ad-events@example.test', password: 'Synthetic paid event passphrase 2026!', sample: false }); assert.equal(setup.status, 201); const projectId = setup.data.projectId; app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, projectId);
     const payload = event(), raw = JSON.stringify(payload), url = origin + '/api/webhooks/zernio'; assert.equal((await originalFetch(url, { method: 'POST', body: raw })).status, 401);
     let result = await originalFetch(url, { method: 'POST', headers: { 'x-zernio-signature': sign(raw) }, body: raw }); assert.equal(result.status, 202); assert.doesNotMatch(app.db.prepare('SELECT payload FROM webhook_events WHERE id=?').get(payload.id).payload, /PRIVATE_/); app.webhooks.processPending();
     const path = `/projects/${projectId}/integrations/ads/events`; assert.equal((await request(path + '?accountId=meta-a&adAccountId=act_123', undefined, false)).status, 401);

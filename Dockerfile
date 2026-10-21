@@ -1,8 +1,10 @@
 FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY vendor ./vendor
 RUN npm ci
-COPY index.html tsconfig.json vite.config.mjs ./
+COPY index.html tsconfig.json tsconfig.backend.json presentation-baseline.json vite.config.mjs ./
+COPY server ./server
 COPY src ./src
 COPY shared ./shared
 COPY public ./public
@@ -19,4 +21,4 @@ COPY --chown=node:node shared ./shared
 RUN mkdir data && chown node:node data
 USER node
 EXPOSE 3018
-CMD ["node", "server/index.mjs"]
+CMD ["node", "server/index.ts"]

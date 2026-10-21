@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('record deletion preserves assignments and administrators can remove sample data without touching real or other-project records', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-record-lifecycle-')), origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, env: {}, appUrl: origin });
@@ -15,7 +15,7 @@ test('record deletion preserves assignments and administrators can remove sample
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   try {
-    const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Lifecycle owner', email: 'lifecycle-owner@example.test', password: secret, sample: true } });
+    const setup = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Lifecycle owner', email: 'lifecycle-owner@example.test', password: secret, sample: true } });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const initial = (await request('/api/state')).data, projectId = initial.projectId, project = `/api/projects/${projectId}`, workspaceId = initial.workspaces[0].id;
     const hash = app.db.prepare('SELECT password FROM users WHERE id=?').get(initial.user.id).password;

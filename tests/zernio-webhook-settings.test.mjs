@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { handleWebhookSettings } from '../server/zernio-webhook-settings.mjs';
-import { IntegrationError } from '../server/integrations.mjs';
+import { handleWebhookSettings } from '../server/zernio-webhook-settings.ts';
+import { IntegrationError } from '../server/provider-core.ts';
 
 const callback = 'https://campaign.example/api/webhooks/zernio', hookId = 'abcdef123456abcdef123456';
 function fixture() {

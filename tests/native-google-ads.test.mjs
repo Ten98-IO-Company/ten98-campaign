@@ -4,11 +4,12 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.mjs';
-import { testNativeGoogleAds } from '../server/native-google-ads.mjs';
+import { createApp } from '../server/index.ts';
+import { testNativeGoogleAds } from '../server/native-google-ads.ts';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import * as ui from '@ten98/ui';
 
 const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_ADS_CLIENT_SECRET: 'fixture-client-secret', GOOGLE_ADS_REFRESH_TOKEN: 'fixture-refresh-token', GOOGLE_ADS_DEVELOPER_TOKEN: 'fixture-developer-token', GOOGLE_ADS_LOGIN_CUSTOMER_ID: '9999999999' };
 
@@ -65,7 +66,7 @@ test('native Google Shopping uses an atomic paused resource graph, customer mapp
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); const base = `http://127.0.0.1:${app.server.address().port}`;
   async function request(path, body, key = 'native-google-' + calls.length) { const response = await fetch(base + path, { method: body === undefined ? 'GET' : 'POST', headers: { ...(cookie ? { Cookie: cookie } : {}), ...(body === undefined ? {} : { Origin: origin, 'Content-Type': 'application/json', 'Idempotency-Key': key }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] }; }
   try {
-    const setup = await request('/api/auth/setup', { name: 'Native Google QA', email: 'native-google@example.test', password: 'Native Google fixture password!', sample: false }); cookie = setup.cookie; assert.equal(setup.status, 201);
+    const setup = await request('/api/auth/setup', { token: app.config.bootstrapToken, name: 'Native Google QA', email: 'native-google@example.test', password: 'Native Google fixture password!', sample: false }); cookie = setup.cookie; assert.equal(setup.status, 201);
     const state = (await request('/api/state')).data; projectId = state.projectId; const route = `/api/projects/${projectId}/native-google-ads/`;
     assert.equal((await request(route + 'status')).data.configured, true); assert.equal((await request(route + 'account')).status, 409);
     assert.equal((await request(route + 'connection', { customerId: '123-456-7890' })).status, 400);
@@ -106,11 +107,13 @@ test('native Google Shopping uses an atomic paused resource graph, customer mapp
     updateHook = async () => { updateHook = null; reached(); await held; };
     const heldBody = { campaignId, status: 'ENABLED', confirmChange: true }; heldUpdate = request(route + 'campaign/update', heldBody, 'held-native-enable');
     await Promise.race([started, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Google held update was not reached.')), 5000); })]); clearTimeout(timer);
-    const heldCount = updates.length;
+    const heldCount = updates.length, blockedRequests = [];
     for (const [action, body] of [['campaign/update', { campaignId, status: 'PAUSED', confirmChange: true }], ['campaign/update', { campaignId, dailyBudget: 50, confirmChange: true }], ['campaign/cpc', { ...cpcBody, maxCpc: 2.9 }]]) {
-      const blocked = await request(route + action, body); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'PROVIDER_RESOURCE_BUSY'); assert.equal(blocked.data.operation, undefined);
+      const key = 'held-native-blocked-' + blockedRequests.length, blocked = await request(route + action, body, key); assert.equal(blocked.status, 409); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); blockedRequests.push({ action, body, key, receipt: blocked.data });
     }
     assert.equal(updates.length, heldCount, 'Shopping status, budget and CPC changes share one resource guard.'); releaseUpdate(); assert.equal((await heldUpdate).status, 200);
+    for (const blocked of blockedRequests) assert.deepEqual((await request(route + blocked.action, blocked.body, blocked.key)).data, blocked.receipt);
+    assert.equal(updates.length, heldCount, 'Previously blocked keys remain unsent after the held action completes.');
     assert.equal((await request(route + 'campaign/update', { campaignId, status: 'PAUSED', confirmChange: true }, 'after-held-native-pause')).status, 200);
     assert.equal((await request(route + 'campaign/update', heldBody, 'held-native-enable')).status, 200); assert.equal(lastCampaign.status, 'PAUSED'); assert.equal(app.store.list(projectId, 'campaigns')[0].status, 'paused');
     failCpcReadback = true; const unknownCpc = { ...cpcBody, maxCpc: 3 }; result = await request(route + 'campaign/cpc', unknownCpc, 'unknown-shopping-cpc'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); const unknownCount = updates.length; result = await request(route + 'campaign/cpc', unknownCpc, 'new-key-shopping-cpc'); assert.equal(result.status, 409); assert.equal(updates.length, unknownCount); failCpcReadback = false;
@@ -152,10 +155,11 @@ test('native Google UI preserves action keys on unknown outcomes and rejects com
 test('Shopping report budgets and spend retain the mapped currency precision', async () => {
   const source = await readFile(new URL('../src/NativeGoogleAds.tsx', import.meta.url), 'utf8');
   const number = new Function(`return (${stripTypeScriptTypes(source.match(/const number = (.+);/)[1])});`)();
-  const start = source.indexOf('<table><thead><tr><th>Campaign</th><th>Type / state'), end = source.indexOf('</table>', start) + '</table>'.length;
+  const start = source.indexOf('const reportColumns = '), end = source.indexOf('\n];', start) + '\n];'.length;
   assert.ok(start > 0 && end > start);
-  const { code } = await transformWithOxc(`const render = (report, currency, digits) => (${source.slice(start, end)});`, 'ShoppingReport.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', 'number', code + '; return render;')(React, number);
+  const { code } = await transformWithOxc(source.slice(start, end), 'ShoppingReport.tsx', { jsx: { runtime: 'classic' } });
+  const columns = new Function('React', ...Object.keys(ui), 'number', code + '; return reportColumns;')(React, ...Object.values(ui), number);
+  const render = (report, currency, digits) => React.createElement(ui.DataTable, { searchable: false, sortable: false, pagination: false, ariaLabel: 'Campaigns', rows: report.campaigns, rowKey: row => row.id, columns: columns(currency, digits) });
   for (const [currency, micros, expected] of [['KWD', '1000', '0.001 KWD'], ['USD', '1230000', '1.23 USD'], ['JPY', '1000000', '1 JPY']]) {
     const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
     for (const budgetPeriod of ['DAILY', 'CUSTOM_PERIOD']) {

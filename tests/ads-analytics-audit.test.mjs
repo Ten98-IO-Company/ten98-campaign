@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { handleIntegration } from '../server/integrations.mjs';
+import { handleIntegration } from '../server/integrations.ts';
 
 // Provider contracts: https://docs.zernio.com/ad-campaigns/boost-post and /api/openapi.
 async function audit(run) {
@@ -47,7 +47,8 @@ test('daily budget editors do not convert the provider campaignBudget or adSetBu
   }
   assert.deepEqual(results, [400, 400, 400, 400, 400, 400]); assert.equal(writes.length, 0, 'Lifetime allocations must be rejected before any paid-provider write.');
   campaign.budget = campaign.campaignBudget = campaign.adSets[0].budget = campaign.adSets[0].adSetBudget = budget('daily');
-  assert.equal((await update('campaign')).status, 200); assert.equal((await update('adset')).status, 200); assert.equal(writes.length, 2, 'Matching daily aliases remain editable.');
+  const campaignReview = await update('campaign');
+  assert.equal(campaignReview.status, 400); assert.equal(campaignReview.data.error.code, 'BUDGET_REVIEW_REQUIRED'); assert.equal((await update('adset')).status, 400); assert.equal(writes.length, 0, 'Both daily budget levels require their separate reviewed proposals before a provider write.');
 }));
 
 test('dashboard fields displayed as text reject objects before they can crash the report UI', () => audit(async ({ mock, invoke }) => {

@@ -3,12 +3,17 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
-import { handleZernioConnections } from '../server/zernio-connections.mjs';
-import { handleIntegration, IntegrationError } from '../server/integrations.mjs';
+import React from 'react';
+import * as design from '@ten98/ui';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { transformWithOxc } from 'vite';
+import { handleZernioConnections } from '../server/zernio-connections.ts';
+import { handleIntegration } from '../server/integrations.ts';
+import { IntegrationError } from '../server/provider-core.ts';
 
 const profileId = 'profile-a';
 function setup() {
-  const db = new DatabaseSync(':memory:'), calls = [], state = { accounts: [], malformed: false, receipt: null, failure: null, status: 'pending', authUrl: 'https://provider.example.test/authorize' };
+  const db = new DatabaseSync(':memory:'), calls = [], state = { accounts: [], accountActivity: true, malformed: false, receipt: null, failure: null, status: 'pending', authUrl: 'https://provider.example.test/authorize' };
   const api = async (path, query = {}, body, key, method = body === undefined ? 'GET' : 'POST') => {
     calls.push({ path, query, body: structuredClone(body), key, method });
     if (path === '/accounts') { assert.deepEqual(query, { profileId }); return { accounts: state.accounts }; }
@@ -18,7 +23,7 @@ function setup() {
     if (method === 'GET') return { authUrl: state.authUrl };
     if (state.failure) throw state.failure;
     const platform = path.includes('bluesky') ? 'bluesky' : path.includes('wordpress') ? 'wordpress' : path.includes('shopify') ? 'shopify' : path.includes('whop') ? 'whopads' : 'telegram';
-    const row = { _id: platform + '-a', platform, profileId, username: platform === 'bluesky' ? body.identifier : platform === 'wordpress' ? new URL(body.siteUrl).hostname : platform === 'shopify' ? body.shop : platform === 'telegram' ? body.chatId.replace('@', '') : 'whop-brand', displayName: 'Campaign brand', isActive: true };
+    const row = { _id: platform + '-a', platform, profileId, username: platform === 'bluesky' ? body.identifier : platform === 'wordpress' ? new URL(body.siteUrl).hostname : platform === 'shopify' ? body.shop : platform === 'telegram' ? body.chatId.replace('@', '') : 'whop-brand', displayName: 'Campaign brand', ...(state.accountActivity === undefined ? {} : { isActive: state.accountActivity }) };
     state.accounts = [row]; return state.malformed ? {} : state.receipt || { account: { ...row, secret: 'never-return' }, ...(platform === 'whopads' ? { accountId: row._id } : {}) };
   };
   let count = 0;
@@ -90,6 +95,32 @@ test('Telegram access codes are bound to a project/profile and connected status 
   } finally { db.close(); }
 });
 
+test('Telegram direct and code confirmation require positive scoped account activity', async () => {
+  for (const flow of ['direct', 'code']) for (const activity of [undefined, null, true]) {
+    const { db, calls, state, request } = setup(), valid = activity === true;
+    try {
+      state.accountActivity = activity;
+      const body = flow === 'direct' ? { chatId: '@brandchannel' } : { code: (await request('telegram/code', { body: {} })).data.code };
+      if (flow === 'code') { state.status = 'connected'; state.accounts = [{ _id: 'telegram-a', platform: 'telegram', profileId, ...(activity === undefined ? {} : { isActive: activity }) }]; }
+      const route = flow === 'direct' ? 'telegram/credentials' : 'telegram/status', key = 'telegram-activity-proof';
+      const result = await request(route, { body, key });
+      assert.equal(result.status, valid ? 200 : flow === 'direct' ? 409 : 502, flow + '/' + String(activity));
+      assert.equal(result.data.account?.accountId, valid ? 'telegram-a' : undefined);
+      if (flow === 'direct') {
+        assert.equal(result.data.operation.status, valid ? 'complete' : 'uncertain');
+        const beforeReplay = calls.length; state.accountActivity = true;
+        assert.equal((await request(route, { body, key })).status, valid ? 200 : 409);
+        assert.equal(calls.length, beforeReplay, 'A dispatched ambiguous connection cannot send again or become confirmed on replay.');
+        assert.equal(calls.filter(row => row.path === '/connect/telegram' && row.method === 'POST').length, 1);
+      } else {
+        state.accounts[0].isActive = true;
+        assert.equal((await request(route, { body })).data.account.accountId, 'telegram-a', 'A status poll may confirm after positive activity becomes readable.');
+        assert.equal(calls.filter(row => row.path === '/connect/telegram' && row.method === 'POST').length, 0, 'Code status confirmation never reconnects the account.');
+      }
+    } finally { db.close(); }
+  }
+});
+
 test('connection UI retains write identity after gateway/pending responses and ignores obsolete views', async () => {
   const source = await readFile(new URL('../src/ZernioConnection.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function write('), code = stripTypeScriptTypes(source.slice(start, source.indexOf('  async function connect(', start)));
   const keys = { current: new Map() }, calls = []; let current = true, failure = Object.assign(new Error('Gateway'), { status: 502 });
@@ -106,4 +137,103 @@ test('credential connection dispatch uses authenticated mapped-profile integrati
     await handleIntegration({ db, req: { method: 'POST', headers: { 'idempotency-key': 'router-connection' } }, url: new URL('https://campaign.example.test/api/projects/project-a/integrations/connections/bluesky/credentials'), project: { id: 'project-a', zernioProfileId: profileId }, config: { env: { ZERNIO_API_KEY: 'synthetic-key' } }, role: 'owner', body: { identifier: 'brand.bsky.social', appPassword: 'fixture' }, send(status, data) { response = { status, data }; } });
     assert.equal(response.status, 200); assert.equal(response.data.account.accountId, 'blue-a'); assert.equal(calls[0].url.pathname, '/api/v1/users');
   } finally { globalThis.fetch = previous; db.close(); }
+});
+
+const connectionSource = await readFile(new URL('../src/ZernioConnection.tsx', import.meta.url), 'utf8');
+const { code: connectionCode } = await transformWithOxc(connectionSource.replace(/^import .+;\r?\n/gm, '').replace('export default function ', 'function '), 'ConnectionInteraction.tsx', { jsx: { runtime: 'classic' } });
+const nodes = node => !React.isValidElement(node) ? [] : [node, ...React.Children.toArray(node.props.children).flatMap(nodes)];
+const nodeText = node => !React.isValidElement(node) ? String(node ?? '') : React.Children.toArray(node.props.children).map(nodeText).join('');
+const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+const postingAccounts = [{ _id: 'x-a', platform: 'twitter', displayName: 'Posting A' }, { _id: 'x-b', platform: 'twitter', displayName: 'Posting B' }];
+
+// Run the complete JSX and its real event handlers at the mocked request boundary.
+async function connectionUi(respond = async path => path.endsWith('/accounts') ? { accounts: postingAccounts } : { authUrl: 'https://provider.example.test/authorize?target=' + encodeURIComponent(path) }) {
+  const hooks = [], queued = [], calls = []; let cursor = 0, dirty = true, tree, unmounted = false, postUnmountUpdates = 0, connected = 0, props = {}, values = {};
+  const state = initial => { const index = cursor++; if (!hooks[index]) hooks[index] = { value: typeof initial === 'function' ? initial() : initial }; return [hooks[index].value, value => { if (unmounted) postUnmountUpdates++; const next = typeof value === 'function' ? value(hooks[index].value) : value; if (!Object.is(next, hooks[index].value)) { hooks[index].value = next; dirty = true; } }]; };
+  const ref = initial => { const index = cursor++; return hooks[index] ||= { current: initial }; };
+  const effect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
+  const request = async (...args) => { calls.push(args); return respond(...args); };
+  const Component = new Function('React', 'useState', 'useRef', 'useEffect', 'FormData', ...Object.keys(design), connectionCode + ';return ZernioConnection;')(React, state, ref, effect, class { constructor(form) { return Object.entries(form.values); } }, ...Object.values(design));
+  function paint() { if (unmounted) return; for (let pass = 0; dirty; pass++) { assert.ok(pass < 25, 'Rendering settles.'); dirty = false; cursor = 0; tree = Component({ projectId: 'project-a', canManage: true, request, onConnected() { connected++; }, onCancel() {}, ...props }); while (queued.length) queued.shift()(); } }
+  const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
+  const form = () => nodes(tree).find(node => node.props?.as === 'form');
+  const input = label => { const wrapper = nodes(tree).find(node => node.type === design.Field && node.props.label === label); return nodes(wrapper).find(node => [design.Input, design.Select].includes(node.type)); };
+  const button = label => nodes(tree).find(node => node.type === design.Button && nodeText(node) === label);
+  const event = (extra = {}) => ({ preventDefault() {}, currentTarget: { values: { ...Object.fromEntries(nodes(tree).filter(node => [design.Input, design.Select].includes(node.type) && node.props.name).map(node => [node.props.name, values[node.props.name] ?? node.props.value ?? node.props.defaultValue ?? ''])), ...extra }, reset() { values = {}; } } });
+  const change = async (label, value) => { const field = input(label), parent = form(); assert.ok(field, label); if (label === 'Channel or store') values = {}; if (field.props.name) values[field.props.name] = value; const event = { target: { value, name: field.props.name } }; field.props.onChange?.(event); parent.props.onChange?.(event); paint(); await tick(); };
+  const submit = (extra = {}) => { const pending = form().props.onSubmit(event(extra)); paint(); return pending; };
+  const click = label => { const control = button(label); assert.ok(control, label); const pending = control.props.onClick(); paint(); return pending; };
+  paint(); await tick();
+  return { calls, tick, form, event, input, button, change, submit, click, html: () => renderToStaticMarkup(tree), link: () => nodes(tree).find(node => node.type === design.Link && nodeText(node) === 'Continue with provider'), get connected() { return connected; }, get postUnmountUpdates() { return postUnmountUpdates; }, scope: async next => { props = { ...props, ...next }; dirty = true; paint(); await tick(); }, unmount() { hooks.forEach(hook => hook.close?.()); unmounted = true; } };
+}
+
+test('connection authorization links remain valid unchanged and disappear immediately when the posting account or Shopify domain changes', async () => {
+  const ui = await connectionUi();
+  await ui.change('Channel or store', 'ads:twitter'); await ui.change('X posting account *', 'x-a'); await ui.submit(); await ui.tick();
+  const original = ui.link().props.href; assert.match(decodeURIComponent(original), /accountId=x-a/); await ui.tick(); assert.equal(ui.link().props.href, original);
+  await ui.change('X posting account *', 'x-b'); assert.equal(ui.link(), undefined); assert.doesNotMatch(ui.html(), /Continue with the provider, then return/);
+  await ui.submit(); await ui.tick(); assert.match(decodeURIComponent(ui.link().props.href), /accountId=x-b/);
+  await ui.change('Channel or store', 'store:shopify'); await ui.change('Store domain *', 'shop-a.myshopify.com'); await ui.submit(); await ui.tick(); assert.match(decodeURIComponent(ui.link().props.href), /shop-a.myshopify.com/);
+  await ui.change('Store domain *', 'shop-b.myshopify.com'); assert.equal(ui.link(), undefined); assert.doesNotMatch(ui.html(), /Continue with the provider, then return/);
+  await ui.submit(); await ui.tick(); assert.match(decodeURIComponent(ui.link().props.href), /shop-b.myshopify.com/);
+});
+
+test('posting-account refresh withdraws the old authorization link before loading, including account removal', async () => {
+  let rows = postingAccounts; const refresh = deferred(); let reads = 0;
+  const ui = await connectionUi(async path => path.endsWith('/accounts') ? ++reads === 1 ? { accounts: rows } : refresh.promise : { authUrl: 'https://provider.example.test/old-account-a' });
+  await ui.change('Channel or store', 'ads:twitter'); await ui.change('X posting account *', 'x-a'); await ui.submit(); await ui.tick(); assert.ok(ui.link());
+  ui.click('Refresh posting accounts'); assert.equal(ui.link(), undefined); assert.doesNotMatch(ui.html(), /Continue with the provider, then return/);
+  rows = [postingAccounts[1]]; refresh.resolve({ accounts: rows }); await ui.tick(); assert.doesNotMatch(ui.html(), /Posting A/); assert.match(ui.html(), /Posting B/); assert.equal(ui.link(), undefined);
+});
+
+test('a replacement authorization attempt clears the old link while pending and after request or URL failure', async () => {
+  for (const failure of ['request', 'url']) {
+    let next = false; const replacement = deferred();
+    const ui = await connectionUi(async path => path.endsWith('/accounts') ? { accounts: postingAccounts } : next ? replacement.promise : { authUrl: 'https://provider.example.test/first' });
+    await ui.submit(); await ui.tick(); assert.ok(ui.link()); next = true;
+    const pending = ui.submit(); assert.equal(ui.link(), undefined); assert.doesNotMatch(ui.html(), /Continue with the provider, then return/);
+    if (failure === 'request') replacement.reject(new Error('Authorization unavailable')); else replacement.resolve({ authUrl: 'http://provider.example.test/unsafe' });
+    await pending; await ui.tick(); assert.equal(ui.link(), undefined); assert.match(ui.html(), failure === 'request' ? /Authorization unavailable/ : /authorization URL is invalid/);
+  }
+});
+
+test('pending authorization results and retained callbacks cannot revive links after target cycles, refresh, scope changes or unmount', async () => {
+  for (const transition of ['account', 'shop', 'refresh', 'project', 'role', 'unmount']) {
+    const delayed = deferred(); let first = true;
+    const ui = await connectionUi(async path => path.endsWith('/accounts') ? { accounts: postingAccounts } : first ? (first = false, delayed.promise) : { authUrl: 'https://provider.example.test/fresh' });
+    await ui.change('Channel or store', transition === 'shop' ? 'store:shopify' : 'ads:twitter'); await ui.change(transition === 'shop' ? 'Store domain *' : 'X posting account *', transition === 'shop' ? 'shop-a' : 'x-a');
+    const retainedSubmit = ui.form().props.onSubmit, retainedChange = ui.form().props.onChange, retainedRefresh = ui.button('Refresh posting accounts')?.props.onClick, pending = ui.submit();
+    if (transition === 'account' || transition === 'shop') { const label = transition === 'shop' ? 'Store domain *' : 'X posting account *'; await ui.change(label, transition === 'shop' ? 'shop-b' : 'x-b'); await ui.change(label, transition === 'shop' ? 'shop-a' : 'x-a'); }
+    if (transition === 'refresh') { ui.click('Refresh posting accounts'); await ui.tick(); }
+    if (transition === 'project') { await ui.scope({ projectId: 'project-b' }); await ui.scope({ projectId: 'project-a' }); }
+    if (transition === 'role') { await ui.scope({ canManage: false }); await ui.scope({ canManage: true }); }
+    if (transition === 'unmount') ui.unmount();
+    delayed.resolve({ authUrl: 'https://provider.example.test/stale', alreadyConnected: transition === 'account' }); await pending; await ui.tick(); assert.equal(ui.link(), undefined, transition); assert.equal(ui.connected, 0);
+    const before = ui.calls.length; await retainedSubmit(ui.event({ accountId: 'x-a', shop: 'shop-a' })); retainedChange?.({ target: { value: 'stale' } }); retainedRefresh?.(); await ui.tick(); assert.equal(ui.calls.length, before, transition);
+    if (transition === 'unmount') { assert.equal(ui.postUnmountUpdates, 0); continue; }
+    await ui.submit(); await ui.tick(); assert.equal(ui.link().props.href, 'https://provider.example.test/fresh', transition);
+  }
+});
+
+test('Instagram connection offers both native login methods, submits the documented default and hides the field for other channels', async () => {
+  const ui = await connectionUi(), method = ui.input('Instagram connection method');
+  assert.equal(method.props.name, 'loginMethod'); assert.equal(method.props.defaultValue, 'instagram_login');
+  assert.deepEqual(nodes(method).filter(node => node.type === design.Option).map(node => [node.props.value, nodeText(node)]), [['instagram_login', 'Instagram Login'], ['facebook_login', 'Facebook Login']]);
+  assert.match(ui.html(), /professional Instagram account directly, without a Facebook Page/); assert.match(ui.html(), /Facebook Page linked to your professional Instagram account/);
+  for (const loginMethod of [undefined, 'facebook_login', 'instagram_login']) {
+    if (loginMethod) { await ui.change('Instagram connection method', loginMethod); assert.equal(ui.link(), undefined); }
+    await ui.submit(); await ui.tick();
+    assert.equal(ui.calls.at(-1)[0], '/projects/project-a/integrations/connect?platform=instagram&kind=social&loginMethod=' + (loginMethod || 'instagram_login'));
+    assert.ok(ui.link());
+  }
+  for (const choice of ['social:facebook', 'ads:facebook', 'credentials:bluesky', 'credentials:telegram', 'store:shopify']) { await ui.change('Channel or store', choice); assert.equal(ui.input('Instagram connection method'), undefined, choice); assert.doesNotMatch(ui.html(), /name="loginMethod"/); }
+});
+
+test('Instagram login-method changes reject a pending old handoff across a method cycle', async () => {
+  const delayed = deferred(); let first = true;
+  const ui = await connectionUi(async path => path.endsWith('/accounts') ? { accounts: postingAccounts } : first ? (first = false, delayed.promise) : { authUrl: 'https://provider.example.test/facebook-login' });
+  const pending = ui.submit(); await ui.change('Instagram connection method', 'facebook_login'); await ui.change('Instagram connection method', 'instagram_login');
+  delayed.resolve({ authUrl: 'https://provider.example.test/stale-instagram-login' }); await pending; await ui.tick(); assert.equal(ui.link(), undefined);
+  await ui.change('Instagram connection method', 'facebook_login'); await ui.submit(); await ui.tick(); assert.equal(ui.link().props.href, 'https://provider.example.test/facebook-login');
+  assert.equal(ui.calls.at(-1)[0], '/projects/project-a/integrations/connect?platform=instagram&kind=social&loginMethod=facebook_login');
 });

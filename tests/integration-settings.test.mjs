@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { createIntegrationSettings } from '../server/integration-settings.mjs';
+import { createIntegrationSettings } from '../server/integration-settings.ts';
 
 const secret = 'integration-settings-fixture-secret-at-least-32-characters';
 const provider = (manager, id) => manager.describe().providers.find(value => value.id === id);
@@ -23,6 +23,27 @@ test('native ad credentials stay encrypted, masked and independent from shared D
     manager.save('microsoftAds', { clientSecret: null }); assert.equal(provider(manager, 'microsoftAds').configured, true, 'Microsoft public OAuth clients need no client secret.');
     rejects(() => manager.save('googleAdsNative', { loginCustomerId: 'short' }), 'INVALID_SETTING');
   } finally { db.close(); }
+});
+
+test('connection tests reject malformed UTF-8 and oversized bodies and cancel rejected provider responses', async () => {
+  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch;
+  const manager = createIntegrationSettings({ db, env: { OPENROUTER_API_KEY: 'fixture', OPENROUTER_MODEL: 'fixture/model' }, secret });
+  let response;
+  globalThis.fetch = async (_target, options) => { assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'error'); return response; };
+  try {
+    let oversizedCancelled = false;
+    const malformed = new Response(Buffer.concat([Buffer.from('{"data":{"label":"'), Buffer.from([0xc3, 0x28]), Buffer.from('"}}')]));
+    const oversized = new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(2 * 1024 * 1024 + 1)); }, cancel() { oversizedCancelled = true; } }));
+    for (response of [malformed, oversized, new Response('\ufeff{"data":{"label":"Valid JSON after BOM"}}')]) {
+      await assert.rejects(manager.test('openrouter'), error => error.status === 502 && error.code === 'INVALID_PROVIDER_RESPONSE');
+      assert.equal(response.body.locked, false);
+    }
+    assert.equal(oversizedCancelled, true);
+    let rejectedCancelled = false;
+    response = new Response(new ReadableStream({ cancel() { rejectedCancelled = true; } }), { status: 401 });
+    await assert.rejects(manager.test('openrouter'), error => error.status === 400 && error.code === 'CONNECTION_REJECTED');
+    assert.equal(rejectedCancelled, true);
+  } finally { globalThis.fetch = originalFetch; db.close(); }
 });
 
 test('integration settings encrypt credentials, mask reads, persist overrides, share Google credentials and restore environment values', () => {
@@ -80,7 +101,7 @@ test('connection tests use fixed read-only provider contracts, never inference o
     onFetch?.(); onFetch = undefined;
     if (rejectNext) { rejectNext = false; return new Response(JSON.stringify({ error: 'TEST_OPENROUTER_KEY must never be returned' }), { status: 401 }); }
     if (url.href === 'https://zernio.com/api/v1/profiles') { assert.equal(options.method, 'GET'); assert.equal(options.headers.Authorization, 'Bearer TEST_ZERNIO_KEY'); return Response.json({ profiles: [{ _id: 'private-id', name: 'PRIVATE_PROFILE_NAME' }] }); }
-    if (url.href === 'https://openrouter.ai/api/v1/key') { assert.equal(options.method, 'GET'); assert.equal(options.headers.Authorization, 'Bearer TEST_OPENROUTER_KEY'); return Response.json({ data: { label: 'PRIVATE_KEY_LABEL', limit_remaining: 5 } }); }
+    if (url.href === 'https://openrouter.ai/api/v1/key') { assert.equal(options.method || 'GET', 'GET'); assert.equal(options.headers.Authorization, 'Bearer TEST_OPENROUTER_KEY'); return Response.json({ data: { label: 'PRIVATE_KEY_LABEL', limit_remaining: 5 } }); }
     if (url.href === 'https://oauth2.googleapis.com/token') {
       assert.equal(options.method, 'POST'); const assertion = new URLSearchParams(options.body).get('assertion');
       const payload = JSON.parse(Buffer.from(assertion.split('.')[1], 'base64url').toString());

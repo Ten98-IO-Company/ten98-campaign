@@ -28,7 +28,7 @@ test('project loading marks the requested project immediately and ignores supers
   const reloadSource = source.slice(source.indexOf('async function reload('), source.indexOf('\n  function leaveEditor('));
   const pending = [], accepted = [], loadVersion = { current: 0 }, activeProject = { current: 'a' };
   const api = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
-  const reload = new Function('api', 'state', 'loadVersion', 'activeProject', 'setLoading', 'setState', 'navigationRef', 'writeNavigation', `return (${stripTypeScriptTypes(reloadSource)});`)(api, { projectId: 'a', projects: ['a', 'b', 'c'].map(id => ({ id })) }, loadVersion, activeProject, () => {}, value => accepted.push(value), { current: {} }, () => {});
+  const reload = new Function('api', 'state', 'loadVersion', 'activeProject', 'setLoading', 'setState', 'navigationRef', 'writeNavigation', 'inboxDraft', `return (${stripTypeScriptTypes(reloadSource)});`)(api, { projectId: 'a', projects: ['a', 'b', 'c'].map(id => ({ id })) }, loadVersion, activeProject, () => {}, value => accepted.push(value), { current: {} }, () => {}, { current: { dirty: false, revision: 0 } });
   const first = reload('a'), second = reload('b');
   assert.equal(activeProject.current, 'b', 'Callbacks from project A must become stale as soon as project B is requested.');
   pending[1].resolve({ projectId: 'b', projects: [{ id: 'b' }] }); await second;
@@ -42,7 +42,7 @@ test('completed saves and deletes refresh their project without closing a newer 
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
   for (const [start, end, type, args] of [
     ['async function savePost(', '  async function remove(', 'post', [{ content: 'Original post' }]],
-    ['async function submitForm(', '  async function savePost(', 'workspace', [{ preventDefault() {}, currentTarget: {} }]],
+    ['async function saveEditor(', '  async function savePost(', 'workspace', [{}]],
     ['async function remove(', '  async function clearSampleData(', 'post', ['posts', { id: 'original', name: 'Original' }]],
   ]) {
     const modal = { type, item: type === 'post' ? { id: 'original' } : undefined }, modalRef = { current: modal }, closed = [], reloads = [];

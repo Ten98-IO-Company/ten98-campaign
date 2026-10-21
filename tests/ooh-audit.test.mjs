@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { createStore } from '../server/database.mjs';
-import { handleOoh } from '../server/ooh.mjs';
+import { createStore } from '../server/database.ts';
+import { handleOoh } from '../server/ooh.ts';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 
@@ -64,7 +64,8 @@ test('OOH inventory refreshes cannot update a departed view or make more request
   const source = await readFile(new URL('../src/OohProviders.tsx', import.meta.url), 'utf8');
   const handler = stripTypeScriptTypes(source.slice(source.indexOf('async function load()'), source.indexOf('  async function refresh()')));
   const active = { current: true }, pending = [], accepted = [], local = [], callbacks = { current: items => accepted.push(items) };
-  const load = new Function('active', 'request', 'path', 'setStatus', 'setInventory', 'setBookings', 'setSelected', 'inventoryCallback', `return (${handler});`)(active, () => new Promise(resolve => pending.push(resolve)), '/projects/ooh-audit/ooh', value => local.push(value), value => local.push(value), value => local.push(value), () => {}, callbacks);
+  const compile = mode => new Function('active', 'request', 'path', 'setStatus', 'setInventory', 'setBookings', 'setSelected', 'inventoryCallback', 'mode', `return (${handler});`)(active, () => new Promise(resolve => pending.push(resolve)), '/projects/ooh-audit/ooh', value => local.push(value), value => local.push(value), value => local.push(value), () => {}, callbacks, mode);
+  const load = compile('workflow');
   const first = load(); active.current = false;
   pending[0]({ configured: true }); pending[1]({ inventory: [{ id: 101 }] }); pending[2]({ bookings: [] });
   await assert.rejects(first, { name: 'AbortError' });
@@ -73,6 +74,10 @@ test('OOH inventory refreshes cannot update a departed view or make more request
   active.current = true; const current = load();
   pending[3]({ configured: true }); pending[4]({ inventory: [{ id: 102 }] }); pending[5]({ bookings: [] });
   await current; assert.deepEqual(accepted, [[{ id: 102 }]]); assert.equal(local.length, 3);
+  const setup = compile('connection'), connecting = setup();
+  assert.equal(pending.length, 8, 'Central setup reads status and booking locks, without requesting feature inventory.');
+  pending[6]({ configured: true }); pending[7]({ bookings: [] });
+  await connecting; assert.deepEqual(accepted.at(-1), []);
 });
 
 test('OOH booking acknowledgement and final readback cannot erase a concurrent cancellation receipt', async () => {

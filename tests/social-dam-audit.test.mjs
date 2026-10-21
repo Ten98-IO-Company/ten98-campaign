@@ -5,8 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleIntegration } from '../server/integrations.mjs';
-import { createApp } from '../server/index.mjs';
+import { handleIntegration } from '../server/integrations.ts';
+import { createApp } from '../server/index.ts';
 
 test('social refresh and publishing reject malformed preview fields before persisting them', async () => {
   const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, records = new Map(), accepted = [];
@@ -88,7 +88,7 @@ test('a reviewed partial post retries only failed accounts and preserves publish
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   try {
-    const setup = await request('/api/auth/setup', 'POST', { name: 'Partial fixture', email: 'partial@example.test', password: 'a sufficiently long fixture password', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
+    const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Partial fixture', email: 'partial@example.test', password: 'a sufficiently long fixture password', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
     const state = (await request('/api/state')).data, project = `/api/projects/${state.projectId}`;
     assert.equal((await request(project, 'PATCH', { zernioProfileId: 'partial-profile' })).status, 200);
     const post = app.store.create(state.projectId, 'posts', { content: remote.content, status: 'partial', externalId: remote._id, zernioProfileId: 'partial-profile' }), route = project + '/integrations/social';

@@ -6,8 +6,10 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { handleZernioMeasurement } from '../server/zernio-measurement.mjs';
-import { IntegrationError, handleIntegration } from '../server/integrations.mjs';
+import * as designSystem from '@ten98/ui';
+import { handleZernioMeasurement } from '../server/zernio-measurement.ts';
+import { handleIntegration } from '../server/integrations.ts';
+import { IntegrationError } from '../server/provider-core.ts';
 
 const profileId = 'profile-a', platforms = ['metaads', 'googleads', 'linkedinads', 'tiktokads', 'pinterestads', 'xads', 'openaiads', 'redditads'];
 const pixel = (platform, id = `${platform}-pixel`) => ({ id, name: 'Website pixel', platform, kind: 'pixel', status: 'active', siteTagId: `site-${id}`, lastFiredTime: null, installed: false, code: '<script>example("public-pixel-id")</script>', secret: 'must-not-escape' });
@@ -154,11 +156,11 @@ test('the integration router authenticates scoped measurement requests and prese
 });
 
 test('rendered pixel controls preserve API versus website IDs, escape snippets and restrict writes and unsupported Reddit operations', async () => {
-  const source = await readFile(new URL('../src/ZernioMeasurement.tsx', import.meta.url), 'utf8'), start = source.indexOf('  return <section'), end = source.lastIndexOf('\n}');
+  const source = await readFile(new URL('../src/ZernioMeasurement.tsx', import.meta.url), 'utf8'), start = source.indexOf('  return <Card as="section" headingLevel={2} title="Pixels and tracking tags"'), end = source.lastIndexOf('\n}');
   const { code } = await transformWithOxc(`const render = () => (${source.slice(start + '  return '.length, end).trim().replace(/;$/, '')});`, 'MeasurementView.tsx', { jsx: { runtime: 'classic' } });
   function render(platform, canManage) {
     const account = { _id: platform, platform, canCreate: platform !== 'redditads', canRename: platform === 'metaads', canDiagnose: platform === 'metaads' }, selected = pixel(platform);
-    const context = { React, busy: false, loading: false, loaded: true, accounts: [account], nativeAccounts: [{ id: 'ad-a' }], account, accountId: platform, adAccountId: 'ad-a', tags: [selected], selected, events: [], checks: [], error: '', notice: '', canManage, labels: { [platform]: platform }, eventTypes: [], action() {}, refresh() {}, setAccountId() {}, setAdAccountId() {}, inspect() {}, loadMore() {}, save() {} };
+    const context = { ...Object.fromEntries(Object.entries(designSystem).filter(([name]) => /^[A-Z]/.test(name))), React, busy: false, loading: false, loaded: true, accounts: [account], nativeAccounts: [{ id: 'ad-a' }], account, accountId: platform, adAccountId: 'ad-a', tags: [selected], selected, events: [], checks: [], error: '', notice: '', canManage, labels: { [platform]: platform }, eventTypes: [], action() {}, refresh() {}, setAccountId() {}, setAdAccountId() {}, inspect() {}, loadMore() {}, save() {} };
     return renderToStaticMarkup(new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))());
   }
   const reader = render('metaads', false); assert.match(reader, /Campaign pixel ID/); assert.match(reader, /Website tag ID/); assert.match(reader, /&lt;script&gt;/); assert.doesNotMatch(reader, /<script>/); assert.doesNotMatch(reader, /Create tracking tag|Rename tag/);

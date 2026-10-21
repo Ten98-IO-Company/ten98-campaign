@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('HTTP OOH inventory, proposals, booking, delivery and cancellation preserve exact scope and concurrent action receipts', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-ooh-workflows-')), origin = 'http://127.0.0.1:3000';
@@ -31,7 +31,7 @@ test('HTTP OOH inventory, proposals, booking, delivery and cancellation preserve
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   try {
-    const setup = await request('/api/auth/setup', 'POST', { name: 'OOH fixture', email: 'ooh@example.test', password: 'a sufficiently long fixture password', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
+    const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'OOH fixture', email: 'ooh@example.test', password: 'a sufficiently long fixture password', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
     const state = (await request('/api/state')).data, project = `/api/projects/${state.projectId}`, path = project + '/ooh';
     const connection = { domainId: 7, clientId: 'brand', clientName: 'Fixture brand', screenIds: [101, 102] };
     assert.equal((await request(path + '/connection', 'POST', connection)).status, 200);
@@ -77,7 +77,7 @@ test('OOH write keys allow a manual retry after definitive rejection and preserv
   error = undefined; reloadError = new Error('Reload failed'); assert.deepEqual(await write(target, body), { acknowledged: true }, 'A confirmed write remains successful if the follow-up read fails.'); assert.equal(pendingKeys.current.get(signature), 'operation-key-2'); assert.equal(refreshRequired, true); assert.equal(refreshNeeded.current, true);
   const writesBeforeRefresh = calls.length;
   await assert.rejects(write(target, { name: 'Changed draft' }), /Refresh provider details/); assert.equal(calls.length, writesBeforeRefresh, 'A changed proposal cannot bypass the stale-details lock with a fresh request key.');
-  assert.match(source, /<fieldset disabled=\{refreshRequired\}>/); assert.match(source, /Broadsign saved the action/);
+  assert.match(source, /<Stack as="fieldset" disabled=\{refreshRequired\}>/); assert.match(source, /Broadsign saved the action/);
   const refreshCode = source.slice(source.indexOf('async function refresh()'), source.indexOf('  useEffect('));
   const refresh = new Function('action', 'load', 'onChanged', 'pendingKeys', 'refreshNeeded', 'setRefreshRequired', 'setNotice', `return (${refreshCode});`)(run => run(), load, undefined, pendingKeys, refreshNeeded, setRefreshRequired, value => { notice = value; });
   await assert.rejects(refresh(), /Reload failed/); assert.equal(refreshRequired, true); assert.equal(pendingKeys.current.get(signature), 'operation-key-2');

@@ -1,14 +1,44 @@
 import { useEffect, useState } from 'react';
+import { AccountProfileFlow, Alert, Button, Card, PasswordChangeFlow, Stack, StatusLine, Text, type AccountProfileValues, type AccountTheme, type AuthNotice } from '@ten98/ui';
 
 type Props = { request: (path: string, method?: string, body?: unknown) => Promise<any>; onChanged: () => void };
+type Section = 'profile' | 'password' | 'sessions';
+
 export default function AccountSettings({ request, onChanged }: Props) {
-  const [account, setAccount] = useState<any>(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  const [account, setAccount] = useState<any>(null), [busy, setBusy] = useState<Section | ''>(''), [error, setError] = useState(''), [feedback, setFeedback] = useState<{ section: Section; error?: string; notice?: AuthNotice }>();
+  const [passwordForm, setPasswordForm] = useState(0);
+  const [appearance, setAppearance] = useState<AccountTheme>(() => ['light', 'dark'].includes(document.documentElement.dataset.theme || '') ? document.documentElement.dataset.theme as AccountTheme : 'system');
+  // The theme is a per-browser preference; only the display name is stored on the account.
+  function changeAppearance(value: string) {
+    if (!['system', 'light', 'dark'].includes(value)) return '';
+    document.documentElement.dataset.theme = value; setAppearance(value as AccountTheme);
+    try { localStorage.setItem('ten98-campaign-theme', value); return 'Appearance saved for this browser.'; }
+    catch { return 'Appearance changed for this tab. Your browser could not save this preference.'; }
+  }
   useEffect(() => { let active = true; request('/account').then(value => { if (active) setAccount(value); }).catch(err => { if (active) setError(err.message); }); return () => { active = false; }; }, [request]);
-  async function action(work: () => Promise<void>, message: string) { setBusy(true); setError(''); setNotice(''); try { await work(); setAccount(await request('/account')); setNotice(message); } catch (err) { setError((err as Error).message); } finally { setBusy(false); } }
-  return <section className="panel settings-panel"><h2>Your account</h2>{error && <p className="alert" role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}{account && <>
-    <p className="field-help">{account.user.email} · {account.activeSessions} active sessions</p>
-    <form onSubmit={event => { event.preventDefault(); const name = String(new FormData(event.currentTarget).get('name')); action(async () => { await request('/account', 'PATCH', { name }); onChanged(); }, 'Display name saved.'); }}><fieldset disabled={busy}><label className="field"><span>Display name</span><input name="name" defaultValue={account.user.name} required maxLength={120} autoComplete="name"/></label><button className="button">Save name</button></fieldset></form>
-    {account.localPassword ? <details><summary>Change your password</summary><form onSubmit={event => { event.preventDefault(); const form = event.currentTarget, values = Object.fromEntries(new FormData(form)); if (values.newPassword !== values.confirmPassword) { setError('The new passwords do not match.'); return; } action(async () => { await request('/account/password', 'POST', { currentPassword: values.currentPassword, newPassword: values.newPassword }); form.reset(); }, 'Password changed. Other sessions have been signed out.'); }}><fieldset disabled={busy}><label className="field"><span>Current password</span><input type="password" name="currentPassword" required maxLength={128} autoComplete="current-password"/></label><label className="field"><span>New password</span><input type="password" name="newPassword" required minLength={12} maxLength={128} autoComplete="new-password"/></label><label className="field"><span>Confirm new password</span><input type="password" name="confirmPassword" required minLength={12} maxLength={128} autoComplete="new-password"/></label><button className="button">Change password</button></fieldset></form></details> : <p className="field-help">Your identity provider manages your password.</p>}
-    <p><button className="button" disabled={busy || account.activeSessions < 2} onClick={() => action(async () => { await request('/account/sessions/revoke', 'POST', {}); }, 'Other sessions signed out.')}>Sign out other sessions</button></p>
-  </>}</section>;
+  async function action(section: Section, work: () => Promise<string | void>, message: string) {
+    setBusy(section); setFeedback(undefined);
+    try { const text = await work(); setAccount(await request('/account')); setFeedback({ section, notice: { tone: 'success', text: text || message } }); }
+    catch (err) { setFeedback({ section, error: (err as Error).message }); }
+    finally { setBusy(''); }
+  }
+  async function saveProfile({ name, theme }: AccountProfileValues) {
+    const notes = [];
+    if (name !== account.user.name) { await request('/account', 'PATCH', { name }); onChanged(); notes.push('Display name saved.'); }
+    if (theme !== appearance) notes.push(changeAppearance(theme));
+    return notes.join(' ');
+  }
+  const state = (section: Section) => ({ busy: busy === section, error: feedback?.section === section ? feedback.error : undefined, notice: feedback?.section === section ? feedback.notice : undefined });
+  const sessions = state('sessions');
+  return <Card as="section" title="Your account"><Stack gap={6}>
+    {error && <Alert tone="danger" title={error}/>}
+    {account && <AccountProfileFlow {...state('profile')} email={account.user.email} defaultValues={{ name: account.user.name, theme: appearance }} description="System follows your device’s light or dark preference. Appearance applies to this browser." onSubmit={values => action('profile', () => saveProfile(values), 'Profile saved.')}/>}
+    {account && <PasswordChangeFlow key={passwordForm} {...state('password')} hasPassword={account.localPassword} policy={{ minLength: 12, maxLength: 128 }} messages={{ noPassword: 'Your identity provider manages your password.' }} onSubmit={values => action('password', async () => { await request('/account/password', 'POST', values); setPasswordForm(value => value + 1); }, 'Password changed. Other sessions have been signed out.')}/>}
+    {account && <Stack gap={2}>
+      <Text tone="muted">{account.activeSessions} active sessions</Text>
+      <Button variant="secondary" disabled={!!busy || account.activeSessions < 2} loading={sessions.busy} onClick={() => action('sessions', async () => { await request('/account/sessions/revoke', 'POST', {}); }, 'Other sessions signed out.')}>Sign out other sessions</Button>
+      {sessions.error && <Alert tone="danger" title={sessions.error}/>}
+      {sessions.notice && <StatusLine tone="success">{sessions.notice.text}</StatusLine>}
+    </Stack>}
+  </Stack></Card>;
 }

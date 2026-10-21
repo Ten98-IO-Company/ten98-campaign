@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('AI ad suggestions stay private, reviewable and unsubmitted until the user completes the ad builder', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-ai-ads-')), origin = 'http://127.0.0.1:3018';
@@ -25,7 +25,7 @@ test('AI ad suggestions stay private, reviewable and unsubmitted until the user 
       const response = await fetch(base + '/api' + path, { method, headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': 'application/json', 'Idempotency-Key': key } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
       cookie = response.headers.get('set-cookie')?.split(';')[0] || cookie; return { status: response.status, data: await response.json() };
     }
-    const setup = await api('/auth/setup', 'POST', { name: 'Ad studio', email: 'ai-ads@example.test', password: 'synthetic ai ad fixture password', sample: false }), projectId = setup.data.projectId, path = `/projects/${projectId}/agent`;
+    const setup = await api('/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Ad studio', email: 'ai-ads@example.test', password: 'synthetic ai ad fixture password', sample: false }), projectId = setup.data.projectId, path = `/projects/${projectId}/agent`;
     const generated = await api(path + '/run', 'POST', { message: 'Suggest a Google Search ad for our services.' });
     assert.equal(generated.status, 200, JSON.stringify(generated.data)); assert.equal(calls, 2); assert.equal(generated.data.run.actions.length, 1);
     const action = generated.data.run.actions[0]; assert.equal(action.collection, 'ads'); assert.deepEqual(action.data, draft);
@@ -40,7 +40,7 @@ test('AI ad suggestions stay private, reviewable and unsubmitted until the user 
 });
 
 test('the actual AI suggestion handler opens ad review without saving a campaign or applying stale results', async () => {
-  const source = await readFile(new URL('../src/CampaignAgent.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function applyDraft('), handler = source.slice(start, source.indexOf('  return <div', start));
+  const source = await readFile(new URL('../src/CampaignAgent.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function applyDraft('), handler = source.slice(start, source.indexOf('  return <', start));
   const opened = [], saved = [], active = { current: true }, context = { path: '/projects/p/agent', active, run: work => work(), request: async () => ({ adDraft: { platform: 'openai', name: 'Suggested card' } }), onOpenAdDraft: value => opened.push(value), history: async () => {}, onSaved: value => saved.push(value) };
   const apply = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(handler)});`)(...Object.values(context));
   await apply({ id: 'ad-action', collection: 'ads' }); assert.equal(opened[0].platform, 'openai'); assert.deepEqual(saved, []);

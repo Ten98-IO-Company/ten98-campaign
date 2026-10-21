@@ -42,7 +42,7 @@ export default function ZernioLeads({ projectId, canManage, canWrite = false, re
   }, [path, accountId, adAccountId]);
   async function action(run: () => Promise<void>) {
     if (!current() || busyRef.current) return; busyRef.current = true; setBusy(true); setError(''); setNotice('');
-    try { await run(); } catch (failure) { if (current()) setError((failure as Error).message || 'The lead action could not be completed.'); }
+    try { await run(); } catch (failure) { if (current()) { const problem = failure as Error & { code?: string; operation?: Row }; if (problem.code === 'OPERATION_NOT_SENT' || problem.operation?.status === 'failed') { setConfirmImport(false); setConfirmCreate(false); setArchiveReview(false); setConfirmTest(false); setDeleteTestReview(''); setSelectedLead(null); setSelected(null); setNotice('This request was not sent. Your form draft and test answers are kept. Refresh forms, load the current form and leads, then review and acknowledge a new action.'); } setError(problem.message || 'The lead action could not be completed.'); } }
     finally { if (current()) { busyRef.current = false; setBusy(false); } }
   }
   async function loadForms(cursor = '') { const result = await requester.current(target + query + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '')); if (current()) { setForms(previous => cursor ? merge(previous, result.forms) : result.forms); setFormPage(result.pagination); setLoaded(true); } }
@@ -61,7 +61,7 @@ export default function ZernioLeads({ projectId, canManage, canWrite = false, re
       const valid = kind === 'import' ? result.contact?.id && result.association?.contactId === result.contact.id : kind === 'test' ? typeof result.testLead?.id === 'string' : kind === 'delete-test' ? result.deleted === body.confirmDelete : typeof result.form?.id === 'string' && typeof result.form?.version === 'string' && (kind !== 'archive' || result.archived === true && result.form.id === body.confirmArchive);
       if (result.operation?.status !== 'complete' || !valid) throw new Error('The lead action receipt could not be read. Its action key has been retained; review provider outcomes before repeating it.');
       keys.current.delete(fingerprint); if (!current()) throw new DOMException('The lead view changed.', 'AbortError'); return result;
-    } catch (failure) { const receipt = failure as Error & { status?: number; code?: string; operation?: Row }; if (receipt.status && receipt.status < 500 && !['OPERATION_UNCERTAIN', 'OPERATION_IN_PROGRESS', 'OPERATION_PENDING'].includes(receipt.code || '') && !['pending', 'uncertain'].includes(receipt.operation?.status)) keys.current.delete(fingerprint); throw failure; }
+    } catch (failure) { const receipt = failure as Error & { status?: number; code?: string; operation?: Row }; if ((receipt.code === 'OPERATION_NOT_SENT' || receipt.operation?.status === 'failed' || receipt.status && receipt.status < 500) && !['OPERATION_UNCERTAIN', 'OPERATION_IN_PROGRESS', 'OPERATION_PENDING'].includes(receipt.code || '') && !['pending', 'uncertain'].includes(receipt.operation?.status)) keys.current.delete(fingerprint); throw failure; }
   }
   function prepareImport(row: Row) {
     setSelectedLead(row); setConfirmImport(false);

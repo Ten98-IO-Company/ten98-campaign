@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Disclosure, Field, Fieldset, FormActions, FormGrid, Heading, Inline, Input, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
 
 type Account = { _id: string; platform: string; displayName?: string; username?: string; isActive?: boolean };
 type Group = { _id: string; name: string; accountIds: string[] };
@@ -9,14 +10,14 @@ const accountName = (row: Account) => row.displayName || row.username || row.pla
 export default function ZernioAdmin({ projectId, canManage, request }: Props) {
   const [profile, setProfile] = useState<Profile | null>(null), [accounts, setAccounts] = useState<Account[]>([]), [groups, setGroups] = useState<Group[]>([]);
   const [profileDraft, setProfileDraft] = useState({ name: '', description: '', color: '#64748b', timezone: '' }), [groupDraft, setGroupDraft] = useState({ name: '', accountIds: [] as string[] }), [selectedId, setSelectedId] = useState('');
-  const [loaded, setLoaded] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  const [loaded, setLoaded] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [confirming, setConfirming] = useState<Group>();
   const active = useRef(true), scope = useRef({ path: '', canManage }), requester = useRef(request), reads = useRef(0), busyRef = useRef(false), keys = useRef(new Map<string, string>());
   const path = `/projects/${encodeURIComponent(projectId)}/integrations/admin`;
   if (scope.current.path !== path || scope.current.canManage !== canManage) scope.current = { path, canManage };
   const view = scope.current; requester.current = request;
   const current = () => active.current && scope.current === view, selected = groups.find(row => row._id === selectedId);
   useEffect(() => {
-    active.current = true; busyRef.current = false; reads.current++; keys.current.clear(); setBusy(false); setLoaded(false); setProfile(null); setAccounts([]); setGroups([]); setSelectedId(''); setGroupDraft({ name: '', accountIds: [] }); setError(''); setNotice('');
+    active.current = true; busyRef.current = false; reads.current++; keys.current.clear(); setBusy(false); setLoaded(false); setProfile(null); setAccounts([]); setGroups([]); setSelectedId(''); setGroupDraft({ name: '', accountIds: [] }); setConfirming(undefined); setError(''); setNotice('');
     action(load);
     return () => { active.current = false; reads.current++; };
   }, [path, canManage]);
@@ -64,35 +65,36 @@ export default function ZernioAdmin({ projectId, canManage, request }: Props) {
       if (!current()) return; setNotice(target ? 'Account group updated in Zernio.' : 'Account group created in Zernio.'); await load();
     });
   }
-  async function removeGroup() {
-    const target = selected;
-    if (!canManage || !target || !window.confirm(`Delete the account group “${target.name}”? Connected accounts remain connected.`)) return;
+  function removeGroup() { if (canManage && selected) setConfirming(selected); }
+  async function deleteGroup(target: Group) {
+    if (!canManage) return;
     await action(async () => {
       await write(`groups/${encodeURIComponent(target._id)}/delete`, { confirmGroupId: target._id, expectedGroup: { name: target.name, accountIds: target.accountIds } });
       if (!current()) return; setSelectedId(''); setNotice('Account group deleted. Connected accounts were kept.'); await load();
     });
   }
-  return <section className="panel settings-panel">
-    <div className="panel-heading"><div><h2>Project profile and account groups</h2><p>Organize the connected accounts belonging to this project.</p></div><button className="button" type="button" disabled={busy} onClick={() => action(load)}>{busy ? 'Working…' : 'Refresh profile and groups'}</button></div>
-    {error && <p className="alert" role="alert">{error}</p>}{notice && <p className="helper-note" role="status">{notice}</p>}
+  return <Stack as="section" gap={3}>
+    <Inline justify="between" align="center"><Stack gap={1}><Heading level={3} size="sm">Project profile and account groups</Heading><Text tone="muted">Organize the connected accounts belonging to this project.</Text></Stack><Button variant="secondary" disabled={busy} onClick={() => action(load)}>{busy ? 'Working…' : 'Refresh profile and groups'}</Button></Inline>
+    {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}
     {loaded && profile && <>
-      <details><summary>Profile settings · {profile.name}</summary>
-        <p className="helper-note">This is the Zernio profile mapped to the current project. Its timezone applies to provider posts without an explicit timezone.</p>
-        {canManage ? <form onSubmit={saveProfile}><fieldset disabled={busy}>
-          <div className="form-grid"><label className="field"><span>Profile name</span><input required maxLength={200} value={profileDraft.name} onChange={event => setProfileDraft({ ...profileDraft, name: event.target.value })}/></label><label className="field"><span>Color</span><input required maxLength={100} placeholder="#64748b" value={profileDraft.color} onChange={event => setProfileDraft({ ...profileDraft, color: event.target.value })}/></label></div>
-          <label className="field"><span>Description</span><textarea maxLength={4000} value={profileDraft.description} onChange={event => setProfileDraft({ ...profileDraft, description: event.target.value })}/></label>
-          <label className="field"><span>Default timezone</span><input maxLength={100} placeholder="UTC, Europe/London, Asia/Dubai" value={profileDraft.timezone} onChange={event => setProfileDraft({ ...profileDraft, timezone: event.target.value })}/><small>Leave empty to use UTC.</small></label>
-          <button className="button">Save profile settings</button>
-        </fieldset></form> : <><p>{profile.description || 'No description.'}</p><p>Default timezone: {profile.timezone || 'UTC'}</p></>}
-      </details>
-      <h3>Account groups</h3><p className="helper-note">Groups shown here contain only this project’s accounts. Groups shared with other profiles and empty global groups are managed in Zernio.</p>
-      {!groups.length ? <p>No account groups in this project.</p> : <div className="table-scroll"><table><thead><tr><th>Group</th><th>Accounts</th>{canManage && <th>Action</th>}</tr></thead><tbody>{groups.map(row => <tr key={row._id}><td>{row.name}</td><td>{row.accountIds.map(id => { const account = accounts.find(item => item._id === id); return account ? `${accountName(account)} (${account.platform})` : 'Unavailable account'; }).join(', ')}</td>{canManage && <td><button type="button" className="button" disabled={busy} aria-pressed={selectedId === row._id} onClick={() => choose(row)}>Edit {row.name}</button></td>}</tr>)}</tbody></table></div>}
-      {canManage && <details key={selectedId || 'new'} open={Boolean(selectedId)}><summary>{selected ? `Edit group · ${selected.name}` : 'Create account group'}</summary><form onSubmit={saveGroup}><fieldset disabled={busy}>
-        <label className="field"><span>Group name</span><input required maxLength={200} value={groupDraft.name} onChange={event => setGroupDraft({ ...groupDraft, name: event.target.value })}/></label>
-        <fieldset><legend>Connected accounts</legend>{accounts.map(account => <label className="checkbox-row" key={account._id}><input type="checkbox" checked={groupDraft.accountIds.includes(account._id)} onChange={event => setGroupDraft({ ...groupDraft, accountIds: event.target.checked ? [...groupDraft.accountIds, account._id] : groupDraft.accountIds.filter(id => id !== account._id) })}/><span>{accountName(account)} · {account.platform}{account.isActive === false ? ' · Inactive' : ''}</span></label>)}{!accounts.length && <p>Connect an account before creating a group.</p>}</fieldset>
-        <p className="helper-note">Select at least one account. Group membership does not move accounts between projects.</p>
-        <div className="button-row"><button className="button" disabled={!groupDraft.accountIds.length}>{selected ? 'Save account group' : 'Create account group'}</button>{selected && <><button type="button" className="button" onClick={() => choose()}>New group</button><button type="button" className="button danger" onClick={removeGroup}>Delete account group</button></>}</div>
-      </fieldset></form></details>}
+      <Disclosure summary={`Profile settings · ${profile.name}`}><Stack gap={3}>
+        <Text tone="muted">This is the Zernio profile mapped to the current project. Its timezone applies to provider posts without an explicit timezone.</Text>
+        {canManage ? <Stack as="form" onSubmit={saveProfile}><Stack as="fieldset" gap={3} disabled={busy}>
+          <FormGrid><Field label="Profile name"><Input required maxLength={200} value={profileDraft.name} onChange={event => setProfileDraft({ ...profileDraft, name: event.target.value })}/></Field><Field label="Color"><Input required maxLength={100} placeholder="#64748b" value={profileDraft.color} onChange={event => setProfileDraft({ ...profileDraft, color: event.target.value })}/></Field></FormGrid>
+          <Field label="Description"><Textarea maxLength={4000} value={profileDraft.description} onChange={event => setProfileDraft({ ...profileDraft, description: event.target.value })}/></Field>
+          <Field label="Default timezone" description="Leave empty to use UTC."><Input maxLength={100} placeholder="UTC, Europe/London, Asia/Dubai" value={profileDraft.timezone} onChange={event => setProfileDraft({ ...profileDraft, timezone: event.target.value })}/></Field>
+          <FormActions><Button variant="secondary" type="submit">Save profile settings</Button></FormActions>
+        </Stack></Stack> : <><Text>{profile.description || 'No description.'}</Text><Text>Default timezone: {profile.timezone || 'UTC'}</Text></>}
+      </Stack></Disclosure>
+      <Stack gap={1}><Heading level={4} size="sm">Account groups</Heading><Text tone="muted">Groups shown here contain only this project’s accounts. Groups shared with other profiles and empty global groups are managed in Zernio.</Text></Stack>
+      {!groups.length ? <Text>No account groups in this project.</Text> : <DataTable searchable={false} sortable={false} pagination={false} ariaLabel="Account groups" rows={groups} rowKey={row => row._id} columns={[{ key: 'name', header: 'Group', rowHeader: true }, { key: 'accounts', header: 'Accounts', wrap: true, render: row => row.accountIds.map(id => { const account = accounts.find(item => item._id === id); return account ? `${accountName(account)} (${account.platform})` : 'Unavailable account'; }).join(', ') }]} rowActionsLabel="Action" rowActions={canManage ? row => <Button variant="secondary" size="sm" disabled={busy} pressed={selectedId === row._id} onClick={() => choose(row)}>Edit {row.name}</Button> : undefined}/>}
+      {canManage && <Disclosure key={selectedId || 'new'} defaultOpen={Boolean(selectedId)} summary={selected ? `Edit group · ${selected.name}` : 'Create account group'}><Stack as="form" onSubmit={saveGroup}><Stack as="fieldset" gap={3} disabled={busy}>
+        <Field label="Group name"><Input required maxLength={200} value={groupDraft.name} onChange={event => setGroupDraft({ ...groupDraft, name: event.target.value })}/></Field>
+        <Fieldset legend="Connected accounts">{accounts.map(account => <Checkbox key={account._id} label={`${accountName(account)} · ${account.platform}${account.isActive === false ? ' · Inactive' : ''}`} checked={groupDraft.accountIds.includes(account._id)} onChange={event => setGroupDraft({ ...groupDraft, accountIds: event.target.checked ? [...groupDraft.accountIds, account._id] : groupDraft.accountIds.filter(id => id !== account._id) })}/>)}{!accounts.length && <Text>Connect an account before creating a group.</Text>}</Fieldset>
+        <Text tone="muted">Select at least one account. Group membership does not move accounts between projects.</Text>
+        <FormActions><Button variant="secondary" type="submit" disabled={!groupDraft.accountIds.length}>{selected ? 'Save account group' : 'Create account group'}</Button>{selected && <><Button variant="secondary" onClick={() => choose()}>New group</Button><Button variant="danger" onClick={removeGroup}>Delete account group</Button></>}</FormActions>
+      </Stack></Stack></Disclosure>}
+      <ConfirmDialog open={!!confirming} onOpenChange={open => { if (!open) setConfirming(undefined); }} danger title={`Delete the account group “${confirming?.name ?? ''}”?`} description="Connected accounts remain connected." confirmLabel="Delete account group" onConfirm={() => deleteGroup(confirming!)}/>
     </>}
-  </section>;
+  </Stack>;
 }

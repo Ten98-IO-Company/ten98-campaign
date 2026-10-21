@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('HTTP publishing approvals, Drive delivery links and provider outcome reviews are wired end to end', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-workflows-http-')), distDir = join(dataDir, 'dist');
@@ -41,7 +41,7 @@ test('HTTP publishing approvals, Drive delivery links and provider outcome revie
   }
   const post = (path, body, options = {}) => request(path, { ...options, method: 'POST', body });
   try {
-    const setup = await post('/api/auth/setup', { name: 'Workflow owner', email: 'workflow-owner@example.test', password: 'a sufficiently long workflow fixture password', sample: false }); assert.equal(setup.status, 201); ownerCookie = setup.cookie;
+    const setup = await post('/api/auth/setup', { token: app.config.bootstrapToken, name: 'Workflow owner', email: 'workflow-owner@example.test', password: 'a sufficiently long workflow fixture password', sample: false }); assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const state = (await request('/api/state')).data, projectId = state.projectId, workspaceId = state.workspaces[0].id, project = `/api/projects/${projectId}`;
     assert.equal(state.user.isOperator, true);
     assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);
@@ -50,7 +50,7 @@ test('HTTP publishing approvals, Drive delivery links and provider outcome revie
       const userId = randomUUID(), email = `${name}@example.test`;
       app.db.prepare('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)').run(userId, name, email, passwordHash);
       const login = await post('/api/auth/login', { email, password: 'a sufficiently long workflow fixture password' }); assert.equal(login.status, 200);
-      if (role) assert.equal((await post(`/api/workspaces/${workspaceId}/members`, { email, role })).status, 200);
+      if (role) app.db.prepare('INSERT INTO memberships VALUES(?,?,?)').run(workspaceId, userId, role);
       return { id: userId, cookie: login.cookie, email };
     }
     const viewer = await member('workflow-viewer', 'viewer'), editor = await member('workflow-editor', 'editor'), admin = await member('workflow-admin', 'admin'), outsider = await member('workflow-outsider');

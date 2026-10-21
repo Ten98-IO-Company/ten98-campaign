@@ -5,15 +5,15 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as social from '../shared/social-posts.mjs';
-import { PLATFORM_RULES, normalizePostVariants, normalizeAccountVariants, publicMediaUrl, resolveVariant } from '../shared/social-posts.mjs';
+import * as social from '../shared/social-posts.ts';
+import { PLATFORM_RULES, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant } from '../shared/social-posts.ts';
 
 const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');
 
 test('provider post updates and lifecycle actions display retained-media warnings returned by the server', async () => {
   const management = await readFile(new URL('../src/PostManagement.tsx', import.meta.url), 'utf8'), notices = [], saved = [], post = { id: 'post' }, warning = 'Existing provider media was retained. Its temporary library link has expired.';
   const context = { ambiguousCopies: false, divergentCopies: false, accountCopiesReady: true, replaceVariants: false, post, setBusy() {}, setError() {}, setNotice: value => notices.push(value), setCurrent: value => saved.push(value), requester: { current: async () => ({ post, validationWarnings: [warning, null] }) }, onChanged() {} };
-  for (const [name, next, args] of [['act', '  async function update(', ['social/retry', {}, 'Retry submitted.']], ['update', '\n  return <section>', [{ content: 'Caption', scheduledAt: '2070-01-02T00:00:00Z' }]]]) {
+  for (const [name, next, args] of [['act', '  async function update(', ['social/retry', {}, 'Retry submitted.']], ['update', '\n  return <Card as="section"', [{ content: 'Caption', scheduledAt: '2070-01-02T00:00:00Z' }]]]) {
     const start = management.indexOf('async function ' + name + '('), declaration = stripTypeScriptTypes(management.slice(start, management.indexOf(next, start)).trim());
     await new Function(...Object.keys(context), `return (${declaration});`)(...Object.values(context))(...args);
     assert.match(notices.at(-1), /Existing provider media was retained/);
@@ -49,7 +49,7 @@ test('late browser and provider media inspections cannot restore removed media o
 });
 const expression = source.match(/const values = useMemo\(\(\) => \((.+)\), \[content,/)[1];
 function draft(changes = {}) {
-  const state = { content: 'Shared caption', platforms: ['facebook', 'instagram'], post: undefined, selectedAccounts: [], accountsTouched: false, accounts: [], baseMode: 'asset', assetId: 'shared-creative', campaignId: '', scheduledAt: '', queueId: '', queueVersion: '', baseMedia: [], accountOverrides: {}, overrides: { instagram: { content: '', mediaItems: [], options: { contentType: 'story' } } }, ...changes };
+  const state = { tagInput: '', content: 'Shared caption', platforms: ['facebook', 'instagram'], post: undefined, selectedAccounts: [], accountsTouched: false, accounts: [], baseMode: 'asset', assetId: 'shared-creative', campaignId: '', scheduledAt: '', queueId: '', queueVersion: '', baseMedia: [], accountOverrides: {}, overrides: { instagram: { content: '', mediaItems: [], options: { contentType: 'story' } } }, ...changes };
   return new Function(...Object.keys(state), 'PLATFORM_RULES', `return (${expression});`)(...Object.values(state), PLATFORM_RULES);
 }
 
@@ -95,7 +95,7 @@ test('account editor stores changes only for that account and submitting drops u
 });
 
 test('actual account composer rendering shows distinct caption, media, options and time controls without changing platform defaults', async () => {
-  const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview'), 'PostComposer.tsx', { jsx: { runtime: 'classic' } });
+  const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview').replace('export const accountLabel', 'const accountLabel'), 'PostComposer.tsx', { jsx: { runtime: 'classic' } });
   const accounts = [{ id: 'first', platform: 'facebook', displayName: 'Brand One' }, { id: 'second', platform: 'facebook', displayName: 'Brand Two' }];
   const post = { id: 'post', content: 'Shared caption', platforms: ['facebook'], accounts: ['first', 'second'], scheduledAt: '2070-01-01T09:00:00Z', mediaItems: [], platformOverrides: { facebook: { content: 'Platform caption', options: { firstComment: 'Platform comment' } } }, accountOverrides: { second: { platform: 'facebook', content: 'Second brand caption', mediaItems: [{ type: 'image', url: 'https://cdn.example.test/second.jpg' }], options: {}, scheduledAt: '2070-01-02T09:00:00Z' } } };
   let stateIndex = 0;
@@ -103,6 +103,11 @@ test('actual account composer rendering shows distinct caption, media, options a
   const context = { React, ...hooks, ...social };
   const Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
   const html = renderToStaticMarkup(Composer({ post, accounts, assets: [], campaigns: [], canWrite: true, onSubmit: async () => {} }));
+  const stylesheet = await readFile(new URL('../src/post-composer.css', import.meta.url), 'utf8');
+  const stickyFooters = [...stylesheet.matchAll(/\.post-composer \.modal-actions\{([^{}]*)\}/g)].map(([, body]) => body).filter(body => body.includes('position:sticky'));
+  assert.equal(stickyFooters.length, 1, 'The shared local/provider composer footer has one sticky owner.');
+  assert.ok(Number(stickyFooters[0].match(/(?:^|;)bottom:([^;]+)/)?.[1].replace(/px$/, '')) >= 0, 'Composer actions must anchor inside the modal scrollport, never below its clipped edge.');
+  assert.match(html, /<div class="modal-actions">[\s\S]*>Cancel<\/button>[\s\S]*>Save changes<\/button>/, 'Actual composer retains its cancel and save actions.');
   assert.match(html, /Customise destination/); assert.match(html, /Brand Two · second/); assert.match(html, /Second brand caption/); assert.match(html, /second\.jpg/); assert.match(html, /Separate account publishing options/); assert.match(html, /Separate account time/); assert.match(html, /2070-01-02/); assert.equal(post.platformOverrides.facebook.content, 'Platform caption');
 });
 
@@ -138,7 +143,7 @@ test('composer saves incomplete platform drafts but blocks malformed options and
   const handler = source.slice(source.indexOf('async function submit('), source.indexOf('  async function checkWithProvider(')).replace('event: React.FormEvent<HTMLFormElement>', 'event').replace('(failure as Error)', 'failure');
   function submit(values, changes = {}) {
     const errors = [], calls = [], saving = [], focused = [];
-    const context = { disabled: false, setError: error => errors.push(error), platforms: values.platforms, optionErrors: {}, normalizePostVariants, normalizeAccountVariants, values, setSaving: value => saving.push(value), onSubmit: async value => calls.push(value), headingRef: { current: { focus: () => focused.push(true) } }, ...changes };
+    const context = { disabled: false, setError: error => errors.push(error), platforms: values.platforms, optionErrors: {}, normalizePostTags, normalizePostVariants, normalizeAccountVariants, values, setSaving: value => saving.push(value), onSubmit: async value => calls.push(value), headingRef: { current: { focus: () => focused.push(true) } }, ...changes };
     const action = new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context));
     return { action, errors, calls, saving, focused };
   }
@@ -226,4 +231,23 @@ test('a confirmed approval stays saved when refreshing its queue fails and close
   const review = new Function(...Object.keys(context), `return (${reviewSource});`)(...Object.values(context));
   await review(pending, 'approved'); assert.equal(data.posts[0].status, 'approved'); assert.equal(notes['post-a'], ''); assert.match(notices[0], /Post approved/); assert.deepEqual(changes, [true]); assert.deepEqual(errors, ['Queue refresh unavailable.']);
   active.current = false; await review(pending, 'approved'); assert.deepEqual(changes, [true]); assert.equal(notices.length, 1);
+});
+
+
+test('YouTube keywords save and reopen as a shared field and reach unpublished updates', async () => {
+  const values = draft({ platforms: ['youtube'], tagInput: '#launch, video\nproduct' });
+  assert.deepEqual(normalizePostTags(values.tags), ['launch', 'video', 'product']);
+  const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview').replace('export const accountLabel', 'const accountLabel'), 'PostComposer.tsx', { jsx: { runtime: 'classic' } });
+  const hooks = { useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute() };
+  const context = { React, ...hooks, ...social }, Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
+  const post = { content: 'Video', platforms: ['youtube'], tags: ['launch', 'product'], mediaItems: [] };
+  const html = renderToStaticMarkup(Composer({ post, assets: [], accounts: [], campaigns: [], canWrite: true, onSubmit: async () => {} }));
+  assert.equal((html.match(/>YouTube keyword tags</g) || []).length, 1); assert.match(html, /launch\nproduct/); assert.match(html, /Shared by every selected YouTube channel/);
+  const invalid = renderToStaticMarkup(Composer({ post: { ...post, tags: ['x'.repeat(101)] }, canWrite: true, onSubmit: async () => {} }));
+  assert.match(invalid, /aria-invalid="true"/); assert.match(invalid, /at most 100 characters/);
+  const management = await readFile(new URL('../src/PostManagement.tsx', import.meta.url), 'utf8'), calls = [];
+  const action = management.slice(management.indexOf('async function update('), management.indexOf('\n  return <Card as="section"'));
+  const updateContext = { ambiguousCopies: false, divergentCopies: false, accountCopiesReady: true, replaceVariants: false, post: { id: 'post' }, setBusy() {}, setError() {}, setNotice() {}, setCurrent() {}, onChanged() {}, requester: { current: async (...args) => { calls.push(args); return { post }; } } };
+  await new Function(...Object.keys(updateContext), `return (${stripTypeScriptTypes(action)});`)(...Object.values(updateContext))(values);
+  assert.deepEqual(calls[0][1].tags, values.tags);
 });

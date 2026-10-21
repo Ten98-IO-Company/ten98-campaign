@@ -4,8 +4,8 @@ import { randomUUID, createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createApp } from '../server/index.mjs';
-import { closeMediaUploads, MEDIA_DELIVERY_FIELDS } from '../server/zernio-media.mjs';
+import { createApp } from '../server/index.ts';
+import { closeMediaUploads, MEDIA_DELIVERY_FIELDS } from '../server/zernio-media.ts';
 
 const appUrl = 'https://hosted-media.example.test', profileId = 'media-profile', storageHost = 'a'.repeat(32) + '.r2.cloudflarestorage.com';
 const until = async check => { for (let i = 0; i < 1000; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); } assert.fail('Synthetic upload did not reach the expected state'); };
@@ -52,7 +52,7 @@ async function fixture() {
     const raw = body instanceof Uint8Array, response = await originalFetch(origin + path, { method, headers: { ...(authenticated && cookie ? { Cookie: cookie } : {}), ...(matchingOrigin ? { Origin: appUrl } : {}), ...(body === undefined ? {} : raw ? {} : { 'Content-Type': 'application/json', 'Idempotency-Key': key }), ...headers }, ...(body === undefined ? {} : { body: raw ? body : JSON.stringify(body) }) });
     const next = response.headers.get('set-cookie'); if (next) cookie = next.split(';')[0]; return { status: response.status, data: await response.json() };
   }
-  const created = await request('/api/auth/setup', { method: 'POST', body: { name: 'Hosted media owner', email: 'media@example.test', password: 'Synthetic hosted media passphrase 2026!', sample: false } }); assert.equal(created.status, 201); projectId = created.data.projectId; app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, projectId); base = `/api/projects/${projectId}/integrations/media/uploads`;
+  const created = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Hosted media owner', email: 'media@example.test', password: 'Synthetic hosted media passphrase 2026!', sample: false } }); assert.equal(created.status, 201); projectId = created.data.projectId; app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, projectId); base = `/api/projects/${projectId}/integrations/media/uploads`;
   const options = async assetId => request(base + '/options' + (assetId ? '?assetId=' + assetId : ''));
   const prepare = async (input = {}, key) => request(base, { method: 'POST', body: { attemptId: randomUUID(), filename: 'creative.jpg', contentType: 'image/jpeg', size: 3, ...input }, ...(key ? { key } : {}) });
   const put = async (attempt, bytes = Buffer.from('abc'), settings = {}) => request(base + '/' + attempt.id + '/content', { method: 'PUT', body: bytes, headers: { 'Content-Type': attempt.contentType, ...settings.headers }, ...settings });

@@ -1,25 +1,29 @@
 {
   "name": "ten98-campaign",
-  "version": "0.8.12",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.14.0"
+    "node": ">=24.0.0 <25"
   },
   "scripts": {
     "dev": "node --env-file-if-exists=.env scripts/dev.mjs",
-    "dev:server": "node --env-file-if-exists=.env --watch server/index.mjs",
-    "build": "tsc --noEmit && vite build",
-    "start": "node --env-file-if-exists=.env server/index.mjs",
-    "test": "node --test tests/*.test.mjs"
+    "dev:server": "node --env-file-if-exists=.env --watch server/index.ts",
+    "build": "npm run check:architecture && tsc --noEmit && vite build",
+    "start": "node --env-file-if-exists=.env server/index.ts",
+    "test": "npm run check:architecture && node --test tests/*.test.mjs",
+    "check:architecture": "node node_modules/@ten98/runtime/check.mjs ."
   },
   "dependencies": {
+    "@ten98/runtime": "file:vendor/ten98-runtime-0.1.14.tgz",
+    "@ten98/ui": "file:vendor/ten98-ui-0.5.4.tgz",
     "openid-client": "6.8.8",
     "qrcode-generator": "2.0.4",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@types/node": "24.10.1",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
     "typescript": "7.0.2",

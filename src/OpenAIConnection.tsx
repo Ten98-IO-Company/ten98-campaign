@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { Alert, Button, Field, FormActions, Input, Stack, StatusLine } from '@ten98/ui';
 
 export default function OpenAIConnection({ request, onConnected }: { request: (path: string, body?: any) => Promise<any>; onConnected: () => void }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
@@ -14,5 +15,5 @@ export default function OpenAIConnection({ request, onConnected }: { request: (p
     } catch (failure) { if (mounted.current && (failure as Error).name !== 'AbortError') setError((failure as Error).message || 'The connection could not be confirmed.'); }
     finally { if (mounted.current) setBusy(false); }
   }
-  return <section className="panel settings-panel"><h2>ChatGPT advertising</h2><p>Connect the ad account through Zernio using an API key from ChatGPT Ads Manager. Each key covers one advertising account and carries campaign write access.</p><form onSubmit={connect}><fieldset disabled={busy}><label className="field"><span>ChatGPT Ads Manager API key *</span><input name="apiKey" type="password" required maxLength={500} autoComplete="off" spellCheck={false}/></label><p className="field-help">The key is sent securely to Zernio. It is not saved in this app. Submit a rotated key to update the same account.</p><button className="button primary">{busy ? 'Verifying connection…' : 'Connect ChatGPT Ads'}</button></fieldset></form>{error && <div className="alert" role="alert">{error}</div>}{notice && <p role="status">{notice}</p>}</section>;
+  return <Stack as="form" gap={3} onSubmit={connect}><Stack as="fieldset" gap={3} disabled={busy}><Field label="ChatGPT Ads Manager API key" required description="The key is sent securely to Zernio. It is not saved in this app. Submit a rotated key to update the same account."><Input name="apiKey" type="password" required maxLength={500} autoComplete="off" spellCheck={false}/></Field><FormActions><Button type="submit" loading={busy}>{busy ? 'Verifying connection…' : 'Connect ChatGPT Ads'}</Button></FormActions></Stack>{error && <Alert tone="danger" title={error}/>}{notice && <StatusLine tone="success">{notice}</StatusLine>}</Stack>;
 }

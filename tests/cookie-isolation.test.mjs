@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
-import { createAuth, hashPassword, cookies, publicUser, HttpError } from '../server/auth.mjs';
-import { openDatabase, transaction } from '../server/database.mjs';
+import { stripTypeScriptTypes } from 'node:module';
+import { createAuth, hashPassword, cookies, publicUser, HttpError } from '../server/auth.ts';
+import { openDatabase, transaction } from '../server/database.ts';
 
 test('same-host instances keep session and OIDC cookies isolated while safely migrating their own legacy cookies', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-cookie-isolation-')), dbA = openDatabase(join(dataDir, 'a')), dbB = openDatabase(join(dataDir, 'b'));
@@ -58,7 +59,7 @@ test('same-host instances keep session and OIDC cookies isolated while safely mi
       buildAuthorizationUrl(provider, params) { assert.equal(params.redirect_uri, provider.clientId + '/api/auth/oidc/callback'); const target = new URL(issuer + '/authorize'); for (const [key, value] of Object.entries(params)) target.searchParams.set(key, value); return target; },
       async authorizationCodeGrant(provider, url, checks) { exchanges++; assert.equal(checks.expectedState, url.searchParams.get('state')); assert.equal(checks.idTokenExpected, true); return { claims: () => ({ iss: issuer, sub: 'existing-identity' }) }; },
     };
-    const source = await readFile(new URL('../server/auth.mjs', import.meta.url), 'utf8'), factorySource = source.slice(source.indexOf('export function createAuth')).replace('export function createAuth', 'function createAuth').replace("await import('openid-client')", 'await Promise.resolve(oidcClient)');
+    const source = stripTypeScriptTypes(await readFile(new URL('../server/auth.ts', import.meta.url), 'utf8')), factorySource = source.slice(source.indexOf('export function createAuth')).replace('export function createAuth', 'function createAuth').replace("await import('openid-client')", 'await Promise.resolve(oidcClient)');
     const factory = runInNewContext(`(() => { ${factorySource}; return createAuth; })()`, { createHmac, createHash, randomBytes, randomUUID, cookies, publicUser, HttpError, hashPassword, transaction, URL, oidcClient, maxAge: 7 * 86400 });
     const oidcA = factory(dbA, configA), oidcB = factory(dbB, configB);
     async function start(auth) { const res = response(); await auth.oidcStart({ ...request(), url: '/api/auth/oidc/start' }, res); absorb(res); return { state: new URL(res.headers.Location).searchParams.get('state'), cookieName: setCookies(res)[0].split('=')[0] }; }

@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
-import { createApp } from '../server/index.mjs';
+import { createApp } from '../server/index.ts';
 
 test('revoked sessions cannot complete provider reads or imports, while accepted writes retain uncertain receipts', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-session-revocation-')), origin = 'http://127.0.0.1:3018';
@@ -46,7 +46,7 @@ test('revoked sessions cannot complete provider reads or imports, while accepted
   try {
     await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); });
     base = `http://127.0.0.1:${app.server.address().port}`;
-    cookie = (await api('/auth/setup', { method: 'POST', body: { name: 'Session fixture', email: 'session-fixture@example.test', password } })).cookie;
+    cookie = (await api('/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Session fixture', email: 'session-fixture@example.test', password } })).cookie;
     const state = (await api('/state')).data, project = `/projects/${state.projectId}`;
     assert.equal((await api(project, { method: 'PATCH', body: { zernioProfileId: 'session-profile', driveFolderId: 'session-folder' } })).status, 200);
     assert.equal((await api('/settings/integrations/zernio/test', { method: 'POST', body: { projectId: state.projectId } })).data.ok, true);
