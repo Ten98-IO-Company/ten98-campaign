@@ -96,3 +96,13 @@ export async function blockWrites(pool, table) {
     async release() { await client.query('COMMIT'); client.release(); },
   };
 }
+
+/**
+ * OIDC routes answer a failure with a redirect to `/?auth_error=<code>`. Turn that redirect back into a rejection so tests can
+ * assert the code; status follows the code (sign-in failure 400, rate limit 429, refusals 403). Returns the response otherwise.
+ */
+export function signInRedirectError(res) {
+  const location = new URL(res.headers?.Location || '/', 'http://app.invalid'), code = location.searchParams.get('auth_error');
+  if (!code) return res;
+  throw Object.assign(new Error(code), { code, status: code === 'OIDC_SIGN_IN_FAILED' ? 400 : code === 'OIDC_RATE_LIMITED' ? 429 : 403, location: res.headers.Location });
+}

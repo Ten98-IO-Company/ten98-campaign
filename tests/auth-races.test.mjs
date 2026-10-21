@@ -5,7 +5,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAuth, hashPassword, signInLimits } from '../server/auth.ts';
-import { blockWrites, postgresSkip, testApp, testDatabase } from './postgres.mjs';
+import { blockWrites, postgresSkip, signInRedirectError, testApp, testDatabase } from './postgres.mjs';
 
 const pg = { skip: postgresSkip };
 function response() {
@@ -96,14 +96,14 @@ function oidcFixture(t, db, config) {
   const auth = createAuth(db, config, { openidClient: async () => client });
   fixture.auth = auth;
   fixture.start = async (query = '') => {
-    const res = response(); await auth.oidcStart({ url: '/api/auth/oidc/start' + query, headers: {}, socket: { remoteAddress: '127.0.0.1' } }, res);
+    const res = response(); await auth.oidcStart({ url: '/api/auth/oidc/start' + query, headers: {}, socket: { remoteAddress: '127.0.0.1' } }, res); signInRedirectError(res);
     assert.equal(res.status, 302); const authorize = new URL(res.headers.Location), set = [].concat(res.headers['Set-Cookie']);
     const browser = set.find(value => value.startsWith('ten98_oidc_') && !value.startsWith('ten98_oidc_invite_')), invite = set.find(value => value.startsWith('ten98_oidc_invite_'));
     return { state: authorize.searchParams.get('state'), cookie: browser.split(';')[0], inviteCookie: invite, authorize };
   };
   fixture.callback = async (flow, query = '', cookie = [flow.cookie, flow.inviteCookie?.split(';')[0]].filter(Boolean).join('; ')) => {
     const res = response(), url = new URL(config.appUrl + '/api/auth/oidc/callback?state=' + encodeURIComponent(flow.state) + '&code=fixture-code' + query);
-    await auth.oidcCallback({ headers: { cookie } }, res, url); return res;
+    await auth.oidcCallback({ headers: { cookie } }, res, url); return signInRedirectError(res);
   };
   return fixture;
 }
@@ -145,7 +145,7 @@ test('OIDC invitation continuation is browser-bound, single-use and origin-fixed
   await assert.rejects(oidc.callback(denied), error => error.status === 403); assert.equal((await db.$client.query("SELECT * FROM users WHERE email = 'outside@example.test'")).rowCount, 0);
   assert.equal((await db.$client.query('SELECT * FROM oidc_return_targets WHERE state = $1', [digest(denied.state)])).rowCount, 0);
   const linking = await oidc.start('?invite=' + invite); oidc.claims = { iss: config.oidcIssuer, sub: 'unlinked-subject', email: 'local@example.test', email_verified: true };
-  await assert.rejects(oidc.callback(linking), error => error.status === 403 && /linking is disabled/.test(error.message));
+  await assert.rejects(oidc.callback(linking), error => error.code === 'OIDC_ACCOUNT_EXISTS');
   assert.equal((await db.$client.query("SELECT password FROM users WHERE id = 'local-user'")).rows[0].password, 'unchanged-local-hash');
   assert.equal((await db.$client.query("SELECT * FROM oidc_identities WHERE subject = 'unlinked-subject'")).rowCount, 0);
 });
@@ -202,7 +202,7 @@ test('a verified invited email outside the OIDC allowlist joins only the invitin
   assert.equal((await db.$client.query("SELECT password FROM users WHERE email = 'invitee@example.test'")).rows[0].password, null);
   // The invitation is single use: a second identity with the same email gets no account through it.
   oidc.claims = { ...invitedIdentity(config, 'invitee@example.test'), sub: 'second-subject' };
-  await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.status === 403 && /not provisioned/.test(error.message));
+  await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_NOT_PROVISIONED');
 });
 
 test('an invitation for another email or an unverified email does not provision an OIDC account', pg, async t => {
@@ -210,10 +210,10 @@ test('an invitation for another email or an unverified email does not provision 
   // Allowlisted or not, a usable invitation names the address it was issued to.
   for (const email of ['someone@example.test', 'allowed@example.test']) {
     oidc.claims = invitedIdentity(config, email);
-    await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.status === 403 && error.message.includes('invitee@example.test'));
+    await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_INVITE_EMAIL_MISMATCH' && !error.location.includes('invitee') && error.location.includes('&invite='));
   }
   oidc.claims = invitedIdentity(config, 'invitee@example.test', { email_verified: false });
-  await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.status === 403 && /not provisioned/.test(error.message));
+  await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_EMAIL_UNVERIFIED');
   oidc.claims = invitedIdentity(config, 'invitee@example.test', { email_verified: 'true' });
   await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.status === 403);
   assert.equal(await count(db, 'users'), 1); assert.equal(await count(db, 'oidc_identities'), 0); assert.equal(await accepted(db, token), null);
@@ -226,7 +226,7 @@ test('an expired, revoked or no-longer-authorized invitation falls back to the O
   await db.$client.query("INSERT INTO users VALUES ('admin-inviter', 'Admin', 'admin@example.test', NULL)"); await db.$client.query("INSERT INTO memberships VALUES ('team', 'admin-inviter', 'admin')");
   await db.$client.query("UPDATE workspace_invitations SET inviter_id = 'admin-inviter' WHERE token_hash = $1", [createHash('sha256').update(demoted).digest('hex')]);
   oidc.claims = invitedIdentity(config, 'invitee@example.test');
-  for (const token of [expired, revoked, demoted]) await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.status === 403 && /not provisioned/.test(error.message), token[0]);
+  for (const token of [expired, revoked, demoted]) await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_NOT_PROVISIONED', token[0]);
   assert.equal((await db.$client.query("SELECT * FROM users WHERE email = 'invitee@example.test'")).rowCount, 0);
   // An allowlisted email still gets its own workspace and resumes the (now unusable) invitation in the browser as before.
   oidc.claims = invitedIdentity(config, 'allowed@example.test'); await db.$client.query("UPDATE workspace_invitations SET email = 'allowed@example.test'");

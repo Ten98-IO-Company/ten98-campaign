@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import * as openid from 'openid-client';
 import { createAuth } from '../server/auth.ts';
-import { postgresSkip, testDatabase } from './postgres.mjs';
+import { postgresSkip, signInRedirectError, testDatabase } from './postgres.mjs';
 
 function response() {
   return { headers: {}, status: null, setHeader(name, value) { this.headers[name] = value; }, getHeader(name) { return this.headers[name]; }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers); }, end() {} };
@@ -45,11 +45,11 @@ test('ID token signatures are verified against the issuer JWKS', { skip: postgre
     const started = response(); await auth.oidcStart({ url: '/api/auth/oidc/start', headers: {}, socket: { remoteAddress: '127.0.0.1' } }, started);
     const authorize = new URL(started.headers.Location), cookie = [].concat(started.headers['Set-Cookie']).find(value => value.startsWith('ten98_oidc_')).split(';')[0];
     issuer.nonce = authorize.searchParams.get('nonce');
-    const res = response(); await auth.oidcCallback({ headers: { cookie } }, res, new URL(`${config.appUrl}/api/auth/oidc/callback?state=${encodeURIComponent(authorize.searchParams.get('state'))}&code=fixture-code`)); return res;
+    const res = response(); await auth.oidcCallback({ headers: { cookie } }, res, new URL(`${config.appUrl}/api/auth/oidc/callback?state=${encodeURIComponent(authorize.searchParams.get('state'))}&code=fixture-code`)); return signInRedirectError(res);
   }
   const count = async table => (await db.$client.query(`SELECT count(*) AS count FROM ${table}`)).rows[0].count;
   issuer.signingKey = issuer.unpublished.privateKey;
-  await assert.rejects(signIn(), error => error.status === 400 && /could not be verified/.test(error.message));
+  await assert.rejects(signIn(), error => error.code === 'OIDC_SIGN_IN_FAILED');
   assert.equal(await count('sessions'), 0); assert.equal(await count('oidc_identities'), 0);
   issuer.signingKey = issuer.published.privateKey;
   assert.equal((await signIn()).status, 302);
