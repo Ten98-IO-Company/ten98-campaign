@@ -1,6 +1,6 @@
 // One PostgreSQL database per test, cloned from a template that is migrated once per migration set.
 // TEST_DATABASE_URL names a disposable server and a role allowed to create databases.
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { connect, migrate, migrationSources } from '../server/database.ts';
 
@@ -41,7 +41,9 @@ export const singleConnection = { max: 1, connectionTimeoutMillis: 2000 };
 
 export async function testDatabase(t, poolOptions = {}) {
   if (!adminUrl) throw new Error('Set TEST_DATABASE_URL to run PostgreSQL tests.');
-  const fingerprint = (await migrationSources()).map(source => source.checksum.slice(0, 8)).join('').slice(0, 40);
+  // A digest of every file's version and checksum: truncating the checksums' concatenation stopped distinguishing migration
+  // sets after the fifth file, and a renumbered file keeps its checksum but records a different version.
+  const fingerprint = createHash('sha256').update((await migrationSources()).map(source => source.version + ':' + source.checksum).join()).digest('hex').slice(0, 40);
   const template = `campaign_template_${fingerprint}`, name = `campaign_test_${randomBytes(6).toString('hex')}`;
   await withAdmin(async admin => {
     if (!(await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [template])).rowCount) {
