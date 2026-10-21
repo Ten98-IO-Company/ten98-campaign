@@ -233,3 +233,13 @@ test('Settings keeps its two existing columns and renders scoped receipt recover
   activeProject.current = 'project-a'; recovery.props.onReviewed('not_applied'); assert.equal(pendingKeys.current.size, 0);
   const html = renderToStaticMarkup(tree); assert.match(html, /Project settings/); assert.match(html, /Workspace &amp; access/); assert.ok(html.indexOf('data-provider-recovery') > html.indexOf('data-workspace-invitations'));
 });
+
+test('post card publishing asks once and names every destination before calling the unchanged publish action', () => {
+  const appSource = source();
+  assert.doesNotMatch(appSource, /onClick=\{\(\) => publish\(p\)\}/, 'A card click never publishes directly.');
+  assert.match(appSource, /title=\{!connected \? 'Connect Zernio in Settings' : ''\} onClick=\{\(\) => setPublishing\(p\)\}>/);
+  const dialog = appSource.match(/<ConfirmDialog open=\{!!publishing\}[^\r\n]+?<\/ConfirmDialog>/)?.[0]; assert.ok(dialog);
+  assert.match(dialog, /onConfirm=\{async \(\) => \{ const post = publishing; if \(post\) await publish\(post\); setPublishing\(null\); \}\}/);
+  assert.match(dialog, /Accounts:<\/Text> \{postRecipients\(publishing, remote\.accounts\?\.accounts \|\| \[\]\)\}/);
+  assert.match(appSource, /async function publish\(post: Row\) \{ await run\(async \(\) => \{ await integrate\('social\/publish', \{ postId: post\.id \}\); await reload\(\); \}/);
+});
