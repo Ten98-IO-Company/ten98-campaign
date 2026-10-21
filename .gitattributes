@@ -1,0 +1,22 @@
+# Store and check out text with LF on every OS so builds and packed archives are byte-identical.
+* text=auto eol=lf
+
+# Binary assets are never line-ending converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.tgz binary
+*.gz binary
+*.zip binary
+*.sqlite binary
+*.sqlite-wal binary
+*.sqlite-shm binary
+*.db binary
