@@ -17,7 +17,7 @@ test('actual ChatGPT composer validates lifetime fixed bidding, tracking macros 
 });
 
 test('ChatGPT credential form clears the entered key on confirmed connection and ignores a closed form completion', async () => {
-  const source = connection.slice(connection.indexOf('async function connect('), connection.indexOf('  return <section'));
+  const source = connection.slice(connection.indexOf('async function connect('), connection.indexOf('  return <Stack'));
   for (const closes of [false, true]) {
     const notices = [], errors = [], changed = [], resets = [], mounted = { current: true }; let finish;
     const form = { apiKey: 'sk-ads-qa', reset: () => resets.push(true) };

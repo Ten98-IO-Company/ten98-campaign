@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { ReviewSummary } from '@ten98/ui';
+import * as ui from '@ten98/ui';
 
 const sources = Object.fromEntries(await Promise.all(['GoogleCalendar', 'UnifiedInbox', 'IntegrationSettings'].map(async name => {
   const source = await readFile(new URL('../src/' + name + '.tsx', import.meta.url), 'utf8');
@@ -13,8 +13,8 @@ const sources = Object.fromEntries(await Promise.all(['GoogleCalendar', 'Unified
 })));
 const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children)] : [];
 const text = node => Array.isArray(node) ? node.map(text).join('') : React.isValidElement(node) ? text(node.props.children) : node == null || typeof node === 'boolean' ? '' : String(node);
-const button = (tree, label) => { const found = elements(tree).find(node => node.type === 'button' && text(node.props.children) === label); assert.ok(found, label); return found; };
-const card = (tree, id) => { const found = elements(tree).find(node => node.type === 'section' && node.props['aria-labelledby'] === 'integration-' + id); assert.ok(found, id); return found; };
+const button = (tree, label) => { const found = elements(tree).find(node => [ui.Button, 'button'].includes(node.type) && text(node.props.children) === label); assert.ok(found, label); return found; };
+const card = (tree, id) => { const found = elements(tree).find(node => node.props?.id === 'integration-' + id); assert.ok(found, id); return found; };
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
@@ -33,7 +33,7 @@ function mount(sourceName, name = sourceName) {
     if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) effects[index] = { deps, callback, cleanup: previous?.cleanup };
   };
   const window = { addEventListener() {}, removeEventListener() {}, setInterval: () => 1, clearInterval() {}, confirm: () => true, location: { origin: 'https://campaign.example.test' } };
-  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'ReviewSummary', 'loadGoogleMaps', 'ZernioWebhooks', 'window', sources[sourceName] + '; return ' + name + ';')(React, useEffect, useRef, useState, ReviewSummary, () => { throw new Error('Maps must not load.'); }, () => null, window);
+  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'loadGoogleMaps', 'ZernioWebhooks', 'window', ...Object.keys(ui), sources[sourceName] + '; return ' + name + ';')(React, useEffect, useRef, useState, () => { throw new Error('Maps must not load.'); }, () => null, window, ...Object.values(ui));
   return {
     updates,
     render(props) { stateIndex = refIndex = effectIndex = 0; return Component(props); },
@@ -94,17 +94,18 @@ test('Integrations has one Google credential form, preserves unrelated drafts an
   const options = props(settingsRequest(calls, async () => ({ callbackUrl: 'https://campaign.example.test/inbound/a', publicCallbacks: true })));
   h.render(options); h.flush(); await settle();
   let tree = h.render(options);
-  const inputs = elements(tree).filter(node => ['input', 'textarea'].includes(node.type));
+  const inputs = elements(tree).filter(node => [ui.Input, ui.Textarea].includes(node.type));
   assert.deepEqual(inputs.filter(node => node.props.name?.endsWith('-serviceAccountEmail')).map(node => node.props.name), ['googleDrive-serviceAccountEmail']);
   assert.deepEqual(inputs.filter(node => node.props.name?.endsWith('-privateKey')).map(node => node.props.name), ['googleDrive-privateKey']);
-  assert.equal(elements(card(tree, 'googleCalendar')).filter(node => node.type === 'form').length, 0);
+  assert.equal(elements(card(tree, 'googleCalendar')).filter(node => String(node.props?.name || '').startsWith('googleCalendar-')).length, 0, 'Calendar has no credential form of its own; its card holds only the project calendar mapping.');
+  assert.equal(elements(card(tree, 'googleCalendar')).filter(node => node.props?.as === 'form').length, 1);
   const change = (name, value) => elements(tree).find(node => node.props.name === name).props.onChange({ target: { value } });
   change('openrouter-model', 'keep/unsaved');
   change('googleDrive-serviceAccountEmail', 'replacement@example.test');
   change('googleDrive-privateKey', 'exact\nprivate-key\n');
   tree = h.render(options);
   assert.equal(button(card(tree, 'googleCalendar'), 'Test connection').props.disabled, true);
-  await elements(card(tree, 'googleDrive')).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await elements(card(tree, 'googleDrive')).find(node => node.props?.as === 'form').props.onSubmit({ preventDefault() {} });
   assert.deepEqual(calls.find(call => call[1] === 'PUT'), ['/settings/integrations/googleDrive', 'PUT', { fields: { serviceAccountEmail: 'replacement@example.test', privateKey: 'exact\nprivate-key\n' } }]);
   tree = h.render(options);
   assert.equal(elements(tree).find(node => node.props.name === 'openrouter-model').props.value, 'keep/unsaved');
@@ -160,4 +161,32 @@ test('SMS webhook setup requires operator and project management access and hand
     else { assert.match(html, /SMS webhook settings could not be read/); assert.doesNotMatch(html, /Incoming-message webhook URL/); }
     h.unmount();
   }
+});
+
+test('each provider card holds its own project mapping and host sections, and saves only its own field', async () => {
+  const h = mount('IntegrationSettings'), calls = [], Section = () => null;
+  const options = { ...props(settingsRequest(calls, async () => ({ callbackUrl: 'https://campaign.example.test/inbound/a', publicCallbacks: true }))), sections: { googleAdsNative: React.createElement(Section, { id: 'google' }), zernio: React.createElement(Section, { id: 'zernio' }) }, extraCards: [{ id: 'chatgptAds', title: 'ChatGPT advertising', description: 'Connect.', body: React.createElement(Section, { id: 'chatgpt' }) }] };
+  h.render(options); h.flush(); await settle();
+  let tree = h.render(options);
+  assert.equal(elements(card(tree, 'googleAdsNative')).some(node => node.type === Section && node.props.id === 'google'), true);
+  assert.equal(elements(card(tree, 'zernio')).some(node => node.type === Section && node.props.id === 'zernio'), true);
+  assert.equal(elements(card(tree, 'chatgptAds')).some(node => node.type === Section && node.props.id === 'chatgpt'), true);
+  const field = (id, label) => elements(card(tree, id)).find(node => node.type === ui.Field && node.props.label === label);
+  field('zernio', 'Zernio profile ID').props.children.props.onChange({ target: { value: ' profile-z ' } });
+  tree = h.render(options);
+  field('googleDrive', 'Google Drive folder ID').props.children.props.onChange({ target: { value: 'folder-d' } });
+  tree = h.render(options);
+  const mappingForm = (id, label) => elements(card(tree, id)).find(node => node.props?.as === 'form' && elements(node).some(child => child.type === ui.Field && child.props.label === label));
+  await mappingForm('zernio', 'Zernio profile ID').props.onSubmit({ preventDefault() {} });
+  tree = h.render(options);
+  await mappingForm('googleDrive', 'Google Drive folder ID').props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(calls.filter(call => call[1] === 'PATCH'), [['/projects/project-a', 'PATCH', { zernioProfileId: 'profile-z' }], ['/projects/project-a', 'PATCH', { driveFolderId: 'folder-d' }]]);
+  h.unmount();
+  const viewer = mount('IntegrationSettings'), viewerCalls = [], viewerProps = { ...props(settingsRequest(viewerCalls, async () => ({}))), isOperator: false, canManageProject: false };
+  viewer.render(viewerProps); viewer.flush(); await settle();
+  const viewerTree = viewer.render(viewerProps);
+  assert.equal(viewerCalls.some(call => call[0] === '/settings/integrations'), false, 'Non-operators never read credentials.');
+  assert.ok(card(viewerTree, 'zernio') && card(viewerTree, 'googleDrive'), 'Non-operators still see each provider card with its project connection.');
+  assert.equal(elements(card(viewerTree, 'zernio')).some(node => node.type === ui.Button && node.props.type === 'submit'), false, 'Mapping changes stay operator-only.');
+  viewer.unmount();
 });

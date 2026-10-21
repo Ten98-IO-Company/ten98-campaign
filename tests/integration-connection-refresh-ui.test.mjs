@@ -5,15 +5,15 @@ import React from 'react';
 import { transformWithOxc } from 'vite';
 
 const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
-const composition = source.match(/<IntegrationSettings key=[\s\S]*?<\/React\.Suspense>/)?.[0];
-assert.ok(composition, 'The central connection composition must remain available.');
-const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children)] : [];
-const IntegrationSettings = () => null, NativeGoogleAds = () => null, MicrosoftAds = () => null, OohProviders = () => null;
-const { code } = await transformWithOxc(`const render = (context) => { const { project, state, activeProject, connectionRevision, workspace, canMap, canWrite, api, setConnectionRevision, setRemote, setCalendarEvents, setOohInventory, reload, integrate } = context; return (<>${composition}</>); };`, 'IntegrationConnections.tsx', { jsx: { runtime: 'classic' } });
-const render = new Function('React', 'IntegrationSettings', 'NativeGoogleAds', 'MicrosoftAds', 'OohProviders', code + '; return render;')(React, IntegrationSettings, NativeGoogleAds, MicrosoftAds, OohProviders);
+const start = source.indexOf("{page === 'Integrations' && project && <IntegrationSettings"), composition = source.slice(source.indexOf('<IntegrationSettings', start), source.indexOf("}] : []}/>}", start) + "}] : []}/>".length);
+assert.ok(start > 0 && composition.endsWith('/>'), 'The central connection composition must remain available.');
+const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children), ...elements(Object.values(node.props.sections || {}))] : [];
+const IntegrationSettings = () => null, NativeGoogleAds = () => null, MicrosoftAds = () => null, OohProviders = () => null, stub = () => null;
+const { code } = await transformWithOxc(`const render = (context) => { const { project, state, activeProject, connectionRevision, workspace, canMap, canWrite, canAdmin, connected, api, setConnectionRevision, setRemote, setCalendarEvents, setOohInventory, reload, integrate, setModal, run, loadRemote } = context; return (<>${composition}</>); };`, 'IntegrationConnections.tsx', { jsx: { runtime: 'classic' } });
+const render = new Function('React', 'IntegrationSettings', 'NativeGoogleAds', 'MicrosoftAds', 'OohProviders', 'StatusLine', 'FormActions', 'Button', 'ZernioTeam', 'ZernioAdmin', 'ZernioAccounts', 'OpenAIConnection', code + '; return render;')(React, IntegrationSettings, NativeGoogleAds, MicrosoftAds, OohProviders, stub, stub, stub, stub, stub, stub, stub);
 function setup(reload = async () => {}) {
   const calls = [], context = {
-    project: { id: 'project-a' }, state: { projectId: 'project-a', user: { id: 'operator', isOperator: true } }, activeProject: { current: 'project-a' }, connectionRevision: 0, workspace: { role: 'owner' }, canMap: true, canWrite: true, api() {},
+    project: { id: 'project-a' }, state: { projectId: 'project-a', user: { id: 'operator', isOperator: true } }, activeProject: { current: 'project-a' }, connectionRevision: 0, workspace: { role: 'owner' }, canMap: true, canWrite: true, canAdmin: true, connected: true, api() {}, setModal() {}, run() {}, loadRemote() {},
     setConnectionRevision(update) { context.connectionRevision = update(context.connectionRevision); },
     setRemote(value) { calls.push(['remote', value]); }, setCalendarEvents(value) { calls.push(['calendar', value]); }, setOohInventory(value) { calls.push(['inventory', value]); }, reload,
     async integrate(path) { calls.push(['integrate', path]); return { configured: true }; },
