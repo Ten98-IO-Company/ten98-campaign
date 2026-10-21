@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
+import * as ui from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioAdmin } from '../server/zernio-admin.ts';
@@ -229,13 +230,13 @@ test('administration UI retains uncertain keys and ignores stale project or out-
 });
 
 test('rendered administration UI offers normal forms and hides write controls from readers', async () => {
-  const source = await readFile(new URL('../src/ZernioAdmin.tsx', import.meta.url), 'utf8'), start = source.indexOf('  return <section'), end = source.lastIndexOf('\n}');
+  const source = await readFile(new URL('../src/ZernioAdmin.tsx', import.meta.url), 'utf8'), start = source.indexOf('  return <Stack'), end = source.lastIndexOf('\n}');
   const { code } = await transformWithOxc(`const render = () => (${source.slice(start + '  return '.length, end).trim().replace(/;$/, '')});`, 'AdminView.tsx', { jsx: { runtime: 'classic' } });
   const render = canManage => {
-    const context = { React, loaded: true, profile: { name: 'Campaign profile', description: 'Campaign details', timezone: null }, profileDraft: { name: 'Campaign profile', description: '', color: '#112233', timezone: '' }, groupDraft: { name: '', accountIds: [] }, selectedId: '', selected: undefined, accounts: [{ _id: 'account-a', platform: 'instagram', displayName: 'Campaign account' }], groups: [{ _id: 'group-a', name: 'Campaign group', accountIds: ['account-a'] }], error: '', notice: '', busy: false, canManage, accountName: row => row.displayName, action() {}, load() {}, saveProfile() {}, saveGroup() {}, choose() {}, removeGroup() {}, setProfileDraft() {}, setGroupDraft() {} };
+    const context = { React, ...ui, confirming: undefined, setConfirming() {}, deleteGroup() {}, loaded: true, profile: { name: 'Campaign profile', description: 'Campaign details', timezone: null }, profileDraft: { name: 'Campaign profile', description: '', color: '#112233', timezone: '' }, groupDraft: { name: '', accountIds: [] }, selectedId: '', selected: undefined, accounts: [{ _id: 'account-a', platform: 'instagram', displayName: 'Campaign account' }], groups: [{ _id: 'group-a', name: 'Campaign group', accountIds: ['account-a'] }], error: '', notice: '', busy: false, canManage, accountName: row => row.displayName, action() {}, load() {}, saveProfile() {}, saveGroup() {}, choose() {}, removeGroup() {}, setProfileDraft() {}, setGroupDraft() {} };
     return renderToStaticMarkup(new Function(...Object.keys(context), `${code}; return render();`)(...Object.values(context)));
   };
-  const reader = render(false), admin = render(true); assert.match(reader, /Campaign group/); assert.doesNotMatch(reader, /Save profile settings|Create account group|Edit Campaign group/); assert.match(admin, /Save profile settings/); assert.match(admin, /Create account group/); assert.match(admin, /type="checkbox"/); assert.doesNotMatch(admin, /JSON|API payload/);
+  const reader = render(false), admin = render(true); assert.match(reader, /Campaign group/); assert.doesNotMatch(reader, /Save profile settings|Create account group|Edit Campaign group/); assert.match(admin, /Save profile settings/); assert.match(admin, /Create account group/); assert.match(admin, /type="checkbox"/); assert.doesNotMatch(admin, /JSON|API payload/); assert.doesNotMatch(source, /window.confirm/);
 });
 
 test('administration write keys survive server failures and pending receipts until a definite client failure', async () => {

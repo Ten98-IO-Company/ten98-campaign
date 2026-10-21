@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
+import * as design from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioConnections } from '../server/zernio-connections.ts';
@@ -152,18 +153,18 @@ async function connectionUi(respond = async path => path.endsWith('/accounts') ?
   const ref = initial => { const index = cursor++; return hooks[index] ||= { current: initial }; };
   const effect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = async (...args) => { calls.push(args); return respond(...args); };
-  const Component = new Function('React', 'useState', 'useRef', 'useEffect', 'FormData', connectionCode + ';return ZernioConnection;')(React, state, ref, effect, class { constructor(form) { return Object.entries(form.values); } });
+  const Component = new Function('React', 'useState', 'useRef', 'useEffect', 'FormData', ...Object.keys(design), connectionCode + ';return ZernioConnection;')(React, state, ref, effect, class { constructor(form) { return Object.entries(form.values); } }, ...Object.values(design));
   function paint() { if (unmounted) return; for (let pass = 0; dirty; pass++) { assert.ok(pass < 25, 'Rendering settles.'); dirty = false; cursor = 0; tree = Component({ projectId: 'project-a', canManage: true, request, onConnected() { connected++; }, onCancel() {}, ...props }); while (queued.length) queued.shift()(); } }
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
-  const form = () => nodes(tree).find(node => node.type === 'form');
-  const input = label => { const wrapper = nodes(tree).find(node => node.type === 'label' && nodes(node).some(child => child.type === 'span' && nodeText(child) === label)); return nodes(wrapper).find(node => ['input', 'select'].includes(node.type)); };
-  const button = label => nodes(tree).find(node => node.type === 'button' && nodeText(node) === label);
-  const event = (extra = {}) => ({ preventDefault() {}, currentTarget: { values: { ...Object.fromEntries(nodes(tree).filter(node => ['input', 'select'].includes(node.type) && node.props.name).map(node => [node.props.name, values[node.props.name] ?? node.props.value ?? node.props.defaultValue ?? ''])), ...extra }, reset() { values = {}; } } });
+  const form = () => nodes(tree).find(node => node.props?.as === 'form');
+  const input = label => { const wrapper = nodes(tree).find(node => node.type === design.Field && node.props.label === label); return nodes(wrapper).find(node => [design.Input, design.Select].includes(node.type)); };
+  const button = label => nodes(tree).find(node => node.type === design.Button && nodeText(node) === label);
+  const event = (extra = {}) => ({ preventDefault() {}, currentTarget: { values: { ...Object.fromEntries(nodes(tree).filter(node => [design.Input, design.Select].includes(node.type) && node.props.name).map(node => [node.props.name, values[node.props.name] ?? node.props.value ?? node.props.defaultValue ?? ''])), ...extra }, reset() { values = {}; } } });
   const change = async (label, value) => { const field = input(label), parent = form(); assert.ok(field, label); if (label === 'Channel or store') values = {}; if (field.props.name) values[field.props.name] = value; const event = { target: { value, name: field.props.name } }; field.props.onChange?.(event); parent.props.onChange?.(event); paint(); await tick(); };
   const submit = (extra = {}) => { const pending = form().props.onSubmit(event(extra)); paint(); return pending; };
   const click = label => { const control = button(label); assert.ok(control, label); const pending = control.props.onClick(); paint(); return pending; };
   paint(); await tick();
-  return { calls, tick, form, event, input, button, change, submit, click, html: () => renderToStaticMarkup(tree), link: () => nodes(tree).find(node => node.type === 'a' && nodeText(node) === 'Continue with provider'), get connected() { return connected; }, get postUnmountUpdates() { return postUnmountUpdates; }, scope: async next => { props = { ...props, ...next }; dirty = true; paint(); await tick(); }, unmount() { hooks.forEach(hook => hook.close?.()); unmounted = true; } };
+  return { calls, tick, form, event, input, button, change, submit, click, html: () => renderToStaticMarkup(tree), link: () => nodes(tree).find(node => node.type === design.Link && nodeText(node) === 'Continue with provider'), get connected() { return connected; }, get postUnmountUpdates() { return postUnmountUpdates; }, scope: async next => { props = { ...props, ...next }; dirty = true; paint(); await tick(); }, unmount() { hooks.forEach(hook => hook.close?.()); unmounted = true; } };
 }
 
 test('connection authorization links remain valid unchanged and disappear immediately when the posting account or Shopify domain changes', async () => {
@@ -217,7 +218,7 @@ test('pending authorization results and retained callbacks cannot revive links a
 test('Instagram connection offers both native login methods, submits the documented default and hides the field for other channels', async () => {
   const ui = await connectionUi(), method = ui.input('Instagram connection method');
   assert.equal(method.props.name, 'loginMethod'); assert.equal(method.props.defaultValue, 'instagram_login');
-  assert.deepEqual(nodes(method).filter(node => node.type === 'option').map(node => [node.props.value, nodeText(node)]), [['instagram_login', 'Instagram Login'], ['facebook_login', 'Facebook Login']]);
+  assert.deepEqual(nodes(method).filter(node => node.type === design.Option).map(node => [node.props.value, nodeText(node)]), [['instagram_login', 'Instagram Login'], ['facebook_login', 'Facebook Login']]);
   assert.match(ui.html(), /professional Instagram account directly, without a Facebook Page/); assert.match(ui.html(), /Facebook Page linked to your professional Instagram account/);
   for (const loginMethod of [undefined, 'facebook_login', 'instagram_login']) {
     if (loginMethod) { await ui.change('Instagram connection method', loginMethod); assert.equal(ui.link(), undefined); }

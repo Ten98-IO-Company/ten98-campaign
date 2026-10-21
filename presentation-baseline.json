@@ -66,25 +66,13 @@
     "element": 48,
     "styling": 14
   },
-  "src/ZernioAdmin.tsx": {
-    "element": 64,
-    "styling": 22
-  },
   "src/ZernioBlogDrafts.tsx": {
     "element": 120,
     "styling": 51
   },
-  "src/ZernioConnection.tsx": {
-    "element": 59,
-    "styling": 18
-  },
   "src/ZernioContacts.tsx": {
     "element": 218,
     "styling": 51
-  },
-  "src/ZernioDestinations.tsx": {
-    "element": 55,
-    "styling": 20
   },
   "src/ZernioInsights.tsx": {
     "element": 259,
@@ -109,10 +97,6 @@
   "src/ZernioRecycling.tsx": {
     "element": 91,
     "styling": 28
-  },
-  "src/ZernioWebhooks.tsx": {
-    "element": 66,
-    "styling": 30
   },
   "src/ZernioWhatsAppTemplates.tsx": {
     "element": 160,
