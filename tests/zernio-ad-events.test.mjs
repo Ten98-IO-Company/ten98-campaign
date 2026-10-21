@@ -8,6 +8,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { transformWithOxc } from 'vite';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { Text } from '@ten98/ui';
 import { createWebhookService } from '../server/webhooks.ts';
 import { createContacts } from '../server/contacts.ts';
 import { handleZernioAdEvents } from '../server/zernio-ad-events.ts';
@@ -128,9 +129,9 @@ test('read access rechecks current connection and native advertiser membership a
 
 test('provider update UI presents typed evidence and ignores responses from departed project/account views', async () => {
   const source = await readFile(new URL('../src/ZernioAdEvents.tsx', import.meta.url), 'utf8'), preview = source.slice(source.indexOf('const names:'), source.indexOf('export default function'));
-  const { code } = await transformWithOxc(preview, 'AdEventEvidence.tsx', { jsx: { runtime: 'classic' } }); const Evidence = new Function('React', `${code}; return Evidence;`)(React);
+  const { code } = await transformWithOxc(preview, 'AdEventEvidence.tsx', { jsx: { runtime: 'classic' } }); const Evidence = new Function('React', 'Text', `${code}; return Evidence;`)(React, Text);
   const html = renderToStaticMarkup(React.createElement(Evidence, { row: { adObject: { level: 'AD', platformId: '701' }, status: { raw: '<script>bad()</script>' }, error: { code: '10' } } })); assert.match(html, /&lt;script&gt;/); assert.doesNotMatch(html, /<script>/);
-  const helper = stripTypeScriptTypes(source.slice(source.indexOf('  async function load('), source.indexOf('  return <section'))), resolvers = [], accepted = [];
+  const helper = stripTypeScriptTypes(source.slice(source.indexOf('  async function load('), source.indexOf('  return <Card'))), resolvers = [], accepted = [];
   const context = { requester: { current: () => new Promise(resolve => resolvers.push(resolve)) }, path: '/projects/a/integrations/ads/events', accountId: 'meta-a', adAccountId: 'act_123', query: '?accountId=meta-a&adAccountId=act_123', pagination: null, current: () => false, setAdvertisers: row => accepted.push(row), setUpdates: row => accepted.push(row), setHealth: row => accepted.push(row), setPagination: row => accepted.push(row), setConfigured: row => accepted.push(row), setCheckedAt: row => accepted.push(row) };
   const load = new Function(...Object.keys(context), `return (${helper});`)(...Object.values(context)), pending = load(false); resolvers.forEach(resolve => resolve({ accounts: [], updates: [], health: {}, pagination: { hasMore: false } })); await pending; assert.equal(accepted.length, 0);
   assert.doesNotMatch(source, /dangerouslySetInnerHTML|window\.confirm|JSON\.parse/); assert.match(source, /Notifications do not change campaigns/);

@@ -12,34 +12,22 @@
     "styling": 2
   },
   "src/OohMap.tsx": {
-    "element": 16,
-    "styling": 9
+    "element": 1,
+    "styling": 2
   },
   "src/PostComposer.tsx": {
     "stylesheet": 1,
     "styling": 2,
     "element": 1
   },
-  "src/SocialAnalytics.tsx": {
-    "element": 11,
-    "styling": 1
-  },
   "src/UnifiedInbox.tsx": {
     "stylesheet": 1,
     "element": 531,
     "styling": 250
   },
-  "src/ZernioAdEvents.tsx": {
-    "element": 48,
-    "styling": 14
-  },
   "src/ZernioContacts.tsx": {
     "element": 218,
     "styling": 51
-  },
-  "src/ZernioInsights.tsx": {
-    "element": 7,
-    "styling": 1
   },
   "src/ZernioLeads.tsx": {
     "element": 153,
