@@ -21,17 +21,7 @@
     "element": 1
   },
   "src/UnifiedInbox.tsx": {
-    "stylesheet": 1,
-    "element": 531,
-    "styling": 250
-  },
-  "src/ZernioContacts.tsx": {
-    "element": 218,
-    "styling": 51
-  },
-  "src/ZernioLeads.tsx": {
-    "element": 153,
-    "styling": 57
+    "element": 1
   },
   "src/ZernioRecycling.tsx": {
     "element": 91,

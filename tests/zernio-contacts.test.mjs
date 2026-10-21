@@ -5,6 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import React from 'react';
+import * as ui from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioContacts } from '../server/zernio-contacts.ts';
@@ -315,8 +316,8 @@ test('contact UI retains action identities, rejects malformed receipts and never
   const identify = (projectId, canManage, state, filters = { platform: '', isSubscribed: '', tag: '' }) => new Function('projectId', 'accountId', 'search', 'filters', 'canManage', 'canWrite', 'isOperator', 'state', 'mounted', `${identitySource}; return current;`)(projectId, 'wa-a', '', filters, canManage, false, true, state, { current: true });
   const state = { current: { identity: '' } }, first = identify('a', true, state), second = identify('b', true, state), third = identify('a', true, state), viewer = identify('a', false, state), owner = identify('a', true, state); assert.equal(first(), false); assert.equal(second(), false); assert.equal(third(), false); assert.equal(viewer(), false); assert.equal(owner(), true);
   for (const filters of [{ platform: 'whatsapp', isSubscribed: '', tag: '' }, { platform: '', isSubscribed: 'false', tag: '' }, { platform: '', isSubscribed: '', tag: 'vip' }]) { const before = identify('a', true, state), filtered = identify('a', true, state, filters), restored = identify('a', true, state); assert.equal(before(), false); assert.equal(filtered(), false); assert.equal(restored(), true); }
-  const { code } = await transformWithOxc(source.replace("import React, { useEffect, useRef, useState } from 'react';", '').replace('export default function', 'function'), 'Contacts.tsx', { jsx: { runtime: 'classic' } });
-  const component = new Function('React', 'useEffect', 'useRef', 'useState', `${code}; return ZernioContacts;`)(React, React.useEffect, React.useRef, React.useState), html = renderToStaticMarkup(React.createElement(component, { projectId: 'a', canManage: true, isOperator: true, request: async () => ({}) }));
+  const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace('export default function', 'function'), 'Contacts.tsx', { jsx: { runtime: 'classic' } });
+  const component = new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(ui), `${code}; return ZernioContacts;`)(React, React.useEffect, React.useRef, React.useState, ...Object.values(ui)), html = renderToStaticMarkup(React.createElement(component, { projectId: 'a', canManage: true, isOperator: true, request: async () => ({}) }));
   assert.match(html, /Connected contacts/); assert.match(html, /Create from a local contact/); assert.match(html, /Custom field definitions/); assert.doesNotMatch(source, /window\.confirm|JSON\.parse\(|dangerouslySetInnerHTML/);
 });
 
@@ -330,25 +331,26 @@ test('refreshing contact and field snapshots invalidates dependent create, link,
 
 test('contact filter layout keeps its form full width and row actions compact with complete accessible names', async () => {
   const source = await readFile(new URL('../src/ZernioContacts.tsx', import.meta.url), 'utf8');
-  const start = source.indexOf('    <label className="field"><span>Contact scope</span>'), end = source.indexOf('    <p className="helper-note">Only this project', start), table = source.indexOf('    {contacts.length ?'), tableEnd = source.indexOf('    {pagination?.hasMore', table);
+  const start = source.indexOf('    <Field label="Contact scope">'), end = source.indexOf('    <Text tone="muted">Only this project', start), table = source.indexOf('    <DataTable ariaLabel="Connected contacts"'), tableEnd = source.indexOf('    {pagination?.hasMore', table);
   assert.ok(start > 0 && end > start && table > end && tableEnd > table);
   const { code } = await transformWithOxc(`const render = () => (<>${source.slice(start, end)}${source.slice(table, tableEnd)}</>);`, 'ContactFilterLayout.tsx', { jsx: { runtime: 'classic' } });
   const contact = { id: 'contact-one', name: 'Long contact identity for the connected project', channels: [], isSubscribed: false }, draft = { platform: 'whatsapp', isSubscribed: 'false', tag: ' vip ' };
   const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
   for (const busy of [false, true]) {
-    let inspected, scope, search, filters, prevented = false;
-    const context = { React, busy, accountId: '', accounts: [{ id: 'wa', name: 'Project number', platform: 'whatsapp', isActive: true }], contacts: [contact], pagination: null, searchDraft: '  Reviewed search  ', filterDraft: draft, label: row => row.name, setAccountId: value => { scope = value; }, setSearch: value => { search = value; }, setFilters: value => { filters = value; }, setSearchDraft() {}, setFilterDraft() {}, inspect: row => { inspected = row; } };
+    let inspected, scope, search, filters;
+    const context = { React, ...ui, busy, selected: null, accountId: '', accounts: [{ id: 'wa', name: 'Project number', platform: 'whatsapp', isActive: true }], contacts: [contact], pagination: null, searchDraft: '  Reviewed search  ', filterDraft: draft, label: row => row.name, setAccountId: value => { scope = value; }, setSearch: value => { search = value; }, setFilters: value => { filters = value; }, setSearchDraft() {}, setFilterDraft() {}, inspect: row => { inspected = row; } };
     const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context)), children = React.Children.toArray(tree.props.children).filter(React.isValidElement), form = children[1], formChildren = React.Children.toArray(form.props.children), grid = formChildren[0];
-    assert.equal(children[0].type, 'label'); assert.equal(form.type, 'form'); assert.equal(grid.props.className, 'form-grid');
-    assert.equal(React.Children.toArray(grid.props.children).length, 4); assert.ok(React.Children.toArray(grid.props.children).every(node => node.type === 'label'));
-    assert.equal(formChildren[1].props.children, 'Apply contact filters'); assert.equal(formChildren[1].props.disabled, busy);
+    // The library Form prevents native navigation; the scope picker and the four filters stay full-width labelled fields.
+    assert.equal(children[0].type, ui.Field); assert.equal(children[0].props.label, 'Contact scope'); assert.equal(form.type, ui.Form); assert.equal(grid.type, ui.FormGrid);
+    assert.equal(React.Children.toArray(grid.props.children).length, 4); assert.ok(React.Children.toArray(grid.props.children).every(node => node.type === ui.Field));
+    const apply = nodes(formChildren[1]).find(node => node.type === ui.Button); assert.equal(apply.props.children, 'Apply contact filters'); assert.equal(apply.props.type, 'submit'); assert.equal(apply.props.disabled, busy);
     assert.equal(search, undefined); assert.equal(filters, undefined);
-    form.props.onSubmit({ preventDefault() { prevented = true; } }); assert.equal(prevented, true); assert.equal(search, 'Reviewed search'); assert.deepEqual(filters, { ...draft, tag: 'vip' });
-    nodes(children[0]).find(node => node.type === 'select').props.onChange({ target: { value: 'wa' } }); assert.equal(scope, 'wa');
-    const inspect = nodes(tree).find(node => node.type === 'button' && node.props['aria-label'] === 'Inspect ' + contact.name);
-    assert.ok(inspect); assert.equal(inspect.props.children, 'Inspect'); assert.equal(inspect.props.disabled, busy);
-    if (!busy) { inspect.props.onClick(); assert.equal(inspected, contact); }
-    assert.ok(nodes(tree).some(node => node.type === 'div' && node.props.className === 'table-scroll'));
+    form.props.onSubmit(new FormData(), { preventDefault() {} }); assert.equal(search, 'Reviewed search'); assert.deepEqual(filters, { ...draft, tag: 'vip' });
+    nodes(children[0]).find(node => node.type === ui.Select).props.onChange({ target: { value: 'wa' } }); assert.equal(scope, 'wa');
+    const results = children.find(node => node.type === ui.DataTable); assert.equal(results.props.ariaLabel, 'Connected contacts'); assert.equal(results.props.rows[0], contact);
+    const inspect = results.props.rowActions(contact);
+    assert.equal(inspect.type, ui.Button); assert.equal(inspect.props['aria-label'], 'Inspect ' + contact.name); assert.equal(inspect.props.children, 'Inspect'); assert.equal(inspect.props.disabled, busy);
+    if (!busy) { inspect.props.onClick(); assert.equal(inspected, contact); inspected = undefined; results.props.onRowActivate(contact); assert.equal(inspected, contact); }
   }
 });
 
@@ -366,8 +368,8 @@ test('contact filter UI keeps failed or late results unknown and validates pagin
     context.requester.current = async path => path.endsWith('/overview') ? { accounts: [], localContacts: [], profileId } : path.endsWith('/fields') ? { fields: [] } : response instanceof Error ? Promise.reject(response) : response;
     await load(); assert.deepEqual(values.contacts, []); assert.equal(values.pagination, null); assert.match(values.error, /scope|verified/);
   }
-  const { code } = await transformWithOxc(source.replace("import React, { useEffect, useRef, useState } from 'react';", '').replace('export default function', 'function'), 'Contacts.tsx', { jsx: { runtime: 'classic' } });
-  const render = pagination => { let index = 0; const component = new Function('React', 'useEffect', 'useRef', 'useState', `${code}; return ZernioContacts;`)(React, () => {}, value => ({ current: value }), initial => [index++ === 7 ? pagination : initial, () => {}]); return renderToStaticMarkup(React.createElement(component, { projectId: 'a', canManage: false, isOperator: false, request: async () => ({}) })); };
+  const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace('export default function', 'function'), 'Contacts.tsx', { jsx: { runtime: 'classic' } });
+  const render = pagination => { let index = 0; const component = new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(ui), `${code}; return ZernioContacts;`)(React, () => {}, value => ({ current: value }), initial => [index++ === 7 ? pagination : initial, () => {}], ...Object.values(ui)); return renderToStaticMarkup(React.createElement(component, { projectId: 'a', canManage: false, isOperator: false, request: async () => ({}) })); };
   let html = render(null); assert.match(html, /Contact results are unavailable/); assert.doesNotMatch(html, /No connected contacts matched|Load more contacts/); assert.match(html, /Exact tag/); assert.match(html, /Provider subscription/);
   html = render({ total: 0, limit: 25, skip: 0, hasMore: false }); assert.match(html, /No connected contacts matched/);
 });
