@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { IntegrationError, operation } from '../server/provider-core.ts';
+import { IntegrationError, claimFence, operation, releaseFence } from '../server/provider-core.ts';
 import { handleOperationRecovery } from '../server/operation-recovery.ts';
 import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
 
@@ -75,4 +75,25 @@ test('an uncertain receipt blocks automatic retries and new actions on its resou
   assert.equal((await pool.query('SELECT count(*) AS count FROM integration_operation_reviews')).rows[0].count, 1);
   assert.equal((await pool.query('SELECT status FROM integration_operations WHERE id = $1', [lost.data.operation.id])).rows[0].status, 'reviewed-not-applied');
   assert.equal((await operation(context('uncertain-key-3', { name: 'after review' }), async () => ({ ok: true }), resource)).status, 200);
+});
+
+test('a provider resource fence admits one holder at a time and stays held while its outcome is unresolved', pg, async t => {
+  const { pool, db } = await fixture(t);
+  const receipt = (key, status) => pool.query("INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at) VALUES ($1, 'p', $1, 'hash', $2, 'now')", [key, status]);
+  for (const key of ['fence-a', 'fence-b', 'fence-c']) await receipt(key, 'pending');
+  // Both claims find the resource free before either commits; only the single conditional upsert keeps one holder.
+  const gate = await blockWrites(pool, 'zernio_webhook_mutations');
+  const claims = [claimFence(db, 'zernio_webhook_mutations', 'webhook-1', 'p', 'fence-a'), claimFence(db, 'zernio_webhook_mutations', 'webhook-1', 'p', 'fence-b')];
+  await gate.waiting(2); await gate.release();
+  assert.deepEqual((await Promise.all(claims)).sort(), [false, true]);
+  const holder = (await pool.query("SELECT request_key FROM zernio_webhook_mutations WHERE resource = 'webhook-1'")).rows[0].request_key;
+  await pool.query("UPDATE integration_operations SET status = 'uncertain' WHERE request_key = $1", [holder]);
+  assert.equal(await claimFence(db, 'zernio_webhook_mutations', 'webhook-1', 'p', 'fence-c'), false, 'An uncertain holder keeps the fence.');
+  await pool.query("UPDATE integration_operations SET status = 'reviewed-not-applied' WHERE request_key = $1", [holder]);
+  assert.equal(await claimFence(db, 'zernio_webhook_mutations', 'webhook-1', 'p', 'fence-c'), true, 'A reviewed holder releases the fence to the next action.');
+  await releaseFence(db, 'zernio_webhook_mutations', 'webhook-1', 'p', 'fence-c');
+  assert.equal((await pool.query('SELECT count(*) AS count FROM zernio_webhook_mutations')).rows[0].count, 0);
+  await receipt('lead-a', 'pending'); await receipt('lead-b', 'pending');
+  assert.equal(await claimFence(db, 'zernio_lead_mutations', 'p', 'p', 'lead-a', 'project_id'), true);
+  assert.equal(await claimFence(db, 'zernio_lead_mutations', 'p', 'p', 'lead-b', 'project_id'), false, 'Project-keyed fences behave the same way.');
 });

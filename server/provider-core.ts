@@ -4,7 +4,7 @@ import { readResponseText } from '@ten98/runtime';
 import { buildPlatformEntry, normalizeMediaItems, normalizePlatformOptions, normalizePostTags, validPostInstant, resolveVariant, validatePostForPlatforms, wireMediaItems, assetDeliveryIssue } from '../shared/social-posts.ts';
 import type { IncomingHttpHeaders } from 'node:http';
 import { sql } from 'drizzle-orm';
-import type { Database } from './database.ts';
+import type { Database, Executor } from './database.ts';
 
 // Provider and stored records are untrusted JSON; every reader below validates the fields it consumes.
 export type ProviderRecord = Record<string, any>;
@@ -167,6 +167,23 @@ export async function operation(context: OperationContext, action: (key: string)
     if (!updated.rowCount) fail(409, 'OPERATION_REVIEWED', 'This action was closed by an operator review. Its review and original receipt were preserved.');
     return outcome;
   } finally { operation.active.delete(id); }
+}
+/**
+ * Single-flight fence for one provider resource, held for the life of an operation (the zernio_*_mutations,
+ * *_claims, *_creates and *_updates tables). One statement claims it: a free resource is inserted, and a held one is
+ * taken over only when its holder's receipt has a resolved outcome, so parallel or unresolved actions cannot both send.
+ * `column` names the resource key column; tables keyed by project_id use `column: 'project_id'`.
+ */
+export async function claimFence(db: Executor, table: string, resource: string, projectId: string, key: string, column = 'resource'): Promise<boolean> {
+  const fence = sql.identifier(table), resourceColumn = sql.identifier(column);
+  const values = column === 'project_id' ? sql`(project_id, request_key) VALUES (${projectId}, ${key})` : sql`(${resourceColumn}, project_id, request_key) VALUES (${resource}, ${projectId}, ${key})`;
+  const claimed = await db.execute(sql`INSERT INTO ${fence} ${values} ON CONFLICT (${resourceColumn}) DO UPDATE SET project_id = excluded.project_id, request_key = excluded.request_key
+    WHERE EXISTS (SELECT 1 FROM integration_operations o WHERE o.project_id = ${fence}.project_id AND o.request_key = ${fence}.request_key AND o.status NOT IN ('pending', 'uncertain'))`);
+  return Boolean(claimed.rowCount);
+}
+/** Releases a fence this request holds; an uncertain outcome keeps it held until an operator review resolves the receipt. */
+export async function releaseFence(db: Executor, table: string, resource: string, projectId: string, key: string, column = 'resource'): Promise<void> {
+  await db.execute(sql`DELETE FROM ${sql.identifier(table)} WHERE ${sql.identifier(column)} = ${column === 'project_id' ? projectId : resource} AND project_id = ${projectId} AND request_key = ${key}`);
 }
 // Process-local state: operation ids whose provider call is running in this process, and this process's run identity.
 // Exclusion between requests comes from the pending receipt under the claim locks, not from this set.
