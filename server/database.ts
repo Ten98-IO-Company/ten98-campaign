@@ -1,7 +1,80 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import pg from 'pg';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import * as schema from './schema.ts';
+
+// PostgreSQL (issue #25): modules move here from the SQLite functions below one by one until cutover.
+// Ported from ten98-discover (MIT) src/server/db.ts and cli.ts migrate at e36503c: the pool, versioned SQL
+// files and checksum ledger. Planned to move into @ten98/runtime so both apps share one implementation.
+let database: { pool: pg.Pool; db: ReturnType<typeof drizzle<typeof schema>> } | undefined;
+export function getDatabase(connectionString = process.env.DATABASE_URL) {
+  if (!database) {
+    if (!connectionString) throw new Error('Set DATABASE_URL to the PostgreSQL connection string.');
+    const pool = new pg.Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10000, statement_timeout: 10000 });
+    pool.on('error', () => console.error('Database connection failed; check database availability.'));
+    database = { pool, db: drizzle(pool, { schema }) };
+  }
+  return database;
+}
+export async function closeDatabase() { if (database) { const { pool } = database; database = undefined; await pool.end(); } }
+
+const migrationFiles = ['0001_baseline.sql'] as const;
+type Migration = Readonly<{ version: string; filename: string; sql: string; checksum: string }>;
+type AppliedMigration = Readonly<{ version: string; checksum: string }>;
+let migrations: Promise<readonly Migration[]> | undefined;
+
+export function migrationSources(): Promise<readonly Migration[]> {
+  if (!migrations) migrations = Promise.all(migrationFiles.map(async filename => {
+    // Git line-ending conversion must not change a migration's identity across host operating systems.
+    const sql = (await readFile(join(import.meta.dirname, '..', 'migrations', filename), 'utf8')).replace(/\r\n?/g, '\n');
+    return Object.freeze({ version: filename.slice(0, 4), filename, sql, checksum: createHash('sha256').update(sql).digest('hex') });
+  })).then(sources => Object.freeze(sources)).catch(error => { migrations = undefined; throw error; });
+  return migrations;
+}
+
+function schemaMismatch() {
+  return Object.assign(new Error('Database schema is incompatible with this application. Use the matching image and migrations.'), { code: 'SCHEMA_MISMATCH' });
+}
+
+// Applied rows must be an unmodified prefix of the shipped migrations; anything else is a different schema.
+export async function pendingMigrations(applied: readonly AppliedMigration[]): Promise<readonly Migration[]> {
+  const sources = await migrationSources();
+  if (applied.length > sources.length || applied.some((row, index) => row.version !== sources[index].version || row.checksum !== sources[index].checksum)) throw schemaMismatch();
+  return sources.slice(applied.length);
+}
+
+export async function assertSchema() {
+  const { rows } = await getDatabase().pool.query<AppliedMigration>('SELECT version, checksum FROM schema_version ORDER BY version');
+  if ((await pendingMigrations(rows)).length !== 0) throw schemaMismatch();
+}
+
+// One transaction under an advisory lock, so concurrent starts apply each migration exactly once.
+export async function migrate(): Promise<string[]> {
+  await migrationSources();
+  const client = await getDatabase().pool.connect(), applied: string[] = [];
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [109858, 1]);
+    await client.query('CREATE TABLE IF NOT EXISTS schema_version (version text PRIMARY KEY, checksum text NOT NULL)');
+    const current = await client.query<AppliedMigration>('SELECT version, checksum FROM schema_version ORDER BY version');
+    for (const migration of await pendingMigrations(current.rows)) {
+      await client.query(migration.sql);
+      await client.query('INSERT INTO schema_version (version, checksum) VALUES ($1, $2)', [migration.version, migration.checksum]);
+      applied.push(migration.version);
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+  return applied;
+}
 
 export type ProjectRecord = { id: string; projectId: string; createdAt: string; updatedAt: string; [key: string]: any };
 export type Store = ReturnType<typeof createStore>;
