@@ -16,10 +16,12 @@ async function policy(db: Executor, projectId: string) {
   const row = await first(db.execute(sql`SELECT require_approval AS "requireApproval",updated_by AS "updatedBy",updated_at AS "updatedAt" FROM project_approval_policy WHERE project_id=${projectId}`));
   return row ? { ...row, requireApproval: Boolean(row.requireApproval) } : { requireApproval: false, updatedBy: null, updatedAt: null };
 }
+async function assetRecords(context: ApprovalContext, post: ProviderRecord) {
+  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map((item: any) => item?.assetId), ...Object.values(normalizeAccountVariants(post)).map(item => item?.assetId)].filter(Boolean))];
+  return { ids, records: await Promise.all(ids.map(id => context.store.get(context.project.id, 'assets', id))) };
+}
 async function postSnapshot(context: ApprovalContext, post: ProviderRecord) {
-  const accountOverrides = normalizeAccountVariants(post);
-  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map((item: any) => item?.assetId), ...Object.values(accountOverrides).map(item => item?.assetId)].filter(Boolean))];
-  const records = await Promise.all(ids.map(id => context.store.get(context.project.id, 'assets', id)));
+  const accountOverrides = normalizeAccountVariants(post), { ids, records } = await assetRecords(context, post);
   const assets = ids.map((id, index) => {
     const asset = records[index];
     return asset ? { id: asset.id, url: asset.url || '', deliveryUrl: asset.deliveryUrl || '', approval: asset.approval || 'pending', kind: asset.kind || '', size: asset.size ?? null, mimeType: asset.mimeType || '', width: asset.width ?? null, height: asset.height ?? null, duration: asset.duration ?? null, modifiedTime: asset.modifiedTime || '', md5Checksum: asset.md5Checksum || '', ...(asset.deliverySource === 'zernio' ? Object.fromEntries(['deliverySource', 'deliveryUploadedAt', 'deliveryExpiresAt', 'deliveryKey', 'deliveryAttemptId', 'deliveryKind', 'deliveryMimeType', 'deliverySize', 'deliveryFilename'].map(key => [key, asset[key] ?? null])) : {}) } : { id, missing: true };
@@ -147,6 +149,61 @@ export async function assertProviderPostEdit(context: ApprovalContext) {
   if ((await policy(context.db, context.project.id)).requireApproval && !administrators.has(context.role)) fail(403, 'APPROVED_PROVIDER_EDIT_RESTRICTED', 'An owner or administrator must make changes to submitted posts while publishing approval is required.');
 }
 
+// A provider copy takes a proposal request, and a review of its pending proposal; every other case stays local.
+async function reviewTarget(context: ApprovalContext, id: string, requesting: boolean) {
+  const { project, db, store, body } = context;
+  const stored = await store.get(project.id, 'posts', id), storedReview = stored ? await latest(db, project.id, stored.id) : undefined;
+  const proposing = Boolean(stored?.externalId && !stored.sample) && (requesting ? Boolean(body && typeof body === 'object' && Object.hasOwn(body, 'proposal')) : proposalOf(storedReview));
+  if (proposing && requesting) return { stored, proposing } as ProviderRecord;
+  const post = proposing ? stored : await localPost(context, id), review = proposing ? storedReview : await latest(db, project.id, post.id);
+  const snapshot = proposing ? JSON.parse(review!.snapshot) : await postSnapshot(context, post), hash = proposing ? review!.fingerprint : fingerprint(snapshot);
+  return { stored, proposing, post, review, snapshot, hash } as ProviderRecord;
+}
+function reviewInput(body: any) {
+  fields(body, ['decision', 'note', 'reviewId']);
+  const note = body.note === undefined ? '' : body.note;
+  if (!['approved', 'rejected'].includes(body.decision) || typeof note !== 'string' || note.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(note) || typeof body.reviewId !== 'string') fail(400, 'INVALID_APPROVAL_REVIEW', 'Choose approve or reject and use a review note of at most 2,000 characters.');
+  return note;
+}
+// One review decision; the single and bulk routes both run it. A repeatable (bulk) item already decided the same way
+// returns its current state without a second decision or activity entry.
+async function decide(context: ApprovalContext, { post, review, snapshot, hash, proposing }: ProviderRecord, body: any, repeatable = false) {
+  const { project, role, user, db, store } = context;
+  if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
+  const note = reviewInput(body);
+  if (repeatable && (await first(db.execute(sql`SELECT status FROM post_approval_reviews WHERE id=${body.reviewId} AND project_id=${project.id} AND post_id=${post.id}`)))?.status === body.decision) return { status: 'unchanged', item: await queueItem(context, post, queueSummary(post, [], true)) };
+  if (!review || review.id !== body.reviewId || review.status !== 'pending' || review.fingerprint !== hash) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
+  let queue = null;
+  if (body.decision === 'approved' && proposing) {
+    if ((await policy(db, project.id)).requireApproval) approvalAccounts(snapshot);
+    assetApproved(snapshot);
+  } else if (body.decision === 'approved') {
+    if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
+    if (post.queueId) queue = reviewedQueue(post, await publishingQueues(context));
+    const currentReview = await latest(db, project.id, post.id);
+    if (fingerprint(await postSnapshot(context, await localPost(context, post.id))) !== hash || currentReview?.id !== review.id || currentReview?.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before approving it.');
+    if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
+    assetApproved(snapshot);
+  }
+  // The reviewer's role is re-checked under the workspace lock. The per-post lock serialises decisions with requests;
+  // only a still-pending review takes a decision, so a parallel approve and reject cannot both apply.
+  const selfApproved = await db.transaction(async (tx: Executor) => {
+    await lockReviewer(tx, project.id, user.id);
+    await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
+    const self = body.decision === 'approved' && review.requested_by === user.id && (await policy(tx, project.id)).requireApproval;
+    if (self) await assertSelfApprovalAllowed(tx, project.id, user.id);
+    const decided = await tx.execute(sql`UPDATE post_approval_reviews SET status=${body.decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()},self_approved=${self} WHERE id=${review.id} AND status='pending'`);
+    if (!decided.rowCount) {
+      // A parallel decision the same way already holds; a repeatable item reports it instead of failing.
+      if (repeatable && (await first(tx.execute(sql`SELECT status FROM post_approval_reviews WHERE id=${review.id}`)))?.status === body.decision) return null;
+      fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
+    }
+    return self;
+  });
+  if (selfApproved === null) return { status: 'unchanged', item: await queueItem(context, post, queueSummary(post, [], true)) };
+  await store.activity(project.id, selfApproved ? `Content self-approved by ${user.name || user.id} (only administrator).` : `Content ${body.decision} by ${user.name || user.id}.`); return { status: 'decided', item: await queueItem(context, post, queue ? { ...queue, ready: true } : queueSummary(post, [], true)) };
+}
+
 export async function handleApprovals(context: ApprovalContext) {
   const { req, url, project, role, user, db, store, body = {}, send } = context;
   const prefix = `/api/projects/${project.id}/approvals/`; if (!url.pathname.startsWith(prefix)) return false;
@@ -167,15 +224,27 @@ export async function handleApprovals(context: ApprovalContext) {
       }
       send(200, { ...await policy(db, project.id), posts: await Promise.all(posts.map((post: ProviderRecord) => queueItem(context, post, queueSummary(post, queues, unavailable)))) }); return true;
     }
+    // Each item is its own decision through the single-review path, so one failure leaves the others decided.
+    if (req.method === 'POST' && path === 'bulk') {
+      if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
+      fields(body, ['decision', 'note', 'items']);
+      if (!Array.isArray(body.items) || !body.items.length || body.items.length > 50 || body.items.some((item: any) => !item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).some(key => !['postId', 'reviewId'].includes(key)) || typeof item.postId !== 'string' || !item.postId || item.postId.length > 200 || typeof item.reviewId !== 'string' || !item.reviewId || item.reviewId.length > 200)) fail(400, 'INVALID_APPROVAL_BULK', 'Choose between 1 and 50 reviews, each with its post and review.');
+      const input = (reviewId: string) => ({ decision: body.decision, ...(body.note === undefined ? {} : { note: body.note }), reviewId });
+      reviewInput(input(''));
+      const results: ProviderRecord[] = [];
+      for (const { postId, reviewId } of body.items) {
+        try { const { status, item } = await decide(context, await reviewTarget(context, postId, false), input(reviewId), true); results.push({ postId, reviewId, status, item }); }
+        catch (error) { results.push({ postId, reviewId, status: 'failed', error: { code: error instanceof IntegrationError ? error.code : 'APPROVAL_ERROR', message: error instanceof IntegrationError ? error.message : 'The content approval action could not be completed.' } }); }
+      }
+      send(200, { results }); return true;
+    }
     const match = path.match(/^posts\/([^/]+)\/(request|review)$/);
     if (!match || req.method !== 'POST') fail(404, 'APPROVAL_ACTION_NOT_FOUND', 'This approval action was not found.');
     if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'APPROVAL_WRITE_REQUIRED', 'Editing permission is required to request content review.');
-    // A provider copy takes a proposal request, and a review of its pending proposal; every other case stays local.
-    const stored = await store.get(project.id, 'posts', match[1]), storedReview = stored ? await latest(db, project.id, stored.id) : undefined;
-    const proposing = Boolean(stored?.externalId && !stored.sample) && (match[2] === 'request' ? Boolean(body && typeof body === 'object' && Object.hasOwn(body, 'proposal')) : proposalOf(storedReview));
-    if (proposing && match[2] === 'request') { send(200, { item: await requestProposal(context, stored) }); return true; }
-    const post = proposing ? stored : await localPost(context, match[1]), review = proposing ? storedReview : await latest(db, project.id, post.id);
-    const snapshot = proposing ? JSON.parse(review!.snapshot) : await postSnapshot(context, post), hash = proposing ? review!.fingerprint : fingerprint(snapshot);
+    const target = await reviewTarget(context, match[1], match[2] === 'request');
+    if (target.proposing && match[2] === 'request') { send(200, { item: await requestProposal(context, target.stored) }); return true; }
+    if (match[2] === 'review') { send(200, { item: (await decide(context, target, body)).item }); return true; }
+    const { post, review, snapshot, hash } = target;
     if (match[2] === 'request') {
       fields(body, []);
       if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
@@ -196,35 +265,6 @@ export async function handleApprovals(context: ApprovalContext) {
       });
       send(200, { item: await queueItem(context, post, queue ? { ...queue, ready: true } : null) }); return true;
     }
-    if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
-    fields(body, ['decision', 'note', 'reviewId']);
-    const note = body.note === undefined ? '' : body.note;
-    if (!['approved', 'rejected'].includes(body.decision) || typeof note !== 'string' || note.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(note) || typeof body.reviewId !== 'string') fail(400, 'INVALID_APPROVAL_REVIEW', 'Choose approve or reject and use a review note of at most 2,000 characters.');
-    if (!review || review.id !== body.reviewId || review.status !== 'pending' || review.fingerprint !== hash) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
-    let queue = null;
-    if (body.decision === 'approved' && proposing) {
-      if ((await policy(db, project.id)).requireApproval) approvalAccounts(snapshot);
-      assetApproved(snapshot);
-    } else if (body.decision === 'approved') {
-      if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
-      if (post.queueId) queue = reviewedQueue(post, await publishingQueues(context));
-      const currentReview = await latest(db, project.id, post.id);
-      if (fingerprint(await postSnapshot(context, await localPost(context, post.id))) !== hash || currentReview?.id !== review.id || currentReview?.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before approving it.');
-      if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
-      assetApproved(snapshot);
-    }
-    // The reviewer's role is re-checked under the workspace lock. The per-post lock serialises decisions with requests;
-    // only a still-pending review takes a decision, so a parallel approve and reject cannot both apply.
-    const selfApproved = await db.transaction(async (tx: Executor) => {
-      await lockReviewer(tx, project.id, user.id);
-      await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
-      const self = body.decision === 'approved' && review.requested_by === user.id && (await policy(tx, project.id)).requireApproval;
-      if (self) await assertSelfApprovalAllowed(tx, project.id, user.id);
-      const decided = await tx.execute(sql`UPDATE post_approval_reviews SET status=${body.decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()},self_approved=${self} WHERE id=${review.id} AND status='pending'`);
-      if (!decided.rowCount) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
-      return self;
-    });
-    await store.activity(project.id, selfApproved ? `Content self-approved by ${user.name || user.id} (only administrator).` : `Content ${body.decision} by ${user.name || user.id}.`); send(200, { item: await queueItem(context, post, queue ? { ...queue, ready: true } : queueSummary(post, [], true)) }); return true;
   } catch (error) {
     send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'APPROVAL_ERROR', message: error instanceof IntegrationError ? error.message : 'The content approval action could not be completed.' } }); return true;
   }

@@ -153,7 +153,7 @@ async function selfReviewFixture(t, members, poolOptions) {
   const review = (userId, reviewId, decision = 'approved') => invoke(`posts/${post.id}/review`, userId, { reviewId, decision, note: 'Checked.' });
   const stored = reviewId => sql.get('SELECT status, self_approved FROM post_approval_reviews WHERE id = ?', reviewId);
   const setPolicy = async (userId, requireApproval) => assert.equal((await invoke('policy', userId, { requireApproval })).status, 200);
-  return { pool, sql, store, project, post, roles, addMember, invoke, request, review, stored, setPolicy };
+  return { db, pool, sql, store, project, post, roles, addMember, invoke, request, review, stored, setPolicy };
 }
 
 test('with approval required, a requester cannot approve their own review while another owner or administrator is active', { skip: postgresSkip }, async t => {
@@ -295,4 +295,71 @@ test('a reviewer demoted after their request started cannot approve or reject', 
     assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVAL_ADMIN_REQUIRED');
   }
   assert.deepEqual(await f.stored(reviewId), { status: 'pending', self_approved: false });
+});
+
+// Bulk decisions run every item through the single-review path, so each item keeps its own rules and outcome.
+test('bulk decisions apply each item independently and repeat idempotently without a second decision', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['avery', 'admin'], ['casey', 'editor']]);
+  await f.setPolicy('blair', true);
+  const bulk = (userId, body) => f.invoke('bulk', userId, body);
+  const create = content => f.store.create(f.project.id, 'posts', { content, platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [] });
+  const second = await create('Second bulk fixture'), third = await create('Self-requested bulk fixture');
+  const requestFor = async (post, userId) => { const result = await f.invoke(`posts/${post.id}/request`, userId); assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data.item.review.id; };
+  const items = [{ postId: f.post.id, reviewId: await requestFor(f.post, 'casey') }, { postId: second.id, reviewId: await requestFor(second, 'casey') }, { postId: third.id, reviewId: await requestFor(third, 'avery') }, { postId: 'missing-post', reviewId: 'missing-review' }];
+  assert.equal((await bulk('casey', { decision: 'approved', items })).status, 403);
+  for (const body of [{ decision: 'approved', items: [] }, { decision: 'approved', items: Array.from({ length: 51 }, () => items[0]) }, { decision: 'approved', items: [{ ...items[0], extra: true }] }, { decision: 'approved', items: [{ postId: f.post.id }] }, { decision: 'maybe', items }, { decision: 'approved', items, note: 'x'.repeat(2001) }, { decision: 'approved', items, reviewId: 'forged' }]) {
+    const result = await bulk('avery', body); assert.equal(result.status, 400, JSON.stringify(result.data));
+  }
+  assert.equal(Number((await f.sql.get("SELECT count(*) AS count FROM post_approval_reviews WHERE status <> 'pending'")).count), 0, 'An invalid bulk request decides nothing.');
+  const activities = async () => Number((await f.sql.get('SELECT count(*) AS count FROM activity WHERE project_id = ?', f.project.id)).count);
+  const before = await activities();
+  let result = await bulk('avery', { decision: 'approved', note: 'Bulk checked.', items });
+  assert.equal(result.status, 200, JSON.stringify(result.data));
+  assert.deepEqual(result.data.results.map(row => [row.postId, row.reviewId, row.status, row.error?.code]), [[f.post.id, items[0].reviewId, 'decided', undefined], [second.id, items[1].reviewId, 'decided', undefined], [third.id, items[2].reviewId, 'failed', 'APPROVAL_SELF_REVIEW'], ['missing-post', 'missing-review', 'failed', 'APPROVAL_POST_NOT_FOUND']]);
+  assert.equal(result.data.results[0].item.status, 'approved'); assert.equal(result.data.results[0].item.review.note, 'Bulk checked.'); assert.equal(result.data.results[0].item.review.reviewedBy.id, 'avery');
+  assert.deepEqual(await f.stored(items[0].reviewId), { status: 'approved', self_approved: false }); assert.deepEqual(await f.stored(items[1].reviewId), { status: 'approved', self_approved: false }); assert.deepEqual(await f.stored(items[2].reviewId), { status: 'pending', self_approved: false });
+  assert.equal(await activities(), before + 2, 'Each decided item logs its own activity entry; failed items log none.');
+  result = await bulk('avery', { decision: 'approved', note: 'Bulk checked.', items: items.slice(0, 2) });
+  assert.deepEqual(result.data.results.map(row => [row.status, row.item?.status]), [['unchanged', 'approved'], ['unchanged', 'approved']], 'A repeated item returns its current state.');
+  assert.equal(await activities(), before + 2, 'A repeated item records no second decision or activity entry.');
+  result = await bulk('avery', { decision: 'rejected', items: items.slice(0, 1) });
+  assert.equal(result.data.results[0].status, 'failed'); assert.equal(result.data.results[0].error.code, 'APPROVAL_REVIEW_CHANGED', 'A decided review cannot be reversed by bulk.');
+  assert.equal((await f.review('avery', items[0].reviewId)).status, 409, 'The single route still refuses a repeated decision.');
+  result = await bulk('blair', { decision: 'approved', items: [items[2]] });
+  assert.equal(result.data.results[0].status, 'decided'); assert.deepEqual(await f.stored(items[2].reviewId), { status: 'approved', self_approved: false });
+});
+
+test('bulk approval keeps the single-administrator self-approval exception and re-checks the reviewer role', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+  await f.setPolicy('blair', true);
+  const reviewId = await f.request('blair');
+  let result = await f.invoke('bulk', 'blair', { decision: 'approved', items: [{ postId: f.post.id, reviewId }] });
+  assert.equal(result.data.results[0].status, 'decided', JSON.stringify(result.data)); assert.equal(result.data.results[0].item.review.selfApproved, true);
+  assert.deepEqual(await f.stored(reviewId), { status: 'approved', self_approved: true });
+  assert.ok((await f.sql.all('SELECT message FROM activity WHERE project_id = ?', f.project.id)).some(row => row.message === 'Content self-approved by Blair Owner (only administrator).'));
+  await f.store.update(f.project.id, 'posts', f.post.id, { content: 'Changed after approval' });
+  const next = await f.request('casey');
+  await f.pool.query("UPDATE memberships SET role = 'editor' WHERE user_id = 'blair'");
+  result = await f.invoke('bulk', 'blair', { decision: 'approved', items: [{ postId: f.post.id, reviewId: next }] });
+  assert.equal(result.data.results[0].error.code, 'APPROVAL_ADMIN_REQUIRED'); assert.deepEqual(await f.stored(next), { status: 'pending', self_approved: false });
+});
+
+test('a bulk decision racing a single decision on the same review records exactly one decision', { skip: postgresSkip }, async t => {
+  for (const [first, decisions] of [['single', ['approved', 'approved']], ['bulk', ['approved', 'approved']], ['single', ['approved', 'rejected']], ['bulk', ['rejected', 'approved']]]) {
+    await t.test(`${first} first, ${decisions.join(' then ')}`, async t => {
+      const f = await selfReviewFixture(t, [['blair', 'owner'], ['avery', 'admin'], ['casey', 'editor']]);
+      const reviewId = await f.request('casey');
+      const single = decision => f.review('blair', reviewId, decision), bulk = decision => f.invoke('bulk', 'avery', { decision, items: [{ postId: f.post.id, reviewId }] });
+      // Both pass the pending check first. The leader holds the per-post lock and waits on the blocked write; the other waits on that lock.
+      const gate = await blockWrites(f.pool, 'post_approval_reviews');
+      const leading = (first === 'single' ? single : bulk)(decisions[0]); await gate.waiting(1);
+      const trailing = (first === 'single' ? bulk : single)(decisions[1]); await gate.waiting(2); await gate.release();
+      const [lead, trail] = await Promise.all([leading, trailing]), outcome = result => result.data.results ? result.data.results[0].status : result.status;
+      assert.equal(outcome(lead), first === 'single' ? 200 : 'decided', JSON.stringify(lead.data));
+      if (first === 'single') assert.equal(outcome(trail), decisions[0] === decisions[1] ? 'unchanged' : 'failed', JSON.stringify(trail.data));
+      else assert.equal(outcome(trail), 409);
+      assert.equal((await f.stored(reviewId)).status, decisions[0]);
+      assert.equal((await f.sql.all("SELECT message FROM activity WHERE project_id = ? AND message LIKE 'Content % by %' AND message NOT LIKE 'Content review requested%'", f.project.id)).length, 1, 'Exactly one decision is logged.');
+    });
+  }
 });
