@@ -55,7 +55,7 @@ for (const path of ['blogs/site/91/create', 'blogs/site/91/articles/12/update'])
   await invoke('blogs/site/91/articles/12', {}, validate); assert.equal(saved.length, 1, 'Reading an article cannot clear a draft.');
   wait = true; const pending = invoke(path, {}, validate); revisions.set(form, 2); response.resolve(result); await pending;
   assert.equal(saved.length, 1, 'A completed save cannot clear later edits.');
-  assert.match(source, /modal\.type === 'blog-draft' \? <React\.Suspense/);
+  assert.match(source, /modal\.type === 'blog-draft' \? <Suspense/);
   assert.match(source, /onCreate=\{canWrite \?/);
   assert.match(source, /onEditDraft=\{canWrite \?/);
   assert.match(source, /article=\{modal\.item!\.article\}/);
@@ -76,11 +76,11 @@ for (const [path, receiptField] of [['products/shop/9001/update', 'product'], ['
   result.accountId = 'shop'; await invoke(path, {}, validate); assert.equal(saved.length, 1);
   await invoke('products/shop/9001', {}, validate); assert.equal(saved.length, 1, 'Reading cannot clear a draft.');
   wait = true; const pending = invoke(path, {}, validate); revisions.set(form, 2); response.resolve(result); await pending; assert.equal(saved.length, 1);
-  assert.match(source, /modal\.type === 'product-edit' \? <React\.Suspense/);
+  assert.match(source, /modal\.type === 'product-edit' \? <Suspense/);
   assert.match(source, /<ProductEditor[^>]+readOnly=\{!canWrite\} request=\{editorIntegrate\}/);
-  assert.match(source, /modal\.type === 'product-create' \? <React\.Suspense/);
+  assert.match(source, /modal\.type === 'product-create' \? <Suspense/);
   assert.match(source, /<ProductCreator[^>]+readOnly=\{!canWrite\} request=\{editorIntegrate\}/);
-  assert.match(source, /modal\.type === 'product-price' \? <React\.Suspense/);
+  assert.match(source, /modal\.type === 'product-price' \? <Suspense/);
   assert.match(source, /<ProductPriceEditor[^>]+readOnly=\{!canWrite\} request=\{editorIntegrate\}/);
   assert.match(source, /<ProductStateReview[^>]+readOnly=\{!canWrite\} request=\{editorIntegrate\}/);
   assert.match(source, /onDeactivate=\{canWrite \?/);

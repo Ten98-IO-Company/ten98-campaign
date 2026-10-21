@@ -25,7 +25,7 @@ test('the month grid is gone and the publishing agenda is always rendered inside
   assert.doesNotMatch(appSource, /calendar-panel|calendar-grid|day-number|Create post for /);
   const page = appSource.match(/\{page === 'Calendar' && [^\r\n]+/g);
   assert.equal(page.length, 1, 'The Calendar page is one agenda inside GoogleCalendar.');
-  assert.match(page[0], /^\{page === 'Calendar' && <GoogleCalendar key=\{state\.projectId\}[^\r\n]*agenda=\{eventActions => <React\.Suspense[^\r\n]*<CampaignPublishingAgenda [^\r\n]*googleEventActions=\{eventActions\}/);
+  assert.match(page[0], /^\{page === 'Calendar' && <GoogleCalendar key=\{state\.projectId\}[^\r\n]*agenda=\{eventActions => <Suspense[^\r\n]*<CampaignPublishingAgenda [^\r\n]*googleEventActions=\{eventActions\}/);
   for (const label of ['aria-label="Previous month"', '>Today<', 'aria-label="Next month"']) assert.ok(page[0].includes(label), label);
 });
 
