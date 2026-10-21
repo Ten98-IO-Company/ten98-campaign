@@ -77,9 +77,9 @@ function editorValues(dialog: ParentNode) {
 }
 const pages: { label: Page; icon: IconName; group?: string }[] = [
   { label: 'Overview', icon: 'grid', group: 'WORKSPACE' }, { label: 'Campaigns', icon: 'layers' },
-  { label: 'Publishing', icon: 'megaphone', group: 'MANAGE' }, { label: 'Approvals', icon: 'check' }, { label: 'Calendar', icon: 'clock' }, { label: 'Ads manager', icon: 'trending-up' },
-  { label: 'OOH media', icon: 'building' }, { label: 'Direct campaigns', icon: 'mail' }, { label: 'Unified inbox', icon: 'inbox' }, { label: 'Links & tracking', icon: 'external' },
-  { label: 'Asset library', icon: 'folder', group: 'LIBRARY' }, { label: 'Media providers', icon: 'globe' }, { label: 'Analytics', icon: 'activity' }, { label: 'Draft content', icon: 'file' }, { label: 'Integrations', icon: 'workflow', group: 'SETUP' },
+  { label: 'Publishing', icon: 'send', group: 'MANAGE' }, { label: 'Approvals', icon: 'check' }, { label: 'Calendar', icon: 'calendar' }, { label: 'Ads manager', icon: 'target' },
+  { label: 'OOH media', icon: 'billboard' }, { label: 'Direct campaigns', icon: 'mail' }, { label: 'Unified inbox', icon: 'inbox' }, { label: 'Links & tracking', icon: 'link' },
+  { label: 'Asset library', icon: 'image', group: 'LIBRARY' }, { label: 'Media providers', icon: 'globe' }, { label: 'Analytics', icon: 'chart' }, { label: 'Draft content', icon: 'file' }, { label: 'Integrations', icon: 'workflow', group: 'SETUP' },
 ];
 // Group the page list for the shared sidebar; each entry with a group label opens a new group.
 const pageGroups = pages.reduce<{ id: string; label: string; pages: typeof pages }[]>((groups, entry) => { if (entry.group || !groups.length) groups.push({ id: (entry.group || 'main').toLowerCase(), label: entry.group || '', pages: [] }); groups.at(-1)!.pages.push(entry); return groups; }, []);
