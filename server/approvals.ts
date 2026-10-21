@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
 import { createStore, type Executor } from './database.ts';
-import { fail, IntegrationError, targetConfiguration, zernioClient, type OperationContext, type ProviderRecord } from './provider-core.ts';
+import { fail, IntegrationError, postRestrictions, targetConfiguration, zernioClient, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
 import { queueList, reviewedQueue } from './zernio-queues.ts';
 import { SOCIAL_UPDATE_FIELDS, socialUpdateProposal } from './integrations.ts';
@@ -16,10 +16,13 @@ async function policy(db: Executor, projectId: string) {
   const row = await first(db.execute(sql`SELECT require_approval AS "requireApproval",updated_by AS "updatedBy",updated_at AS "updatedAt" FROM project_approval_policy WHERE project_id=${projectId}`));
   return row ? { ...row, requireApproval: Boolean(row.requireApproval) } : { requireApproval: false, updatedBy: null, updatedAt: null };
 }
-async function postSnapshot(context: ApprovalContext, post: ProviderRecord) {
-  const accountOverrides = normalizeAccountVariants(post);
-  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map((item: any) => item?.assetId), ...Object.values(accountOverrides).map(item => item?.assetId)].filter(Boolean))];
-  const records = await Promise.all(ids.map(id => context.store.get(context.project.id, 'assets', id)));
+// `loaded` serves a caller that already read the project's assets, so many snapshots cost no further queries.
+async function assetRecords(context: ApprovalContext, post: ProviderRecord, loaded?: Map<string, ProviderRecord>) {
+  const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map((item: any) => item?.assetId), ...Object.values(normalizeAccountVariants(post)).map(item => item?.assetId)].filter(Boolean))];
+  return { ids, records: await Promise.all(ids.map(id => loaded ? loaded.get(id) ?? null : context.store.get(context.project.id, 'assets', id))) };
+}
+async function postSnapshot(context: ApprovalContext, post: ProviderRecord, loaded?: Map<string, ProviderRecord>) {
+  const accountOverrides = normalizeAccountVariants(post), { ids, records } = await assetRecords(context, post, loaded);
   const assets = ids.map((id, index) => {
     const asset = records[index];
     return asset ? { id: asset.id, url: asset.url || '', deliveryUrl: asset.deliveryUrl || '', approval: asset.approval || 'pending', kind: asset.kind || '', size: asset.size ?? null, mimeType: asset.mimeType || '', width: asset.width ?? null, height: asset.height ?? null, duration: asset.duration ?? null, modifiedTime: asset.modifiedTime || '', md5Checksum: asset.md5Checksum || '', ...(asset.deliverySource === 'zernio' ? Object.fromEntries(['deliverySource', 'deliveryUploadedAt', 'deliveryExpiresAt', 'deliveryKey', 'deliveryAttemptId', 'deliveryKind', 'deliveryMimeType', 'deliverySize', 'deliveryFilename'].map(key => [key, asset[key] ?? null])) : {}) } : { id, missing: true };
@@ -58,6 +61,21 @@ async function localPost(context: ApprovalContext, id: string) {
 function assetApproved(snapshot: ProviderRecord) {
   if (snapshot.assets.some((asset: ProviderRecord) => asset.missing || asset.approval !== 'approved')) fail(409, 'APPROVAL_ASSET_REQUIRED', 'Approve every referenced creative asset before approving or publishing this post.');
 }
+// The local per-platform restriction check publishing runs, so a post that would fail to publish cannot be approved.
+// Only customised accounts carry their platform locally, so they are checked per account and the base variant on platforms
+// without one; publishing's own check covers an uncustomised account on a customised platform. A retry checks only its failed copies.
+function assertPlatformRules(post: ProviderRecord, assets: ProviderRecord[], failed?: ProviderRecord[]) {
+  let overrides: ProviderRecord = {}; try { overrides = normalizeAccountVariants(post); } catch { /* reported by the restriction check below */ }
+  const targets = Object.entries(overrides).map(([_id, copy]) => ({ _id, platform: copy.platform })), base = (post.platforms || []).filter((platform: string) => !targets.some(target => target.platform === platform));
+  // Media in a failed copy was already delivered, so its hosted-file expiry is checked by the retry against the provider copy.
+  const owned = new Set<string>(failed ? assets.map(asset => asset.deliveryUrl) : []);
+  let errors: ProviderRecord[];
+  try { errors = failed ? postRestrictions(post, [...new Set<string>(failed.map(copy => copy.platform))], assets, failed, owned).errors : [...(base.length || !targets.length ? postRestrictions(post, base, assets).errors : []), ...(targets.length ? postRestrictions(post, [], assets, targets).errors : [])]; }
+  catch (error) { if (error instanceof IntegrationError) errors = [{ platform: '', field: 'mediaItems', message: error.message }]; else throw error; }
+  // `details` lists each failed rule (platform, field, message and, for a customised account, accountId) for the form.
+  if (errors.length) throw Object.assign(new IntegrationError(422, 'APPROVAL_POST_RESTRICTIONS', errors.map(item => item.platform ? `${item.platform}: ${item.message}` : item.message).join(' ').slice(0, 4000)), { details: errors.slice(0, 100).map(({ platform, field, message, accountId }) => ({ platform, field, message, ...(accountId ? { accountId } : {}) })) });
+}
+const errorBody = (error: unknown) => error instanceof IntegrationError ? { code: error.code, message: error.message, ...((error as ProviderRecord).details ? { details: (error as ProviderRecord).details } : {}) } : { code: 'APPROVAL_ERROR', message: 'The content approval action could not be completed.' };
 function approvalAccounts(post: ProviderRecord) {
   if (!Array.isArray(post.accounts) || !post.accounts.length) fail(409, 'APPROVAL_ACCOUNTS_REQUIRED', 'Edit this post, select its connected publishing accounts, and save it before requesting approval or publishing.');
 }
@@ -69,9 +87,11 @@ async function publicReview(db: Executor, row: ProviderRecord | undefined) {
 function fields(body: any, allowed: string[]) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_APPROVAL_FIELDS', 'Use only the fields shown in the approval form.');
 }
+// A post's review state as the queue shows it; only 'approved' passes assertPublishingApproval's review check.
+const approvalStatus = (post: ProviderRecord, review: ProviderRecord | undefined, snapshot: ProviderRecord) => submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
 async function queueItem(context: ApprovalContext, post: ProviderRecord, queue: ProviderRecord | null = null) {
   const snapshot = await postSnapshot(context, post), review = await latest(context.db, context.project.id, post.id);
-  const status = submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
+  const status = approvalStatus(post, review, snapshot);
   return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: snapshot.queueId || '', queueVersion: snapshot.queueVersion || '', content: snapshot.content, tags: snapshot.tags, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, ...(snapshot.accountOverrides ? { accountOverrides: snapshot.accountOverrides } : {}), providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: await publicReview(context.db, review) };
 }
 async function publishingQueues(context: ApprovalContext) {
@@ -147,6 +167,65 @@ export async function assertProviderPostEdit(context: ApprovalContext) {
   if ((await policy(context.db, context.project.id)).requireApproval && !administrators.has(context.role)) fail(403, 'APPROVED_PROVIDER_EDIT_RESTRICTED', 'An owner or administrator must make changes to submitted posts while publishing approval is required.');
 }
 
+// A provider copy takes a proposal request, and a review of its pending proposal; every other case stays local.
+async function reviewTarget(context: ApprovalContext, id: string, requesting: boolean) {
+  const { project, db, store, body } = context;
+  const stored = await store.get(project.id, 'posts', id), storedReview = stored ? await latest(db, project.id, stored.id) : undefined;
+  const proposing = Boolean(stored?.externalId && !stored.sample) && (requesting ? Boolean(body && typeof body === 'object' && Object.hasOwn(body, 'proposal')) : proposalOf(storedReview));
+  if (proposing && requesting) return { stored, proposing } as ProviderRecord;
+  const post = proposing ? stored : await localPost(context, id), review = proposing ? storedReview : await latest(db, project.id, post.id);
+  const snapshot = proposing ? JSON.parse(review!.snapshot) : await postSnapshot(context, post), hash = proposing ? review!.fingerprint : fingerprint(snapshot);
+  return { stored, proposing, post, review, snapshot, hash } as ProviderRecord;
+}
+function reviewInput(body: any) {
+  fields(body, ['decision', 'note', 'reviewId']);
+  const note = body.note === undefined ? '' : body.note;
+  if (!['approved', 'rejected'].includes(body.decision) || typeof note !== 'string' || note.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(note) || typeof body.reviewId !== 'string') fail(400, 'INVALID_APPROVAL_REVIEW', 'Choose approve or reject and use a review note of at most 2,000 characters.');
+  return note;
+}
+// One review decision; the single and bulk routes both run it. A repeatable (bulk) item already decided the same way
+// returns its current state without a second decision or activity entry.
+async function decide(context: ApprovalContext, { post, review, snapshot, hash, proposing }: ProviderRecord, body: any, repeatable = false) {
+  const { project, role, user, db, store } = context;
+  if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
+  const note = reviewInput(body);
+  if (repeatable && (await first(db.execute(sql`SELECT status FROM post_approval_reviews WHERE id=${body.reviewId} AND project_id=${project.id} AND post_id=${post.id}`)))?.status === body.decision) return { status: 'unchanged', item: await queueItem(context, post, queueSummary(post, [], true)) };
+  if (!review || review.id !== body.reviewId || review.status !== 'pending' || review.fingerprint !== hash) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
+  let queue = null;
+  if (body.decision === 'approved' && proposing) {
+    if ((await policy(db, project.id)).requireApproval) approvalAccounts(snapshot);
+    assetApproved(snapshot);
+    // The proposal snapshot is the post the provider update would send, with every variant already resolved.
+    assertPlatformRules(snapshot, []);
+  } else if (body.decision === 'approved') {
+    if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
+    if (post.queueId) queue = reviewedQueue(post, await publishingQueues(context));
+    const currentReview = await latest(db, project.id, post.id);
+    if (fingerprint(await postSnapshot(context, await localPost(context, post.id))) !== hash || currentReview?.id !== review.id || currentReview?.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before approving it.');
+    if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
+    assetApproved(snapshot);
+    const failed = retryableFailure(post) ? post.providerResults.filter((copy: ProviderRecord) => copy.status === 'failed' && copy.platform) : [];
+    assertPlatformRules(post, (await assetRecords(context, post)).records.filter(Boolean), failed.length ? failed : undefined);
+  }
+  // The reviewer's role is re-checked under the workspace lock. The per-post lock serialises decisions with requests;
+  // only a still-pending review takes a decision, so a parallel approve and reject cannot both apply.
+  const selfApproved = await db.transaction(async (tx: Executor) => {
+    await lockReviewer(tx, project.id, user.id);
+    await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
+    const self = body.decision === 'approved' && review.requested_by === user.id && (await policy(tx, project.id)).requireApproval;
+    if (self) await assertSelfApprovalAllowed(tx, project.id, user.id);
+    const decided = await tx.execute(sql`UPDATE post_approval_reviews SET status=${body.decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()},self_approved=${self} WHERE id=${review.id} AND status='pending'`);
+    if (!decided.rowCount) {
+      // A parallel decision the same way already holds; a repeatable item reports it instead of failing.
+      if (repeatable && (await first(tx.execute(sql`SELECT status FROM post_approval_reviews WHERE id=${review.id}`)))?.status === body.decision) return null;
+      fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
+    }
+    return self;
+  });
+  if (selfApproved === null) return { status: 'unchanged', item: await queueItem(context, post, queueSummary(post, [], true)) };
+  await store.activity(project.id, selfApproved ? `Content self-approved by ${user.name || user.id} (only administrator).` : `Content ${body.decision} by ${user.name || user.id}.`); return { status: 'decided', item: await queueItem(context, post, queue ? { ...queue, ready: true } : queueSummary(post, [], true)) };
+}
+
 export async function handleApprovals(context: ApprovalContext) {
   const { req, url, project, role, user, db, store, body = {}, send } = context;
   const prefix = `/api/projects/${project.id}/approvals/`; if (!url.pathname.startsWith(prefix)) return false;
@@ -167,15 +246,34 @@ export async function handleApprovals(context: ApprovalContext) {
       }
       send(200, { ...await policy(db, project.id), posts: await Promise.all(posts.map((post: ProviderRecord) => queueItem(context, post, queueSummary(post, queues, unavailable)))) }); return true;
     }
+    // Badge and Publish gating: each post's queue status, read in a fixed number of queries and without provider calls.
+    if (req.method === 'GET' && path === 'summary') {
+      const [posts, assets, reviews, current] = await Promise.all([store.list(project.id, 'posts'), store.list(project.id, 'assets'), db.execute(sql`SELECT DISTINCT ON (post_id) * FROM post_approval_reviews WHERE project_id=${project.id} ORDER BY post_id, seq DESC`), policy(db, project.id)]);
+      const loaded = new Map<string, ProviderRecord>(assets.map((asset: ProviderRecord) => [asset.id, asset])), latestReview = new Map((reviews.rows as ProviderRecord[]).map(row => [row.post_id, row]));
+      const statuses = Object.fromEntries(await Promise.all(posts.map(async (post: ProviderRecord) => [post.id, approvalStatus(post, latestReview.get(post.id), await postSnapshot(context, post, loaded))])));
+      send(200, { requireApproval: current.requireApproval, pending: Object.values(statuses).filter(status => status === 'pending').length, statuses }); return true;
+    }
+    // Each item is its own decision through the single-review path, so one failure leaves the others decided.
+    if (req.method === 'POST' && path === 'bulk') {
+      if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
+      fields(body, ['decision', 'note', 'items']);
+      if (!Array.isArray(body.items) || !body.items.length || body.items.length > 50 || body.items.some((item: any) => !item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).some(key => !['postId', 'reviewId'].includes(key)) || typeof item.postId !== 'string' || !item.postId || item.postId.length > 200 || typeof item.reviewId !== 'string' || !item.reviewId || item.reviewId.length > 200)) fail(400, 'INVALID_APPROVAL_BULK', 'Choose between 1 and 50 reviews, each with its post and review.');
+      const input = (reviewId: string) => ({ decision: body.decision, ...(body.note === undefined ? {} : { note: body.note }), reviewId });
+      reviewInput(input(''));
+      const results: ProviderRecord[] = [];
+      for (const { postId, reviewId } of body.items) {
+        try { const { status, item } = await decide(context, await reviewTarget(context, postId, false), input(reviewId), true); results.push({ postId, reviewId, status, item }); }
+        catch (error) { results.push({ postId, reviewId, status: 'failed', error: errorBody(error) }); }
+      }
+      send(200, { results }); return true;
+    }
     const match = path.match(/^posts\/([^/]+)\/(request|review)$/);
     if (!match || req.method !== 'POST') fail(404, 'APPROVAL_ACTION_NOT_FOUND', 'This approval action was not found.');
     if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'APPROVAL_WRITE_REQUIRED', 'Editing permission is required to request content review.');
-    // A provider copy takes a proposal request, and a review of its pending proposal; every other case stays local.
-    const stored = await store.get(project.id, 'posts', match[1]), storedReview = stored ? await latest(db, project.id, stored.id) : undefined;
-    const proposing = Boolean(stored?.externalId && !stored.sample) && (match[2] === 'request' ? Boolean(body && typeof body === 'object' && Object.hasOwn(body, 'proposal')) : proposalOf(storedReview));
-    if (proposing && match[2] === 'request') { send(200, { item: await requestProposal(context, stored) }); return true; }
-    const post = proposing ? stored : await localPost(context, match[1]), review = proposing ? storedReview : await latest(db, project.id, post.id);
-    const snapshot = proposing ? JSON.parse(review!.snapshot) : await postSnapshot(context, post), hash = proposing ? review!.fingerprint : fingerprint(snapshot);
+    const target = await reviewTarget(context, match[1], match[2] === 'request');
+    if (target.proposing && match[2] === 'request') { send(200, { item: await requestProposal(context, target.stored) }); return true; }
+    if (match[2] === 'review') { send(200, { item: (await decide(context, target, body)).item }); return true; }
+    const { post, review, snapshot, hash } = target;
     if (match[2] === 'request') {
       fields(body, []);
       if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
@@ -196,36 +294,7 @@ export async function handleApprovals(context: ApprovalContext) {
       });
       send(200, { item: await queueItem(context, post, queue ? { ...queue, ready: true } : null) }); return true;
     }
-    if (!administrators.has(role)) fail(403, 'APPROVAL_ADMIN_REQUIRED', 'Only an owner or administrator can approve or reject a post.');
-    fields(body, ['decision', 'note', 'reviewId']);
-    const note = body.note === undefined ? '' : body.note;
-    if (!['approved', 'rejected'].includes(body.decision) || typeof note !== 'string' || note.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(note) || typeof body.reviewId !== 'string') fail(400, 'INVALID_APPROVAL_REVIEW', 'Choose approve or reject and use a review note of at most 2,000 characters.');
-    if (!review || review.id !== body.reviewId || review.status !== 'pending' || review.fingerprint !== hash) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
-    let queue = null;
-    if (body.decision === 'approved' && proposing) {
-      if ((await policy(db, project.id)).requireApproval) approvalAccounts(snapshot);
-      assetApproved(snapshot);
-    } else if (body.decision === 'approved') {
-      if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
-      if (post.queueId) queue = reviewedQueue(post, await publishingQueues(context));
-      const currentReview = await latest(db, project.id, post.id);
-      if (fingerprint(await postSnapshot(context, await localPost(context, post.id))) !== hash || currentReview?.id !== review.id || currentReview?.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before approving it.');
-      if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
-      assetApproved(snapshot);
-    }
-    // The reviewer's role is re-checked under the workspace lock. The per-post lock serialises decisions with requests;
-    // only a still-pending review takes a decision, so a parallel approve and reject cannot both apply.
-    const selfApproved = await db.transaction(async (tx: Executor) => {
-      await lockReviewer(tx, project.id, user.id);
-      await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
-      const self = body.decision === 'approved' && review.requested_by === user.id && (await policy(tx, project.id)).requireApproval;
-      if (self) await assertSelfApprovalAllowed(tx, project.id, user.id);
-      const decided = await tx.execute(sql`UPDATE post_approval_reviews SET status=${body.decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()},self_approved=${self} WHERE id=${review.id} AND status='pending'`);
-      if (!decided.rowCount) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
-      return self;
-    });
-    await store.activity(project.id, selfApproved ? `Content self-approved by ${user.name || user.id} (only administrator).` : `Content ${body.decision} by ${user.name || user.id}.`); send(200, { item: await queueItem(context, post, queue ? { ...queue, ready: true } : queueSummary(post, [], true)) }); return true;
   } catch (error) {
-    send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'APPROVAL_ERROR', message: error instanceof IntegrationError ? error.message : 'The content approval action could not be completed.' } }); return true;
+    send(error instanceof IntegrationError ? error.status : 500, { error: errorBody(error) }); return true;
   }
 }

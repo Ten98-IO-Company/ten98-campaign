@@ -67,10 +67,37 @@ function editable(body: any) {
   return result;
 }
 function sameSettings(queue: any, input: any) { return ['name', 'timezone', 'active'].every(key => queue[key] === input[key]) && JSON.stringify(queue.slots) === JSON.stringify(input.slots); }
+// Pause or activate without an edit: the update request (which requires the full schedule) resends the reviewed queue's
+// current settings with only `active` changed, keeping its default and leaving queued posts in place.
+async function toggleQueue(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, value: string) {
+  const { req, body = {}, role, send } = context;
+  if (req.method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', 'Use the available publishing queue controls.');
+  if (!['owner', 'admin'].includes(role)) fail(403, 'ADMIN_PERMISSION_REQUIRED', 'A workspace owner or administrator must change publishing queues.');
+  let queueId: any; try { queueId = id(decodeURIComponent(value)); } catch (error: any) { if (error instanceof IntegrationError) throw error; fail(400, 'INVALID_QUEUE', 'Choose a valid publishing queue.'); }
+  fields(body, ['active', 'expectedVersion']); if (typeof body.active !== 'boolean') fail(400, 'INVALID_QUEUE_SETTINGS', 'Choose whether this queue is active or paused.');
+  const result = await operation(context, async key => {
+    await unresolved(context);
+    const before = await queueList(api, profileId), current = before.queues.find((row: any) => row._id === queueId);
+    if (!current) fail(403, 'QUEUE_OUTSIDE_PROJECT', 'This publishing queue no longer belongs to the current profile.');
+    expectedVersion(body.expectedVersion, current.version);
+    if (current.active === body.active) return { queue: current, ...before, changed: false };
+    if (body.active && !current.slots.length) fail(400, 'QUEUE_SLOTS_REQUIRED', 'Add at least one weekly slot before activating this queue.');
+    const settings = { name: current.name, timezone: current.timezone, slots: current.slots, active: body.active };
+    const response = await api('/queue/slots', {}, { profileId, queueId, setAsDefault: current.isDefault, reshuffleExisting: false, ...settings }, key, 'PUT');
+    try {
+      if (response.success !== true) invalid();
+      const receipt = schedule(response.schedule, profileId), fresh = await queueList(api, profileId), confirmed = fresh.queues.find((row: any) => row._id === queueId);
+      if (receipt._id !== queueId || !confirmed || !sameSettings(receipt, settings) || !sameSettings(confirmed, settings) || current.isDefault && (!receipt.isDefault || !confirmed.isDefault)) invalid();
+      return { queue: confirmed, ...fresh, changed: true };
+    } catch (error: any) { uncertain(error); }
+  }, 'publishing-queues');
+  send(result.status, result.data); return true;
+}
 
 export async function handleZernioQueues(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, action: any) {
   const { req, url, body = {}, role, send } = context;
   if (!action && req.method === 'GET') { send(200, await queueList(api, profileId)); return true; }
+  const toggle = /^([^/]+)\/status$/.exec(action); if (toggle) return toggleQueue(context, api, profileId, toggle[1]);
   const match = /^([^/]+)\/(update|delete|preview)$/.exec(action), create = action === 'create';
   if (!create && !match) return false;
   const preview = match?.[2] === 'preview', deleting = match?.[2] === 'delete';

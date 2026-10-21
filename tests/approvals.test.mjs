@@ -153,7 +153,7 @@ async function selfReviewFixture(t, members, poolOptions) {
   const review = (userId, reviewId, decision = 'approved') => invoke(`posts/${post.id}/review`, userId, { reviewId, decision, note: 'Checked.' });
   const stored = reviewId => sql.get('SELECT status, self_approved FROM post_approval_reviews WHERE id = ?', reviewId);
   const setPolicy = async (userId, requireApproval) => assert.equal((await invoke('policy', userId, { requireApproval })).status, 200);
-  return { pool, sql, store, project, post, roles, addMember, invoke, request, review, stored, setPolicy };
+  return { db, pool, sql, store, project, post, roles, addMember, invoke, request, review, stored, setPolicy };
 }
 
 test('with approval required, a requester cannot approve their own review while another owner or administrator is active', { skip: postgresSkip }, async t => {
@@ -227,7 +227,7 @@ async function proposalFixture(t, members, poolOptions) {
   const review = (userId, reviewId, decision = 'approved') => invoke(`posts/${post.id}/review`, userId, { reviewId, decision, note: 'Checked the proposed update.' });
   const stored = reviewId => sql.get('SELECT status, note, requested_by, self_approved FROM post_approval_reviews WHERE id = ?', reviewId);
   const count = async () => Number((await sql.get('SELECT count(*) AS count FROM post_approval_reviews WHERE post_id = ?', post.id)).count);
-  return { request, review, stored, count };
+  return { sql, request, review, stored, count };
 }
 
 test('a submitted post still needs a proposal to request review, and an invalid proposal opens no review', { skip: postgresSkip }, async t => {
@@ -295,4 +295,163 @@ test('a reviewer demoted after their request started cannot approve or reject', 
     assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVAL_ADMIN_REQUIRED');
   }
   assert.deepEqual(await f.stored(reviewId), { status: 'pending', self_approved: false });
+});
+
+// Bulk decisions run every item through the single-review path, so each item keeps its own rules and outcome.
+test('bulk decisions apply each item independently and repeat idempotently without a second decision', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['avery', 'admin'], ['casey', 'editor']]);
+  await f.setPolicy('blair', true);
+  const bulk = (userId, body) => f.invoke('bulk', userId, body);
+  const create = content => f.store.create(f.project.id, 'posts', { content, platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [] });
+  const second = await create('Second bulk fixture'), third = await create('Self-requested bulk fixture');
+  const requestFor = async (post, userId) => { const result = await f.invoke(`posts/${post.id}/request`, userId); assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data.item.review.id; };
+  const items = [{ postId: f.post.id, reviewId: await requestFor(f.post, 'casey') }, { postId: second.id, reviewId: await requestFor(second, 'casey') }, { postId: third.id, reviewId: await requestFor(third, 'avery') }, { postId: 'missing-post', reviewId: 'missing-review' }];
+  assert.equal((await bulk('casey', { decision: 'approved', items })).status, 403);
+  for (const body of [{ decision: 'approved', items: [] }, { decision: 'approved', items: Array.from({ length: 51 }, () => items[0]) }, { decision: 'approved', items: [{ ...items[0], extra: true }] }, { decision: 'approved', items: [{ postId: f.post.id }] }, { decision: 'maybe', items }, { decision: 'approved', items, note: 'x'.repeat(2001) }, { decision: 'approved', items, reviewId: 'forged' }]) {
+    const result = await bulk('avery', body); assert.equal(result.status, 400, JSON.stringify(result.data));
+  }
+  assert.equal(Number((await f.sql.get("SELECT count(*) AS count FROM post_approval_reviews WHERE status <> 'pending'")).count), 0, 'An invalid bulk request decides nothing.');
+  const activities = async () => Number((await f.sql.get('SELECT count(*) AS count FROM activity WHERE project_id = ?', f.project.id)).count);
+  const before = await activities();
+  let result = await bulk('avery', { decision: 'approved', note: 'Bulk checked.', items });
+  assert.equal(result.status, 200, JSON.stringify(result.data));
+  assert.deepEqual(result.data.results.map(row => [row.postId, row.reviewId, row.status, row.error?.code]), [[f.post.id, items[0].reviewId, 'decided', undefined], [second.id, items[1].reviewId, 'decided', undefined], [third.id, items[2].reviewId, 'failed', 'APPROVAL_SELF_REVIEW'], ['missing-post', 'missing-review', 'failed', 'APPROVAL_POST_NOT_FOUND']]);
+  assert.equal(result.data.results[0].item.status, 'approved'); assert.equal(result.data.results[0].item.review.note, 'Bulk checked.'); assert.equal(result.data.results[0].item.review.reviewedBy.id, 'avery');
+  assert.deepEqual(await f.stored(items[0].reviewId), { status: 'approved', self_approved: false }); assert.deepEqual(await f.stored(items[1].reviewId), { status: 'approved', self_approved: false }); assert.deepEqual(await f.stored(items[2].reviewId), { status: 'pending', self_approved: false });
+  assert.equal(await activities(), before + 2, 'Each decided item logs its own activity entry; failed items log none.');
+  result = await bulk('avery', { decision: 'approved', note: 'Bulk checked.', items: items.slice(0, 2) });
+  assert.deepEqual(result.data.results.map(row => [row.status, row.item?.status]), [['unchanged', 'approved'], ['unchanged', 'approved']], 'A repeated item returns its current state.');
+  assert.equal(await activities(), before + 2, 'A repeated item records no second decision or activity entry.');
+  result = await bulk('avery', { decision: 'rejected', items: items.slice(0, 1) });
+  assert.equal(result.data.results[0].status, 'failed'); assert.equal(result.data.results[0].error.code, 'APPROVAL_REVIEW_CHANGED', 'A decided review cannot be reversed by bulk.');
+  assert.equal((await f.review('avery', items[0].reviewId)).status, 409, 'The single route still refuses a repeated decision.');
+  result = await bulk('blair', { decision: 'approved', items: [items[2]] });
+  assert.equal(result.data.results[0].status, 'decided'); assert.deepEqual(await f.stored(items[2].reviewId), { status: 'approved', self_approved: false });
+});
+
+test('bulk approval keeps the single-administrator self-approval exception and re-checks the reviewer role', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+  await f.setPolicy('blair', true);
+  const reviewId = await f.request('blair');
+  let result = await f.invoke('bulk', 'blair', { decision: 'approved', items: [{ postId: f.post.id, reviewId }] });
+  assert.equal(result.data.results[0].status, 'decided', JSON.stringify(result.data)); assert.equal(result.data.results[0].item.review.selfApproved, true);
+  assert.deepEqual(await f.stored(reviewId), { status: 'approved', self_approved: true });
+  assert.ok((await f.sql.all('SELECT message FROM activity WHERE project_id = ?', f.project.id)).some(row => row.message === 'Content self-approved by Blair Owner (only administrator).'));
+  await f.store.update(f.project.id, 'posts', f.post.id, { content: 'Changed after approval' });
+  const next = await f.request('casey');
+  await f.pool.query("UPDATE memberships SET role = 'editor' WHERE user_id = 'blair'");
+  result = await f.invoke('bulk', 'blair', { decision: 'approved', items: [{ postId: f.post.id, reviewId: next }] });
+  assert.equal(result.data.results[0].error.code, 'APPROVAL_ADMIN_REQUIRED'); assert.deepEqual(await f.stored(next), { status: 'pending', self_approved: false });
+});
+
+test('a bulk decision racing a single decision on the same review records exactly one decision', { skip: postgresSkip }, async t => {
+  for (const [first, decisions] of [['single', ['approved', 'approved']], ['bulk', ['approved', 'approved']], ['single', ['approved', 'rejected']], ['bulk', ['rejected', 'approved']]]) {
+    await t.test(`${first} first, ${decisions.join(' then ')}`, async t => {
+      const f = await selfReviewFixture(t, [['blair', 'owner'], ['avery', 'admin'], ['casey', 'editor']]);
+      const reviewId = await f.request('casey');
+      const single = decision => f.review('blair', reviewId, decision), bulk = decision => f.invoke('bulk', 'avery', { decision, items: [{ postId: f.post.id, reviewId }] });
+      // Both pass the pending check first. The leader holds the per-post lock and waits on the blocked write; the other waits on that lock.
+      const gate = await blockWrites(f.pool, 'post_approval_reviews');
+      const leading = (first === 'single' ? single : bulk)(decisions[0]); await gate.waiting(1);
+      const trailing = (first === 'single' ? bulk : single)(decisions[1]); await gate.waiting(2); await gate.release();
+      const [lead, trail] = await Promise.all([leading, trailing]), outcome = result => result.data.results ? result.data.results[0].status : result.status;
+      assert.equal(outcome(lead), first === 'single' ? 200 : 'decided', JSON.stringify(lead.data));
+      if (first === 'single') assert.equal(outcome(trail), decisions[0] === decisions[1] ? 'unchanged' : 'failed', JSON.stringify(trail.data));
+      else assert.equal(outcome(trail), 409);
+      assert.equal((await f.stored(reviewId)).status, decisions[0]);
+      assert.equal((await f.sql.all("SELECT message FROM activity WHERE project_id = ? AND message LIKE 'Content % by %' AND message NOT LIKE 'Content review requested%'", f.project.id)).length, 1, 'Exactly one decision is logged.');
+    });
+  }
+});
+
+// The summary drives the navigation badge and hides Publish; it must agree with the queue and with publishing's gate.
+async function summaryFixture(t) {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]), originalFetch = globalThis.fetch, provider = [];
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async target => { provider.push(String(target)); throw new Error('Synthetic provider unavailable'); };
+  const project = { id: f.project.id, zernioProfileId: 'profile-a' }, context = role => ({ db: f.db, store: f.store, project, role, user: { id: role, name: role }, config: { env: {}, ZERNIO_API_KEY: 'sk_test_stub' }, assertProjectMapping: async () => {} });
+  const get = async (path, role = 'viewer') => { let result; await handleApprovals({ ...context(role), req: { method: 'GET' }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), send(status, data) { result = { status, data }; } }); return result; };
+  const create = (content, fields = {}) => f.store.create(project.id, 'posts', { content, platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [], ...fields });
+  const requestFor = async post => { const result = await f.invoke(`posts/${post.id}/request`, 'casey'); assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data.item.review.id; };
+  const decide = async (post, decision) => assert.equal((await f.invoke(`posts/${post.id}/review`, 'blair', { reviewId: await requestFor(post), decision })).status, 200);
+  return { ...f, provider, context, get, create, requestFor, decide };
+}
+
+test('the approvals summary reports every post’s queue status for any member, with no provider calls and a fixed number of queries', { skip: postgresSkip }, async t => {
+  const f = await summaryFixture(t);
+  await f.pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-b','w','B')");
+  assert.deepEqual(await f.get('summary'), { status: 200, data: { requireApproval: false, pending: 0, statuses: { [f.post.id]: 'not_requested' } } });
+  const approved = await f.create('Approved'), rejected = await f.create('Rejected'), stale = await f.create('Stale'), queued = await f.create('Queued', { queueId: 'queue-a', queueVersion: 'a'.repeat(64) });
+  const submittedPost = await f.store.create(f.project.id, 'posts', { content: 'Submitted', platforms: ['facebook'], status: 'scheduled', externalId: 'remote-a' });
+  await f.requestFor(f.post); await f.decide(approved, 'approved'); await f.decide(rejected, 'rejected');
+  await f.requestFor(stale); await f.store.update(f.project.id, 'posts', stale.id, { content: 'Edited while pending' });
+  const foreign = await f.store.create('project-b', 'posts', { content: 'Foreign', platforms: ['facebook'], status: 'draft' });
+  await f.pool.query("INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES ('foreign-review','project-b',$1,'x','{}','pending','casey','2026-10-22T00:00:00Z')", [foreign.id]);
+  const expected = { [f.post.id]: 'pending', [approved.id]: 'approved', [rejected.id]: 'rejected', [stale.id]: 'stale', [queued.id]: 'not_requested', [submittedPost.id]: 'submitted' };
+  // Count statements on the pool: the summary reads posts, assets, latest reviews and policy whatever the number of posts.
+  const query = f.pool.query.bind(f.pool); let queries = 0; f.pool.query = (...args) => { queries++; return query(...args); };
+  for (const role of ['viewer', 'editor', 'admin', 'owner']) assert.deepEqual((await f.get('summary', role)).data, { requireApproval: false, pending: 1, statuses: expected });
+  const perRead = queries / 4; assert.ok(perRead >= 1 && perRead <= 4,`The summary used ${perRead} queries.`);
+  for (let index = 0; index < 5; index++) await f.requestFor(await f.create(`More ${index}`, { assetId: 'missing-asset' }));
+  queries = 0; const larger = (await f.get('summary')).data; assert.equal(queries, perRead, 'More posts and reviews add no queries.'); f.pool.query = query;
+  assert.equal(larger.pending, 6); assert.equal(Object.keys(larger.statuses).length, 11); assert.equal(f.provider.length, 0, 'The summary sends no provider request, even with queued posts.');
+  // The queue (which may read the provider) reports the same status for every post.
+  const queue = (await f.get('posts')).data.posts; assert.ok(f.provider.length > 0, 'The queue, by contrast, reads the provider for queued posts.');
+  assert.deepEqual(Object.fromEntries(queue.map(row => [row.post.id, row.status])), larger.statuses);
+  await f.store.remove(f.project.id, 'posts', queued.id);
+  assert.equal((await f.get('summary')).data.statuses[queued.id], undefined, 'Deleted posts are not reported.');
+});
+
+test('the summary marks a post approved exactly when publishing’s approval gate passes it', { skip: postgresSkip }, async t => {
+  const f = await summaryFixture(t);
+  await f.setPolicy('blair', true);
+  const asset = await f.store.create(f.project.id, 'assets', { name: 'Creative', kind: 'image', url: 'https://cdn.example.test/c.jpg', deliveryUrl: 'https://cdn.example.test/d.jpg', approval: 'approved' });
+  const approved = await f.create('Approved'), approvedThenEdited = await f.create('Approved then edited'), assetChanged = await f.create('Asset changed', { assetId: asset.id }), rejected = await f.create('Rejected'), pendingThenEdited = await f.create('Pending then edited'); await f.create('Never requested');
+  for (const post of [approved, approvedThenEdited, assetChanged]) await f.decide(post, 'approved');
+  await f.decide(rejected, 'rejected'); await f.requestFor(f.post); await f.requestFor(pendingThenEdited);
+  await f.store.update(f.project.id, 'posts', approvedThenEdited.id, { content: 'Edited after approval' }); await f.store.update(f.project.id, 'posts', pendingThenEdited.id, { content: 'Edited while pending' });
+  await f.store.update(f.project.id, 'assets', asset.id, { deliveryUrl: 'https://cdn.example.test/changed.jpg' });
+  const { statuses, requireApproval } = (await f.get('summary')).data; assert.equal(requireApproval, true);
+  assert.deepEqual(new Set(Object.values(statuses)), new Set(['approved', 'stale', 'rejected', 'pending', 'not_requested']));
+  for (const post of await f.store.list(f.project.id, 'posts')) {
+    const gate = await assertPublishingApproval(f.context('owner'), post).then(() => 'passed', error => error.code);
+    assert.equal(gate, statuses[post.id] === 'approved' ? 'passed' : statuses[post.id] === 'stale' && (await f.sql.get('SELECT status FROM post_approval_reviews WHERE post_id = ? ORDER BY seq DESC LIMIT 1', post.id))?.status === 'approved' ? 'PUBLISHING_APPROVAL_STALE' : 'PUBLISHING_APPROVAL_REQUIRED', `${statuses[post.id]} post ${post.content}`);
+  }
+  assert.equal(statuses[approvedThenEdited.id], 'stale'); assert.equal(statuses[assetChanged.id], 'stale'); assert.equal(statuses[approved.id], 'approved');
+});
+
+// Approval runs publishing's per-platform restriction check, so a post that would fail to publish cannot be approved.
+test('approving a post that fails a platform restriction is refused, singly and in bulk, while rejecting it still works', { skip: postgresSkip }, async t => {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+  const image = { type: 'image', url: 'https://cdn.example.test/creative.jpg' }, decisions = async () => (await f.sql.all("SELECT message FROM activity WHERE project_id = ? AND message LIKE 'Content % by %' AND message NOT LIKE 'Content review requested%'", f.project.id)).length;
+  const create = fields => f.store.create(f.project.id, 'posts', { status: 'draft', mediaItems: [], ...fields });
+  const requestFor = async post => { const result = await f.invoke(`posts/${post.id}/request`, 'casey'); assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data.item.review.id; };
+  const medialess = await create({ content: 'Instagram needs media', platforms: ['instagram'], accounts: ['instagram-a'] }), medialessReview = await requestFor(medialess);
+  let result = await f.invoke(`posts/${medialess.id}/review`, 'blair', { reviewId: medialessReview, decision: 'approved' });
+  assert.equal(result.status, 422); assert.equal(result.data.error.code, 'APPROVAL_POST_RESTRICTIONS'); assert.match(result.data.error.message, /^instagram: Instagram requires media\./);
+  assert.deepEqual(result.data.error.details, [{ platform: 'instagram', field: 'mediaItems', message: 'Instagram requires media.' }]);
+  result = await f.invoke('bulk', 'blair', { decision: 'approved', items: [{ postId: medialess.id, reviewId: medialessReview }] });
+  assert.equal(result.data.results[0].status, 'failed'); assert.equal(result.data.results[0].error.code, 'APPROVAL_POST_RESTRICTIONS'); assert.equal(result.data.results[0].error.details[0].field, 'mediaItems');
+  assert.deepEqual(await f.stored(medialessReview), { status: 'pending', self_approved: false }); assert.equal(await decisions(), 0);
+  assert.equal((await f.invoke(`posts/${medialess.id}/review`, 'blair', { reviewId: medialessReview, decision: 'rejected' })).status, 200, 'An unpublishable post can still be rejected.');
+  // A customised account is checked with its own copy; the base variant is checked on platforms without a customised account.
+  const tooLong = await create({ content: 'Shared caption', mediaItems: [image], platforms: ['facebook', 'instagram'], accounts: ['facebook-a', 'instagram-a'], accountOverrides: { 'instagram-a': { platform: 'instagram', content: 'x'.repeat(2201) } } }), tooLongReview = await requestFor(tooLong);
+  result = await f.invoke(`posts/${tooLong.id}/review`, 'blair', { reviewId: tooLongReview, decision: 'approved' });
+  assert.equal(result.status, 422); assert.match(result.data.error.message, /^instagram: Caption has 2,201 characters; Instagram allows 2,200\./);
+  assert.deepEqual(result.data.error.details, [{ platform: 'instagram', field: 'content', message: 'Caption has 2,201 characters; Instagram allows 2,200.', accountId: 'instagram-a' }]);
+  const customised = await create({ content: 'x'.repeat(2201), mediaItems: [image], platforms: ['facebook', 'instagram'], accounts: ['facebook-a', 'instagram-a'], accountOverrides: { 'instagram-a': { platform: 'instagram', content: 'Short Instagram copy' } } });
+  assert.equal((await f.invoke(`posts/${customised.id}/review`, 'blair', { reviewId: await requestFor(customised), decision: 'approved' })).status, 200);
+});
+
+test('approving a proposal validates the proposed post against the platform restrictions', { skip: postgresSkip }, async t => {
+  const f = await proposalFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+  const requested = await f.request('casey', { proposal: { content: 'Proposed caption', mode: 'draft' } }); assert.equal(requested.status, 200, JSON.stringify(requested.data));
+  const reviewId = requested.data.item.review.id, snapshot = JSON.parse((await f.sql.get('SELECT snapshot FROM post_approval_reviews WHERE id = ?', reviewId)).snapshot);
+  // The reviewed snapshot is what approval binds (its fingerprint is the review's), so an unpublishable one must be refused.
+  await f.sql.run('UPDATE post_approval_reviews SET snapshot = ? WHERE id = ?', JSON.stringify({ ...snapshot, platformOverrides: { facebook: { ...snapshot.platformOverrides.facebook, content: 'x'.repeat(63207) } } }), reviewId);
+  const result = await f.review('blair', reviewId);
+  assert.equal(result.status, 422); assert.equal(result.data.error.code, 'APPROVAL_POST_RESTRICTIONS'); assert.match(result.data.error.message, /^facebook: Caption has 63,207 characters/);
+  assert.equal((await f.stored(reviewId)).status, 'pending');
+  await f.sql.run('UPDATE post_approval_reviews SET snapshot = ? WHERE id = ?', JSON.stringify(snapshot), reviewId);
+  assert.equal((await f.review('blair', reviewId)).status, 200);
 });
