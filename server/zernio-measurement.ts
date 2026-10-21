@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 type Ctx = OperationContext & { body: any };
 import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts, fail, reportObject as object } from './provider-core.ts';
@@ -83,9 +84,13 @@ export async function handleZernioMeasurement(context: Ctx, api: ZernioApi, prof
     if (!object(body) || Object.keys(body).some(key => !allowed.includes(key)) || !label(body.name, account.platform === 'tiktokads' ? 40 : 200) || !body.name.trim() || account.platform === 'tiktokads' && /[\p{Extended_Pictographic}\uFE0F\u20E3]/u.test(body.name)) fail(400, 'INVALID_MEASUREMENT_SETTINGS', 'Enter a valid tag name using the fields available for this platform.');
     if (body.defaultEventType !== undefined && (account.platform !== 'openaiads' || !eventTypes.includes(body.defaultEventType))) fail(400, 'INVALID_MEASUREMENT_SETTINGS', 'Choose a supported ChatGPT conversion event.');
     const payload = { adAccountId, name: body.name.trim(), ...(body.defaultEventType ? { defaultEventType: body.defaultEventType } : {}) };
-    if (creating && context.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operations'").get() as ProviderRecord && context.db.prepare("SELECT id FROM integration_operations WHERE project_id=? AND request_key<>? AND status IN ('pending','uncertain') AND action_path='POST /integrations/measurement/:id/tags/create'").get(context.project.id, req.headers['idempotency-key'] as string) as ProviderRecord) fail(409, 'OPERATION_UNCERTAIN', 'Review the previous tracking tag creation before creating another pixel.');
+    const unresolved = async () => { if (creating && (await context.db.execute(sql`SELECT id FROM integration_operations WHERE project_id = ${context.project.id} AND request_key <> ${req.headers['idempotency-key'] as string} AND status IN ('pending','uncertain') AND action_path = 'POST /integrations/measurement/:id/tags/create'`)).rowCount) fail(409, 'OPERATION_UNCERTAIN', 'Review the previous tracking tag creation before creating another pixel.'); };
+    await unresolved();
     // ponytail: unknown tag creation blocks this project; use persisted per-account resource locks if concurrent account provisioning is needed.
     const outcome = await operation(context, async key => {
+      // Parallel creations on different accounts both pass the check above; each re-checks after its own receipt is
+      // committed, so at least one sees the other pending and two creations cannot send concurrently.
+      await unresolved();
       let response;
       try { response = await api(creating ? path : `${path}/${encoded(tagId)}`, {}, payload, key, creating ? 'POST' : 'PATCH'); }
       catch (error) { if (creating && account.platform === 'openaiads' && error instanceof IntegrationError) error.uncertain = true; throw error; }

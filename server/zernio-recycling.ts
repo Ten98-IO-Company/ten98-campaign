@@ -1,6 +1,6 @@
-import type { DatabaseSync } from 'node:sqlite';
 import type { OperationContext, ZernioApi, ProviderRecord } from './provider-core.ts';
 import { createHash, randomUUID } from 'node:crypto';
+import { sql } from 'drizzle-orm';
 import { fail, reportObject as object, IntegrationError, operation, scopedAccounts, scopedPost, remotePostModel, remoteRestrictionPayload, validateRemotePayload, providerPostValidation, savePostSnapshot, validProviderInstant, targetConfiguration } from './provider-core.ts';
 
 const validId = (value: any) => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
@@ -34,23 +34,20 @@ function recyclingState(value: any) {
   for (const key of ['nextRecycleAt', 'lastRecycledAt']) { if (value[key] != null && !validProviderInstant(value[key])) malformed(); result[key] = value[key] == null ? null : new Date(value[key]).toISOString(); }
   return result;
 }
-export function assertRecyclingSeedEditable(remote: any, context: OperationContext & { body: any }) {
-  if (context) unresolved(context);
+export async function assertRecyclingSeedEditable(remote: any, context: OperationContext & { body: any }) {
+  if (context) await unresolved(context);
   if (recyclingState(remote.recycling).enabled) fail(409, 'RECYCLING_SOURCE_EDIT_REQUIRES_STOP', 'Stop recycling in Publishing → Recurring posts before editing this post. Review the changed content and repeat plan before enabling future copies again.');
 }
-function tables(db: DatabaseSync) {
-  db.exec(`CREATE TABLE IF NOT EXISTS post_recycling_reviews(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,post_id TEXT NOT NULL,fingerprint TEXT NOT NULL,snapshot TEXT NOT NULL,configuration TEXT NOT NULL,reviewed_by TEXT NOT NULL REFERENCES users(id),reviewed_at TEXT NOT NULL,UNIQUE(project_id,post_id,fingerprint));`);
-}
-function assetSnapshots(context: OperationContext & { body: any }, post: any) {
+async function assetSnapshots(context: OperationContext & { body: any }, post: any) {
   const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map((row: any) => row?.assetId), ...Object.values(post.accountOverrides || {}).map((row: any) => row?.assetId)].filter(Boolean))];
-  return ids.map(id => { const asset = context.store.get(context.project.id, 'assets', id); return asset ? Object.fromEntries(['id', 'approval', 'url', 'deliveryUrl', 'kind', 'mimeType', 'size', 'width', 'height', 'duration', 'modifiedTime', 'md5Checksum', 'deliverySource', 'deliveryUploadedAt', 'deliveryExpiresAt', 'deliveryKey', 'deliveryAttemptId', 'deliveryKind', 'deliveryMimeType', 'deliverySize', 'deliveryFilename'].filter(key => asset[key] !== undefined).map(key => [key, asset[key]])) : { id, missing: true }; });
+  return Promise.all(ids.map(async id => { const asset = await context.store.get(context.project.id, 'assets', id); return asset ? Object.fromEntries(['id', 'approval', 'url', 'deliveryUrl', 'kind', 'mimeType', 'size', 'width', 'height', 'duration', 'modifiedTime', 'md5Checksum', 'deliverySource', 'deliveryUploadedAt', 'deliveryExpiresAt', 'deliveryKey', 'deliveryAttemptId', 'deliveryKind', 'deliveryMimeType', 'deliverySize', 'deliveryFilename'].filter(key => asset[key] !== undefined).map(key => [key, asset[key]])) : { id, missing: true }; }));
 }
 async function readPost(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, postId: any, activeOnly = false) {
-  const local = context.store.get(context.project.id, 'posts', postId);
+  const local = await context.store.get(context.project.id, 'posts', postId);
   if (!local?.externalId || local.sample || local.zernioProfileId !== profileId) fail(404, 'RECYCLING_POST_NOT_FOUND', 'Choose a real submitted post from this project.');
   const remote = await scopedPost(api, profileId, local, activeOnly), model = await remotePostModel(context.store, context.project.id, local, remote), payload = remoteRestrictionPayload(model, remote), state = recyclingState(remote.recycling);
   if (remote.recycledFromPostId != null && !validId(remote.recycledFromPostId)) malformed();
-  const snapshot = { postId, providerId: local.externalId, profileId, status: remote.status, content: payload.content, mediaItems: payload.mediaItems || [], platforms: payload.platforms, scheduledFor: remote.scheduledFor || null, recycledFromPostId: remote.recycledFromPostId || null, recycling: state, assets: assetSnapshots(context, local) };
+  const snapshot = { postId, providerId: local.externalId, profileId, status: remote.status, content: payload.content, mediaItems: payload.mediaItems || [], platforms: payload.platforms, scheduledFor: remote.scheduledFor || null, recycledFromPostId: remote.recycledFromPostId || null, recycling: state, assets: await assetSnapshots(context, local) };
   const unavailable = Object.values(model.accountOverrides || {}).some((row: any) => row.scheduledAt) || remote.platforms.some((row: any) => row.scheduledFor && Date.parse(row.scheduledFor) !== Date.parse(remote.scheduledFor)) ? 'Separate account times cannot be recycled. Clear the individual account times and review a shared repeat plan first.' : snapshot.recycledFromPostId ? 'This is an automatically created copy. Manage recycling on its original post to avoid starting another cycle.' : remote.platforms.some((row: any) => ['youtube', 'tiktok'].includes(row.platform)) ? 'YouTube and TikTok posts cannot be recycled.' : !['draft', 'scheduled', 'published'].includes(remote.status) ? 'Refresh or resolve this post’s publishing outcome before enabling recycling.' : remote.status === 'published' && remote.platforms.some((row: any) => row.status !== 'published') ? 'Every published account copy must have a confirmed published outcome before enabling recycling.' : '';
   return { local, remote, model, payload, snapshot, version: fingerprint(snapshot), unavailable };
 }
@@ -76,7 +73,7 @@ async function checkPlan(context: OperationContext & { body: any }, api: ZernioA
   if (read.unavailable) fail(422, 'RECYCLING_UNAVAILABLE', read.unavailable);
   if (!read.snapshot.recycling.enabled && Date.parse(config.startDate) <= Date.now()) fail(400, 'RECYCLING_START_PASSED', 'Choose a future start before enabling a new cycle.');
   if (config.expireDate && Date.parse(config.expireDate) <= Date.now() || config.expireCount != null && config.expireCount <= (read.snapshot.recycling.recycleCount || 0)) fail(400, 'RECYCLING_ALREADY_EXPIRED', 'Choose an end and copy limit that leave at least one future copy.');
-  const requiresApproval = context.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='project_approval_policy'").get() && context.db.prepare('SELECT require_approval FROM project_approval_policy WHERE project_id=?').get(context.project.id)?.require_approval;
+  const requiresApproval = (await context.db.execute(sql`SELECT require_approval FROM project_approval_policy WHERE project_id=${context.project.id}`)).rows[0]?.require_approval;
   if (read.snapshot.assets.some((row: any) => row.missing || requiresApproval && row.approval !== 'approved')) fail(409, 'RECYCLING_ASSET_APPROVAL_REQUIRED', 'Every referenced creative must exist and have current approval before enabling automatic copies.');
   const assets = read.snapshot.assets;
   for (const content of config.contentVariations.length ? config.contentVariations : [read.payload.content]) {
@@ -89,8 +86,8 @@ async function checkPlan(context: OperationContext & { body: any }, api: ZernioA
     if (posts.filter(row => row._id !== read.local.externalId && row.recycling?.enabled === true).length >= 10) fail(409, 'RECYCLING_CAPACITY', 'An account already has ten active recycling posts. Stop another cycle before enabling this one.');
   }
 }
-function unresolved(context: OperationContext & { body: any }) {
-  if (context.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='integration_operations'").get() && context.db.prepare("SELECT id FROM integration_operations WHERE project_id=? AND request_key<>? AND status IN ('pending','uncertain') AND (action_path LIKE 'POST /integrations/recycling/%' OR action_path IN ('POST /integrations/social/update','POST /integrations/social/edit-published','POST /integrations/social/update-metadata'))").get(context.project.id, context.req.headers['idempotency-key'] as string)) fail(409, 'RECYCLING_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous recycling or post-content change before applying another plan. This new change has not been sent.');
+async function unresolved(context: OperationContext & { body: any }) {
+  if ((await context.db.execute(sql`SELECT id FROM integration_operations WHERE project_id=${context.project.id} AND request_key<>${context.req.headers['idempotency-key'] as string} AND status IN ('pending','uncertain') AND (action_path LIKE 'POST /integrations/recycling/%' OR action_path IN ('POST /integrations/social/update','POST /integrations/social/edit-published','POST /integrations/social/update-metadata'))`)).rowCount) fail(409, 'RECYCLING_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous recycling or post-content change before applying another plan. This new change has not been sent.');
 }
 function reviewedConfiguration(config: any) {
   if (!config.enabled) fail(400, 'RECYCLING_STOP_REQUIRED', 'Use Stop recycling to disable a cycle.');
@@ -98,7 +95,7 @@ function reviewedConfiguration(config: any) {
 }
 export async function handleZernioRecycling(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, action: any) {
   const { req, body = {}, project, role, store, db, send } = context;
-  if (!action && req.method === 'GET') { send(200, { posts: store.list(project.id, 'posts').filter((row: any) => row.externalId && !row.sample && !row.providerDeletedAt && row.zernioProfileId === profileId).map((row: any) => ({ id: row.id, content: row.content || '', platforms: row.platforms || [], status: row.status })) }); return true; }
+  if (!action && req.method === 'GET') { send(200, { posts: (await store.list(project.id, 'posts')).filter((row: any) => row.externalId && !row.sample && !row.providerDeletedAt && row.zernioProfileId === profileId).map((row: any) => ({ id: row.id, content: row.content || '', platforms: row.platforms || [], status: row.status })) }); return true; }
   const match = /^posts\/([^/]+)(?:\/(review|apply|stop|copies))?$/.exec(action); if (!match) return false;
   let postId; try { postId = decodeURIComponent(match[1]); } catch { fail(400, 'INVALID_RECYCLING_POST', 'Choose a valid post.'); } if (!validId(postId)) fail(400, 'INVALID_RECYCLING_POST', 'Choose a valid post.');
   const command = match[2]; if (req.method !== (!command || command === 'copies' ? 'GET' : 'POST')) fail(405, 'METHOD_NOT_ALLOWED', 'Use the available recycling controls.');
@@ -110,29 +107,29 @@ export async function handleZernioRecycling(context: OperationContext & { body: 
     send(200, { copies, complete: true }); return true;
   }
   if (!['owner', 'admin'].includes(role)) fail(403, 'RECYCLING_ADMIN_REQUIRED', 'A workspace owner or administrator must review and change automatic publishing.');
-  context.assertProviderPostEdit?.(); tables(db);
+  await context.assertProviderPostEdit?.();
   if (command === 'review') {
     fields(body, ['expectedFingerprint', 'configuration', 'confirmReview']); if (body.confirmReview !== true) fail(400, 'RECYCLING_CONFIRMATION_REQUIRED', 'Review all captions, creative, account settings and repeat limits before approving automatic copies.');
     const read = await readPost(context, api, profileId, postId, true); expected(body.expectedFingerprint, read.version); const config = reviewedConfiguration(configuration(body.configuration));
     await checkPlan(context, api, profileId, read, config);
-    const fresh = await readPost(context, api, profileId, postId, true); expected(read.version, fresh.version); context.assertProviderPostEdit?.();
+    const fresh = await readPost(context, api, profileId, postId, true); expected(read.version, fresh.version); await context.assertProviderPostEdit?.();
     const reviewFingerprint = fingerprint([fresh.snapshot, config]), reviewedAt = new Date().toISOString();
-    db.prepare('INSERT OR IGNORE INTO post_recycling_reviews VALUES(?,?,?,?,?,?,?,?)').run(randomUUID(), project.id, postId, reviewFingerprint, canonical(fresh.snapshot), canonical(config), context.user.id, reviewedAt);
-    const review = db.prepare('SELECT id,reviewed_by AS reviewedBy,reviewed_at AS reviewedAt FROM post_recycling_reviews WHERE project_id=? AND post_id=? AND fingerprint=?').get(project.id, postId, reviewFingerprint);
-    store.activity(project.id, 'Reviewed an automatic post recycling plan.'); send(200, { review: { ...review, configuration: config, fingerprint: fresh.version }, post: publicPost(fresh) }); return true;
+    await db.execute(sql`INSERT INTO post_recycling_reviews (id, project_id, post_id, fingerprint, snapshot, configuration, reviewed_by, reviewed_at) VALUES (${randomUUID()}, ${project.id}, ${postId}, ${reviewFingerprint}, ${canonical(fresh.snapshot)}, ${canonical(config)}, ${context.user.id}, ${reviewedAt}) ON CONFLICT (project_id, post_id, fingerprint) DO NOTHING`);
+    const review = (await db.execute(sql`SELECT id, reviewed_by AS "reviewedBy", reviewed_at AS "reviewedAt" FROM post_recycling_reviews WHERE project_id=${project.id} AND post_id=${postId} AND fingerprint=${reviewFingerprint}`)).rows[0];
+    await store.activity(project.id, 'Reviewed an automatic post recycling plan.'); send(200, { review: { ...review, configuration: config, fingerprint: fresh.version }, post: publicPost(fresh) }); return true;
   }
   fields(body, command === 'apply' ? ['reviewId'] : ['expectedFingerprint', 'confirmStop']);
   if (command === 'apply' && !validId(body.reviewId) || command === 'stop' && body.confirmStop !== true) fail(400, 'RECYCLING_CONFIRMATION_REQUIRED', 'Review the plan before applying it, or explicitly confirm stopping recycling.');
   const outcome = await operation(context, async key => {
-    unresolved(context);
+    await unresolved(context);
     const read = await readPost(context, api, profileId, postId, command === 'apply'); let config: any;
     if (command === 'apply') {
-      const review = db.prepare('SELECT * FROM post_recycling_reviews WHERE project_id=? AND post_id=? AND id=?').get(project.id, postId, body.reviewId) as ProviderRecord | undefined; if (!review) fail(404, 'RECYCLING_REVIEW_NOT_FOUND', 'Review this post’s complete recycling plan first.');
+      const review = (await db.execute(sql`SELECT * FROM post_recycling_reviews WHERE project_id=${project.id} AND post_id=${postId} AND id=${body.reviewId}`)).rows[0] as ProviderRecord | undefined; if (!review) fail(404, 'RECYCLING_REVIEW_NOT_FOUND', 'Review this post’s complete recycling plan first.');
       expected(fingerprint(JSON.parse(review.snapshot)), read.version); config = reviewedConfiguration(configuration(JSON.parse(review.configuration)));
       await checkPlan(context, api, profileId, read, config);
       const fresh = await readPost(context, api, profileId, postId, true); expected(read.version, fresh.version);
     } else { expected(body.expectedFingerprint, read.version); if (!read.snapshot.recycling.enabled) fail(409, 'RECYCLING_NOT_ACTIVE', 'Recycling is already stopped. Refresh its latest state.'); config = { enabled: false }; }
-    context.assertProviderPostEdit?.();
+    await context.assertProviderPostEdit?.();
     let response: any;
     try { response = await api(`/posts/${encodeURIComponent(read.local.externalId)}`, {}, { recycling: config }, key, 'PUT'); }
     catch (error: any) { if (error instanceof IntegrationError && error.status >= 500) error.uncertain = true; throw error; }
@@ -142,7 +139,7 @@ export async function handleZernioRecycling(context: OperationContext & { body: 
       if (config.enabled ? canonical(actual) !== canonical(config) : actual.enabled !== false) malformed();
       if (canonical({ ...confirmed.snapshot, recycling: null }) !== canonical({ ...read.snapshot, recycling: null })) malformed();
       await savePostSnapshot(store, project.id, read.local, confirmed.remote, {}, read.remote.platforms, read.local);
-      store.activity(project.id, config.enabled ? 'Enabled the reviewed automatic publishing cycle.' : 'Stopped automatic post recycling. Previously created copies are unchanged.');
+      await store.activity(project.id, config.enabled ? 'Enabled the reviewed automatic publishing cycle.' : 'Stopped automatic post recycling. Previously created copies are unchanged.');
       return { post: publicPost(confirmed) };
     } catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
   }, 'publishing-recycling');

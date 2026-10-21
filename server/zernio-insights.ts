@@ -57,7 +57,7 @@ export async function handleZernioInsights(context: Ctx, api: ZernioApi, profile
     if ([...url.searchParams.keys()].some(key => !['fromDate', 'toDate'].includes(key) || url.searchParams.getAll(key).length !== 1)) fail(400, 'INVALID_REPORT_OPTIONS', 'Choose only the daily pricing report dates.');
     const range = dates(url, 366, true);
     if (connected.filter(row => row._id === accountId).length !== 1 || account.isActive !== true || account.needsReconnection === true) fail(409, 'REPORT_ACCOUNT_UNAVAILABLE', 'Reconnect the active WhatsApp account before loading its pricing report.');
-    context.assertProjectMapping?.(profileId); context.assertIntegrationSettings?.();
+    await context.assertProjectMapping?.(profileId); await context.assertIntegrationSettings?.();
     const dimensions = ['COUNTRY', 'PHONE', 'PRICING_CATEGORY', 'PRICING_TYPE', 'TIER'], response = await read('/whatsapp/pricing-analytics', { accountId, start: range.fromDate, end: range.toDate, granularity: 'DAILY', dimensions: dimensions.join(','), metricTypes: 'COST,VOLUME' });
     scope(response, account, profileId, false);
     if (response.accountId !== accountId || !text(response.phoneNumber, 100) || !/^\d+$/.test(response.phoneNumber) || response.granularity !== 'DAILY' || !validPostInstant(response.start) || !validPostInstant(response.end) || Date.parse(response.start) !== Date.parse(range.fromDate) || Date.parse(response.end) !== Date.parse(range.toDate)) bad();
@@ -71,7 +71,7 @@ export async function handleZernioInsights(context: Ctx, api: ZernioApi, profile
     if (new Set(points.map((row: ProviderRecord) => JSON.stringify([Date.parse(row.start), Date.parse(row.end), row.phoneNumber, row.country, row.tier, row.pricingType, row.pricingCategory]))).size !== points.length) bad();
     const freshAccounts = await scopedAccounts(api, profileId), fresh = requireAccount(freshAccounts, accountId);
     if (freshAccounts.filter(row => row._id === accountId).length !== 1 || fresh.isActive !== true || fresh.needsReconnection === true || ['_id', 'platform', 'platformUserId', 'platformId', 'username', 'isActive', 'needsReconnection'].some(key => (fresh[key] ?? null) !== (account[key] ?? null))) fail(409, 'REPORT_ACCOUNT_CHANGED', 'The WhatsApp connection changed while this report loaded. Refresh and load it again.');
-    context.assertProjectMapping?.(profileId); context.assertIntegrationSettings?.();
+    await context.assertProjectMapping?.(profileId); await context.assertIntegrationSettings?.();
     report = { ...base, loadedAt: new Date().toISOString(), range, granularity: 'DAILY', dimensions, phoneNumber: response.phoneNumber, points, note: 'Meta reports delivered-message volume and approximate costs, which can be delayed. Costs use the WABA payment-method currency; its currency code is not reported. These figures are not an invoice or campaign attribution. Each row retains its provider interval and breakdown; rows are not summed. The end date is excluded. Meta may refuse date ranges outside its available history.' };
   } else if (kind === 'tiktok-account' || kind === 'linkedin-organization') {
     const range = dates(url, 89), metricType = url.searchParams.get('metricType') || 'total_value', tiktok = kind === 'tiktok-account';

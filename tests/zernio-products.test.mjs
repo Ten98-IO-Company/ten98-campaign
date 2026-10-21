@@ -7,6 +7,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
+
+// A restart keeps the test database: the replacement app shares the injected pool and the test's finally closes it.
+async function reopen(app, options) {
+  await app.close();
+  return Object.assign(await createApp({ ...options, database: { pool: app.database.pool, db: app.database.db } }), { database: app.database, sql: app.sql });
+}
 
 // Synthetic replies exercise the pinned Commerce contract without contacting a store.
 function fixture() {
@@ -37,10 +44,10 @@ function fixture() {
   return { state, account, accountId, calls, request };
 }
 
-test('HTTP Shopify collection title rename uses exact partial PATCH, independent readback and a durable native fence', async () => {
+test('HTTP Shopify collection title rename uses exact partial PATCH, independent readback and a durable native fence', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-collection-rename-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;
   const appOptions = { dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'collection-rename-fixture-key' } };
-  let app = createApp(appOptions), base, cookie, projectId, providerHook, sequence = 1000, keySequence = 0;
+  let app = await testApp(t, appOptions), base, cookie, projectId, providerHook, sequence = 1000, keySequence = 0;
   const f = fixture(), account = { ...f.account, profileId: 'collection-rename-profile' }, accounts = [account], collections = new Map(), calls = [];
   const store = { ...f.state.store, capabilities: ['collections.read', 'collections.write'] }, writes = () => calls.filter(call => call.method !== 'GET');
   const addCollection = (id = 'gid://shopify/Collection/000' + ++sequence) => { const row = { ...structuredClone(f.state.collection), id }; collections.set(id, row); return row; };
@@ -73,7 +80,7 @@ test('HTTP Shopify collection title rename uses exact partial PATCH, independent
   async function review(collection, accountId = account._id, title = 'Renamed collection') { const result = await request(route(collection, accountId) + '/edit'); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.accountId, accountId); assert.match(result.data.version, /^[a-f0-9]{64}$/); return { version: result.data.version, title }; }
   try {
     await listen(); const setup = await request('/api/auth/setup', { body: { token: app.config.bootstrapToken, name: 'Collection QA', email: 'collection-rename@example.test', password: 'a long local collection rename password', sample: false } }); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
-    app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(account.profileId, projectId);
+    await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', account.profileId, projectId);
     for (const id of ['gid://shopify/Collection/000123', '00124', 'opaque:collection/+=?#']) {
       const collection = addCollection(id), original = structuredClone(collection), body = await review(collection, account._id, '  Autumn  '), key = 'collection-success-' + ++keySequence, before = writes().length, readCount = calls.length;
       const result = await request(route(collection) + '/rename', { body, key }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.readback, true); assert.equal(result.data.collection.title, 'Autumn'); assert.equal(result.data.collection.id, id);
@@ -88,7 +95,7 @@ test('HTTP Shopify collection title rename uses exact partial PATCH, independent
     for (const method of ['GET', 'PUT', 'PATCH', 'DELETE']) assert.equal((await request(route(invalid) + '/rename', { method })).status, 405);
     assert.equal((await request(route(invalid) + '/rename?accountId=foreign', { body: valid })).status, 400); assert.equal((await request(route(invalid) + '/edit?title=x')).status, 400);
     assert.equal((await request(route(invalid) + '/rename', { body: { ...valid, title: 'Summer' } })).data.error.code, 'EMPTY_COLLECTION_RENAME');
-    app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(route(invalid) + '/rename', { body: valid })).status, 403); app.db.prepare("UPDATE memberships SET role='owner'").run(); assert.equal(writes().length, beforeInvalid);
+    await app.sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await request(route(invalid) + '/rename', { body: valid })).status, 403); await app.sql.run("UPDATE memberships SET role='owner'"); assert.equal(writes().length, beforeInvalid);
     for (const capability of ['collections.read', 'collections.write']) { store.capabilities = store.capabilities.filter(item => item !== capability); assert.equal((await request(route(invalid) + '/edit')).status, 403); assert.equal((await request(route(invalid) + '/rename', { body: valid })).status, 403); grants(); }
     for (const scenario of ['stale', 'native-missing', 'inactive', 'reconnect', 'between-reads', 'read-grant', 'write-grant', 'native-store', 'domain', 'role', 'mapping', 'credentials', 'session']) {
       grants(); const collection = addCollection(), body = await review(collection), before = writes().length; let storeReads = 0;
@@ -98,29 +105,29 @@ test('HTTP Shopify collection title rename uses exact partial PATCH, independent
         if (scenario === 'between-reads') collection.title = 'Changed before send';
         if (scenario.endsWith('-grant')) { store.capabilities = store.capabilities.filter(item => item !== (scenario === 'read-grant' ? 'collections.read' : 'collections.write')); result.store.capabilities = [...store.capabilities]; }
         if (scenario === 'native-store') account.platformUserId = 'changed-native-store'; if (scenario === 'domain') result.store.domain = store.domain = 'changed.myshopify.com';
-        if (scenario === 'role') app.db.prepare("UPDATE memberships SET role='viewer'").run();
-        if (scenario === 'mapping') app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?").run(projectId);
+        if (scenario === 'role') await app.sql.run("UPDATE memberships SET role='viewer'");
+        if (scenario === 'mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", projectId);
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-collection-fixture-key' } } })).status, 200);
-        if (scenario === 'session') app.db.prepare('DELETE FROM sessions').run();
+        if (scenario === 'session') await app.sql.run('DELETE FROM sessions');
       };
       // Changing the collection before the second native read must invalidate its original review.
       if (scenario === 'between-reads') { let reads = 0; providerHook = (call, result) => { if (call.url.pathname.endsWith(encodeURIComponent(collection.id)) && ++reads === 2) result.collection.updatedAt = collection.updatedAt = '2026-10-19T10:00:00Z'; }; }
       const result = await request(route(collection) + '/rename', { body }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, before, scenario); providerHook = undefined;
-      app.db.prepare("UPDATE memberships SET role='owner'").run(); app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('collection-rename-profile', projectId);
+      await app.sql.run("UPDATE memberships SET role='owner'"); await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'collection-rename-profile', projectId);
       if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'collection-rename-fixture-key' } } })).status, 200);
       if (scenario === 'session') { const login = await request('/api/auth/login', { body: { email: 'collection-rename@example.test', password: 'a long local collection rename password' } }); assert.equal(login.status, 200); cookie = login.cookie; }
     }
     for (const scenario of ['missing-receipt', 'foreign-envelope', 'foreign-account', 'foreign-platform', 'wrong-id', 'wrong-title', 'wrong-readback', 'lost-readback', 'lost-ack', 'post-role', 'post-grants', 'post-store']) {
       grants(); const collection = addCollection(), body = await review(collection), before = writes().length, key = 'collection-unknown-' + scenario; let written = false;
-      providerHook = (call, result) => {
+      providerHook = async (call, result) => {
         if (call.method === 'PATCH') {
           written = true; if (scenario === 'missing-receipt') return Response.json({}); if (scenario === 'foreign-envelope') result.accountId = 'foreign'; if (scenario === 'foreign-account') result.collection.accountId = 'foreign'; if (scenario === 'foreign-platform') result.collection.platform = 'woocommerce'; if (scenario === 'wrong-id') result.collection.id = 'other'; if (scenario === 'wrong-title') result.collection.title = 'Wrong'; if (scenario === 'lost-ack') throw new Error('Lost rename acknowledgement');
-          if (scenario === 'post-role') app.db.prepare("UPDATE memberships SET role='viewer'").run(); if (scenario === 'post-grants') store.capabilities = ['collections.read']; if (scenario === 'post-store') store.domain = 'changed-after-write.myshopify.com';
+          if (scenario === 'post-role') await app.sql.run("UPDATE memberships SET role='viewer'"); if (scenario === 'post-grants') store.capabilities = ['collections.read']; if (scenario === 'post-store') store.domain = 'changed-after-write.myshopify.com';
         }
         if (written && call.method === 'GET' && call.url.pathname.endsWith(encodeURIComponent(collection.id))) { if (scenario === 'wrong-readback') result.collection.title = 'Wrong'; if (scenario === 'lost-readback') return Response.json({ error: 'private provider detail' }, { status: 404 }); }
       };
-      const result = await request(route(collection) + '/rename', { body, key }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, before + 1); providerHook = undefined; grants(); app.db.prepare("UPDATE memberships SET role='owner'").run();
-      assert.equal(app.db.prepare('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?').get(projectId, key).status, 'uncertain', scenario); assert.equal((await request(route(collection) + '/rename', { body, key })).data.error.code, 'OPERATION_UNCERTAIN');
+      const result = await request(route(collection) + '/rename', { body, key }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, before + 1); providerHook = undefined; grants(); await app.sql.run("UPDATE memberships SET role='owner'");
+      assert.equal((await app.sql.get('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?', projectId, key)).status, 'uncertain', scenario); assert.equal((await request(route(collection) + '/rename', { body, key })).data.error.code, 'OPERATION_UNCERTAIN');
       const alias = { ...account, _id: 'collection-alias-' + scenario }; accounts.push(alias); assert.equal((await request(route(collection, alias._id) + '/rename', { body: await review(collection, alias._id, 'Another title') })).data.error.code, 'COLLECTION_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, before + 1);
     }
     grants(); const raced = addCollection('gid://shopify/Collection/0009999'), alias = { ...account, _id: 'collection-race-alias' }; accounts.push(alias); collections.set('009999', raced);
@@ -133,13 +140,13 @@ test('HTTP Shopify collection title rename uses exact partial PATCH, independent
       const aliasBlocked = await request(route(aliasCollection, alias._id) + '/rename', { body: await review(aliasCollection, alias._id, 'Another title') }); assert.equal(aliasBlocked.data.error.code, 'COLLECTION_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeRace + 1);
     } finally { release(); }
     assert.equal((await pending).data.operation.status, 'uncertain'); providerHook = undefined;
-    const workspaceId = app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id, originalProject = projectId;
-    app.db.prepare('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)').run('collection-alias-project', workspaceId, 'Same collection', 'collection-alias-profile'); const other = { ...account, _id: 'collection-project-alias', profileId: 'collection-alias-profile' }; accounts.push(other); projectId = 'collection-alias-project';
+    const workspaceId = (await app.sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id, originalProject = projectId;
+    await app.sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'collection-alias-project', workspaceId, 'Same collection', 'collection-alias-profile'); const other = { ...account, _id: 'collection-project-alias', profileId: 'collection-alias-profile' }; accounts.push(other); projectId = 'collection-alias-project';
     assert.equal((await request(route(aliasCollection, other._id) + '/rename', { body: await review(aliasCollection, other._id, 'Cross project') })).data.error.code, 'COLLECTION_PREVIOUS_OUTCOME_UNRESOLVED'); projectId = originalProject;
-    await app.close(); app = createApp(appOptions); await listen(); const beforeReopen = writes().length;
+    app = await reopen(app, appOptions); await listen(); const beforeReopen = writes().length;
     assert.equal((await request(route(raced) + '/rename', { body, key: pendingKey })).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal((await request(route(raced) + '/rename', { body, key: blockedKey })).data.error.code, 'OPERATION_NOT_SENT');
     assert.equal((await request(route(aliasCollection, alias._id) + '/rename', { body: await review(aliasCollection, alias._id, 'After restart') })).data.error.code, 'COLLECTION_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeReopen);
-    const orphan = addCollection('orphan-native-collection'); app.db.prepare('INSERT INTO zernio_collection_updates VALUES(?,?,?)').run(JSON.stringify(['shopify', account.platformUserId, orphan.id]), 'missing-project', 'missing-request'); assert.equal((await request(route(orphan) + '/rename', { body: await review(orphan) })).data.error.code, 'COLLECTION_PREVIOUS_OUTCOME_UNRESOLVED');
+    const orphan = addCollection('orphan-native-collection'); await app.sql.run('INSERT INTO zernio_collection_updates (resource, project_id, request_key) VALUES (?, ?, ?)', JSON.stringify(['shopify', account.platformUserId, orphan.id]), 'missing-project', 'missing-request'); assert.equal((await request(route(orphan) + '/rename', { body: await review(orphan) })).data.error.code, 'COLLECTION_PREVIOUS_OUTCOME_UNRESOLVED');
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -387,9 +394,9 @@ test('collection member provider requests preserve encoded native IDs, sanitized
   }
 });
 
-test('HTTP collection member pages support scoped viewers and suppress final-await role, mapping, native account and collection grant changes', async () => {
+test('HTTP collection member pages support scoped viewers and suppress final-await role, mapping, native account and collection grant changes', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-collection-members-')), originalFetch = globalThis.fetch, origin = 'http://127.0.0.1:3000';
-  const app = createApp({ dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'collection-http-fixture-key' } }), f = fixture();
+  const app = await testApp(t, { dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'collection-http-fixture-key' } }), f = fixture();
   f.state.store.capabilities.push('collections.read');
   let base, cookie, projectId, scenario, storeReads = 0; const calls = [];
   globalThis.fetch = async (target, options = {}) => {
@@ -398,8 +405,8 @@ test('HTTP collection member pages support scoped viewers and suppress final-awa
     if (url.pathname.endsWith('/accounts')) {
       assert.equal(url.searchParams.get('profileId'), 'profile-a');
       if (storeReads === 2) {
-        if (scenario === 'role') app.db.prepare("UPDATE memberships SET role='owner'").run();
-        if (scenario === 'mapping') app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('other-profile', projectId);
+        if (scenario === 'role') await app.sql.run("UPDATE memberships SET role='owner'");
+        if (scenario === 'mapping') await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'other-profile', projectId);
         if (scenario === 'native-account') f.account.platformUserId = 'other-native-store';
       }
       return Response.json({ accounts: f.state.accounts });
@@ -421,16 +428,16 @@ test('HTTP collection member pages support scoped viewers and suppress final-awa
     await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
     const setup = await request('/api/auth/setup', { token: app.config.bootstrapToken, name: 'Collection QA', email: 'collection-qa@example.test', password: 'a long local collection fixture password', sample: false });
     assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
-    app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('profile-a', projectId); app.db.prepare("UPDATE memberships SET role='viewer'").run();
+    await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'profile-a', projectId); await app.sql.run("UPDATE memberships SET role='viewer'");
     const route = `/api/projects/${projectId}/integrations/products/${f.accountId}?collectionId=${encodeURIComponent(f.state.collection.id)}`;
     const result = await request(route); assert.equal(result.status, 200); assert.equal(result.data.collection.id, f.state.collection.id); assert.equal(result.data.accountId, f.accountId); assert.equal(result.data.products[0].id, f.state.product.id);
     assert.equal((await request(route, undefined, null)).status, 401);
     for (scenario of ['role', 'mapping', 'native-account', 'collection-grant']) {
       storeReads = 0; const rejected = await request(route); assert.ok([403, 409].includes(rejected.status), scenario); assert.equal(Object.hasOwn(rejected.data, 'products'), false);
-      app.db.prepare("UPDATE memberships SET role='viewer'").run(); app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('profile-a', projectId); f.account.platformUserId = 'native-store'; f.state.store.capabilities = ['products.read', 'collections.read'];
+      await app.sql.run("UPDATE memberships SET role='viewer'"); await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'profile-a', projectId); f.account.platformUserId = 'native-store'; f.state.store.capabilities = ['products.read', 'collections.read'];
     }
     assert.ok(calls.some(url => url.pathname.endsWith('/commerce/products')));
-  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });
 
 test('mutations, unsupported accounts, identifiers, duplicate/unknown filters and malformed pages do not reach products', async () => {
@@ -527,12 +534,12 @@ test('real provider 403 responses become product permission errors through the a
   assert.equal(JSON.stringify(response).includes('Private provider detail'), false); assert.ok(calls.includes('/api/v1/commerce/products'));
 });
 
-test('HTTP Shopify content and classification updates use fresh reviews, exact PATCH fields and a durable native-product fence', async () => {
+test('HTTP Shopify content and classification updates use fresh reviews, exact PATCH fields and a durable native-product fence', { skip: postgresSkip }, async t => {
   // Official cached OpenAPI 1.295.0: PATCH /v1/commerce/products/{productId}
   // accepts accountId plus partial fields and returns {product}; it has no success flag.
   const directory = await mkdtemp(join(tmpdir(), 'ten98-product-edit-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;
   const appOptions = { dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'product-http-fixture-key' } };
-  let app = createApp(appOptions), base, cookie, projectId, providerHook, sequence = 100, keySequence = 0;
+  let app = await testApp(t, appOptions), base, cookie, projectId, providerHook, sequence = 100, keySequence = 0;
   const f = fixture(), account = { ...f.account, profileId: 'product-http-profile' }, accounts = [account], products = new Map(), calls = [];
   const store = { ...f.state.store, capabilities: ['products.read', 'products.update'] };
   const addProduct = () => { const row = { ...structuredClone(f.state.product), id: String(++sequence), descriptionHtml: '<p>Original</p>', vendor: 'Original vendor' }; products.set(row.id, row); return row; };
@@ -569,7 +576,7 @@ test('HTTP Shopify content and classification updates use fresh reviews, exact P
   try {
     await listen();
     const setup = await request('/api/auth/setup', { body: { token: app.config.bootstrapToken, name: 'Product QA', email: 'product-qa@example.test', password: 'a long local product fixture password', sample: false } }); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
-    app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(account.profileId, projectId);
+    await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', account.profileId, projectId);
     for (const fields of [{ title: '  Reviewed title  ' }, { descriptionHtml: '<p>Reviewed <strong>HTML</strong></p>' }, { title: 'Reviewed title', descriptionHtml: '' }, { vendor: 'Reviewed vendor' }, { vendor: '' }, { title: 'Reviewed title', vendor: 'Reviewed vendor' }, { productType: '  Exact, Product Type  ' }, { productType: '' }, { tags: ['Blue,Red', ' Case ', 'case', 'case', '', 'line\nbreak', 'tab\tlabel'] }, { tags: [] }, { productType: 'Shirts', tags: ['<script>literal tag</script>', 'summer'] }]) {
       const product = addProduct(), body = await review(product, fields), key = 'product-success-' + product.id, before = writes().length;
       const result = await request(route(product) + '/update', { body, key }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.accountId, account._id); assert.equal(result.data.readback, true); assert.equal(result.data.product.id, product.id);
@@ -611,7 +618,7 @@ test('HTTP Shopify content and classification updates use fresh reviews, exact P
     const unchanged = await review(product, { title: product.title, descriptionHtml: '<p>Changed only HTML</p>' }); assert.equal((await request(route(product) + '/update', { body: unchanged })).status, 200); assert.deepEqual(Object.keys(writes().at(-1).payload).sort(), ['accountId', 'descriptionHtml']);
     for (const method of ['GET', 'PATCH', 'PUT', 'DELETE']) assert.equal((await request(route(product) + '/update', { method })).status, 405);
     assert.equal((await request(route(product), { session: null })).status, 401); assert.equal(writes().length, before + 1);
-    app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(route(product) + '/update', { body })).status, 403); app.db.prepare("UPDATE memberships SET role='owner'").run();
+    await app.sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await request(route(product) + '/update', { body })).status, 403); await app.sql.run("UPDATE memberships SET role='owner'");
     for (const scenario of ['ungranted', 'missing-update', 'grant-link', 'native-missing', 'native-blank', 'foreign-profile', 'inactive', 'reconnect']) {
       const current = addProduct(), reviewed = await review(current, { productType: 'Scoped type', tags: ['exact, tag', ' Case '] }), count = writes().length;
       if (['ungranted', 'missing-update', 'grant-link'].includes(scenario)) { store.capabilities = ['products.read']; store.missingCapabilities = scenario === 'missing-update' ? ['products.update'] : []; store.grantPermissionsUrl = scenario === 'grant-link' ? 'https://brand.myshopify.com/admin/oauth/authorize' : null; }
@@ -635,23 +642,23 @@ test('HTTP Shopify content and classification updates use fresh reviews, exact P
         if (scenario === 'type-between-reads') current.productType = 'External type edit';
         if (scenario === 'tags-between-reads') current.tags = ['External tag edit'];
         if (scenario === 'deleted-between-reads') current.status = 'deleted';
-        if (scenario === 'role') app.db.prepare("UPDATE memberships SET role='editor'").run();
-        if (scenario === 'mapping') app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?").run(projectId);
+        if (scenario === 'role') await app.sql.run("UPDATE memberships SET role='editor'");
+        if (scenario === 'mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", projectId);
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-fixture-key' } } })).status, 200);
-        if (scenario === 'session') app.db.prepare('DELETE FROM sessions').run();
+        if (scenario === 'session') await app.sql.run('DELETE FROM sessions');
         if (scenario === 'native-store') account.platformUserId = 'other-native-store';
         if (scenario === 'store-domain') store.domain = 'other.myshopify.com';
         if (scenario === 'currency') store.currency = 'USD';
         if (scenario === 'permissions') store.capabilities = ['products.read'];
       };
       const rejected = await request(route(current) + '/update', { body: reviewed }); assert.ok([403, 409].includes(rejected.status), scenario + JSON.stringify(rejected)); assert.equal(writes().length, count); providerHook = undefined;
-      app.db.prepare("UPDATE memberships SET role='owner'").run(); app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('product-http-profile', projectId); account.platformUserId = 'native-store'; store.domain = f.state.store.domain; store.currency = 'AED'; store.capabilities = ['products.read', 'products.update'];
+      await app.sql.run("UPDATE memberships SET role='owner'"); await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'product-http-profile', projectId); account.platformUserId = 'native-store'; store.domain = f.state.store.domain; store.currency = 'AED'; store.capabilities = ['products.read', 'products.update'];
       if (scenario === 'session') { const login = await request('/api/auth/login', { body: { email: 'product-qa@example.test', password: 'a long local product fixture password' } }); assert.equal(login.status, 200); cookie = login.cookie; }
       if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'product-http-fixture-key' } } })).status, 200);
     }
     for (const scenario of ['missing-receipt', 'foreign-envelope', 'foreign-product', 'wrong-product', 'wrong-title', 'wrong-vendor', 'vendor-readback', 'null-vendor', 'wrong-type', 'null-type', 'type-readback', 'wrong-tags', 'tags-readback', 'null-html', 'wrong-readback', 'deleted-receipt', 'deleted-readback', 'lost-ack', 'post-write-access', 'post-write-permissions']) {
       const current = addProduct(), reviewed = await review(current, { title: 'Selected title', descriptionHtml: '<p>Selected HTML</p>', vendor: 'Selected vendor', productType: 'Selected type', tags: ['exact, tag', ' Case ', 'case'] }), count = writes().length, key = 'product-uncertain-' + scenario; let written = false;
-      providerHook = (call, result) => {
+      providerHook = async (call, result) => {
         if (call.method === 'PATCH') {
           written = true;
           if (scenario === 'missing-receipt') return Response.json({});
@@ -667,7 +674,7 @@ test('HTTP Shopify content and classification updates use fresh reviews, exact P
           if (scenario === 'null-html') return Response.json({ product: { ...result.product, descriptionHtml: null } });
           if (scenario === 'deleted-receipt' || scenario === 'deleted-readback') { current.status = 'deleted'; if (scenario === 'deleted-receipt') return Response.json({ product: { ...result.product, status: 'deleted' } }); }
           if (scenario === 'lost-ack') throw new Error('Lost acknowledgement');
-          if (scenario === 'post-write-access') app.db.prepare("UPDATE memberships SET role='viewer'").run();
+          if (scenario === 'post-write-access') await app.sql.run("UPDATE memberships SET role='viewer'");
           if (scenario === 'post-write-permissions') store.capabilities = ['products.read'];
         }
         if (written && scenario === 'vendor-readback' && call.method === 'GET' && call.url.pathname.endsWith('/commerce/products/' + current.id)) return Response.json({ product: { ...result.product, vendor: 'Different vendor readback' } });
@@ -675,7 +682,7 @@ test('HTTP Shopify content and classification updates use fresh reviews, exact P
         if (written && scenario === 'tags-readback' && call.method === 'GET' && call.url.pathname.endsWith('/commerce/products/' + current.id)) return Response.json({ product: { ...result.product, tags: ['Different tag readback'] } });
         if (written && scenario === 'wrong-readback' && call.method === 'GET' && call.url.pathname.endsWith('/commerce/products/' + current.id)) return Response.json({ product: { ...result.product, descriptionHtml: '<p>Different readback</p>' } });
       };
-      const result = await request(route(current) + '/update', { body: reviewed, key }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, count + 1); providerHook = undefined; app.db.prepare("UPDATE memberships SET role='owner'").run(); store.capabilities = ['products.read', 'products.update'];
+      const result = await request(route(current) + '/update', { body: reviewed, key }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, count + 1); providerHook = undefined; await app.sql.run("UPDATE memberships SET role='owner'"); store.capabilities = ['products.read', 'products.update'];
       assert.equal((await request(route(current) + '/update', { body: reviewed, key })).data.error.code, 'OPERATION_UNCERTAIN');
       if (scenario === 'deleted-receipt' || scenario === 'deleted-readback') {
         const blocked = await request(route(current) + '/update', { body: await review(current, { title: 'New request for deleted product' }) }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation?.id); assert.equal(writes().length, count + 1);
@@ -696,22 +703,22 @@ test('HTTP Shopify content and classification updates use fresh reviews, exact P
     const count = writes().length, waiting = request(route(raced) + '/update', { body: raceBody }); await held;
     const lostKey = 'product-reopen-lost-ack'; assert.equal((await request(route(raced, alias._id) + '/update', { body: aliasBody, key: lostKey })).data.operation.status, 'uncertain'); release();
     assert.equal((await waiting).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, count + 1); providerHook = undefined;
-    const originalProject = projectId, workspaceId = app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id;
-    app.db.prepare('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)').run('product-alias-project', workspaceId, 'Same native store', 'alias-profile');
+    const originalProject = projectId, workspaceId = (await app.sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
+    await app.sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'product-alias-project', workspaceId, 'Same native store', 'alias-profile');
     const projectAlias = { ...account, _id: 'cross-project-alias', profileId: 'alias-profile' }; accounts.push(projectAlias); projectId = 'product-alias-project';
     assert.equal((await request(route(raced, projectAlias._id) + '/update', { body: await review(raced, { descriptionHtml: '<p>Changed request body</p>' }, projectAlias._id) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); projectId = originalProject;
-    await app.close(); app = createApp(appOptions); await listen();
+    app = await reopen(app, appOptions); await listen();
     assert.equal((await request(route(raced, alias._id) + '/update', { body: aliasBody, key: lostKey })).data.error.code, 'OPERATION_UNCERTAIN');
     assert.equal((await request(route(raced) + '/update', { body: await review(raced, { title: 'After reopen' }) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, count + 1);
-    const orphan = addProduct(); app.db.prepare('INSERT INTO zernio_product_updates VALUES(?,?,?)').run(JSON.stringify(['shopify', account.platformUserId, orphan.id]), 'missing-project', 'missing-request');
+    const orphan = addProduct(); await app.sql.run('INSERT INTO zernio_product_updates (resource, project_id, request_key) VALUES (?, ?, ?)', JSON.stringify(['shopify', account.platformUserId, orphan.id]), 'missing-project', 'missing-request');
     assert.equal((await request(route(orphan) + '/update', { body: await review(orphan) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, count + 1);
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test('HTTP Shopify draft creation forces one priced variant, fresh store review, durable receipts and a global native-store fence', async () => {
+test('HTTP Shopify draft creation forces one priced variant, fresh store review, durable receipts and a global native-store fence', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-product-create-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;
   const appOptions = { dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'product-create-fixture-key' } };
-  let app = createApp(appOptions), base, cookie, projectId, providerHook, sequence = 200, keySequence = 0, storeSequence = 0;
+  let app = await testApp(t, appOptions), base, cookie, projectId, providerHook, sequence = 200, keySequence = 0, storeSequence = 0;
   const f = fixture(), account = { ...f.account, profileId: 'product-create-profile' }, accounts = [account], products = new Map(), calls = [];
   const store = { ...f.state.store, capabilities: ['products.read', 'products.create'] }, writes = () => calls.filter(call => call.method !== 'GET');
   const freshStore = () => { account.platformUserId = 'native-create-store-' + ++storeSequence; account.isActive = true; account.needsReconnection = false; Object.assign(store, { currency: 'AED', domain: 'brand.myshopify.com', capabilities: ['products.read', 'products.create'], missingCapabilities: [] }); };
@@ -742,24 +749,30 @@ test('HTTP Shopify draft creation forces one priced variant, fresh store review,
   }
   const route = (accountId = account._id) => `/api/projects/${projectId}/integrations/products/${accountId}`;
   async function review(fields = {}, accountId = account._id) { const result = await request(route(accountId) + '/store'); assert.equal(result.status, 200, JSON.stringify(result)); assert.match(result.data.creationVersion, /^[a-f0-9]{64}$/); return { version: result.data.creationVersion, confirmCreate: true, title: '  Reviewed draft  ', price: '00019.90', ...fields }; }
-  const evidence = key => app.db.prepare('SELECT account_id,native_product_id FROM zernio_product_create_receipts WHERE project_id=? AND request_key=?').get(projectId, key);
+  const evidence = key => app.sql.get('SELECT account_id,native_product_id FROM zernio_product_create_receipts WHERE project_id=? AND request_key=?', projectId, key);
   try {
     await listen(); const setup = await request('/api/auth/setup', { body: { token: app.config.bootstrapToken, name: 'Create QA', email: 'product-create@example.test', password: 'a long local product creation password', sample: false } }); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
-    app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(account.profileId, projectId);
+    await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', account.profileId, projectId);
     for (const fields of [{}, { descriptionHtml: '' }, { descriptionHtml: '<p>Reviewed HTML</p>' }, { price: '0' }, { price: '9'.repeat(80) + '.10' }]) {
       freshStore(); const body = await review(fields), key = 'product-created-' + storeSequence, count = writes().length;
       const result = await request(route() + '/create', { body, key }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.readback, true); assert.equal(result.data.product.status, 'draft'); assert.equal(result.data.product.platformStatus, 'DRAFT');
       assert.deepEqual(writes().at(-1).payload, { accountId: account._id, title: 'Reviewed draft', ...(Object.hasOwn(fields, 'descriptionHtml') ? { descriptionHtml: fields.descriptionHtml } : {}), status: 'draft', variants: [{ price: body.price }] }); assert.equal(writes().length, count + 1);
-      assert.deepEqual({ ...evidence(key) }, { account_id: account._id, native_product_id: result.data.product.id }); assert.equal(JSON.stringify(result).includes('never-expose'), false);
+      assert.deepEqual(await evidence(key), { account_id: account._id, native_product_id: result.data.product.id }); assert.equal(JSON.stringify(result).includes('never-expose'), false);
       assert.deepEqual((await request(route() + '/create', { body, key })).data, result.data); assert.equal(writes().length, count + 1);
       assert.equal((await request(route() + '/create', { body: { ...body, price: '20' }, key })).data.error.code, 'IDEMPOTENCY_CONFLICT');
     }
+    // Parallel duplicates with one Idempotency-Key create one native product and share one sent outcome.
+    freshStore(); const creates = () => calls.filter(call => call.method === 'POST' && call.url.pathname === '/api/v1/commerce/products').length;
+    const parallelBody = await review(), parallelKey = 'product-create-parallel', createsBefore = creates();
+    const parallel = await Promise.all([1, 2].map(() => request(route() + '/create', { body: parallelBody, key: parallelKey })));
+    assert.equal(creates(), createsBefore + 1, JSON.stringify(parallel)); assert.equal(new Set(parallel.filter(result => result.status === 200).map(result => result.data.operation.id)).size, 1, JSON.stringify(parallel));
+    assert.ok(parallel.every(result => result.status === 200 ? result.data.operation.status === 'complete' : result.data.error.code === 'OPERATION_UNCERTAIN'), JSON.stringify(parallel));
     freshStore(); const valid = await review(), count = writes().length;
     for (const fields of [{ status: 'active' }, { variants: [{ price: '1' }] }, { inventoryQuantity: 1 }, { images: [] }, { tags: [] }, { accountId: 'foreign' }, { confirmCreate: false }, { title: '' }, { title: ' ' }, { title: 'Bad\nTitle' }, { title: 'x'.repeat(10001) }, { descriptionHtml: null }, { descriptionHtml: {} }, { version: 'bad' }, { price: 19.9 }, { price: '-1' }, { price: '1.001' }, { price: '1e2' }, { price: ' 1' }, { price: '19.90\n' }, { price: '1'.repeat(101) }]) assert.equal((await request(route() + '/create', { body: { ...valid, ...fields } })).status, 400, JSON.stringify(fields).slice(0, 100));
     for (const field of ['title', 'price', 'version', 'confirmCreate']) { const body = { ...valid }; delete body[field]; assert.equal((await request(route() + '/create', { body })).status, 400); }
     for (const method of ['GET', 'PUT', 'PATCH', 'DELETE']) assert.equal((await request(route() + '/create', { method })).status, 405);
     assert.equal((await request(route() + '/create?status=draft', { body: valid })).status, 400); assert.equal((await request(route() + '/create', { body: valid, session: null })).status, 401);
-    app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(route() + '/create', { body: valid })).status, 403); app.db.prepare("UPDATE memberships SET role='owner'").run(); assert.equal(writes().length, count);
+    await app.sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await request(route() + '/create', { body: valid })).status, 403); await app.sql.run("UPDATE memberships SET role='owner'"); assert.equal(writes().length, count);
     for (const scenario of ['missing-create', 'missing-read', 'ungranted', 'native-missing', 'native-blank', 'inactive', 'reconnect', 'currency', 'domain', 'between-reads', 'mapping', 'role', 'credentials', 'session']) {
       freshStore(); const body = await review(), before = writes().length; let changed = false;
       if (scenario.startsWith('missing-')) store.capabilities = [scenario === 'missing-create' ? 'products.read' : 'products.create'];
@@ -773,19 +786,19 @@ test('HTTP Shopify draft creation forces one priced variant, fresh store review,
       providerHook = async call => {
         if (call.url.pathname !== '/api/v1/commerce/store' || changed) return; changed = true;
         if (scenario === 'between-reads') store.currency = 'USD';
-        if (scenario === 'mapping') app.db.prepare("UPDATE projects SET zernio_profile_id='other-profile' WHERE id=?").run(projectId);
-        if (scenario === 'role') app.db.prepare("UPDATE memberships SET role='viewer'").run();
-        if (scenario === 'session') app.db.prepare('DELETE FROM sessions').run();
+        if (scenario === 'mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='other-profile' WHERE id=?", projectId);
+        if (scenario === 'role') await app.sql.run("UPDATE memberships SET role='viewer'");
+        if (scenario === 'session') await app.sql.run('DELETE FROM sessions');
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-create-fixture-key' } } })).status, 200);
       };
       assert.ok([403, 409].includes((await request(route() + '/create', { body })).status), scenario); assert.equal(writes().length, before); providerHook = undefined;
-      app.db.prepare("UPDATE memberships SET role='owner'").run(); app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(account.profileId, projectId);
+      await app.sql.run("UPDATE memberships SET role='owner'"); await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', account.profileId, projectId);
       if (scenario === 'session') { const login = await request('/api/auth/login', { body: { email: 'product-create@example.test', password: 'a long local product creation password' } }); assert.equal(login.status, 200); cookie = login.cookie; }
       if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'product-create-fixture-key' } } })).status, 200);
     }
     for (const scenario of ['missing-receipt', 'foreign-envelope', 'foreign-product', 'missing-id', 'active', 'wrong-platform-status', 'wrong-title', 'wrong-price', 'wrong-currency', 'two-variants', 'null-html', 'wrong-readback', 'readback-404', 'lost-ack', 'post-write-access', 'post-write-permissions']) {
       freshStore(); const body = await review({ descriptionHtml: '<p>Authored HTML</p>' }), before = writes().length, key = 'create-uncertain-' + scenario; let written = false;
-      providerHook = (call, result) => {
+      providerHook = async (call, result) => {
         if (call.method === 'POST') {
           written = true;
           if (scenario === 'missing-receipt') return Response.json({});
@@ -800,7 +813,7 @@ test('HTTP Shopify draft creation forces one priced variant, fresh store review,
           if (scenario === 'two-variants') result.product.variants.push({ ...result.product.variants[0], id: 'second' });
           if (scenario === 'null-html') result.product.descriptionHtml = null;
           if (scenario === 'lost-ack') throw new Error('Lost create acknowledgement');
-          if (scenario === 'post-write-access') app.db.prepare("UPDATE memberships SET role='viewer'").run();
+          if (scenario === 'post-write-access') await app.sql.run("UPDATE memberships SET role='viewer'");
           if (scenario === 'post-write-permissions') store.capabilities = ['products.read'];
         }
         if (written && call.method === 'GET' && call.url.pathname.includes('/commerce/products/')) {
@@ -808,38 +821,38 @@ test('HTTP Shopify draft creation forces one priced variant, fresh store review,
           if (scenario === 'readback-404') return Response.json({ error: 'not found' }, { status: 404 });
         }
       };
-      const result = await request(route() + '/create', { body, key }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, before + 1); providerHook = undefined; app.db.prepare("UPDATE memberships SET role='owner'").run(); store.capabilities = ['products.read', 'products.create'];
-      const operation = app.db.prepare('SELECT id,status FROM integration_operations WHERE project_id=? AND request_key=?').get(projectId, key); assert.equal(operation.status, 'uncertain', scenario);
-      assert.deepEqual({ ...evidence(key) }, { account_id: account._id, native_product_id: ['missing-receipt', 'foreign-envelope', 'foreign-product', 'missing-id', 'lost-ack'].includes(scenario) ? null : String(sequence) });
+      const result = await request(route() + '/create', { body, key }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, before + 1); providerHook = undefined; await app.sql.run("UPDATE memberships SET role='owner'"); store.capabilities = ['products.read', 'products.create'];
+      const operation = await app.sql.get('SELECT id,status FROM integration_operations WHERE project_id=? AND request_key=?', projectId, key); assert.equal(operation.status, 'uncertain', scenario);
+      assert.deepEqual(await evidence(key), { account_id: account._id, native_product_id: ['missing-receipt', 'foreign-envelope', 'foreign-product', 'missing-id', 'lost-ack'].includes(scenario) ? null : String(sequence) });
       assert.equal((await request(route() + '/create', { body, key })).data.error.code, 'OPERATION_UNCERTAIN');
       const blocked = await request(route() + '/create', { body: await review({ title: 'New attempt' }) }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, operation.id); assert.equal(writes().length, before + 1);
       const alias = { ...account, _id: 'creation-alias-' + scenario, username: 'renamed.myshopify.com' }; accounts.push(alias);
       assert.equal((await request(route(alias._id) + '/create', { body: await review({ title: 'Alias draft' }, alias._id) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, before + 1);
-      app.db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE id=?").run(operation.id);
+      await app.sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE id=?", operation.id);
       assert.equal((await request(route() + '/create', { body, key })).data.error.code, 'OPERATION_REVIEWED');
       assert.equal((await request(route() + '/create', { body: await review({ title: 'New reviewed draft' }) })).status, 200); assert.equal(writes().length, before + 2);
-      assert.equal(evidence(key).native_product_id, ['missing-receipt', 'foreign-envelope', 'foreign-product', 'missing-id', 'lost-ack'].includes(scenario) ? null : String(sequence - 1), 'Older evidence survives fence replacement.');
+      assert.equal((await evidence(key)).native_product_id, ['missing-receipt', 'foreign-envelope', 'foreign-product', 'missing-id', 'lost-ack'].includes(scenario) ? null : String(sequence - 1), 'Older evidence survives fence replacement.');
     }
     freshStore(); const originalBody = await review(), alias = { ...account, _id: 'create-race-alias' }; accounts.push(alias); const aliasBody = await review({}, alias._id); let storesRead = 0, entered, release, heldOnce = false;
     const held = new Promise(resolve => { entered = resolve; }), resume = new Promise(resolve => { release = resolve; });
     providerHook = async call => { if (call.url.pathname === '/api/v1/commerce/store' && call.url.searchParams.get('accountId') === account._id) storesRead++; if (!heldOnce && storesRead === 4 && call.url.pathname === '/api/v1/accounts') { heldOnce = true; entered(); await resume; } if (call.method === 'POST') throw new Error('Alias lost acknowledgement'); };
     const beforeRace = writes().length, waiting = request(route() + '/create', { body: originalBody }); await held;
     const lostKey = 'create-restart-lost-ack'; assert.equal((await request(route(alias._id) + '/create', { body: aliasBody, key: lostKey })).data.operation.status, 'uncertain'); release(); assert.equal((await waiting).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeRace + 1); providerHook = undefined;
-    const originalProject = projectId, workspaceId = app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id;
-    app.db.prepare('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)').run('creation-alias-project', workspaceId, 'Same native store', 'creation-alias-profile'); const other = { ...account, _id: 'create-project-alias', profileId: 'creation-alias-profile' }; accounts.push(other); projectId = 'creation-alias-project';
+    const originalProject = projectId, workspaceId = (await app.sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
+    await app.sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'creation-alias-project', workspaceId, 'Same native store', 'creation-alias-profile'); const other = { ...account, _id: 'create-project-alias', profileId: 'creation-alias-profile' }; accounts.push(other); projectId = 'creation-alias-project';
     assert.equal((await request(route(other._id) + '/create', { body: await review({}, other._id) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); projectId = originalProject;
-    await app.close(); app = createApp(appOptions); await listen(); assert.equal((await request(route(alias._id) + '/create', { body: aliasBody, key: lostKey })).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(evidence(lostKey).native_product_id, null);
+    app = await reopen(app, appOptions); await listen(); assert.equal((await request(route(alias._id) + '/create', { body: aliasBody, key: lostKey })).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal((await evidence(lostKey)).native_product_id, null);
     assert.equal((await request(route() + '/create', { body: await review({ title: 'After restart' }) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeRace + 1);
-    freshStore(); app.db.prepare('INSERT INTO zernio_product_creates VALUES(?,?,?)').run(JSON.stringify(['shopify', account.platformUserId]), 'missing-project', 'missing-request'); assert.equal((await request(route() + '/create', { body: await review() })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeRace + 1);
+    freshStore(); await app.sql.run('INSERT INTO zernio_product_creates (resource, project_id, request_key) VALUES (?, ?, ?)', JSON.stringify(['shopify', account.platformUserId]), 'missing-project', 'missing-request'); assert.equal((await request(route() + '/create', { body: await review() })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeRace + 1);
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test('HTTP Shopify single-variant price uses exact native fields, verified readback and the shared content fence', async () => {
+test('HTTP Shopify single-variant price uses exact native fields, verified readback and the shared content fence', { skip: postgresSkip }, async t => {
   // Cached OpenAPI 1.295.0: POST /v1/commerce/products/{productId}/price
   // accepts accountId and variants [{id,price}], and returns {product}.
   const directory = await mkdtemp(join(tmpdir(), 'ten98-product-price-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;
   const appOptions = { dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'product-price-fixture-key' } };
-  let app = createApp(appOptions), base, cookie, projectId, providerHook, sequence = 400, keySequence = 0;
+  let app = await testApp(t, appOptions), base, cookie, projectId, providerHook, sequence = 400, keySequence = 0;
   const f = fixture(), account = { ...f.account, profileId: 'product-price-profile' }, accounts = [account], products = new Map(), calls = [];
   const store = { ...f.state.store, capabilities: ['products.read', 'products.price'] }, writes = () => calls.filter(call => call.method !== 'GET');
   const addProduct = () => { const row = { ...structuredClone(f.state.product), id: String(++sequence) }; row.variants.push({ ...structuredClone(row.variants[0]), id: 'variant-2', title: 'M', price: { amount: '50.000', currency: 'AED' } }); products.set(row.id, row); return row; };
@@ -878,7 +891,7 @@ test('HTTP Shopify single-variant price uses exact native fields, verified readb
   const grants = () => { Object.assign(store, { capabilities: ['products.read', 'products.price'], missingCapabilities: [], currency: 'AED', domain: f.state.store.domain }); Object.assign(account, f.account, { profileId: 'product-price-profile', needsReconnection: false }); };
   try {
     await listen(); const setup = await request('/api/auth/setup', { body: { token: app.config.bootstrapToken, name: 'Price QA', email: 'product-price@example.test', password: 'a long local product price password', sample: false } }); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
-    app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(account.profileId, projectId);
+    await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', account.profileId, projectId);
     for (const price of ['00029.90', '0', '9'.repeat(80) + '.10']) {
       const product = addProduct(), original = structuredClone(product), body = await review(product, { price }), key = 'price-success-' + product.id, count = writes().length;
       const result = await request(route(product) + '/price', { body, key }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.readback, true); assert.equal(result.data.accountId, account._id);
@@ -891,7 +904,7 @@ test('HTTP Shopify single-variant price uses exact native fields, verified readb
     for (const field of ['version', 'confirmPrice', 'variantId', 'price']) { const body = { ...valid }; delete body[field]; assert.equal((await request(route(invalidProduct) + '/price', { body })).status, 400); }
     for (const method of ['GET', 'PUT', 'PATCH', 'DELETE']) assert.equal((await request(route(invalidProduct) + '/price', { method })).status, 405);
     assert.equal((await request(route(invalidProduct) + '/price?accountId=foreign', { body: valid })).status, 400); assert.equal((await request(route(invalidProduct) + '/price', { body: valid, session: null })).status, 401);
-    app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(route(invalidProduct) + '/price', { body: valid })).status, 403); app.db.prepare("UPDATE memberships SET role='owner'").run();
+    await app.sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await request(route(invalidProduct) + '/price', { body: valid })).status, 403); await app.sql.run("UPDATE memberships SET role='owner'");
     assert.equal((await request(route(invalidProduct) + '/price', { body: { ...valid, price: '00050.00' } })).data.error.code, 'EMPTY_PRODUCT_PRICE_UPDATE'); assert.equal((await request(route(invalidProduct) + '/price', { body: { ...valid, variantId: 'unreturned-variant' } })).data.error.code, 'PRODUCT_VARIANT_CHANGED'); assert.equal(writes().length, count);
     for (const scenario of ['missing-price', 'ungranted-price', 'missing-read', 'native-missing', 'native-blank', 'native-untrimmed', 'inactive', 'reconnect', 'deleted', 'stale', 'between-reads', 'removed-variant', 'currency', 'domain', 'native-store', 'role', 'mapping', 'credentials', 'session']) {
       grants(); const product = addProduct();
@@ -913,19 +926,19 @@ test('HTTP Shopify single-variant price uses exact native fields, verified readb
         if (scenario === 'currency') store.currency = 'USD';
         if (scenario === 'domain') store.domain = 'changed.myshopify.com';
         if (scenario === 'native-store') account.platformUserId = 'changed-native-store';
-        if (scenario === 'role') app.db.prepare("UPDATE memberships SET role='viewer'").run();
-        if (scenario === 'mapping') app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?").run(projectId);
+        if (scenario === 'role') await app.sql.run("UPDATE memberships SET role='viewer'");
+        if (scenario === 'mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", projectId);
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-price-fixture-key' } } })).status, 200);
-        if (scenario === 'session') app.db.prepare('DELETE FROM sessions').run();
+        if (scenario === 'session') await app.sql.run('DELETE FROM sessions');
       };
       const result = await request(route(product) + '/price', { body }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); if (scenario.endsWith('price')) assert.equal(result.data.error.code, 'PRODUCT_PRICE_PERMISSION_REQUIRED'); assert.equal(writes().length, before); providerHook = undefined;
-      app.db.prepare("UPDATE memberships SET role='owner'").run(); app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('product-price-profile', projectId);
+      await app.sql.run("UPDATE memberships SET role='owner'"); await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'product-price-profile', projectId);
       if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'product-price-fixture-key' } } })).status, 200);
       if (scenario === 'session') { const login = await request('/api/auth/login', { body: { email: 'product-price@example.test', password: 'a long local product price password' } }); assert.equal(login.status, 200); cookie = login.cookie; }
     }
     for (const scenario of ['missing-receipt', 'foreign-envelope', 'foreign-product', 'wrong-product', 'missing-variant', 'duplicate-variant', 'wrong-price', 'wrong-currency', 'deleted', 'wrong-readback', 'missing-readback-variant', 'readback-currency', 'readback-404', 'lost-ack', 'post-write-access', 'post-write-grants', 'post-write-store']) {
       grants(); store.capabilities.push('products.update'); const product = addProduct(), body = await review(product), before = writes().length, key = 'price-uncertain-' + scenario; let written = false;
-      providerHook = (call, result) => {
+      providerHook = async (call, result) => {
         if (call.method === 'POST') {
           written = true;
           if (scenario === 'missing-receipt') return Response.json({});
@@ -938,7 +951,7 @@ test('HTTP Shopify single-variant price uses exact native fields, verified readb
           if (scenario === 'wrong-currency') result.product.variants[1].price.currency = 'USD';
           if (scenario === 'deleted') result.product.status = 'deleted';
           if (scenario === 'lost-ack') throw new Error('Lost price acknowledgement');
-          if (scenario === 'post-write-access') app.db.prepare("UPDATE memberships SET role='viewer'").run();
+          if (scenario === 'post-write-access') await app.sql.run("UPDATE memberships SET role='viewer'");
           if (scenario === 'post-write-grants') store.capabilities = ['products.read'];
           if (scenario === 'post-write-store') store.domain = 'changed-after-write.myshopify.com';
         }
@@ -949,8 +962,8 @@ test('HTTP Shopify single-variant price uses exact native fields, verified readb
           if (scenario === 'readback-404') return Response.json({ error: 'not found' }, { status: 404 });
         }
       };
-      const result = await request(route(product) + '/price', { body, key }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, before + 1); providerHook = undefined; grants(); store.capabilities.push('products.update'); app.db.prepare("UPDATE memberships SET role='owner'").run();
-      assert.equal(app.db.prepare('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?').get(projectId, key).status, 'uncertain', scenario); assert.equal((await request(route(product) + '/price', { body, key })).data.error.code, 'OPERATION_UNCERTAIN');
+      const result = await request(route(product) + '/price', { body, key }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, before + 1); providerHook = undefined; grants(); store.capabilities.push('products.update'); await app.sql.run("UPDATE memberships SET role='owner'");
+      assert.equal((await app.sql.get('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?', projectId, key)).status, 'uncertain', scenario); assert.equal((await request(route(product) + '/price', { body, key })).data.error.code, 'OPERATION_UNCERTAIN');
       const alias = { ...account, _id: 'price-alias-' + scenario }; accounts.push(alias);
       assert.equal((await request(route(product, alias._id) + '/update', { body: await review(product, {}, alias._id, true) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, before + 1);
     }
@@ -964,21 +977,21 @@ test('HTTP Shopify single-variant price uses exact native fields, verified readb
       const key = 'price-reopen-' + otherKind; const unknown = await request(route(product, alias._id) + '/' + otherKind, { body: aliasBody, key }); assert.equal(unknown.data.operation.status, 'uncertain', JSON.stringify(unknown)); release(); assert.equal((await waiting).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, before + 1); providerHook = undefined;
       reopenedProduct = product; reopenedAlias = alias; reopenedBody = aliasBody; reopenedKey = key;
     }
-    const originalProject = projectId, workspaceId = app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id;
-    app.db.prepare('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)').run('price-alias-project', workspaceId, 'Same native product', 'price-alias-profile'); const other = { ...account, _id: 'price-project-alias', profileId: 'price-alias-profile' }; accounts.push(other); projectId = 'price-alias-project';
+    const originalProject = projectId, workspaceId = (await app.sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
+    await app.sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'price-alias-project', workspaceId, 'Same native product', 'price-alias-profile'); const other = { ...account, _id: 'price-project-alias', profileId: 'price-alias-profile' }; accounts.push(other); projectId = 'price-alias-project';
     for (const kind of ['price', 'update']) assert.equal((await request(route(reopenedProduct, other._id) + '/' + kind, { body: await review(reopenedProduct, { ...(kind === 'price' ? { price: '30' } : {}) }, other._id, kind === 'update') })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); projectId = originalProject;
-    await app.close(); app = createApp(appOptions); await listen(); const beforeRestart = writes().length;
+    app = await reopen(app, appOptions); await listen(); const beforeRestart = writes().length;
     assert.equal((await request(route(reopenedProduct, reopenedAlias._id) + '/price', { body: reopenedBody, key: reopenedKey })).data.error.code, 'OPERATION_UNCERTAIN');
     const padded = { ...reopenedProduct, id: '000' + reopenedProduct.id }; assert.equal((await request(route(padded) + '/price', { body: await review(padded, { price: '30' }) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeRestart);
-    const orphan = addProduct(); app.db.prepare('INSERT INTO zernio_product_updates VALUES(?,?,?)').run(JSON.stringify(['shopify', account.platformUserId, orphan.id]), 'missing-project', 'missing-request'); assert.equal((await request(route(orphan) + '/price', { body: await review(orphan) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeRestart);
+    const orphan = addProduct(); await app.sql.run('INSERT INTO zernio_product_updates (resource, project_id, request_key) VALUES (?, ?, ?)', JSON.stringify(['shopify', account.platformUserId, orphan.id]), 'missing-project', 'missing-request'); assert.equal((await request(route(orphan) + '/price', { body: await review(orphan) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeRestart);
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(`HTTP Shopify ${stateAction} uses exact native state receipt, fresh grants and the shared durable product fence`, async () => {
+for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(`HTTP Shopify ${stateAction} uses exact native state receipt, fresh grants and the shared durable product fence`, { skip: postgresSkip }, async t => {
   const deleting = stateAction === 'delete', startingState = deleting ? 'archived' : stateAction === 'activate' ? 'draft' : 'active', targetState = stateAction === 'archive' ? 'archived' : stateAction === 'activate' ? 'active' : 'draft', confirmation = deleting ? 'confirmDelete' : stateAction === 'archive' ? 'confirmArchive' : stateAction === 'activate' ? 'confirmActivate' : 'confirmDeactivate';
   const directory = await mkdtemp(join(tmpdir(), 'ten98-product-state-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;
   const appOptions = { dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'product-state-fixture-key' } };
-  let app = createApp(appOptions), base, cookie, projectId, providerHook, sequence = 700, keySequence = 0;
+  let app = await testApp(t, appOptions), base, cookie, projectId, providerHook, sequence = 700, keySequence = 0;
   const f = fixture(), account = { ...f.account, profileId: 'product-state-profile' }, accounts = [account], products = new Map(), absent = new Set(), calls = [];
   const store = { ...f.state.store, capabilities: ['products.read', 'products.status', 'products.update', 'products.price'] }, writes = () => calls.filter(call => call.method !== 'GET');
   const addProduct = () => { const row = { ...structuredClone(f.state.product), id: String(++sequence), status: startingState, platformStatus: startingState.toUpperCase(), url: 'https://brand.example.test/existing', publishedAt: '2026-10-19T09:00:00Z' }; products.set(row.id, row); return row; };
@@ -1020,7 +1033,7 @@ for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(
   const grants = () => { Object.assign(store, { capabilities: ['products.read', 'products.status', 'products.update', 'products.price'], missingCapabilities: [], currency: 'AED', domain: f.state.store.domain }); Object.assign(account, f.account, { profileId: 'product-state-profile', needsReconnection: false }); };
   try {
     await listen(); const setup = await request('/api/auth/setup', { body: { token: app.config.bootstrapToken, name: 'State QA', email: 'product-state@example.test', password: 'a long local product state password', sample: false } }); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
-    app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(account.profileId, projectId);
+    await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', account.profileId, projectId);
     const product = addProduct(), body = await review(product), key = 'deactivate-success', before = writes().length;
     const result = await request(route(product) + '/' + stateAction, { body, key }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.readback, true); if (!deleting) assert.match(result.data.version, /^[a-f0-9]{64}$/);
     if (deleting) { assert.deepEqual(result.data.deletionAcceptance, { productId: product.id, platform: 'shopify', action: 'delete', absenceVerified: true, checkedAt: result.data.deletionAcceptance.checkedAt }); assert.equal(new Date(result.data.deletionAcceptance.checkedAt).toISOString(), result.data.deletionAcceptance.checkedAt); assert.equal(Object.hasOwn(result.data, 'product'), false); }
@@ -1057,9 +1070,9 @@ for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(
       providerHook = (call, reply) => { if (call.url.pathname === '/api/v1/commerce/products/' + changed.id && ++reads === 2) Object.assign(reply.product, { status: 'active', platformStatus: 'ACTIVE' }); };
       assert.equal((await request(route(changed) + '/activate', { body: changedBody })).data.error.code, 'PRODUCT_STATE_CHANGED'); assert.equal(writes().length, before); providerHook = undefined;
       const revoked = addProduct(), revokedBody = await review(revoked), revokedKey = 'activation-postwrite-access';
-      providerHook = call => { if (call.url.pathname === '/api/v1/commerce/products/state') app.db.prepare("UPDATE memberships SET role='viewer'").run(); };
-      const revokedResult = await request(route(revoked) + '/activate', { body: revokedBody, key: revokedKey }); assert.ok([403, 409].includes(revokedResult.status)); providerHook = undefined; app.db.prepare("UPDATE memberships SET role='owner'").run();
-      assert.equal(app.db.prepare('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?').get(projectId, revokedKey).status, 'uncertain'); assert.equal(writes().length, before + 1);
+      providerHook = async call => { if (call.url.pathname === '/api/v1/commerce/products/state') await app.sql.run("UPDATE memberships SET role='viewer'"); };
+      const revokedResult = await request(route(revoked) + '/activate', { body: revokedBody, key: revokedKey }); assert.ok([403, 409].includes(revokedResult.status)); providerHook = undefined; await app.sql.run("UPDATE memberships SET role='owner'");
+      assert.equal((await app.sql.get('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?', projectId, revokedKey)).status, 'uncertain'); assert.equal(writes().length, before + 1);
       assert.equal((await request(route(revoked) + '/activate', { body: revokedBody, key: revokedKey })).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(writes().length, before + 1);
     }
     if (deleting) {
@@ -1074,7 +1087,7 @@ for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(
     for (const field of ['version', confirmation]) { const body = { ...valid }; delete body[field]; assert.equal((await request(route(invalidProduct) + '/' + stateAction, { body })).status, 400); }
     for (const method of ['GET', 'PUT', 'PATCH', 'DELETE']) assert.equal((await request(route(invalidProduct) + '/' + stateAction, { method })).status, 405);
     assert.equal((await request(route(invalidProduct) + '/' + stateAction + '?accountId=foreign', { body: valid })).status, 400); assert.equal((await request(route(invalidProduct) + '/' + stateAction, { body: valid, session: null })).status, 401);
-    app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await request(route(invalidProduct) + '/' + stateAction, { body: valid })).status, 403); app.db.prepare("UPDATE memberships SET role='owner'").run(); assert.equal(writes().length, count);
+    await app.sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await request(route(invalidProduct) + '/' + stateAction, { body: valid })).status, 403); await app.sql.run("UPDATE memberships SET role='owner'"); assert.equal(writes().length, count);
     for (const scenario of ['missing-status', 'ungranted-status', 'missing-read', 'native-missing', 'native-blank', 'native-untrimmed', 'inactive', 'reconnect', 'draft', 'active', 'archived', 'deleted', 'inactive-product', 'conflicting-active', 'conflicting-draft', 'stale', 'second-read-state', 'second-read-version', 'final-grants', 'final-domain', 'final-account', 'final-role', 'final-mapping', 'final-credentials', 'final-session'].filter(scenario => (scenario !== 'draft' || stateAction === 'deactivate' || deleting) && (scenario !== 'active' || stateAction === 'activate' || deleting) && (scenario !== 'archived' || !deleting))) {
       grants(); const product = addProduct();
       if (scenario === 'missing-status') store.capabilities = ['products.read'];
@@ -1103,21 +1116,21 @@ for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(
         }
         if (productReads === 2 && call.url.pathname === '/api/v1/accounts' && ++finalAccounts === 2) {
           if (scenario === 'final-account') reply.accounts[0].platformUserId = 'changed-native-store';
-          if (scenario === 'final-role') app.db.prepare("UPDATE memberships SET role='viewer'").run();
-          if (scenario === 'final-mapping') app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?").run(projectId);
+          if (scenario === 'final-role') await app.sql.run("UPDATE memberships SET role='viewer'");
+          if (scenario === 'final-mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", projectId);
           if (scenario === 'final-credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-state-key' } } })).status, 200);
-          if (scenario === 'final-session') app.db.prepare('DELETE FROM sessions').run();
+          if (scenario === 'final-session') await app.sql.run('DELETE FROM sessions');
         }
       };
       const result = await request(route(product) + '/' + stateAction, { body }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, before, scenario); providerHook = undefined;
-      app.db.prepare("UPDATE memberships SET role='owner'").run(); app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('product-state-profile', projectId);
+      await app.sql.run("UPDATE memberships SET role='owner'"); await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'product-state-profile', projectId);
       if (scenario === 'final-credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'product-state-fixture-key' } } })).status, 200);
       if (scenario === 'final-session') { const login = await request('/api/auth/login', { body: { email: 'product-state@example.test', password: 'a long local product state password' } }); assert.equal(login.status, 200); cookie = login.cookie; }
     }
     let unknownProduct, unknownBody, unknownKey;
     for (const scenario of ['missing-receipt', 'wrong-action', 'missing-succeeded', 'wrong-id', 'extra-id', 'duplicate-id', 'failed-id', 'missing-failed', 'foreign-receipt', 'readback-active', 'readback-conflict', 'readback-missing', 'readback-foreign', 'readback-404', 'postwrite-grants', 'postwrite-store', 'lost-ack', ...(deleting ? ['absence-account', 'absence-generic', 'absence-malformed', 'absence-permission', 'absence-failure', 'absence-still-present', 'absence-post-grants', 'absence-post-account', 'absence-post-mapping'] : [])].filter(scenario => !deleting || !['readback-active', 'readback-conflict', 'readback-missing', 'readback-foreign'].includes(scenario))) {
       grants(); const product = addProduct(), body = await review(product), before = writes().length, key = 'state-uncertain-' + scenario; let written = false;
-      providerHook = (call, reply) => {
+      providerHook = async (call, reply) => {
         if (call.url.pathname === '/api/v1/commerce/products/state') {
           written = true;
           if (scenario === 'missing-receipt') return Response.json({});
@@ -1142,7 +1155,7 @@ for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(
           if (scenario === 'absence-still-present') return Response.json({ product: { ...structuredClone(product), accountId: account._id } });
           if (scenario === 'absence-post-grants') store.capabilities = ['products.read'];
           if (scenario === 'absence-post-account') account.platformUserId = 'changed-after-absence';
-          if (scenario === 'absence-post-mapping') app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?").run(projectId);
+          if (scenario === 'absence-post-mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", projectId);
           if (scenario === 'readback-active') Object.assign(reply.product, { status: startingState, platformStatus: startingState.toUpperCase() });
           if (scenario === 'readback-conflict') reply.product.platformStatus = startingState.toUpperCase();
           if (scenario === 'readback-missing') delete reply.product.status;
@@ -1150,8 +1163,8 @@ for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(
           if (scenario === 'readback-404') return Response.json({ error: 'not found' }, { status: 404 });
         }
       };
-      const result = await request(route(product) + '/' + stateAction, { body, key }); if (scenario === 'absence-post-mapping') assert.ok([403, 409].includes(result.status), JSON.stringify(result)); else assert.equal(result.data.operation?.status, 'uncertain', scenario + JSON.stringify(result)); assert.equal(writes().length, before + 1); providerHook = undefined; grants(); absent.delete(product.id); app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('product-state-profile', projectId);
-      assert.equal(app.db.prepare('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?').get(projectId, key).status, 'uncertain');
+      const result = await request(route(product) + '/' + stateAction, { body, key }); if (scenario === 'absence-post-mapping') assert.ok([403, 409].includes(result.status), JSON.stringify(result)); else assert.equal(result.data.operation?.status, 'uncertain', scenario + JSON.stringify(result)); assert.equal(writes().length, before + 1); providerHook = undefined; grants(); absent.delete(product.id); await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'product-state-profile', projectId);
+      assert.equal((await app.sql.get('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?', projectId, key)).status, 'uncertain');
       assert.equal((await request(route(product) + '/' + stateAction, { body, key })).data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(writes().length, before + 1);
       const alias = { ...account, _id: 'state-alias-' + scenario }; accounts.push(alias);
       for (const kind of ['update', 'price']) assert.equal((await request(route(product, alias._id) + '/' + kind, { body: await review(product, kind, alias._id) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED');
@@ -1166,15 +1179,15 @@ for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(
       const blocked = await request(route(product) + '/' + otherKind, { body: await review(product, otherKind) }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.equal(writes().length, before);
       const unknown = await request(route(product, alias._id) + '/' + otherKind, { body: aliasBody }); assert.equal(unknown.data.operation.status, 'uncertain'); release(); assert.equal((await waiting).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, before + 1); providerHook = undefined;
     }
-    const originalProject = projectId, workspaceId = app.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(projectId).workspace_id;
-    app.db.prepare('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)').run('state-alias-project', workspaceId, 'Same native product', 'state-alias-profile'); const other = { ...account, _id: 'state-project-alias', profileId: 'state-alias-profile' }; accounts.push(other); projectId = 'state-alias-project';
+    const originalProject = projectId, workspaceId = (await app.sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
+    await app.sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'state-alias-project', workspaceId, 'Same native product', 'state-alias-profile'); const other = { ...account, _id: 'state-project-alias', profileId: 'state-alias-profile' }; accounts.push(other); projectId = 'state-alias-project';
     Object.assign(unknownProduct, { status: startingState, platformStatus: startingState.toUpperCase() });
     for (const kind of [stateAction, 'price', 'update']) assert.equal((await request(route(unknownProduct, other._id) + '/' + kind, { body: await review(unknownProduct, kind, other._id) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); projectId = originalProject;
-    await app.close(); app = createApp(appOptions); await listen(); const beforeRestart = writes().length;
+    app = await reopen(app, appOptions); await listen(); const beforeRestart = writes().length;
     assert.equal((await request(route(unknownProduct) + '/' + stateAction, { body: unknownBody, key: unknownKey })).data.error.code, 'OPERATION_UNCERTAIN');
     const padded = { ...unknownProduct, id: '000' + unknownProduct.id }; assert.equal((await request(route(padded) + '/' + stateAction, { body: await review(padded) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, beforeRestart);
-    const orphan = addProduct(); app.db.prepare('INSERT INTO zernio_product_updates VALUES(?,?,?)').run(JSON.stringify(['shopify', account.platformUserId, orphan.id]), 'missing-project', 'missing-request'); assert.equal((await request(route(orphan) + '/' + stateAction, { body: await review(orphan) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED');
-    app.db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE project_id=? AND request_key=?").run(projectId, unknownKey);
+    const orphan = addProduct(); await app.sql.run('INSERT INTO zernio_product_updates (resource, project_id, request_key) VALUES (?, ?, ?)', JSON.stringify(['shopify', account.platformUserId, orphan.id]), 'missing-project', 'missing-request'); assert.equal((await request(route(orphan) + '/' + stateAction, { body: await review(orphan) })).data.error.code, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED');
+    await app.sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE project_id=? AND request_key=?", projectId, unknownKey);
     assert.equal((await request(route(unknownProduct) + '/' + stateAction, { body: unknownBody, key: unknownKey })).data.error.code, 'OPERATION_REVIEWED'); assert.equal(writes().length, beforeRestart);
     assert.equal((await request(route(unknownProduct) + '/' + stateAction, { body: await review(unknownProduct) })).status, 200); assert.equal(writes().length, beforeRestart + 1);
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
@@ -1288,15 +1301,15 @@ test('stock native permission and rate-limit failures stay sanitized through the
 });
 
 
-test('HTTP every product and collection mutation permits exact receipt-only checks without a first dispatch', async () => {
+test('HTTP every product and collection mutation permits exact receipt-only checks without a first dispatch', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-product-check-')), origin = 'http://127.0.0.1:3000', originalFetch = globalThis.fetch;
-  const app = createApp({ dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'receipt-check-local-key' } }); let base, cookie, projectId, providerCalls = 0;
+  const app = await testApp(t, { dataDir: directory, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'receipt-check-local-key' } }); let base, cookie, projectId, providerCalls = 0;
   globalThis.fetch = async (target, options) => { if (new URL(target).hostname === '127.0.0.1') return originalFetch(target, options); providerCalls++; assert.fail('A receipt check must not contact the provider'); };
   async function request(path, body, key) { const response = await fetch(base + path, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}), 'Idempotency-Key': key }, body: JSON.stringify(body) }); return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] }; }
   try {
     await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
     const setup = await request('/api/auth/setup', { token: app.config.bootstrapToken, name: 'Receipt QA', email: 'receipt-check@example.test', password: 'a long local receipt check password', sample: false }, 'receipt-check-setup'); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
-    app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('receipt-check-profile', projectId);
+    await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'receipt-check-profile', projectId);
     const version = 'a'.repeat(64), rows = [
       ['shop/create', { version, confirmCreate: true, title: 'Draft', price: '1' }], ['shop/123/update', { version, confirmUpdate: true, title: 'New title' }], ['shop/123/price', { version, confirmPrice: true, variantId: 'variant-1', price: '1' }],
       ...['deactivate', 'archive', 'activate', 'delete'].map(action => ['shop/123/' + action, { version, ['confirm' + action[0].toUpperCase() + action.slice(1)]: true }]), ['shop/collections/123/rename', { version, title: 'New title' }],
@@ -1306,10 +1319,10 @@ test('HTTP every product and collection mutation permits exact receipt-only chec
       assert.equal((await request(path + '?check=1', body, key)).data.error.code, 'OPERATION_OUTCOME_UNAVAILABLE', suffix); assert.equal(providerCalls, 0);
       const seeded = await operation({ db: app.db, project: { id: projectId }, req: { method: 'POST', headers: { 'idempotency-key': key } }, url: new URL(origin + path), body }, async () => ({ retained: suffix }));
       const response = await request(path + '?check=1', body, key); assert.equal(response.status, 200, suffix + JSON.stringify(response)); assert.deepEqual(response.data, seeded.data);
-      for (const status of ['uncertain', 'reviewed-not-applied']) { app.db.prepare('UPDATE integration_operations SET status=? WHERE project_id=? AND request_key=?').run(status, projectId, key); assert.equal((await request(path + '?check=1', body, key)).data.error.code, status === 'uncertain' ? 'OPERATION_UNCERTAIN' : 'OPERATION_REVIEWED', suffix); }
+      for (const status of ['uncertain', 'reviewed-not-applied']) { await app.sql.run('UPDATE integration_operations SET status=? WHERE project_id=? AND request_key=?', status, projectId, key); assert.equal((await request(path + '?check=1', body, key)).data.error.code, status === 'uncertain' ? 'OPERATION_UNCERTAIN' : 'OPERATION_REVIEWED', suffix); }
       assert.equal((await request(path + '?check=1', { ...body, version: 'b'.repeat(64) }, key)).data.error.code, 'IDEMPOTENCY_CONFLICT', suffix);
       for (const query of ['?check=0', '?check=1&check=1', '?check=1&query=x']) assert.equal((await request(path + query, body, key)).status, 400, suffix + query);
       assert.equal(providerCalls, 0);
     }
-  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });

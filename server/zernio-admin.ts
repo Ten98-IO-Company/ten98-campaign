@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 import { fail, reportObject as object, IntegrationError, operation, scopedAccounts, requireAccount } from './provider-core.ts';
 
@@ -54,18 +55,18 @@ export async function handleZernioAdmin(context: OperationContext & { body: any 
   const { req, body, role, send } = context;
   if (action === 'team') {
     if (req.method !== 'GET') fail(405, 'METHOD_NOT_ALLOWED', 'Provider team members can only be read here.');
-    const assertAccess = () => {
-      if (!context.user?.id || !context.user.isOperator || !['owner', 'admin'].includes(role) || !context.db.prepare('SELECT 1 FROM instance_operators WHERE user_id=?').get(context.user.id)) fail(403, 'OPERATOR_REQUIRED', 'An app administrator who manages this workspace must read provider team members.');
-      try { context.assertProjectMapping(profileId); }
+    const assertAccess = async () => {
+      if (!context.user?.id || !context.user.isOperator || !['owner', 'admin'].includes(role) || !(await context.db.execute(sql`SELECT 1 FROM instance_operators WHERE user_id = ${context.user.id}`)).rowCount) fail(403, 'OPERATOR_REQUIRED', 'An app administrator who manages this workspace must read provider team members.');
+      try { await context.assertProjectMapping(profileId); }
       catch (error: any) { fail([403, 404].includes(error.status) ? 403 : 409, 'PROVIDER_TEAM_ACCESS_CHANGED', 'Your access or provider connection changed. Refresh before reading provider team members.'); }
     };
-    assertAccess();
+    await assertAccess();
     let result: any;
     try { result = await api('/users'); }
     catch (error: any) {
       if (error instanceof IntegrationError && error.providerStatus === 403) fail(403, 'PROVIDER_TEAM_FORBIDDEN', 'Zernio did not allow this credential to read provider team members. Check access in Zernio.');
       throw error;
-    } finally { assertAccess(); }
+    } finally { await assertAccess(); }
     send(200, providerTeam(result)); return true;
   }
   if (action === 'overview' && req.method === 'GET') {

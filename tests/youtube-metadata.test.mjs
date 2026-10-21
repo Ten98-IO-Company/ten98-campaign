@@ -1,18 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import { handleIntegration } from '../server/integrations.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { normalizePostTags } from '../shared/social-posts.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
-function fixture(t) {
-  const previous = globalThis.fetch, db = new DatabaseSync(':memory:'), project = { id: 'metadata-project', zernioProfileId: 'metadata-profile' };
+async function fixture(t) {
+  const previous = globalThis.fetch, { db, sql } = await testDatabase(t), project = { id: 'metadata-project', zernioProfileId: 'metadata-profile' };
   const accounts = ['channel-a', 'channel-b'].map(_id => ({ _id, platform: 'youtube', profileId: project.zernioProfileId, isActive: true }));
   const remote = { _id: 'remote-metadata', status: 'published', content: 'Stored description', tags: ['shared upload'], platforms: accounts.map((account, index) => ({ platform: 'youtube', accountId: account._id, status: 'published', platformPostId: index ? 'bbbbbbbbbbb' : 'aaaaaaaaaaa', platformPostUrl: `https://www.youtube.com/watch?v=${index ? 'bbbbbbbbbbb' : 'aaaaaaaaaaa'}`, platformSpecificData: { title: 'Stored upload title' } })) };
   let saved = { id: 'local-metadata', projectId: project.id, externalId: remote._id, zernioProfileId: project.zernioProfileId, status: 'published', providerStatus: 'published', content: remote.content, tags: [...remote.tags], providerResults: structuredClone(remote.platforms) }, sequence = 0;
-  const state = { db, project, accounts, remote, writes: [], reads: 0, guards: 0, failReadback: false, mapping: project.zernioProfileId, get saved() { return saved; }, receipt: payload => ({ success: true, updatedFields: ['title', 'tags'].filter(field => Object.hasOwn(payload, field)) }) };
+  const state = { sql, project, accounts, remote, writes: [], reads: 0, guards: 0, failReadback: false, mapping: project.zernioProfileId, get saved() { return saved; }, receipt: payload => ({ success: true, updatedFields: ['title', 'tags'].filter(field => Object.hasOwn(payload, field)) }) };
   const store = { get() { return structuredClone(saved); }, list() { return []; }, update(_, collection, id, changes) { assert.equal(collection, 'posts'); assert.equal(id, saved.id); saved = { ...saved, ...changes }; return structuredClone(saved); }, activity() {} };
   state.invoke = async (body = {}, key = `youtube-metadata-${++sequence}`, role = 'editor') => {
     let response;
@@ -31,24 +31,24 @@ function fixture(t) {
     if (state.loseReceipt) throw new Error('Receipt lost');
     return Response.json(state.receipt(payload));
   };
-  t.after(() => { globalThis.fetch = previous; db.close(); }); return state;
+  t.after(() => { globalThis.fetch = previous; }); return state;
 }
 
-test('YouTube metadata acceptance preserves stored root and sibling values, supports omission and replays its receipt without another write', async t => {
-  const f = fixture(t), before = structuredClone(f.saved), body = { title: 'Replacement title', tags: ['one, literal tag', '#literal'] };
+test('YouTube metadata acceptance preserves stored root and sibling values, supports omission and replays its receipt without another write', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), before = structuredClone(f.saved), body = { title: 'Replacement title', tags: ['one, literal tag', '#literal'] };
   const result = await f.invoke(body, 'metadata-accepted-001');
   assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete');
   assert.deepEqual(f.writes, [{ platform: 'youtube', accountId: 'channel-a', ...body }]); assert.deepEqual(f.saved, before);
   assert.deepEqual(result.data.metadataAcceptance, { postId: before.id, accountId: 'channel-a', videoId: 'aaaaaaaaaaa', requested: body, updatedFields: ['title', 'tags'], message: 'Accepted by Zernio; live values unverified.' });
   assert.equal(f.reads, 3); assert.equal(f.guards, 2);
   assert.deepEqual((await f.invoke(body, 'metadata-accepted-001')).data, result.data); assert.equal(f.writes.length, 1);
-  assert.deepEqual(JSON.parse(f.db.prepare('SELECT response FROM integration_operations WHERE id=?').get(result.data.operation.id).response).metadataAcceptance, result.data.metadataAcceptance);
+  assert.deepEqual(JSON.parse((await f.sql.get('SELECT response FROM integration_operations WHERE id=?', result.data.operation.id)).response).metadataAcceptance, result.data.metadataAcceptance);
   await f.invoke({ tags: [] }); assert.deepEqual(f.writes.at(-1), { platform: 'youtube', accountId: 'channel-a', tags: [] });
   await f.invoke({ title: 'Title only' }); assert.deepEqual(f.writes.at(-1), { platform: 'youtube', accountId: 'channel-a', title: 'Title only' }); assert.deepEqual(f.saved, before);
 });
 
-test('YouTube metadata rejects unreviewed, invalid, unauthorized and changed account/video scope before writing', async t => {
-  const f = fixture(t);
+test('YouTube metadata rejects unreviewed, invalid, unauthorized and changed account/video scope before writing', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   for (const body of [{}, { title: '' }, { title: 'x'.repeat(101) }, { title: 'line\nbreak' }, { tags: ['x'.repeat(101)] }, { tags: Array(6).fill('x'.repeat(100)) }, { tags: ['bad\u0000tag'] }, { tags: 'tag' }, { title: 'A', description: 'Unsupported' }, { title: 'A', confirmEdit: false }, { title: 'A', videoId: 'wrong' }]) assert.equal((await f.invoke(body)).status, 400, JSON.stringify(body));
   assert.equal((await f.invoke({ title: 'A' }, undefined, 'viewer')).status, 403);
   assert.equal((await f.invoke({ title: 'A', accountId: 'outside' })).status, 403);
@@ -62,9 +62,9 @@ test('YouTube metadata rejects unreviewed, invalid, unauthorized and changed acc
   assert.equal((await f.invoke({ title: 'A' })).status, 409); assert.deepEqual(f.writes, []);
 });
 
-test('YouTube metadata requires only the selected channel to stay active and still checks every copy scope', async t => {
+test('YouTube metadata requires only the selected channel to stay active and still checks every copy scope', { skip: postgresSkip }, async t => {
   for (const index of [0, 1]) for (const read of [1, 2, 3]) await t.test(`${index ? 'sibling' : 'selected'} inactive at read ${read}`, async t => {
-    const f = fixture(t), before = structuredClone(f.saved);
+    const f = await fixture(t), before = structuredClone(f.saved);
     f.onRead = count => { if (count === read) f.accounts[index].isActive = false; };
     const result = await f.invoke({ title: 'Replacement title' });
     assert.equal(result.status, index ? 200 : 409, JSON.stringify(result));
@@ -72,23 +72,23 @@ test('YouTube metadata requires only the selected channel to stay active and sti
     assert.equal(f.writes.length, index || read === 3 ? 1 : 0); assert.deepEqual(f.saved, before);
   });
   for (const mismatch of ['profile', 'platform']) await t.test(`inactive sibling with wrong ${mismatch}`, async t => {
-    const f = fixture(t); f.accounts[1].isActive = false;
+    const f = await fixture(t); f.accounts[1].isActive = false;
     if (mismatch === 'profile') f.accounts[1].profileId = 'outside-profile'; else f.accounts[1].platform = 'facebook';
     const result = await f.invoke({ title: 'Replacement title' });
     assert.equal(result.status, mismatch === 'profile' ? 403 : 502); assert.equal(f.writes.length, 0);
   });
 });
 
-test('YouTube metadata malformed, scoped-away and lost receipts stay uncertain and cannot resend with old or new keys', async t => {
+test('YouTube metadata malformed, scoped-away and lost receipts stay uncertain and cannot resend with old or new keys', { skip: postgresSkip }, async t => {
   for (const receipt of [{ success: false, updatedFields: ['title'] }, { success: true }, { success: true, updatedFields: [] }, { success: true, updatedFields: ['title', 'tags'] }, { success: true, updatedFields: ['title', 'title'] }, { success: true, updatedFields: ['title'], accountId: 'channel-b' }, { success: true, updatedFields: ['title'], videoId: 'bbbbbbbbbbb' }, { success: true, updatedFields: ['title'], postId: 'foreign' }]) {
     await t.test(JSON.stringify(receipt), async t => {
-      const f = fixture(t), before = structuredClone(f.saved); f.receipt = () => receipt;
+      const f = await fixture(t), before = structuredClone(f.saved); f.receipt = () => receipt;
       const first = await f.invoke({ title: 'A' }, 'metadata-bad-receipt'); assert.equal(first.data.operation.status, 'uncertain', JSON.stringify(first));
       assert.equal((await f.invoke({ title: 'A' }, 'metadata-bad-receipt')).status, 409); assert.equal((await f.invoke({ title: 'B' })).status, 409); assert.equal(f.writes.length, 1); assert.deepEqual(f.saved, before);
     });
   }
   for (const mode of ['loseReceipt', 'failReadback', 'remap', 'changed-video']) await t.test(mode, async t => {
-    const f = fixture(t), before = structuredClone(f.saved); f[mode] = true;
+    const f = await fixture(t), before = structuredClone(f.saved); f[mode] = true;
     if (mode === 'remap') f.onWrite = () => { f.mapping = 'new-profile'; };
     if (mode === 'changed-video') f.onWrite = () => { f.remote.platforms[0].platformPostId = 'ccccccccccc'; };
     const result = await f.invoke({ tags: ['replace'] }); assert.equal(result.data.operation.status, 'uncertain', JSON.stringify(result));

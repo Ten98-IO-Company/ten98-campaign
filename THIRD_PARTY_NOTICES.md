@@ -15,6 +15,7 @@ The publishing/scheduling and content-approval workflows are compared against th
 - [pendpost/pendpost](https://github.com/pendpost/pendpost) at commit [42ac77b](https://github.com/pendpost/pendpost/tree/42ac77b29f7720a912bdce1507b16a2a56fca74f), copyright (c) 2026 Nomadik GmbH — [MIT license](https://github.com/pendpost/pendpost/blob/42ac77b29f7720a912bdce1507b16a2a56fca74f/LICENSE). Content approvals. Disclosed differences, not parity:
   - Editing an approved post keeps it approved in pendpost. It sets `editedSinceApproval`, and the scheduler skips flagged posts. Campaign instead invalidates the review when a post or its referenced asset changes.
   - Pendpost's "no self-approval" rule compares a caller-supplied string, so it is a user-experience rule, not authorization. Campaign keeps its own server-side role and membership authorization for reviews.
+  - Pendpost exempts a role (`owner`) from its self-approval rule. Campaign exempts by count instead: a requester may approve their own request only when the project has exactly one active owner or administrator, and that review is recorded as self-approved (council decision ten98-code-system#30).
 
 Campaign ports selected behaviour from these references, adapted to its own stack. Each ported helper carries a provenance comment naming the reference, commit and file; whole source files are not copied. Zernio calls are implemented independently with Node.js built-ins and `fetch`. The workspace/project hierarchy and purple visual palette also follow the local ten98-monitor project (MIT, copyright 2026 ten98-monitor contributors), inspected as reference rather than copied source.
 
@@ -24,6 +25,9 @@ Campaign ports selected behaviour from these references, adapted to its own stac
 | --- | --- | --- |
 | React and React DOM | 19.2.8 | MIT; Meta Platforms, Inc. and affiliates. |
 | openid-client | 6.8.8 | MIT; Filip Skokan. |
+| pg (node-postgres) | 8.23.0 | MIT; Brian Carlson. |
+| drizzle-orm | 0.45.2 | Apache-2.0; Drizzle Team. |
+| @types/pg | 8.15.6 | MIT; DefinitelyTyped contributors. |
 | Vite | 8.3.4 | MIT. |
 | TypeScript | 7.0.2 | Apache-2.0. |
 | @types/react | 19.2.2 | MIT; DefinitelyTyped contributors. |

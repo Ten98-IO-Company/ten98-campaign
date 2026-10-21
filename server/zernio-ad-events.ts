@@ -1,4 +1,5 @@
-import type { DatabaseSync } from 'node:sqlite';
+import { sql, type SQL } from 'drizzle-orm';
+import type { Executor } from './database.ts';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 type Ctx = OperationContext & { body: any };
 import { IntegrationError, scopedAccounts, requireAccount, adAccounts, reportObject as object , fail } from './provider-core.ts';
@@ -55,23 +56,20 @@ export function minimizeAdEvent(payload: any, stored = false) {
   return result;
 }
 
-export function initializeAdEvents(db: DatabaseSync) {
-  db.exec(`CREATE TABLE IF NOT EXISTS webhook_ad_updates(sequence INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,platform TEXT NOT NULL,ad_account_id TEXT NOT NULL,event_id TEXT UNIQUE NOT NULL,event_at TEXT NOT NULL,event TEXT NOT NULL,data TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS webhook_ad_scope ON webhook_ad_updates(project_id,profile_id,account_id,ad_account_id,sequence);`);
-}
-export function recordAdEvent(db: DatabaseSync, payload: any, projectId: string) {
+export async function recordAdEvent(db: Executor, payload: any, projectId: string) {
   const adAccountId = payload.adAccount?.platformAdAccountId || payload.adObject?.platformAdAccountId || payload.video?.platformAdAccountId || '';
-  db.prepare('INSERT INTO webhook_ad_updates(project_id,profile_id,account_id,platform,ad_account_id,event_id,event_at,event,data) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING').run(projectId, payload.account.profileId, payload.account.accountId, payload.account.platform, adAccountId, payload.id, payload.timestamp, payload.event, JSON.stringify(payload));
+  await db.execute(sql`INSERT INTO webhook_ad_updates (project_id, profile_id, account_id, platform, ad_account_id, event_id, event_at, event, data) VALUES (${projectId}, ${payload.account.profileId}, ${payload.account.accountId}, ${payload.account.platform}, ${adAccountId}, ${payload.id}, ${payload.timestamp}, ${payload.event}, ${JSON.stringify(payload)}) ON CONFLICT (event_id) DO NOTHING`);
 }
 function nativeRows(response: any, platform: any) {
   const rows = response.accounts;
   if (!Array.isArray(rows) || rows.length > 10000 || response.hasMore === true || response.pagination?.hasMore === true || rows.some(row => !object(row) || !nativeId(platform, row.id) || row.name != null && (typeof row.name !== 'string' || row.name.length > 1000) || row.selectable != null && typeof row.selectable !== 'boolean') || new Set(rows.map(row => row.id)).size !== rows.length) fail(502, 'INVALID_AD_EVENT_ACCOUNTS', 'Zernio did not return a complete advertising account list.');
   return rows.map((row: ProviderRecord) => ({ id: row.id, name: row.name || row.id, selectable: row.selectable ?? null }));
 }
-function latest(db: DatabaseSync, where: any, values: any, events: any) {
-  const filter = `${where} AND event IN (${events.map(() => '?').join(',')})`, eventAt = (db.prepare(`SELECT max(event_at) AS eventAt FROM webhook_ad_updates WHERE ${filter}`).get(...values, ...events) as ProviderRecord).eventAt;
+async function latest(db: Executor, where: SQL, events: string[]) {
+  const filter = sql`${where} AND event IN (${sql.join(events.map(event => sql`${event}`), sql`, `)})`, eventAt = ((await db.execute(sql`SELECT max(event_at) AS "eventAt" FROM webhook_ad_updates WHERE ${filter}`)).rows[0] as ProviderRecord).eventAt;
   if (!eventAt) return null;
-  const rows = db.prepare(`SELECT DISTINCT event,json_extract(data,'$.sync') AS sync FROM webhook_ad_updates WHERE ${filter} AND event_at=? LIMIT 2`).all(...values, ...events, eventAt) as ProviderRecord[];
+  // json has no equality operator, so DISTINCT compares the sync object's text, as json_extract did.
+  const rows = (await db.execute(sql`SELECT DISTINCT event, (data->'sync')::text AS sync FROM webhook_ad_updates WHERE ${filter} AND event_at=${eventAt} LIMIT 2`)).rows as ProviderRecord[];
   return rows.length > 1 ? { event: 'conflicting', eventAt } : { event: rows[0].event, eventAt, ...JSON.parse(rows[0].sync) };
 }
 export async function handleZernioAdEvents(context: Ctx, api: ZernioApi, profileId: string, action = '') {
@@ -79,20 +77,21 @@ export async function handleZernioAdEvents(context: Ctx, api: ZernioApi, profile
   if (!['', 'accounts', 'ad-accounts'].includes(action)) return false;
   if (req.method !== 'GET') fail(405, 'METHOD_NOT_ALLOWED', 'Advertising updates are read only.');
   if ([...url.searchParams.keys()].some(key => !['accountId', 'adAccountId', 'before', 'limit'].includes(key))) fail(400, 'INVALID_AD_EVENT_FILTER', 'Use the connection, advertising account and history controls.');
-  initializeAdEvents(db); context.assertProjectMapping?.(profileId);
+  await context.assertProjectMapping?.(profileId);
   const accounts = (await scopedAccounts(api, profileId)).filter(account => platforms.has(account.platform));
-  if (action === 'accounts') { context.assertProjectMapping?.(profileId); send(200, { accounts: accounts.map(row => ({ id: row._id, platform: row.platform, name: row.displayName || row.username || row._id, isActive: row.isActive !== false, hasAdvertisers: row.platform.endsWith('ads') })) }); return true; }
+  if (action === 'accounts') { await context.assertProjectMapping?.(profileId); send(200, { accounts: accounts.map(row => ({ id: row._id, platform: row.platform, name: row.displayName || row.username || row._id, isActive: row.isActive !== false, hasAdvertisers: row.platform.endsWith('ads') })) }); return true; }
   const accountId = url.searchParams.get('accountId') as string, account = requireAccount(accounts, accountId);
   const advertisers = account.platform.endsWith('ads') ? nativeRows(await adAccounts(api, accountId), account.platform) : [];
-  if (action === 'ad-accounts') { const fresh = requireAccount(await scopedAccounts(api, profileId), accountId); if (fresh.platform !== account.platform) fail(409, 'AD_EVENT_CONNECTION_CHANGED', 'The connection changed. Refresh provider updates.'); context.assertProjectMapping?.(profileId); send(200, { accounts: advertisers }); return true; }
+  if (action === 'ad-accounts') { const fresh = requireAccount(await scopedAccounts(api, profileId), accountId); if (fresh.platform !== account.platform) fail(409, 'AD_EVENT_CONNECTION_CHANGED', 'The connection changed. Refresh provider updates.'); await context.assertProjectMapping?.(profileId); send(200, { accounts: advertisers }); return true; }
   const adAccountId = url.searchParams.get('adAccountId') || '', before = url.searchParams.get('before'), limit = Number(url.searchParams.get('limit') || 25);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || before !== null && (!/^\d{1,16}$/.test(before) || !Number.isSafeInteger(Number(before)) || Number(before) < 1)) fail(400, 'INVALID_AD_EVENT_FILTER', 'Choose a valid history cursor and at most 100 updates.');
   if (adAccountId && !advertisers.some((row: ProviderRecord) => row.id === adAccountId)) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'Choose an advertising account available through this project connection.');
-  const where = 'project_id=? AND profile_id=? AND account_id=? AND platform=?', values = [project.id, profileId, accountId, account.platform], scope = adAccountId ? "(ad_account_id=? OR ad_account_id='')" : "ad_account_id=''", scopeValues = adAccountId ? [...values, adAccountId] : values;
-  const rows = db.prepare(`SELECT e.rowid AS sequence,u.data FROM webhook_ad_updates u JOIN webhook_events e ON e.id=u.event_id WHERE ${where} AND ${scope}${before ? ' AND e.rowid<?' : ''} ORDER BY e.rowid DESC LIMIT ?`).all(...scopeValues, ...(before ? [Number(before)] : []), limit + 1) as ProviderRecord[];
-  const updates = rows.slice(0, limit).map((row: ProviderRecord) => { const payload = minimizeAdEvent(JSON.parse(row.data), true); return { ...payload, sequence: row.sequence, scope: payload.adAccount || payload.adObject || payload.video ? 'advertiser' : 'connection' }; });
-  const health = { initialSync: latest(db, where + " AND ad_account_id=''", values, ['account.ads.initial_sync_completed']), advertiserSync: adAccountId ? latest(db, where + ' AND ad_account_id=?', [...values, adAccountId], ['account.ads.sync_failed', 'account.ads.sync_recovered']) : null };
+  const where = sql`project_id=${project.id} AND profile_id=${profileId} AND account_id=${accountId} AND platform=${account.platform}`, scope = adAccountId ? sql`(ad_account_id=${adAccountId} OR ad_account_id='')` : sql`ad_account_id=''`;
+  // The public cursor is the webhook event's insertion sequence (SQLite rowid, now seq).
+  const rows = (await db.execute(sql`SELECT e.seq AS sequence, u.data FROM webhook_ad_updates u JOIN webhook_events e ON e.id=u.event_id WHERE ${where} AND ${scope}${before ? sql` AND e.seq<${Number(before)}` : sql``} ORDER BY e.seq DESC LIMIT ${limit + 1}`)).rows as ProviderRecord[];
+  const updates = rows.slice(0, limit).map((row: ProviderRecord) => { const payload = minimizeAdEvent(row.data, true); return { ...payload, sequence: row.sequence, scope: payload.adAccount || payload.adObject || payload.video ? 'advertiser' : 'connection' }; });
+  const health = { initialSync: await latest(db, sql`${where} AND ad_account_id=''`, ['account.ads.initial_sync_completed']), advertiserSync: adAccountId ? await latest(db, sql`${where} AND ad_account_id=${adAccountId}`, ['account.ads.sync_failed', 'account.ads.sync_recovered']) : null };
   const freshAccount = requireAccount(await scopedAccounts(api, profileId), accountId); if (freshAccount.platform !== account.platform) fail(409, 'AD_EVENT_CONNECTION_CHANGED', 'The connection changed. Refresh provider updates.');
   if (adAccountId && !nativeRows(await adAccounts(api, accountId), account.platform).some((row: ProviderRecord) => row.id === adAccountId)) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'The selected advertising account is no longer available.');
-  context.assertProjectMapping?.(profileId); send(200, { updates, health, pagination: { hasMore: rows.length > limit, before: rows.length > limit ? updates.at(-1)!.sequence : null }, checkedAt: new Date().toISOString(), webhookConfigured: Boolean(context.config?.env?.ZERNIO_WEBHOOK_SECRET) }); return true;
+  await context.assertProjectMapping?.(profileId); send(200, { updates, health, pagination: { hasMore: rows.length > limit, before: rows.length > limit ? updates.at(-1)!.sequence : null }, checkedAt: new Date().toISOString(), webhookConfigured: Boolean(context.config?.env?.ZERNIO_WEBHOOK_SECRET) }); return true;
 }

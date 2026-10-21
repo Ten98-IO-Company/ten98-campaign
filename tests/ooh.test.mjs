@@ -1,15 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { handleOoh } from '../server/ooh.ts';
 import { createStore } from '../server/database.ts';
 import { operation, IntegrationError } from '../server/provider-core.ts';
 import { handleOperationRecovery } from '../server/operation-recovery.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
-test('Broadsign contracts, approved inventory, paid confirmation, and durable partial failures', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, calls = [];
-  db.exec(`CREATE TABLE records(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,collection TEXT NOT NULL,data TEXT NOT NULL);
-    CREATE TABLE activity(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,message TEXT NOT NULL,created_at TEXT NOT NULL,sample INTEGER NOT NULL DEFAULT 0);`);
+test('Broadsign contracts, approved inventory, paid confirmation, and durable partial failures', { skip: postgresSkip }, async t => {
+  const { pool, db, sql } = await testDatabase(t), originalFetch = globalThis.fetch, calls = [];
+  await pool.query("INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'),('project-b','w','B'),('project-c','w','C')");
   const store = createStore(db);
   const project = { id: 'project-a' }, config = { env: {}, BROADSIGN_API_KEY: 'private-server-key', BROADSIGN_ENVIRONMENT: 'sandbox' };
   const connection = { domainId: 7, clientId: 'brand-a', clientName: 'Brand A', screenIds: [101, 102] };
@@ -90,15 +89,15 @@ test('Broadsign contracts, approved inventory, paid confirmation, and durable pa
     const readsBeforeReport = calls.filter(call => call.url.pathname.includes('/proposal_item/')).length;
     result = await invoke(`bookings/${booking.id}/report`); assert.equal(result.status, 200); assert.deepEqual(result.data.report, { actualImpressions: 12500, actualPlays: 43, updatedAt: '2026-10-20 12:30:00', rawProofOfPlay: false });
     assert.equal(calls.filter(call => call.url.pathname.includes('/proposal_item/')).length - readsBeforeReport, 1, 'Report data must come from the exact line-item response whose project scope was verified.');
-    const placements = store.list(project.id, 'placements'), placementIds = placements.map(item => item.id).sort();
+    const placements = await store.list(project.id, 'placements'), placementIds = placements.map(item => item.id).sort();
     assert.equal(placements.length, 2, 'Every verified screen has one placement in the shared campaign plan.');
     for (const placement of placements) {
       assert.equal(placement.source, 'broadsign'); assert.equal(placement.externalId, String(booking.proposalId)); assert.equal(placement.proposalItemId, booking.lineItemId); assert.equal(placement.status, 'draft'); assert.equal(placement.providerStatus, 1);
       assert.equal(placement.startDate, draft.startDate); assert.equal(placement.endDate, draft.endDate); assert.equal(placement.latitude, 0); assert.equal(placement.longitude, 55);
       assert.equal(placement.cost, null, 'A combined line-item quote must not be invented as each screen’s cost.'); assert.equal(placement.currency, null);
     }
-    assert.deepEqual(store.list('project-b', 'placements'), []);
-    result = await invoke(`bookings/${booking.id}/report`); assert.equal(result.status, 200); assert.deepEqual(store.list(project.id, 'placements').map(item => item.id).sort(), placementIds, 'Repeated reports upsert the same provider placements.');
+    assert.deepEqual((await store.list('project-b', 'placements')), []);
+    result = await invoke(`bookings/${booking.id}/report`); assert.equal(result.status, 200); assert.deepEqual((await store.list(project.id, 'placements')).map(item => item.id).sort(), placementIds, 'Repeated reports upsert the same provider placements.');
     result = await invoke(`bookings/${booking.id}/submit`, { method: 'POST', body: {} }); assert.equal(result.data.error.code, 'OOH_CONFIRMATION_REQUIRED');
     changedScreens = true;
     result = await invoke(`bookings/${booking.id}/submit`, { method: 'POST', body: { confirmBooking: true }, key: 'changed-001' }); assert.equal(result.data.error.code, 'OOH_BOOKING_CHANGED');
@@ -106,7 +105,7 @@ test('Broadsign contracts, approved inventory, paid confirmation, and durable pa
     changedScreens = false;
     result = await invoke(`bookings/${booking.id}/availability`); assert.equal(result.data.availability, 'available');
     result = await invoke(`bookings/${booking.id}/submit`, { method: 'POST', body: { confirmBooking: true }, key: 'submit-0001' }); assert.equal(result.status, 200); assert.equal(result.data.booking.providerStatus, 10);
-    assert.equal(store.list(project.id, 'placements').every(item => item.status === 'requested' && item.providerStatus === 10), true, 'Submitted does not mean booked or live.');
+    assert.equal((await store.list(project.id, 'placements')).every(item => item.status === 'requested' && item.providerStatus === 10), true, 'Submitted does not mean booked or live.');
     assert.deepEqual(await invoke(`bookings/${booking.id}/submit`, { method: 'POST', body: { confirmBooking: true }, key: 'submit-0001' }), result); assert.equal(calls.filter(call => call.url.pathname.includes('book_proposal')).length, 1);
     const cancelPath = `bookings/${booking.id}/cancel`, cancelCount = () => calls.filter(call => call.url.pathname.endsWith('/cancel')).length;
     result = await invoke(cancelPath, { method: 'POST', body: { confirmCancellation: true }, role: 'viewer' }); assert.equal(result.status, 403); assert.equal(cancelCount(), 0);
@@ -117,16 +116,16 @@ test('Broadsign contracts, approved inventory, paid confirmation, and durable pa
     result = await invoke(cancelPath, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-outside' }); assert.equal(result.status, 403); assert.equal(cancelCount(), 0); proposal.client_id = connection.clientId;
     state = 11;
     result = await invoke(cancelPath, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-first01' }); assert.equal(result.status, 200); assert.equal(result.data.booking.providerStatus, 15); assert.equal(result.data.booking.stage, 'cancelling'); assert.deepEqual(result.data.cancellation, { requested: true, confirmed: false }); assert.equal(cancelCount(), 1);
-    assert.equal(store.list(project.id, 'placements').every(item => item.providerStatus === 15 && item.status === 'requested'), true, 'Cancelling is pending, never a fabricated confirmed cancellation.');
+    assert.equal((await store.list(project.id, 'placements')).every(item => item.providerStatus === 15 && item.status === 'requested'), true, 'Cancelling is pending, never a fabricated confirmed cancellation.');
     const cancellation = result;
     assert.deepEqual(await invoke(cancelPath, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-first01' }), cancellation); assert.equal(cancelCount(), 1);
     result = await invoke(cancelPath, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-fresh01' }); assert.equal(result.status, 200); assert.equal(cancelCount(), 1, 'An already cancelling provider line item must not receive a second mutation.');
-    state = 12; result = await invoke(`bookings/${booking.id}/report`); assert.equal(result.data.booking.stage, 'cancelled'); assert.equal(store.list(project.id, 'placements').every(item => item.providerStatus === 12 && item.status === 'cancelled'), true);
+    state = 12; result = await invoke(`bookings/${booking.id}/report`); assert.equal(result.data.booking.stage, 'cancelled'); assert.equal((await store.list(project.id, 'placements')).every(item => item.providerStatus === 12 && item.status === 'cancelled'), true);
     result = await invoke(cancelPath, { method: 'POST', body: { confirmCancellation: true }, key: 'cancel-final01' }); assert.equal(result.data.cancellation.confirmed, true); assert.equal(cancelCount(), 1);
     for (const [providerStatus, localStatus] of [[9, 'booked'], [11, 'live'], [14, 'completed'], [12, 'cancelled']]) {
       state = providerStatus; result = await invoke(`bookings/${booking.id}/report`); assert.equal(result.status, 200);
-      assert.equal(store.list(project.id, 'placements').every(item => item.status === localStatus && item.providerStatus === providerStatus), true);
-      assert.deepEqual(store.list(project.id, 'placements').map(item => item.id).sort(), placementIds);
+      assert.equal((await store.list(project.id, 'placements')).every(item => item.status === localStatus && item.providerStatus === providerStatus), true);
+      assert.deepEqual((await store.list(project.id, 'placements')).map(item => item.id).sort(), placementIds);
     }
     async function anotherBooking(name, key) {
       state = 1; const created = await invoke('bookings', { method: 'POST', body: { ...draft, name }, key }); assert.equal(created.status, 200);
@@ -176,15 +175,15 @@ test('Broadsign contracts, approved inventory, paid confirmation, and durable pa
     assert.equal((await reviewCancellation(reviewedId)).status, 200);
     const beforeReviewRead = calls.length;
     assert.equal((await bookingView(reviewedBooking.id)).canRetryCancellation, true); assert.equal(calls.length, beforeReviewRead, 'Reading a reviewed booking does not make a provider call.');
-    operation.active.get(db).add(reviewedId); assert.equal((await bookingView(reviewedBooking.id)).canRetryCancellation, false); operation.active.get(db).delete(reviewedId);
-    const savedReviewed = JSON.parse(db.prepare('SELECT data FROM project_ooh_bookings WHERE id=?').get(reviewedBooking.id).data);
+    operation.active.add(reviewedId); assert.equal((await bookingView(reviewedBooking.id)).canRetryCancellation, false); operation.active.delete(reviewedId);
+    const savedReviewed = (await sql.get('SELECT data FROM project_ooh_bookings WHERE id=?', reviewedBooking.id)).data;
     const legacyReviewed = { ...savedReviewed }; delete legacyReviewed.cancellationOperationId;
-    db.prepare('UPDATE project_ooh_bookings SET data=? WHERE id=?').run(JSON.stringify(legacyReviewed), reviewedBooking.id);
+    await sql.run('UPDATE project_ooh_bookings SET data=? WHERE id=?', JSON.stringify(legacyReviewed), reviewedBooking.id);
     assert.equal((await bookingView(reviewedBooking.id)).canRetryCancellation, false, 'Legacy pending cancellations without an exact receipt stay blocked.');
-    db.prepare('UPDATE project_ooh_bookings SET data=? WHERE id=?').run(JSON.stringify(savedReviewed), reviewedBooking.id);
-    db.prepare('UPDATE integration_operation_reviews SET project_id=? WHERE operation_id=?').run('project-b', reviewedId);
+    await sql.run('UPDATE project_ooh_bookings SET data=? WHERE id=?', JSON.stringify(savedReviewed), reviewedBooking.id);
+    await sql.run('UPDATE integration_operation_reviews SET project_id=? WHERE operation_id=?', 'project-b', reviewedId);
     assert.equal((await bookingView(reviewedBooking.id)).canRetryCancellation, false, 'A mismatched review project cannot authorize retry.');
-    db.prepare('UPDATE integration_operation_reviews SET project_id=? WHERE operation_id=?').run(project.id, reviewedId);
+    await sql.run('UPDATE integration_operation_reviews SET project_id=? WHERE operation_id=?', project.id, reviewedId);
     const beforeManualRetry = cancelCount(); assert.equal(beforeManualRetry, recoveryWrites + 2, 'Operator reviews themselves never submit cancellation requests.');
     result = await invoke(`bookings/${reviewedBooking.id}/cancel`, { method: 'POST', body: {}, key: 'cancel-reviewed-new' }); assert.equal(result.data.error.code, 'OOH_CANCELLATION_CONFIRMATION_REQUIRED'); assert.equal(cancelCount(), beforeManualRetry);
     failure = 'cancel-rejected';
@@ -212,5 +211,5 @@ test('Broadsign contracts, approved inventory, paid confirmation, and durable pa
     result = await invoke('status', { selectedConfig: { ...config, BROADSIGN_ENVIRONMENT: 'https://evil.invalid' } }); assert.equal(result.status, 200);
     const before = calls.length;
     result = await invoke('connection', { method: 'POST', role: 'owner', isOperator: true, body: { ...connection, screenIds: [103] }, selectedProject: { id: 'project-c' }, selectedConfig: { ...config, BROADSIGN_ENVIRONMENT: 'https://evil.invalid' } }); assert.equal(result.status, 503); assert.equal(calls.length, before);
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });

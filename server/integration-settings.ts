@@ -1,6 +1,8 @@
-import type { DatabaseSync } from 'node:sqlite';
 import { createCipheriv, createDecipheriv, createPrivateKey, hkdfSync, randomBytes } from 'node:crypto';
 import { openRouterFetch, readResponseText } from '@ten98/runtime';
+import { sql } from 'drizzle-orm';
+import { advisoryLock } from './auth.ts';
+import type { Database } from './database.ts';
 import { fail, googleToken, providerRequest, reportObject as plain } from './provider-core.ts';
 import { testNativeGoogleAds } from './native-google-ads.ts';
 import { testMicrosoftAds } from './native-microsoft-ads.ts';
@@ -65,12 +67,12 @@ async function readProvider(url: string | URL, authorization: string, label: str
   } catch { fail(502, 'INVALID_PROVIDER_RESPONSE', `${label} returned an unreadable response.`); }
 }
 
-export function createIntegrationSettings({ db, env, secret }: { db: DatabaseSync; env: Record<string, string | undefined>; secret: unknown }) {
+/** Resolves once saved settings are loaded, decrypted and applied to env. */
+export async function createIntegrationSettings({ db, env, secret }: { db: Database; env: Record<string, string | undefined>; secret: unknown }) {
   if (typeof secret !== 'string' || secret.length < 32) throw new Error('Integration settings require the instance session secret.');
   const key: any = hkdfSync('sha256', secret, 'ten98-campaign', 'integration-settings-v1', 32);
   const fallback = Object.fromEntries(Object.values(groups).flatMap(fields => Object.values(fields)).map(name => [name, env[name]]));
   const saved = new Map<string, any>(); let revision = 0;
-  db.exec('CREATE TABLE IF NOT EXISTS integration_settings(provider TEXT PRIMARY KEY,nonce BLOB NOT NULL,ciphertext BLOB NOT NULL,tag BLOB NOT NULL,updated_at TEXT NOT NULL)');
   function decode(row: any) {
     try {
       const decipher = createDecipheriv('aes-256-gcm', key, row.nonce); decipher.setAAD(Buffer.from(`integration-settings-v1:${row.provider}`)); decipher.setAuthTag(row.tag);
@@ -79,7 +81,7 @@ export function createIntegrationSettings({ db, env, secret }: { db: DatabaseSyn
       return fields;
     } catch { throw new Error('Saved integration settings could not be decrypted. Restore the matching session secret and database backup.'); }
   }
-  for (const row of db.prepare('SELECT * FROM integration_settings').all() as any[]) {
+  for (const row of (await db.execute(sql`SELECT * FROM integration_settings`)).rows as any[]) {
     if (!Object.hasOwn(groups, row.provider)) throw new Error('Saved integration settings contain an unsupported provider.');
     saved.set(row.provider, { fields: decode(row), updatedAt: row.updated_at });
   }
@@ -104,29 +106,48 @@ export function createIntegrationSettings({ db, env, secret }: { db: DatabaseSyn
     return { id: provider, label: providers[provider], configured, source: sources.size > 1 ? 'mixed' : [...sources][0] || 'unconfigured', fields, secretFields: secrets, updatedAt: row?.updatedAt || null };
   }
   const describe = () => ({ providers: Object.keys(providers).map(describeProvider), revision });
+  // Saves and resets run one at a time here, so env, the saved map and revision change in commit order.
+  let writes: Promise<unknown> = Promise.resolve();
+  function serial<T>(run: () => Promise<T>): Promise<T> { const next = writes.then(run, run); writes = next.catch(() => undefined); return next; }
   return {
     get revision() { return revision; },
     describe,
     save(provider: string, fields: any, { tokenRotation = false }: { tokenRotation?: boolean } = {}) {
-      const group = requireProvider(provider);
-      if (!plain(fields) || Object.keys(fields).length === 0 || Object.keys(fields).some(field => !Object.hasOwn(groups[group], field))) fail(400, 'INVALID_SETTING', 'Use only the settings shown for this integration.');
-      const values = { ...(saved.get(group)?.fields || {}) }, before = JSON.stringify(Object.values(groups[group]).map(name => env[name]));
-      for (const [field, input] of Object.entries(fields)) {
-        if (secretFields.has(field) && typeof input === 'string' && !input.trim()) continue;
-        values[field] = validate(field, input);
-      }
-      const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, nonce); cipher.setAAD(Buffer.from(`integration-settings-v1:${group}`));
-      const ciphertext = Buffer.concat([cipher.update(JSON.stringify(values), 'utf8'), cipher.final()]), updatedAt = new Date().toISOString();
-      db.prepare('INSERT INTO integration_settings VALUES(?,?,?,?,?) ON CONFLICT(provider) DO UPDATE SET nonce=excluded.nonce,ciphertext=excluded.ciphertext,tag=excluded.tag,updated_at=excluded.updated_at').run(group, nonce, ciphertext, cipher.getAuthTag(), updatedAt);
-      saved.set(group, { fields: values, updatedAt }); apply(group);
-      if (!tokenRotation && before !== JSON.stringify(Object.values(groups[group]).map(name => env[name]))) revision++;
-      return describe();
+      return serial(async () => {
+        const group = requireProvider(provider);
+        if (!plain(fields) || Object.keys(fields).length === 0 || Object.keys(fields).some(field => !Object.hasOwn(groups[group], field))) fail(400, 'INVALID_SETTING', 'Use only the settings shown for this integration.');
+        const before = JSON.stringify(Object.values(groups[group]).map(name => env[name]));
+        const { values, updatedAt } = await db.transaction(async tx => {
+          // Serialises read-merge-write saves of one provider across instances so a concurrent save cannot drop these fields.
+          await advisoryLock(tx, 'integration-settings:' + group);
+          const [stored] = (await tx.execute(sql`SELECT * FROM integration_settings WHERE provider=${group}`)).rows as any[];
+          const values = { ...(stored ? decode(stored) : {}) };
+          for (const [field, input] of Object.entries(fields)) {
+            if (secretFields.has(field) && typeof input === 'string' && !input.trim()) continue;
+            values[field] = validate(field, input);
+          }
+          const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, nonce); cipher.setAAD(Buffer.from(`integration-settings-v1:${group}`));
+          const ciphertext = Buffer.concat([cipher.update(JSON.stringify(values), 'utf8'), cipher.final()]), updatedAt = new Date().toISOString();
+          await tx.execute(sql`INSERT INTO integration_settings VALUES(${group},${nonce},${ciphertext},${cipher.getAuthTag()},${updatedAt}) ON CONFLICT(provider) DO UPDATE SET nonce=excluded.nonce,ciphertext=excluded.ciphertext,tag=excluded.tag,updated_at=excluded.updated_at`);
+          return { values, updatedAt };
+        });
+        saved.set(group, { fields: values, updatedAt }); apply(group);
+        if (!tokenRotation && before !== JSON.stringify(Object.values(groups[group]).map(name => env[name]))) revision++;
+        return describe();
+      });
     },
     reset(provider: string) {
-      const group = requireProvider(provider), before = JSON.stringify(Object.values(groups[group]).map(name => env[name]));
-      db.prepare('DELETE FROM integration_settings WHERE provider=?').run(group); saved.delete(group); apply(group);
-      if (before !== JSON.stringify(Object.values(groups[group]).map(name => env[name]))) revision++;
-      return describe();
+      return serial(async () => {
+        const group = requireProvider(provider), before = JSON.stringify(Object.values(groups[group]).map(name => env[name]));
+        await db.transaction(async tx => {
+          // Same per-provider lock as save, so a reset cannot interleave with another instance's read-merge-write.
+          await advisoryLock(tx, 'integration-settings:' + group);
+          await tx.execute(sql`DELETE FROM integration_settings WHERE provider=${group}`);
+        });
+        saved.delete(group); apply(group);
+        if (before !== JSON.stringify(Object.values(groups[group]).map(name => env[name]))) revision++;
+        return describe();
+      });
     },
     async test(provider: string, context: any = {}) {
       requireProvider(provider);
@@ -135,8 +156,11 @@ export function createIntegrationSettings({ db, env, secret }: { db: DatabaseSyn
       const result: any = { ok: true, status: 'connected', checkedAt: new Date().toISOString(), readOnly: true };
       if (['googleAdsNative', 'microsoftAds'].includes(provider)) {
         const assertCurrent = () => { if (currentRevision !== revision) fail(409, 'CONNECTION_CHANGED', 'Integration credentials changed during the connection test.'); };
-        const persistRefresh = (expected: any, next: any) => { assertCurrent(); const name = provider === 'microsoftAds' ? 'MICROSOFT_ADS_REFRESH_TOKEN' : 'GOOGLE_ADS_REFRESH_TOKEN'; if (env[name] === expected) this.save(provider, { refreshToken: next }, { tokenRotation: true }); current[name] = env[name]; };
+        // Provider code reports a rotated refresh token synchronously; the save is awaited before the test result returns.
+        const rotations: Promise<unknown>[] = [];
+        const persistRefresh = (expected: any, next: any) => { assertCurrent(); const name = provider === 'microsoftAds' ? 'MICROSOFT_ADS_REFRESH_TOKEN' : 'GOOGLE_ADS_REFRESH_TOKEN'; if (env[name] === expected) { const saving = this.save(provider, { refreshToken: next }, { tokenRotation: true }); saving.catch(() => undefined); rotations.push(saving); current[name] = next; } else current[name] = env[name]; };
         Object.assign(result, await (provider === 'googleAdsNative' ? testNativeGoogleAds : testMicrosoftAds)(current, assertCurrent, persistRefresh));
+        await Promise.all(rotations);
       } else if (provider === 'zernio') {
         const data = await providerRequest('https://zernio.com/api/v1/profiles', { method: 'GET', headers: { Authorization: `Bearer ${current.ZERNIO_API_KEY}` } }, 'Zernio');
         if (!Array.isArray(data.profiles)) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not return the expected profile list.');

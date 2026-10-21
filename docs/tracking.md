@@ -56,7 +56,7 @@ Reports show daily ordinary short-link visits, QR-tagged visits, pageviews and n
 
 Campaign filters apply to associated short links. Website events have no campaign identity and appear only in the whole-project report. Reports use UTC days and retain daily aggregates for 365 days; link totals cover the retained data. No person-level attribution or cross-site identity is inferred.
 
-Per project, the app supports 1,000 saved links, ten allowed website origins, 600 event-intake requests per minute, 10,000 accepted event IDs per rolling 24 hours, and 2,000 distinct path/event combinations per UTC day. The instance caps website event-intake POSTs at 10,000 per minute; these intake limits do not cover redirect or script requests. Events have a maximum body size of 2 KiB. Duplicate UUIDv4 event IDs are ignored for 24 hours, then removed. Limits and expired data are cleaned during active requests; these bounded SQLite counters are intended for the existing single-instance deployment. Use a dedicated analytics service if sustained traffic exceeds these limits.
+Per project, the app supports 1,000 saved links, ten allowed website origins, 600 event-intake requests per minute, 10,000 accepted event IDs per rolling 24 hours, and 2,000 distinct path/event combinations per UTC day. The instance caps website event-intake POSTs at 10,000 per minute; these intake limits do not cover redirect or script requests. Events have a maximum body size of 2 KiB. Duplicate UUIDv4 event IDs are ignored for 24 hours, then removed. Limits and expired data are cleaned during active requests; these bounded database counters are sized for a single installation. Use a dedicated analytics service if sustained traffic exceeds these limits.
 
 ## API
 

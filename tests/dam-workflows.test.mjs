@@ -4,12 +4,12 @@ import { generateKeyPairSync, verify } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 import { resolveVariant, validatePostForPlatforms } from '../shared/social-posts.ts';
 
-test('Drive HTTP sync and upload preserve publishing metadata, validate complete batches and atomically deduplicate concurrent imports', async () => {
+test('Drive HTTP sync and upload preserve publishing metadata, validate complete batches and atomically deduplicate concurrent imports', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-dam-workflows-')), origin = 'http://127.0.0.1:3000', { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-  const app = createApp({ dataDir, appUrl: origin, env: { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'fixture@example.iam.gserviceaccount.com', GOOGLE_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }), ZERNIO_API_KEY: 'mock-dam-zernio-key' } });
+  const app = await testApp(t, { dataDir, appUrl: origin, env: { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'fixture@example.iam.gserviceaccount.com', GOOGLE_PRIVATE_KEY: privateKey.export({ type: 'pkcs8', format: 'pem' }), ZERNIO_API_KEY: 'mock-dam-zernio-key' } });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`, originalFetch = globalThis.fetch, writes = []; let cookie, mode = 'valid', uploadMode = 'valid';
   const image = { id: 'drive-image', name: 'Campaign image', mimeType: 'image/png', size: '2048', modifiedTime: '2026-10-18T10:00:00Z', md5Checksum: '1'.repeat(32), imageMediaMetadata: { width: 1080, height: 1350, location: { latitude: 25, longitude: 55 }, cameraMake: 'PRIVATE_EXIF_CAMERA' } };
@@ -77,9 +77,10 @@ test('Drive HTTP sync and upload preserve publishing metadata, validate complete
     assert.deepEqual(writes.at(-1).mediaItems, [{ type: 'image', url: custom.deliveryUrl, mimeType: 'image/png', altText: custom.description, size: 2048 }]);
     const before = (await request('/api/state')).data.assets;
     for (const invalidMode of ['invalid', 'invalid-id', 'oversized', 'oversized-page', 'incomplete', 'repeating-page']) { mode = invalidMode; result = await request(path + '/sync', 'POST', {}); assert.ok([502, 503].includes(result.status), JSON.stringify(result.data)); assert.deepEqual((await request('/api/state')).data.assets, before, invalidMode + ' must not partially modify assets.'); }
-    mode = 'atomic-failure'; const create = app.store.create; let inserted = 0;
-    app.store.create = function (...args) { const record = create.apply(this, args); if (++inserted === 2) throw new Error('Simulated storage failure after an insert'); return record; };
-    try { assert.equal((await request(path + '/sync', 'POST', {})).status, 500); } finally { app.store.create = create; }
+    // Drive saves run in their own transaction store, so the failure is injected at the second new asset row instead.
+    mode = 'atomic-failure'; await app.sql.run(`CREATE FUNCTION fail_second_asset() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.collection = 'assets' AND (SELECT count(*) FROM records WHERE collection = 'assets' AND project_id = NEW.project_id) >= ${before.length + 1} THEN RAISE EXCEPTION 'Simulated storage failure after an insert'; END IF; RETURN NEW; END $$`);
+    await app.sql.run('CREATE TRIGGER fail_second_asset BEFORE INSERT ON records FOR EACH ROW EXECUTE FUNCTION fail_second_asset()');
+    try { assert.equal((await request(path + '/sync', 'POST', {})).status, 500); } finally { await app.sql.run('DROP TRIGGER fail_second_asset ON records'); await app.sql.run('DROP FUNCTION fail_second_asset()'); }
     assert.deepEqual((await request('/api/state')).data.assets, before, 'A storage failure rolls back the complete import transaction.');
     mode = 'valid'; image.imageMediaMetadata.width = 1200;
     assert.equal((await request(path + '/sync', 'POST', {})).status, 200); savedImage = (await request('/api/state')).data.assets.find(asset => asset.id === savedImage.id); assert.equal(savedImage.approval, 'pending'); assert.equal(savedImage.deliveryUrl, custom.deliveryUrl); assert.equal(savedImage.description, custom.description);
@@ -88,7 +89,7 @@ test('Drive HTTP sync and upload preserve publishing metadata, validate complete
     const uploadCount = writes.filter(write => write.upload).length; assert.equal((await request(path + '/upload', 'POST', uploadBody, 'dam-upload-001')).status, 200); assert.equal(writes.filter(write => write.upload).length, uploadCount);
     uploadMode = 'invalid'; result = await request(path + '/upload', 'POST', { ...uploadBody, name: 'Invalid.mp4' }, 'dam-upload-invalid'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
     const afterInvalidUpload = writes.filter(write => write.upload).length; assert.equal((await request(path + '/upload', 'POST', { ...uploadBody, name: 'Invalid.mp4' }, 'dam-upload-new-key')).status, 409); assert.equal(writes.filter(write => write.upload).length, afterInvalidUpload);
-  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); }
 });
 
 test('DAM GIFs retain their actual format and description alternative text when resolving platform copies', () => {

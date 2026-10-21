@@ -1,6 +1,7 @@
+import { sql } from 'drizzle-orm';
 import type { OperationContext, ZernioApi, ProviderRecord } from './provider-core.ts';
 import { createHash } from 'node:crypto';
-import { fail, reportObject as object, IntegrationError, operation, scopedAccounts, requireAccount } from './provider-core.ts';
+import { fail, reportObject as object, IntegrationError, claimFence, operation, releaseFence, scopedAccounts, requireAccount } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const text = (value: any, max: any, empty = false) => typeof value === 'string' && value.length <= max && (empty || value.trim().length > 0) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
@@ -135,57 +136,54 @@ export async function handleZernioWhatsAppTemplates(context: OperationContext & 
   const { req, url: requestUrl, body = {}, role, db, project, send } = context;
   const mutation = req.method === 'POST', matched = action.match(/^templates\/(\d{1,40})(?:\/(update|delete))?$/);
   if (!(req.method === 'GET' && ['overview', 'templates', 'library'].includes(action)) && !(matched && (req.method === 'GET' && !matched[2] || mutation && matched[2])) && !(mutation && ['templates/create', 'templates/import'].includes(action))) return false;
-  db.exec(`CREATE TABLE IF NOT EXISTS zernio_whatsapp_template_ownership(waba_id TEXT NOT NULL,template_id TEXT NOT NULL,project_id TEXT NOT NULL,profile_id TEXT NOT NULL,PRIMARY KEY(waba_id,template_id));
-    CREATE TABLE IF NOT EXISTS zernio_whatsapp_template_mutations(waba_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)`);
-  const assertAccess = () => context.assertProjectMapping?.(profileId);
-  assertAccess();
+  const assertAccess = async () => { await context.assertProjectMapping?.(profileId); };
+  await assertAccess();
   const accounts = await scopedAccounts(api, profileId), whatsapp = accounts.filter(account => account.platform === 'whatsapp');
   if (action === 'overview') { send(200, { accounts: whatsapp.map(account => ({ id: account._id, name: account.displayName || account.username || 'WhatsApp Business', isActive: account.isActive !== false, wabaId: numeric(account.metadata?.wabaId) ? account.metadata.wabaId : null })) }); return true; }
   const accountId = mutation ? body.accountId : requestUrl.searchParams.get('accountId'), account = requireAccount(accounts, accountId);
   if (account.platform !== 'whatsapp') fail(422, 'WHATSAPP_ACCOUNT_REQUIRED', 'Choose a connected WhatsApp account.');
   const wabaId = numeric(account.metadata?.wabaId) ? account.metadata.wabaId : null;
-  const isAdmin = ['owner', 'admin'].includes(role), isOperator = () => Boolean(context.user?.isOperator && db.prepare('SELECT 1 FROM instance_operators WHERE user_id=?').get(context.user.id));
-  const ownership = (templateId: any) => db.prepare('SELECT project_id,profile_id FROM zernio_whatsapp_template_ownership WHERE waba_id=? AND template_id=?').get(wabaId, templateId);
-  const decorate = (template: any) => { const owner = ownership(template.id); return { ...template, managedHere: owner?.project_id === project.id && owner.profile_id === profileId, canReviewShared: isAdmin && isOperator(), wabaId }; };
+  const isAdmin = ['owner', 'admin'].includes(role), isOperator = async () => Boolean(context.user?.isOperator && (await db.execute(sql`SELECT 1 FROM instance_operators WHERE user_id = ${context.user.id}`)).rowCount);
+  const ownership = async (templateId: any) => (await db.execute(sql`SELECT project_id, profile_id FROM zernio_whatsapp_template_ownership WHERE waba_id = ${wabaId} AND template_id = ${templateId}`)).rows[0] as ProviderRecord | undefined;
+  const decorate = async (template: any) => { const owner = await ownership(template.id); return { ...template, managedHere: owner?.project_id === project.id && owner.profile_id === profileId, canReviewShared: isAdmin && await isOperator(), wabaId }; };
   async function freshAccount() {
-    assertAccess(); const fresh = requireAccount(await scopedAccounts(api, profileId), accountId);
+    await assertAccess(); const fresh = requireAccount(await scopedAccounts(api, profileId), accountId);
     if (fresh.platform !== 'whatsapp' || fresh.isActive === false || !wabaId || fresh.metadata?.wabaId !== wabaId) fail(409, 'WHATSAPP_CONNECTION_CHANGED', 'The WhatsApp connection or business account changed. Refresh before continuing.');
     return fresh;
   }
   if (!mutation) {
     let result: any;
-    if (action === 'templates') { const status = requestUrl.searchParams.get('status'); if (status && !states.includes(status)) fail(400, 'INVALID_TEMPLATE_FILTER', 'Choose a template review status.'); result = { templates: (await list(api, accountId, status ? { status } : {})).map(decorate), wabaId }; }
+    if (action === 'templates') { const status = requestUrl.searchParams.get('status'); if (status && !states.includes(status)) fail(400, 'INVALID_TEMPLATE_FILTER', 'Choose a template review status.'); result = { templates: await Promise.all((await list(api, accountId, status ? { status } : {})).map(decorate)), wabaId }; }
     else if (action === 'library') result = { library: await library(api, accountId, requestUrl.searchParams.get('name'), requestUrl.searchParams.get('language')) };
-    else { if (!(await list(api, accountId)).some((template: any) => template.id === matched[1])) fail(404, 'TEMPLATE_NOT_FOUND', 'This template is not available through this account.'); result = { template: decorate(await detail(api, accountId, matched[1])) }; }
-    assertAccess(); send(200, result); return true;
+    else { if (!(await list(api, accountId)).some((template: any) => template.id === matched[1])) fail(404, 'TEMPLATE_NOT_FOUND', 'This template is not available through this account.'); result = { template: await decorate(await detail(api, accountId, matched[1])) }; }
+    await assertAccess(); send(200, result); return true;
   }
   if (!isAdmin) fail(403, 'TEMPLATE_ADMIN_REQUIRED', 'A workspace owner or administrator must manage WhatsApp business templates.');
   fields(body, ['accountId', 'expectedWabaId', 'name', 'category', 'language', 'form', 'ttlSeconds', 'confirmSubmission', 'expectedVersion', 'confirmTemplateId', 'reviewSharedWabaId', 'libraryName', 'expectedLibraryVersion', 'buttonInputs']);
   if (!wabaId || body.expectedWabaId !== wabaId) fail(409, 'WHATSAPP_BUSINESS_REVIEW_REQUIRED', 'Refresh and review the WhatsApp business account before changing a template.');
   const task = matched?.[2] || action.split('/')[1], templateId = matched?.[1];
   fields(body, ['accountId', 'expectedWabaId', ...(task === 'create' ? ['name', 'category', 'language', 'form', 'ttlSeconds', 'confirmSubmission'] : task === 'import' ? ['name', 'language', 'libraryName', 'expectedLibraryVersion', 'buttonInputs', 'ttlSeconds', 'confirmSubmission'] : ['expectedVersion', 'confirmTemplateId', 'reviewSharedWabaId', ...(task === 'update' ? ['form', 'ttlSeconds'] : [])])]);
-  const reviewBusinessScope = () => {
+  const reviewBusinessScope = async () => {
     // Creation provenance cannot prove exclusive use: templates belong to the WABA, not one number or project.
-    if (!(isOperator() && body.reviewSharedWabaId === wabaId && body.confirmTemplateId === templateId)) fail(403, 'SHARED_TEMPLATE_REVIEW_REQUIRED', 'An instance operator must explicitly review this variant and WhatsApp business account before editing or deleting it.');
+    if (!(await isOperator() && body.reviewSharedWabaId === wabaId && body.confirmTemplateId === templateId)) fail(403, 'SHARED_TEMPLATE_REVIEW_REQUIRED', 'An instance operator must explicitly review this variant and WhatsApp business account before editing or deleting it.');
   };
   if (['create', 'import'].includes(task) && (body.confirmSubmission !== true || !name(body.name) || !language(body.language))) fail(400, 'TEMPLATE_SUBMISSION_REVIEW_REQUIRED', 'Review the template name, language and content before submitting.');
   const result = await operation(context, async key => {
     if (!locks.has(db)) locks.set(db, new Set()); const active = locks.get(db);
-    // ponytail: one process owns this SQLite database; use a durable WABA lock before adding server processes.
+    // Fast in-process rejection; the durable WABA fence below is what excludes other processes.
     if (active.has(wabaId)) fail(409, 'WHATSAPP_BUSINESS_BUSY', 'Another template change for this WhatsApp business account is in progress.');
     active.add(wabaId);
     let fenced = false, uncertain = false;
     try {
-      const previous = db.prepare('SELECT m.project_id,m.request_key,o.status FROM zernio_whatsapp_template_mutations m LEFT JOIN integration_operations o ON o.project_id=m.project_id AND o.request_key=m.request_key WHERE m.waba_id=?').get(wabaId) as ProviderRecord | undefined;
-      if (previous && (previous.project_id !== project.id || previous.request_key !== key) && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'TEMPLATE_PREVIOUS_OUTCOME_UNRESOLVED', 'This new change was not sent. Review the previous template change in provider outcomes before changing this WhatsApp business account again.');
-      db.prepare('INSERT INTO zernio_whatsapp_template_mutations VALUES(?,?,?) ON CONFLICT(waba_id) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(wabaId, project.id, key); fenced = true;
+      if (!await claimFence(db, 'zernio_whatsapp_template_mutations', wabaId, project.id, key, 'waba_id')) fail(409, 'TEMPLATE_PREVIOUS_OUTCOME_UNRESOLVED', 'This new change was not sent. Review the previous template change in provider outcomes before changing this WhatsApp business account again.');
+      fenced = true;
       await freshAccount();
       const before = await list(api, accountId); let current: any;
       if (templateId) {
         if (!before.some((template: any) => template.id === templateId)) fail(404, 'TEMPLATE_NOT_FOUND', 'This template is not available through this account.');
         current = await detail(api, accountId, templateId);
         if (body.expectedVersion !== current.version) fail(409, 'TEMPLATE_CHANGED', 'This template changed. Refresh and review the current version.');
-        reviewBusinessScope();
+        await reviewBusinessScope();
         if (task === 'delete' && body.confirmTemplateId !== templateId) fail(400, 'TEMPLATE_DELETE_REVIEW_REQUIRED', 'Confirm the exact language variant before deleting it.');
       }
       let payload: any, components: any, source: any;
@@ -216,11 +214,11 @@ export async function handleZernioWhatsAppTemplates(context: OperationContext & 
         if (task !== 'update' && before.some((template: any) => template.name === payload.name && template.language === payload.language)) fail(409, 'TEMPLATE_EXISTS', 'That template name and language already exist. Choose its variant to edit it.');
       }
       await freshAccount();
-      if (templateId) reviewBusinessScope();
+      if (templateId) await reviewBusinessScope();
       const receipt = await api(templateId ? `/whatsapp/templates/id/${templateId}` : '/whatsapp/templates', task === 'delete' ? { accountId } : {}, payload, key, task === 'delete' ? 'DELETE' : task === 'update' ? 'PATCH' : 'POST');
       try {
         if (receipt.success !== true) unavailable();
-        if (templateId) reviewBusinessScope();
+        if (templateId) await reviewBusinessScope();
         if (task === 'delete') {
           if (receipt.scope !== 'language' || receipt.language !== current.language) unavailable();
           await freshAccount();
@@ -230,8 +228,8 @@ export async function handleZernioWhatsAppTemplates(context: OperationContext & 
         const saved = receipt.template;
         if (!object(saved) || !numeric(saved.id) || templateId && saved.id !== templateId || saved.name !== (current?.name || payload.name) || saved.language !== (current?.language || payload.language) || !text(saved.status, 100) || saved.category !== undefined && saved.category !== (current?.category || payload.category) || !templateId && before.some((template: any) => template.id === saved.id)) unavailable();
         if (!templateId) {
-          const owned = ownership(saved.id); if (owned && (owned.project_id !== project.id || owned.profile_id !== profileId)) fail(502, 'TEMPLATE_OWNERSHIP_CONFLICT', 'This template already has a different project owner.');
-          db.prepare('INSERT OR IGNORE INTO zernio_whatsapp_template_ownership VALUES(?,?,?,?)').run(wabaId, saved.id, project.id, profileId);
+          const owned = await ownership(saved.id); if (owned && (owned.project_id !== project.id || owned.profile_id !== profileId)) fail(502, 'TEMPLATE_OWNERSHIP_CONFLICT', 'This template already has a different project owner.');
+          await db.execute(sql`INSERT INTO zernio_whatsapp_template_ownership (waba_id, template_id, project_id, profile_id) VALUES (${wabaId}, ${saved.id}, ${project.id}, ${profileId}) ON CONFLICT DO NOTHING`);
         }
         await freshAccount(); const fresh = await detail(api, accountId, saved.id);
         if (fresh.name !== saved.name || fresh.language !== saved.language || fresh.category !== (current?.category || payload.category) || components && canonical(semantic(fresh.components)) !== canonical(semantic(components)) || payload.message_send_ttl_seconds !== undefined && payload.message_send_ttl_seconds !== -1 && fresh.ttlSeconds !== payload.message_send_ttl_seconds) unavailable();
@@ -239,10 +237,10 @@ export async function handleZernioWhatsAppTemplates(context: OperationContext & 
           const buttons = fresh.components.flatMap((part: any) => part.buttons || []);
           if (fresh.components.find((part: any) => part.type === 'body')?.text !== source.body || buttons.length !== source.buttons.length || source.buttons.some((button: any, index: any) => buttons[index]?.type !== button.type || buttons[index]?.text !== button.text || button.type === 'url' && buttons[index]?.url !== body.buttonInputs[index].url || button.type === 'phone_number' && buttons[index]?.phone_number !== body.buttonInputs[index].phoneNumber)) unavailable();
         }
-        assertAccess(); return { template: decorate(fresh), submitted: true };
+        await assertAccess(); return { template: await decorate(fresh), submitted: true };
       } catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
     } catch (error: any) { uncertain = !(error instanceof IntegrationError) || error.uncertain; throw error; }
-    finally { if (fenced && !uncertain) db.prepare('DELETE FROM zernio_whatsapp_template_mutations WHERE waba_id=? AND project_id=? AND request_key=?').run(wabaId, project.id, key); active.delete(wabaId); }
+    finally { try { if (fenced && !uncertain) await releaseFence(db, 'zernio_whatsapp_template_mutations', wabaId, project.id, key, 'waba_id'); } finally { active.delete(wabaId); } }
   }, `whatsapp-templates:${wabaId}`);
   send(result.status, result.data); return true;
 }

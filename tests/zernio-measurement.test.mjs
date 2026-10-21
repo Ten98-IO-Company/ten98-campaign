@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
@@ -13,8 +13,9 @@ import { IntegrationError } from '../server/provider-core.ts';
 
 const profileId = 'profile-a', platforms = ['metaads', 'googleads', 'linkedinads', 'tiktokads', 'pinterestads', 'xads', 'openaiads', 'redditads'];
 const pixel = (platform, id = `${platform}-pixel`) => ({ id, name: 'Website pixel', platform, kind: 'pixel', status: 'active', siteTagId: `site-${id}`, lastFiredTime: null, installed: false, code: '<script>example("public-pixel-id")</script>', secret: 'must-not-escape' });
-function setup() {
-  const db = new DatabaseSync(':memory:'), calls = [], state = { accounts: platforms.map(platform => ({ _id: platform, platform, profileId, isActive: true, displayName: platform })), tags: new Map(platforms.map(platform => [platform, [pixel(platform)]])), natives: [{ id: 'ad-a', name: 'Project advertiser', currency: 'USD', selectable: true }, { id: 'ad-b', name: 'Other advertiser', currency: 'USD', selectable: true }], list: null, receipt: null, detail: null, events: null, diagnostics: null, fail: false, readbackFail: false, created: false, hold: null, destinations: [{ id: 'reddit-pixel-a', name: 'Selected advertiser pixel', status: 'active', adAccountId: 'ad-a' }, { id: 'reddit-pixel-b', name: 'Other advertiser pixel', status: 'active', adAccountId: 'ad-b' }] };
+const pg = { skip: postgresSkip };
+async function setup(t) {
+  const { db, sql } = await testDatabase(t), calls = [], state = { accounts: platforms.map(platform => ({ _id: platform, platform, profileId, isActive: true, displayName: platform })), tags: new Map(platforms.map(platform => [platform, [pixel(platform)]])), natives: [{ id: 'ad-a', name: 'Project advertiser', currency: 'USD', selectable: true }, { id: 'ad-b', name: 'Other advertiser', currency: 'USD', selectable: true }], list: null, receipt: null, detail: null, events: null, diagnostics: null, fail: false, readbackFail: false, created: false, hold: null, destinations: [{ id: 'reddit-pixel-a', name: 'Selected advertiser pixel', status: 'active', adAccountId: 'ad-a' }, { id: 'reddit-pixel-b', name: 'Other advertiser pixel', status: 'active', adAccountId: 'ad-b' }] };
   state.accounts.push({ _id: 'foreign', platform: 'metaads', profileId: 'other-profile', isActive: true });
   let sequence = 0;
   const api = async (path, query = {}, body, key, method = body === undefined ? 'GET' : 'POST') => {
@@ -42,63 +43,55 @@ function setup() {
     try { const handled = await handleZernioMeasurement(context, api, profileId, context.url.pathname.split('/measurement/')[1]); return response || { handled }; }
     catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   }
-  return { db, calls, state, request };
+  return { db, sql, calls, state, request };
 }
 
-test('measurement discovery scopes connections, native advertisers, Reddit pixels and every supported tag platform', async () => {
-  const { db, calls, state, request } = setup();
-  try {
-    const connections = await request('accounts', { role: 'viewer' }); assert.equal(connections.status, 200); assert.equal(connections.data.accounts.length, 8); assert.equal(JSON.stringify(connections).includes('foreign'), false);
-    let result = await request('redditads/ad-accounts'); assert.equal(result.status, 200); assert.equal(result.data.accounts.length, 2);
-    result = await request('redditads/tags?adAccountId=ad-a'); assert.equal(result.status, 200); assert.deepEqual(result.data.tags.map(row => row.id), ['reddit-pixel-a']); assert.equal(result.data.canCreate, false); assert.equal(JSON.stringify(result).includes('Other advertiser pixel'), false);
-    result = await request('redditads/tags/reddit-pixel-a?adAccountId=ad-a'); assert.equal(result.status, 200); assert.match(result.data.instructions, /already|fired/);
-    const before = calls.length; assert.equal((await request('foreign/tags?adAccountId=ad-a')).status, 403); assert.equal(calls.length, before + 1);
-    for (const platform of platforms.filter(name => name !== 'redditads')) { result = await request(`${platform}/tags?adAccountId=ad-a`); assert.equal(result.status, 200, platform); assert.equal(result.data.tags[0].platform, platform); assert.equal(result.data.tags[0].code, undefined); assert.equal(JSON.stringify(result).includes('must-not-escape'), false); }
-    const reads = calls.length; assert.equal((await request('redditads/tags?adAccountId=foreign-advertiser')).status, 403); assert.equal(calls.length, reads + 2);
-    assert.equal((await request('redditads/tags/reddit-pixel-b?adAccountId=ad-a')).status, 403);
-    state.destinations[0].adAccountId = undefined; assert.equal((await request('redditads/tags?adAccountId=ad-a')).status, 502);
-  } finally { db.close(); }
+test('measurement discovery scopes connections, native advertisers, Reddit pixels and every supported tag platform', pg, async t => {
+  const { calls, state, request } = await setup(t);
+  const connections = await request('accounts', { role: 'viewer' }); assert.equal(connections.status, 200); assert.equal(connections.data.accounts.length, 8); assert.equal(JSON.stringify(connections).includes('foreign'), false);
+  let result = await request('redditads/ad-accounts'); assert.equal(result.status, 200); assert.equal(result.data.accounts.length, 2);
+  result = await request('redditads/tags?adAccountId=ad-a'); assert.equal(result.status, 200); assert.deepEqual(result.data.tags.map(row => row.id), ['reddit-pixel-a']); assert.equal(result.data.canCreate, false); assert.equal(JSON.stringify(result).includes('Other advertiser pixel'), false);
+  result = await request('redditads/tags/reddit-pixel-a?adAccountId=ad-a'); assert.equal(result.status, 200); assert.match(result.data.instructions, /already|fired/);
+  const before = calls.length; assert.equal((await request('foreign/tags?adAccountId=ad-a')).status, 403); assert.equal(calls.length, before + 1);
+  for (const platform of platforms.filter(name => name !== 'redditads')) { result = await request(`${platform}/tags?adAccountId=ad-a`); assert.equal(result.status, 200, platform); assert.equal(result.data.tags[0].platform, platform); assert.equal(result.data.tags[0].code, undefined); assert.equal(JSON.stringify(result).includes('must-not-escape'), false); }
+  const reads = calls.length; assert.equal((await request('redditads/tags?adAccountId=foreign-advertiser')).status, 403); assert.equal(calls.length, reads + 2);
+  assert.equal((await request('redditads/tags/reddit-pixel-b?adAccountId=ad-a')).status, 403);
+  state.destinations[0].adAccountId = undefined; assert.equal((await request('redditads/tags?adAccountId=ad-a')).status, 502);
 });
 
-test('tag detail, installation code, event definitions and Meta diagnostics validate scope and omit private provider fields', async () => {
-  const { db, state, calls, request } = setup();
-  try {
-    let result = await request('metaads/tags/metaads-pixel?adAccountId=ad-a'); assert.equal(result.status, 200); assert.match(result.data.tag.code, /<script>/); assert.equal(result.data.tag.siteTagId, 'site-metaads-pixel'); assert.equal(JSON.stringify(result).includes('must-not-escape'), false);
-    result = await request('openaiads/tags/openaiads-pixel/events?adAccountId=ad-a'); assert.equal(result.status, 200); assert.equal(result.data.events[0].siteEventId, 'site-purchase'); assert.equal(JSON.stringify(result).includes('must-not-escape'), false);
-    result = await request('metaads/tags/metaads-pixel/diagnostics?adAccountId=ad-a'); assert.equal(result.status, 200); assert.equal(result.data.checks[0].result, 'ok'); assert.equal(JSON.stringify(result).includes('javascript:'), false);
-    const before = calls.length; assert.equal((await request('metaads/tags/private-pixel?adAccountId=ad-a')).status, 403); assert.equal(calls.length, before + 3, 'An unlisted tag must never be read directly.');
-    assert.equal((await request('googleads/tags/googleads-pixel/diagnostics?adAccountId=ad-a')).status, 422);
-    for (const malformed of [{ platform: 'other', tags: [pixel('metaads')] }, { platform: 'metaads', tags: [pixel('googleads')] }, { platform: 'metaads', tags: [{ ...pixel('metaads'), installed: {} }] }, { platform: 'metaads', tags: [pixel('metaads'), pixel('metaads')] }, { platform: 'metaads', tags: [pixel('metaads')], hasMore: true }]) { state.list = malformed; assert.equal((await request('metaads/tags?adAccountId=ad-a')).status, 502); } state.list = null;
-    state.detail = { platform: 'metaads', tag: pixel('metaads', 'different-pixel') }; assert.equal((await request('metaads/tags/metaads-pixel?adAccountId=ad-a')).status, 502); state.detail = null;
-    state.events = { platform: 'openaiads', events: [{ id: 'event', name: {} }] }; assert.equal((await request('openaiads/tags/openaiads-pixel/events?adAccountId=ad-a')).status, 502);
-    state.diagnostics = { platform: 'metaads', checks: [{ title: {} }] }; assert.equal((await request('metaads/tags/metaads-pixel/diagnostics?adAccountId=ad-a')).status, 502);
-  } finally { db.close(); }
+test('tag detail, installation code, event definitions and Meta diagnostics validate scope and omit private provider fields', pg, async t => {
+  const { state, calls, request } = await setup(t);
+  let result = await request('metaads/tags/metaads-pixel?adAccountId=ad-a'); assert.equal(result.status, 200); assert.match(result.data.tag.code, /<script>/); assert.equal(result.data.tag.siteTagId, 'site-metaads-pixel'); assert.equal(JSON.stringify(result).includes('must-not-escape'), false);
+  result = await request('openaiads/tags/openaiads-pixel/events?adAccountId=ad-a'); assert.equal(result.status, 200); assert.equal(result.data.events[0].siteEventId, 'site-purchase'); assert.equal(JSON.stringify(result).includes('must-not-escape'), false);
+  result = await request('metaads/tags/metaads-pixel/diagnostics?adAccountId=ad-a'); assert.equal(result.status, 200); assert.equal(result.data.checks[0].result, 'ok'); assert.equal(JSON.stringify(result).includes('javascript:'), false);
+  const before = calls.length; assert.equal((await request('metaads/tags/private-pixel?adAccountId=ad-a')).status, 403); assert.equal(calls.length, before + 3, 'An unlisted tag must never be read directly.');
+  assert.equal((await request('googleads/tags/googleads-pixel/diagnostics?adAccountId=ad-a')).status, 422);
+  for (const malformed of [{ platform: 'other', tags: [pixel('metaads')] }, { platform: 'metaads', tags: [pixel('googleads')] }, { platform: 'metaads', tags: [{ ...pixel('metaads'), installed: {} }] }, { platform: 'metaads', tags: [pixel('metaads'), pixel('metaads')] }, { platform: 'metaads', tags: [pixel('metaads')], hasMore: true }]) { state.list = malformed; assert.equal((await request('metaads/tags?adAccountId=ad-a')).status, 502); } state.list = null;
+  state.detail = { platform: 'metaads', tag: pixel('metaads', 'different-pixel') }; assert.equal((await request('metaads/tags/metaads-pixel?adAccountId=ad-a')).status, 502); state.detail = null;
+  state.events = { platform: 'openaiads', events: [{ id: 'event', name: {} }] }; assert.equal((await request('openaiads/tags/openaiads-pixel/events?adAccountId=ad-a')).status, 502);
+  state.diagnostics = { platform: 'metaads', checks: [{ title: {} }] }; assert.equal((await request('metaads/tags/metaads-pixel/diagnostics?adAccountId=ad-a')).status, 502);
 });
 
-test('tag creation and Meta rename use administrative permissions, receipt/readback guards and exact-key replay', async () => {
-  const { db, calls, request } = setup(); const body = { adAccountId: 'ad-a', name: 'New website pixel' };
-  try {
-    for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request('metaads/tags/create', { body, role })).status, 403); assert.equal(calls.length, before); }
-    for (const platform of platforms.filter(name => name !== 'redditads')) { const result = await request(`${platform}/tags/create`, { body: { ...body, ...(platform === 'openaiads' ? { defaultEventType: 'order_created' } : {}) }, key: `create-${platform}` }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.tag.name, body.name); assert.equal(JSON.stringify(result).includes('must-not-escape'), false); }
-    const writes = calls.filter(call => call.method === 'POST').length; assert.equal((await request('metaads/tags/create', { body, key: 'create-metaads' })).status, 200); assert.equal(calls.filter(call => call.method === 'POST').length, writes);
-    assert.equal((await request('metaads/tags/metaads-pixel/update', { body: { ...body, name: 'Renamed pixel' }, key: 'rename-meta-pixel' })).status, 200); assert.equal(calls.findLast(call => call.method === 'PATCH').body.name, 'Renamed pixel');
-    assert.equal((await request('redditads/tags/create', { body })).status, 422); assert.equal((await request('openaiads/tags/openaiads-pixel/update', { body })).status, 422);
-    for (const invalid of [{ ...body, name: '' }, { ...body, accessToken: 'private' }, { ...body, defaultEventType: 'order_created' }, { ...body, adAccountId: 'outside' }]) assert.ok((await request('metaads/tags/create', { body: invalid })).status >= 400);
-    assert.equal((await request('tiktokads/tags/create', { body: { ...body, name: 'Emoji 😀 pixel' } })).status, 400);
-  } finally { db.close(); }
+test('tag creation and Meta rename use administrative permissions, receipt/readback guards and exact-key replay', pg, async t => {
+  const { calls, request } = await setup(t); const body = { adAccountId: 'ad-a', name: 'New website pixel' };
+  for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request('metaads/tags/create', { body, role })).status, 403); assert.equal(calls.length, before); }
+  for (const platform of platforms.filter(name => name !== 'redditads')) { const result = await request(`${platform}/tags/create`, { body: { ...body, ...(platform === 'openaiads' ? { defaultEventType: 'order_created' } : {}) }, key: `create-${platform}` }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.tag.name, body.name); assert.equal(JSON.stringify(result).includes('must-not-escape'), false); }
+  const writes = calls.filter(call => call.method === 'POST').length; assert.equal((await request('metaads/tags/create', { body, key: 'create-metaads' })).status, 200); assert.equal(calls.filter(call => call.method === 'POST').length, writes);
+  assert.equal((await request('metaads/tags/metaads-pixel/update', { body: { ...body, name: 'Renamed pixel' }, key: 'rename-meta-pixel' })).status, 200); assert.equal(calls.findLast(call => call.method === 'PATCH').body.name, 'Renamed pixel');
+  assert.equal((await request('redditads/tags/create', { body })).status, 422); assert.equal((await request('openaiads/tags/openaiads-pixel/update', { body })).status, 422);
+  for (const invalid of [{ ...body, name: '' }, { ...body, accessToken: 'private' }, { ...body, defaultEventType: 'order_created' }, { ...body, adAccountId: 'outside' }]) assert.ok((await request('metaads/tags/create', { body: invalid })).status >= 400);
+  assert.equal((await request('tiktokads/tags/create', { body: { ...body, name: 'Emoji 😀 pixel' } })).status, 400);
 });
 
-test('unreadable or lost pixel receipts block changed-name duplicate creation until the operator reviews the unknown outcome', async () => {
+test('unreadable or lost pixel receipts block changed-name duplicate creation until the operator reviews the unknown outcome', pg, async t => {
   for (const mode of ['receipt', 'readback', 'network']) {
-    const { db, calls, state, request } = setup(); const body = { adAccountId: 'ad-a', name: 'Uncertain pixel' };
-    try {
-      if (mode === 'receipt') state.receipt = { platform: 'openaiads', tag: { id: 'broken-receipt' } }; if (mode === 'readback') state.readbackFail = true; if (mode === 'network') state.fail = true;
-      let result = await request('openaiads/tags/create', { body, key: `unknown-${mode}` }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); const before = calls.filter(call => call.method === 'POST').length;
-      state.receipt = null; state.readbackFail = false; state.fail = false;
-      result = await request('openaiads/tags/create', { body: { ...body, name: 'Changed retry name' }, key: `fresh-${mode}` }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(calls.filter(call => call.method === 'POST').length, before);
-      db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=?").run(`unknown-${mode}`);
-      result = await request('openaiads/tags/create', { body: { ...body, name: 'Changed retry name' }, key: `fresh-${mode}` }); assert.equal(result.status, 200, 'A rejected duplicate must not leave a failed receipt that prevents use after review.');
-    } finally { db.close(); }
+    const { sql, calls, state, request } = await setup(t); const body = { adAccountId: 'ad-a', name: 'Uncertain pixel' };
+    if (mode === 'receipt') state.receipt = { platform: 'openaiads', tag: { id: 'broken-receipt' } }; if (mode === 'readback') state.readbackFail = true; if (mode === 'network') state.fail = true;
+    let result = await request('openaiads/tags/create', { body, key: `unknown-${mode}` }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); const before = calls.filter(call => call.method === 'POST').length;
+    state.receipt = null; state.readbackFail = false; state.fail = false;
+    result = await request('openaiads/tags/create', { body: { ...body, name: 'Changed retry name' }, key: `fresh-${mode}` }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(calls.filter(call => call.method === 'POST').length, before);
+    await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=?", `unknown-${mode}`);
+    result = await request('openaiads/tags/create', { body: { ...body, name: 'Changed retry name' }, key: `fresh-${mode}` }); assert.equal(result.status, 200, 'A rejected duplicate must not leave a failed receipt that prevents use after review.');
   }
 });
 
@@ -133,8 +126,9 @@ test('measurement write keys survive server failures and pending receipts until 
   failure = null; await write('/pixel/create', { name: 'Pixel' }); assert.notEqual(calls.at(-1)[3], rejected);
 });
 
-test('the integration router authenticates scoped measurement requests and preserves unknown creation when mapping changes after a write', async () => {
-  const original = globalThis.fetch, db = new DatabaseSync(':memory:'), project = { id: 'project-a', zernioProfileId: profileId }; let changed = false, writes = 0;
+test('the integration router authenticates scoped measurement requests and preserves unknown creation when mapping changes after a write', pg, async t => {
+  const { db, pool } = await testDatabase(t), original = globalThis.fetch, project = { id: 'project-a', zernioProfileId: profileId }; let changed = false, writes = 0;
+  await pool.query(`INSERT INTO workspaces (id, name) VALUES ('w', 'W'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'w', 'Project A', '${profileId}')`);
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); assert.equal(url.origin, 'https://zernio.com'); assert.equal(options.headers.Authorization, 'Bearer fixture-key');
     if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [{ _id: 'openaiads', platform: 'openaiads', profileId, isActive: true }] });
@@ -152,7 +146,7 @@ test('the integration router authenticates scoped measurement requests and prese
     assert.equal((await invoke('openaiads/tags/create', { adAccountId: 'ad-a', name: 'Router pixel' }, 'editor')).status, 403); assert.equal(writes, 0);
     let result = await invoke('openaiads/tags/create', { adAccountId: 'ad-a', name: 'Router pixel' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(writes, 1);
     changed = false; result = await invoke('openaiads/tags/create', { adAccountId: 'ad-a', name: 'Changed retry' }, 'owner', 'measurement-router-retry'); assert.equal(result.status, 409); assert.equal(writes, 1);
-  } finally { globalThis.fetch = original; db.close(); }
+  } finally { globalThis.fetch = original; }
 });
 
 test('rendered pixel controls preserve API versus website IDs, escape snippets and restrict writes and unsupported Reddit operations', async () => {

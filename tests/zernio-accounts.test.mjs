@@ -1,9 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import * as design from '@ten98/ui';
@@ -12,6 +9,14 @@ import { transformWithOxc } from 'vite';
 import { handleZernioAccounts } from '../server/zernio-accounts.ts';
 import { handleIntegration } from '../server/integrations.ts';
 import { IntegrationError } from '../server/provider-core.ts';
+import { connect } from '../server/database.ts';
+import { postgresSkip, sqlHelper, testDatabase } from './postgres.mjs';
+
+const pg = { skip: postgresSkip };
+// PostgreSQL stand-in for a local receipt write failing after the provider call; drizzle wraps the driver error.
+const rejectReceipts = (pool, name) => pool.query(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'receipt unavailable'; END $$; CREATE TRIGGER ${name} BEFORE UPDATE ON integration_operations FOR EACH ROW EXECUTE FUNCTION ${name}()`);
+const acceptReceipts = (pool, name) => pool.query(`DROP TRIGGER ${name} ON integration_operations`);
+const receiptUnavailable = error => /receipt unavailable/.test(error.cause?.message ?? error.message);
 
 const profileId = 'profile-a';
 const account = (id = 'instagram-a', platform = 'instagram') => ({ _id: id, platform, profileId, isActive: true, displayName: 'Acme', username: '@acme' });
@@ -66,8 +71,8 @@ test('WhatsApp number status rechecks access at every await and fences changed n
   assert.equal((await request()).status, 200);
 });
 
-test('WhatsApp number status real integration transport is authenticated, bodyless and account scoped with no operation or other endpoint', async () => {
-  const db = new DatabaseSync(':memory:'), original = globalThis.fetch, row = { ...account('whatsapp/a', 'whatsapp'), metadata: { phoneNumberId: 'phone-one', wabaId: 'waba-one' } }, calls = []; let mode = 'good';
+test('WhatsApp number status real integration transport is authenticated, bodyless and account scoped with no operation or other endpoint', pg, async t => {
+  const { db, sql } = await testDatabase(t), original = globalThis.fetch, row = { ...account('whatsapp/a', 'whatsapp'), metadata: { phoneNumberId: 'phone-one', wabaId: 'waba-one' } }, calls = []; let mode = 'good';
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); calls.push({ url, options }); assert.equal(url.origin, 'https://zernio.com'); assert.equal(options.headers.Authorization, 'Bearer fixture-secret'); assert.equal(options.method, 'GET'); assert.equal(options.body, undefined); assert.equal(options.headers['Idempotency-Key'], undefined);
     if (url.pathname === '/api/v1/accounts') { assert.equal(url.searchParams.get('profileId'), profileId); return Response.json({ accounts: [row] }); }
@@ -79,8 +84,8 @@ test('WhatsApp number status real integration transport is authenticated, bodyle
   try {
     const result = await invoke(); assert.equal(result.status, 200); assert.equal(result.data.phone.is_official_business_account, false); assert.equal(result.data.waba, null); assert.equal(result.data.operation, undefined);
     for (const failure of ['malformed', 'missing', 'lost']) { mode = failure; const result = await invoke(); assert.equal(result.status, failure === 'missing' ? 400 : 502); assert.equal(result.data.operation, undefined); assert.equal(result.data.phone, undefined); }
-    assert.ok(calls.every(call => call.options.method === 'GET')); assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all(), []);
-  } finally { globalThis.fetch = original; db.close(); }
+    assert.ok(calls.every(call => call.options.method === 'GET')); assert.equal((await sql.get('SELECT count(*) AS n FROM integration_operations')).n, 0);
+  } finally { globalThis.fetch = original; }
 });
 
 async function whatsappNumberUi(respond, initial = {}) {
@@ -128,7 +133,8 @@ test('WhatsApp number UI rejects pending and retained work across account/projec
   }
 });
 
-function facebookSubscriptionFixture(db = new DatabaseSync(':memory:')) {
+async function facebookSubscriptionFixture(t, connection) {
+  const database = connection ?? await testDatabase(t), { db, sql, pool } = database;
   const calls = [], state = { row: { ...account('facebook-a', 'facebook'), platformUserId: '123456789' }, subscription: { pageId: '123456789', appSubscribed: false, leadgen: false, subscribedFields: ['feed'], warning: 'leadgen is missing' }, roleAllowed: true, mappingAllowed: true, accountReads: 0, subscriptionReads: 0, writes: 0 };
   const api = async (path, query = {}, body, key, method = body === undefined ? 'GET' : 'POST') => {
     calls.push({ path, query, body, key, method });
@@ -144,91 +150,81 @@ function facebookSubscriptionFixture(db = new DatabaseSync(':memory:')) {
     try { await handleZernioAccounts(context, api, profileId, `${accountId}/${task}`); return response; }
     catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   };
-  return { db, calls, state, request, async reviewed(options) { const snapshot = await request(undefined, options); return request({ expectedVersion: snapshot.data.version, confirmed: true }, options); } };
+  return { database, db, sql, pool, calls, state, request, async reviewed(options) { const snapshot = await request(undefined, options); return request({ expectedVersion: snapshot.data.version, confirmed: true }, options); } };
 }
 
-test('Facebook Page subscription reads live scoped status and confirms bodyless native POST against independent actual readback', async () => {
-  const { db, calls, state, request } = facebookSubscriptionFixture();
-  try {
-    state.subscription.subscribedFields = ['feed', 'leadgen', 'feed']; state.subscription.pageId = '000123456789';
-    const loaded = await request(undefined, { role: 'viewer' }); assert.equal(loaded.status, 200); assert.equal(loaded.data.pageId, '123456789'); assert.equal(loaded.data.appSubscribed, false); assert.equal(loaded.data.leadgen, false); assert.deepEqual(loaded.data.subscribedFields, ['feed', 'leadgen']); assert.match(loaded.data.version, /^[a-f0-9]{64}$/); assert.equal(JSON.stringify(loaded).includes('never-return'), false);
-    state.onWrite = () => { Object.assign(state.subscription, { appSubscribed: true, leadgen: true, subscribedFields: ['leadgen', 'feed'], warning: null }); };
-    const payload = { expectedVersion: loaded.data.version, confirmed: true }, result = await request(payload, { key: 'facebook-same-key' });
-    assert.equal(result.status, 200); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.readback, true); assert.equal(result.data.resubscribed, true); assert.equal(result.data.leadgen, true); assert.deepEqual(result.data.subscribedFields, ['feed', 'leadgen']);
-    assert.deepEqual(await request(payload, { key: 'facebook-same-key' }), result); assert.equal(state.writes, 1);
-    state.onWrite = null; Object.assign(state.subscription, { appSubscribed: false, leadgen: false, subscribedFields: [], warning: 'Not granted' }); state.receipt = { ...state.subscription, resubscribed: false };
-    const degraded = await request({ expectedVersion: (await request()).data.version, confirmed: true }); assert.equal(degraded.status, 200); assert.equal(degraded.data.resubscribed, false); assert.equal(degraded.data.appSubscribed, false); assert.equal(degraded.data.leadgen, false); assert.deepEqual(degraded.data.subscribedFields, []);
-    assert.ok(calls.filter(row => row.method === 'POST').every(row => row.body === undefined && Object.keys(row.query).length === 0)); assert.equal(calls.some(row => row.path.includes('/pages')), false);
-  } finally { db.close(); }
+test('Facebook Page subscription reads live scoped status and confirms bodyless native POST against independent actual readback', pg, async t => {
+  const { calls, state, request } = await facebookSubscriptionFixture(t);
+  state.subscription.subscribedFields = ['feed', 'leadgen', 'feed']; state.subscription.pageId = '000123456789';
+  const loaded = await request(undefined, { role: 'viewer' }); assert.equal(loaded.status, 200); assert.equal(loaded.data.pageId, '123456789'); assert.equal(loaded.data.appSubscribed, false); assert.equal(loaded.data.leadgen, false); assert.deepEqual(loaded.data.subscribedFields, ['feed', 'leadgen']); assert.match(loaded.data.version, /^[a-f0-9]{64}$/); assert.equal(JSON.stringify(loaded).includes('never-return'), false);
+  state.onWrite = () => { Object.assign(state.subscription, { appSubscribed: true, leadgen: true, subscribedFields: ['leadgen', 'feed'], warning: null }); };
+  const payload = { expectedVersion: loaded.data.version, confirmed: true }, result = await request(payload, { key: 'facebook-same-key' });
+  assert.equal(result.status, 200); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.readback, true); assert.equal(result.data.resubscribed, true); assert.equal(result.data.leadgen, true); assert.deepEqual(result.data.subscribedFields, ['feed', 'leadgen']);
+  assert.deepEqual(await request(payload, { key: 'facebook-same-key' }), result); assert.equal(state.writes, 1);
+  state.onWrite = null; Object.assign(state.subscription, { appSubscribed: false, leadgen: false, subscribedFields: [], warning: 'Not granted' }); state.receipt = { ...state.subscription, resubscribed: false };
+  const degraded = await request({ expectedVersion: (await request()).data.version, confirmed: true }); assert.equal(degraded.status, 200); assert.equal(degraded.data.resubscribed, false); assert.equal(degraded.data.appSubscribed, false); assert.equal(degraded.data.leadgen, false); assert.deepEqual(degraded.data.subscribedFields, []);
+  assert.ok(calls.filter(row => row.method === 'POST').every(row => row.body === undefined && Object.keys(row.query).length === 0)); assert.equal(calls.some(row => row.path.includes('/pages')), false);
 });
 
-test('Facebook subscription rejects unreviewed scope, wrong platforms, malformed live statuses and stale versions without writing', async () => {
-  const { db, state, calls, request } = facebookSubscriptionFixture();
-  try {
-    const payload = { expectedVersion: (await request()).data.version, confirmed: true };
-    for (const extra of [{ confirmed: false }, { expectedVersion: 123 }, { expectedVersion: 'bad' }, { pageId: 'other' }, { subscribedFields: ['leadgen'] }, { refresh: true }]) assert.equal((await request({ ...payload, ...extra })).status, 400);
-    const before = calls.length; assert.equal((await request(payload, { role: 'editor' })).status, 403); assert.equal(calls.length, before);
-    assert.equal((await request(undefined, { search: '?refresh=true' })).status, 400); assert.equal((await request(undefined, { method: 'PATCH' })).status, 405); assert.equal((await request(undefined, { accountId: 'outside' })).status, 403);
-    for (const platform of ['instagram', 'metaads', 'telegram']) { state.row.platform = platform; assert.equal((await request()).status, 400); } state.row.platform = 'facebook';
-    state.row.isActive = false; assert.equal((await request()).status, 400); state.row.isActive = true; state.row.needsReconnection = true; assert.equal((await request()).status, 400); delete state.row.needsReconnection;
-    for (const extra of [{ pageId: '' }, { pageId: '0' }, { pageId: '0000' }, { pageId: 123 }, { pageId: 'a b' }, { appSubscribed: undefined }, { appSubscribed: null }, { leadgen: 'false' }, { subscribedFields: undefined }, { subscribedFields: [3] }, { subscribedFields: [''] }, { subscribedFields: ['bad\nfield'] }, { subscribedFields: Array(201).fill('feed') }, { warning: {} }]) { state.readResponse = { ...state.subscription, ...extra }; assert.equal((await request()).status, 502, JSON.stringify(extra)); } state.readResponse = null;
-    state.subscription.pageId = 'opaque-page'; assert.equal((await request()).data.pageId, 'opaque-page'); state.subscription.pageId = '123456789';
-    for (const extra of [{ pageId: '987654321' }, { appSubscribed: true }, { leadgen: true }, { subscribedFields: ['feed', 'leadgen'] }]) { const original = { ...state.subscription }; Object.assign(state.subscription, extra); assert.equal((await request(payload)).data.error.code, 'FACEBOOK_SUBSCRIPTION_CHANGED'); Object.assign(state.subscription, original); }
-    assert.equal(state.writes, 0);
-  } finally { db.close(); }
+test('Facebook subscription rejects unreviewed scope, wrong platforms, malformed live statuses and stale versions without writing', pg, async t => {
+  const { state, calls, request } = await facebookSubscriptionFixture(t);
+  const payload = { expectedVersion: (await request()).data.version, confirmed: true };
+  for (const extra of [{ confirmed: false }, { expectedVersion: 123 }, { expectedVersion: 'bad' }, { pageId: 'other' }, { subscribedFields: ['leadgen'] }, { refresh: true }]) assert.equal((await request({ ...payload, ...extra })).status, 400);
+  const before = calls.length; assert.equal((await request(payload, { role: 'editor' })).status, 403); assert.equal(calls.length, before);
+  assert.equal((await request(undefined, { search: '?refresh=true' })).status, 400); assert.equal((await request(undefined, { method: 'PATCH' })).status, 405); assert.equal((await request(undefined, { accountId: 'outside' })).status, 403);
+  for (const platform of ['instagram', 'metaads', 'telegram']) { state.row.platform = platform; assert.equal((await request()).status, 400); } state.row.platform = 'facebook';
+  state.row.isActive = false; assert.equal((await request()).status, 400); state.row.isActive = true; state.row.needsReconnection = true; assert.equal((await request()).status, 400); delete state.row.needsReconnection;
+  for (const extra of [{ pageId: '' }, { pageId: '0' }, { pageId: '0000' }, { pageId: 123 }, { pageId: 'a b' }, { appSubscribed: undefined }, { appSubscribed: null }, { leadgen: 'false' }, { subscribedFields: undefined }, { subscribedFields: [3] }, { subscribedFields: [''] }, { subscribedFields: ['bad\nfield'] }, { subscribedFields: Array(201).fill('feed') }, { warning: {} }]) { state.readResponse = { ...state.subscription, ...extra }; assert.equal((await request()).status, 502, JSON.stringify(extra)); } state.readResponse = null;
+  state.subscription.pageId = 'opaque-page'; assert.equal((await request()).data.pageId, 'opaque-page'); state.subscription.pageId = '123456789';
+  for (const extra of [{ pageId: '987654321' }, { appSubscribed: true }, { leadgen: true }, { subscribedFields: ['feed', 'leadgen'] }]) { const original = { ...state.subscription }; Object.assign(state.subscription, extra); assert.equal((await request(payload)).data.error.code, 'FACEBOOK_SUBSCRIPTION_CHANGED'); Object.assign(state.subscription, original); }
+  assert.equal(state.writes, 0);
 });
 
-test('Facebook subscription rechecks access and account identity around every await and takes two fresh snapshots before dispatch', async () => {
+test('Facebook subscription rechecks access and account identity around every await and takes two fresh snapshots before dispatch', pg, async t => {
   for (const boundary of ['accounts-1', 'read-1', 'accounts-2', 'accounts-3', 'read-2', 'accounts-4']) for (const change of ['role', 'mapping', 'identity', 'scope']) {
-    const { db, state, request } = facebookSubscriptionFixture();
-    try {
-      const payload = { expectedVersion: (await request()).data.version, confirmed: true }; state.accountReads = 0; state.subscriptionReads = 0;
-      const drift = () => { if (change === 'role') state.roleAllowed = false; if (change === 'mapping') state.mappingAllowed = false; if (change === 'identity') state.row.platformUserId = 'replacement'; if (change === 'scope') state.row.profileId = 'outside'; };
-      state.onAccounts = count => { if (boundary === `accounts-${count}`) drift(); }; state.onRead = count => { if (boundary === `read-${count}`) drift(); };
-      const result = await request(payload); assert.ok([403, 409].includes(result.status), `${boundary}/${change}: ${JSON.stringify(result)}`); assert.equal(state.writes, 0, `${boundary}/${change}`);
-    } finally { db.close(); }
+    const { state, request } = await facebookSubscriptionFixture(t);
+    const payload = { expectedVersion: (await request()).data.version, confirmed: true }; state.accountReads = 0; state.subscriptionReads = 0;
+    const drift = () => { if (change === 'role') state.roleAllowed = false; if (change === 'mapping') state.mappingAllowed = false; if (change === 'identity') state.row.platformUserId = 'replacement'; if (change === 'scope') state.row.profileId = 'outside'; };
+    state.onAccounts = count => { if (boundary === `accounts-${count}`) drift(); }; state.onRead = count => { if (boundary === `read-${count}`) drift(); };
+    const result = await request(payload); assert.ok([403, 409].includes(result.status), `${boundary}/${change}: ${JSON.stringify(result)}`); assert.equal(state.writes, 0, `${boundary}/${change}`);
   }
 });
 
-test('Facebook unknown receipts, readback mismatch and postwrite access loss fence Page aliases, projects and generic account actions', async () => {
+test('Facebook unknown receipts, readback mismatch and postwrite access loss fence Page aliases, projects and generic account actions', pg, async t => {
   for (const failure of ['receipt', 'wrongPage', 'missingResubscribed', 'readback', 'booleans', 'fields', 'page', 'account', 'role', 'mapping', 'scope', 'provider']) {
-    const { db, state, request, reviewed } = facebookSubscriptionFixture();
-    try {
-      state.onWrite = () => { if (failure === 'receipt') state.receipt = {}; if (failure === 'wrongPage') state.receipt = { ...state.subscription, pageId: '987654321', resubscribed: true }; if (failure === 'missingResubscribed') state.receipt = { ...state.subscription }; if (failure === 'readback') state.readFailure = true; if (failure === 'booleans') state.readResponse = { ...state.subscription, leadgen: true }; if (failure === 'fields') state.readResponse = { ...state.subscription, subscribedFields: ['leadgen'] }; if (failure === 'page') state.readResponse = { ...state.subscription, pageId: '987654321' }; if (failure === 'account') state.row.platformUserId = 'replacement'; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'scope') state.row.profileId = 'outside'; if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'No acknowledgement', true); };
-      const result = await reviewed(); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure);
-      Object.assign(state, { onWrite: null, receipt: null, readFailure: false, readResponse: null, writeFailure: null, roleAllowed: true, mappingAllowed: true }); state.row.profileId = profileId;
-      const blocked = await request({ displayName: 'Changed' }, { task: 'update' }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT', failure); assert.equal(blocked.data.operation.status, 'failed', failure); assert.notEqual(blocked.data.operation.id, result.data.operation.id, failure);
-      assert.equal((await reviewed({ accountId: 'facebook-alias' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED', failure);
-      assert.equal((await reviewed({ projectId: 'project-b' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED', failure); assert.equal(state.writes, 1, failure);
-      db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=(SELECT request_key FROM zernio_facebook_subscription_mutations)").run(); assert.equal((await reviewed()).status, 200, failure); assert.equal(state.writes, 2, failure);
-    } finally { db.close(); }
+    const { state, request, reviewed, sql } = await facebookSubscriptionFixture(t);
+    state.onWrite = () => { if (failure === 'receipt') state.receipt = {}; if (failure === 'wrongPage') state.receipt = { ...state.subscription, pageId: '987654321', resubscribed: true }; if (failure === 'missingResubscribed') state.receipt = { ...state.subscription }; if (failure === 'readback') state.readFailure = true; if (failure === 'booleans') state.readResponse = { ...state.subscription, leadgen: true }; if (failure === 'fields') state.readResponse = { ...state.subscription, subscribedFields: ['leadgen'] }; if (failure === 'page') state.readResponse = { ...state.subscription, pageId: '987654321' }; if (failure === 'account') state.row.platformUserId = 'replacement'; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'scope') state.row.profileId = 'outside'; if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'No acknowledgement', true); };
+    const result = await reviewed(); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure);
+    Object.assign(state, { onWrite: null, receipt: null, readFailure: false, readResponse: null, writeFailure: null, roleAllowed: true, mappingAllowed: true }); state.row.profileId = profileId;
+    const blocked = await request({ displayName: 'Changed' }, { task: 'update' }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT', failure); assert.equal(blocked.data.operation.status, 'failed', failure); assert.notEqual(blocked.data.operation.id, result.data.operation.id, failure);
+    assert.equal((await reviewed({ accountId: 'facebook-alias' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED', failure);
+    assert.equal((await reviewed({ projectId: 'project-b' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED', failure); assert.equal(state.writes, 1, failure);
+    await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=(SELECT request_key FROM zernio_facebook_subscription_mutations)"); assert.equal((await reviewed()).status, 200, failure); assert.equal(state.writes, 2, failure);
   }
 });
 
-test('Facebook native Page uncertainty survives reopening and missing receipts; closed keys require a fresh review', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'ten98-facebook-subscription-')), path = join(directory, 'state.sqlite'); let fixture = facebookSubscriptionFixture(new DatabaseSync(path));
-  try {
-    const payload = { expectedVersion: (await fixture.request()).data.version, confirmed: true }; fixture.state.receipt = {};
-    const result = await fixture.request(payload, { key: 'facebook-durable-key' }); assert.equal(result.data.operation.status, 'uncertain'); assert.equal((await fixture.request(payload, { key: 'facebook-durable-key' })).data.error.code, 'OPERATION_UNCERTAIN');
-    const blockedBody = { displayName: 'Blocked name' }, blocked = await fixture.request(blockedBody, { task: 'update', key: 'facebook-blocked-key' }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id); fixture.db.close(); fixture = facebookSubscriptionFixture(new DatabaseSync(path));
-    fixture.state.subscription.pageId = '000123456789'; assert.equal((await fixture.reviewed({ accountId: 'facebook-alias', projectId: 'project-b' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(fixture.state.writes, 0);
-    fixture.db.prepare("UPDATE integration_operations SET status='pending' WHERE request_key='facebook-durable-key'").run(); assert.equal((await fixture.reviewed({ accountId: 'facebook-alias', projectId: 'project-c' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED');
-    fixture.db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key='facebook-durable-key'").run(); assert.equal((await fixture.request(payload, { key: 'facebook-durable-key' })).data.error.code, 'OPERATION_REVIEWED'); assert.deepEqual(await fixture.request(blockedBody, { task: 'update', key: 'facebook-blocked-key' }), blocked); assert.equal(fixture.state.writes, 0); assert.equal((await fixture.reviewed()).status, 200);
-    fixture.state.receipt = {}; assert.equal((await fixture.reviewed()).data.operation.status, 'uncertain'); fixture.db.prepare('DELETE FROM integration_operations WHERE request_key=(SELECT request_key FROM zernio_facebook_subscription_mutations)').run(); assert.equal((await fixture.reviewed({ accountId: 'facebook-alias', projectId: 'project-d' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED');
-  } finally { fixture.db.close(); await rm(directory, { recursive: true, force: true }); }
+test('Facebook native Page uncertainty survives reopening and missing receipts; closed keys require a fresh review', pg, async t => {
+  let fixture = await facebookSubscriptionFixture(t);
+  // "Reopening" is a fresh pool and fixture over the same database, so no in-process state survives.
+  const reopen = async () => { const reopened = connect(fixture.database.url); t.after(() => reopened.pool.end()); fixture = await facebookSubscriptionFixture(t, { ...reopened, url: fixture.database.url, sql: sqlHelper(reopened.pool) }); };
+  const payload = { expectedVersion: (await fixture.request()).data.version, confirmed: true }; fixture.state.receipt = {};
+  const result = await fixture.request(payload, { key: 'facebook-durable-key' }); assert.equal(result.data.operation.status, 'uncertain'); assert.equal((await fixture.request(payload, { key: 'facebook-durable-key' })).data.error.code, 'OPERATION_UNCERTAIN');
+  const blockedBody = { displayName: 'Blocked name' }, blocked = await fixture.request(blockedBody, { task: 'update', key: 'facebook-blocked-key' }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, result.data.operation.id); await reopen();
+  fixture.state.subscription.pageId = '000123456789'; assert.equal((await fixture.reviewed({ accountId: 'facebook-alias', projectId: 'project-b' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(fixture.state.writes, 0);
+  await fixture.sql.run("UPDATE integration_operations SET status='pending' WHERE request_key='facebook-durable-key'"); assert.equal((await fixture.reviewed({ accountId: 'facebook-alias', projectId: 'project-c' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED');
+  await fixture.sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key='facebook-durable-key'"); assert.equal((await fixture.request(payload, { key: 'facebook-durable-key' })).data.error.code, 'OPERATION_REVIEWED'); assert.deepEqual(await fixture.request(blockedBody, { task: 'update', key: 'facebook-blocked-key' }), blocked); assert.equal(fixture.state.writes, 0); assert.equal((await fixture.reviewed()).status, 200);
+  fixture.state.receipt = {}; assert.equal((await fixture.reviewed()).data.operation.status, 'uncertain'); await fixture.sql.run('DELETE FROM integration_operations WHERE request_key=(SELECT request_key FROM zernio_facebook_subscription_mutations)'); assert.equal((await fixture.reviewed({ accountId: 'facebook-alias', projectId: 'project-d' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED');
 });
 
-test('Facebook Page subscription preserves durable pending fence when the local completion receipt cannot be saved', async () => {
-  const { db, state, reviewed } = facebookSubscriptionFixture();
-  try {
-    assert.equal((await reviewed()).status, 200); db.exec("CREATE TRIGGER reject_facebook_receipt BEFORE UPDATE ON integration_operations BEGIN SELECT RAISE(FAIL,'receipt unavailable'); END");
-    await assert.rejects(reviewed(), /receipt unavailable/); db.exec('DROP TRIGGER reject_facebook_receipt');
-    assert.equal((await reviewed({ accountId: 'facebook-alias', projectId: 'project-b' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(state.writes, 2);
-  } finally { db.close(); }
+test('Facebook Page subscription preserves durable pending fence when the local completion receipt cannot be saved', pg, async t => {
+  const { state, reviewed, pool } = await facebookSubscriptionFixture(t);
+  assert.equal((await reviewed()).status, 200); await rejectReceipts(pool, 'reject_facebook_receipt');
+  await assert.rejects(reviewed(), receiptUnavailable); await acceptReceipts(pool, 'reject_facebook_receipt');
+  assert.equal((await reviewed({ accountId: 'facebook-alias', projectId: 'project-b' })).data.error.code, 'FACEBOOK_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(state.writes, 2);
 });
 
-test('Facebook Page subscription real transport uses authenticated scoped live GET and bodyless POST with strict independent readback', async () => {
-  const db = new DatabaseSync(':memory:'), original = globalThis.fetch, row = { ...account('facebook-a', 'facebook'), platformUserId: '123456789' }, calls = [];
+test('Facebook Page subscription real transport uses authenticated scoped live GET and bodyless POST with strict independent readback', pg, async t => {
+  const { db, sql } = await testDatabase(t), original = globalThis.fetch, row = { ...account('facebook-a', 'facebook'), platformUserId: '123456789' }, calls = [];
   let subscription = { pageId: '123456789', appSubscribed: false, leadgen: false, subscribedFields: [], warning: 'leadgen is missing' }, receipt = 'good', sequence = 0;
   async function invoke(body, role = 'owner') {
     let response;
@@ -251,12 +247,12 @@ test('Facebook Page subscription real transport uses authenticated scoped live G
     for (const mode of ['empty', 'malformed', 'lost']) {
       receipt = mode; snapshot = await invoke(); result = await invoke({ expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(result.status, 409, mode); assert.equal(result.data.operation.status, 'uncertain', mode);
       const writes = calls.filter(call => call.options.method === 'POST').length, uncertainId = result.data.operation.id; snapshot = await invoke(); result = await invoke({ expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(result.data.operation.status, 'failed'); assert.notEqual(result.data.operation.id, uncertainId); assert.equal(calls.filter(call => call.options.method === 'POST').length, writes);
-      db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'").run();
+      await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'");
     }
-  } finally { globalThis.fetch = original; db.close(); }
+  } finally { globalThis.fetch = original; }
 });
-function discordFixture() {
-  const db = new DatabaseSync(':memory:'), calls = [], state = { row: { ...account('discord-a', 'discord'), platformUserId: '111111111111111111' }, settings: { _id: 'discord-a', platform: 'discord', guildId: '222222222222222222', channelId: '111111111111111111', channelName: 'Updates', channelType: '0', webhookUsername: 'Updates', webhookAvatarUrl: 'https://images.example/avatar.png' }, roleAllowed: true, mappingAllowed: true };
+async function discordFixture(t) {
+  const { db, sql, pool } = await testDatabase(t), calls = [], state = { row: { ...account('discord-a', 'discord'), platformUserId: '111111111111111111' }, settings: { _id: 'discord-a', platform: 'discord', guildId: '222222222222222222', channelId: '111111111111111111', channelName: 'Updates', channelType: '0', webhookUsername: 'Updates', webhookAvatarUrl: 'https://images.example/avatar.png' }, roleAllowed: true, mappingAllowed: true };
   const api = async (path, query = {}, body, key, method = body === undefined ? 'GET' : 'POST') => {
     calls.push({ path, query, body, key, method });
     if (path === '/accounts') { assert.deepEqual(query, { profileId }); return { accounts: [structuredClone(state.row)] }; }
@@ -272,60 +268,54 @@ function discordFixture() {
     try { await handleZernioAccounts(context, api, profileId, `${accountId}/discord-settings`); return response; }
     catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   };
-  return { db, calls, state, request, async reviewed(defaults = { webhookUsername: 'Support', webhookAvatarUrl: 'https://images.example/support.png' }, options) { const loaded = await request(); return request({ ...defaults, clearUsername: defaults.webhookUsername === '', clearAvatar: defaults.webhookAvatarUrl === '', expectedVersion: loaded.data.version, confirmed: true }, options); } };
+  return { db, sql, pool, calls, state, request, async reviewed(defaults = { webhookUsername: 'Support', webhookAvatarUrl: 'https://images.example/support.png' }, options) { const loaded = await request(); return request({ ...defaults, clearUsername: defaults.webhookUsername === '', clearAvatar: defaults.webhookAvatarUrl === '', expectedVersion: loaded.data.version, confirmed: true }, options); } };
 }
 
-test('Discord native defaults require admin review and confirm exact scoped PATCH receipt and GET readback, including independent resets', async () => {
-  const { db, calls, state, request, reviewed } = discordFixture();
-  try {
-    const loaded = await request(undefined, { role: 'viewer' }); assert.equal(loaded.status, 200); assert.equal(loaded.data.guildId, state.settings.guildId); assert.match(loaded.data.version, /^[a-f0-9]{64}$/); assert.equal(JSON.stringify(loaded).includes('never-return'), false);
-    let result = await reviewed(); assert.equal(result.status, 200); assert.equal(result.data.readback, true); assert.equal(result.data.operation.status, 'complete');
-    result = await reviewed({ webhookUsername: '', webhookAvatarUrl: 'https://images.example/support.png' }); assert.equal(result.data.webhookUsername, ''); assert.ok(result.data.webhookAvatarUrl);
-    result = await reviewed({ webhookUsername: 'Support', webhookAvatarUrl: '' }); assert.equal(result.data.webhookUsername, 'Support'); assert.equal(result.data.webhookAvatarUrl, '');
-    result = await reviewed({ webhookUsername: '', webhookAvatarUrl: '' }); assert.equal(result.status, 200);
-    delete state.settings.webhookUsername; delete state.settings.webhookAvatarUrl; assert.equal((await request()).data.webhookUsername, ''); state.settings.webhookUsername = null; state.settings.webhookAvatarUrl = null; assert.equal((await request()).data.webhookAvatarUrl, '');
-    const payload = { webhookUsername: 'Reviewed', webhookAvatarUrl: '', clearUsername: false, clearAvatar: true, expectedVersion: (await request()).data.version, confirmed: true }, before = calls.length;
-    assert.equal((await request(payload, { role: 'editor' })).status, 403); assert.equal(calls.length, before);
-    result = await request(payload, { key: 'discord-same-key' }); const writes = state.writes; assert.equal(result.status, 200); assert.deepEqual(await request(payload, { key: 'discord-same-key' }), result); assert.equal(state.writes, writes);
-    assert.ok(calls.filter(row => row.method === 'PATCH').every(row => row.key.startsWith('discord-') && Object.keys(row.body).length === 2));
-  } finally { db.close(); }
+test('Discord native defaults require admin review and confirm exact scoped PATCH receipt and GET readback, including independent resets', pg, async t => {
+  const { calls, state, request, reviewed } = await discordFixture(t);
+  const loaded = await request(undefined, { role: 'viewer' }); assert.equal(loaded.status, 200); assert.equal(loaded.data.guildId, state.settings.guildId); assert.match(loaded.data.version, /^[a-f0-9]{64}$/); assert.equal(JSON.stringify(loaded).includes('never-return'), false);
+  let result = await reviewed(); assert.equal(result.status, 200); assert.equal(result.data.readback, true); assert.equal(result.data.operation.status, 'complete');
+  result = await reviewed({ webhookUsername: '', webhookAvatarUrl: 'https://images.example/support.png' }); assert.equal(result.data.webhookUsername, ''); assert.ok(result.data.webhookAvatarUrl);
+  result = await reviewed({ webhookUsername: 'Support', webhookAvatarUrl: '' }); assert.equal(result.data.webhookUsername, 'Support'); assert.equal(result.data.webhookAvatarUrl, '');
+  result = await reviewed({ webhookUsername: '', webhookAvatarUrl: '' }); assert.equal(result.status, 200);
+  delete state.settings.webhookUsername; delete state.settings.webhookAvatarUrl; assert.equal((await request()).data.webhookUsername, ''); state.settings.webhookUsername = null; state.settings.webhookAvatarUrl = null; assert.equal((await request()).data.webhookAvatarUrl, '');
+  const payload = { webhookUsername: 'Reviewed', webhookAvatarUrl: '', clearUsername: false, clearAvatar: true, expectedVersion: (await request()).data.version, confirmed: true }, before = calls.length;
+  assert.equal((await request(payload, { role: 'editor' })).status, 403); assert.equal(calls.length, before);
+  result = await request(payload, { key: 'discord-same-key' }); const writes = state.writes; assert.equal(result.status, 200); assert.deepEqual(await request(payload, { key: 'discord-same-key' }), result); assert.equal(state.writes, writes);
+  assert.ok(calls.filter(row => row.method === 'PATCH').every(row => row.key.startsWith('discord-') && Object.keys(row.body).length === 2));
 });
 
-test('Discord defaults reject channel changes, malformed identities and unreviewed or changed destinations before writing', async () => {
-  const { db, state, calls, request } = discordFixture();
-  try {
-    const payload = { webhookUsername: 'New', webhookAvatarUrl: '', clearUsername: false, clearAvatar: true, expectedVersion: (await request()).data.version, confirmed: true };
-    for (const extra of [{ confirmed: false }, { channelId: '333333333333333333' }, { defaultUsername: 'Wrong key' }, { clearAvatar: undefined }, { webhookUsername: '' }, { webhookUsername: '   ' }, { webhookUsername: 'a'.repeat(81) }, { webhookUsername: 'ClyDe helper' }, { webhookUsername: 'Our DISCORD' }, { webhookUsername: 'bad\nname' }, { webhookUsername: null }, { webhookAvatarUrl: '', clearAvatar: false }, ...['http://example.com/a', 'https://127.0.0.1/a', 'https://192.168.1.1/a', 'https://a.local/a', 'https://a/a', 'https://u:p@example.com/a', 'https://drive.google.com/a'].map(webhookAvatarUrl => ({ webhookAvatarUrl, clearAvatar: false }))]) assert.equal((await request({ ...payload, ...extra })).status, 400, JSON.stringify(extra));
-    assert.equal((await request(undefined, { method: 'PATCH' })).status, 405); assert.equal((await request(undefined, { search: '?channelId=3' })).status, 400); assert.equal((await request(undefined, { accountId: 'outside' })).status, 403);
-    for (const key of ['guildId', 'channelId', 'channelType', 'webhookUsername', 'webhookAvatarUrl']) { const original = state.settings[key]; state.settings[key] = key === 'channelType' ? '15' : key.endsWith('Id') ? '333333333333333333' : key === 'webhookAvatarUrl' ? 'https://images.example/changed.png' : 'Changed'; assert.equal((await request(payload)).data.error.code, 'DISCORD_SETTINGS_CHANGED', key); state.settings[key] = original; }
-    state.row.needsReconnection = true; assert.equal((await request()).status, 400); delete state.row.needsReconnection;
-    for (const field of ['roleAllowed', 'mappingAllowed']) { state.onRead = () => { state[field] = false; }; assert.equal((await request(payload)).status, field === 'roleAllowed' ? 403 : 409); state.onRead = null; state[field] = true; }
-    state.onRead = () => { state.row.platformUserId = 'replacement'; }; assert.equal((await request()).data.error.code, 'DISCORD_ACCOUNT_CHANGED'); state.onRead = null;
-    for (const settings of [{ ...state.settings, _id: 'other' }, { ...state.settings, platform: 'slack' }, { ...state.settings, guildId: 22 }, { ...state.settings, channelType: 0 }, { ...state.settings, webhookUsername: {} }, { ...state.settings, webhookAvatarUrl: 'https://localhost/a' }]) { state.readResponse = { account: settings }; assert.equal((await request()).status, 502); }
-    assert.equal(calls.some(row => row.method === 'PATCH'), false);
-  } finally { db.close(); }
+test('Discord defaults reject channel changes, malformed identities and unreviewed or changed destinations before writing', pg, async t => {
+  const { state, calls, request } = await discordFixture(t);
+  const payload = { webhookUsername: 'New', webhookAvatarUrl: '', clearUsername: false, clearAvatar: true, expectedVersion: (await request()).data.version, confirmed: true };
+  for (const extra of [{ confirmed: false }, { channelId: '333333333333333333' }, { defaultUsername: 'Wrong key' }, { clearAvatar: undefined }, { webhookUsername: '' }, { webhookUsername: '   ' }, { webhookUsername: 'a'.repeat(81) }, { webhookUsername: 'ClyDe helper' }, { webhookUsername: 'Our DISCORD' }, { webhookUsername: 'bad\nname' }, { webhookUsername: null }, { webhookAvatarUrl: '', clearAvatar: false }, ...['http://example.com/a', 'https://127.0.0.1/a', 'https://192.168.1.1/a', 'https://a.local/a', 'https://a/a', 'https://u:p@example.com/a', 'https://drive.google.com/a'].map(webhookAvatarUrl => ({ webhookAvatarUrl, clearAvatar: false }))]) assert.equal((await request({ ...payload, ...extra })).status, 400, JSON.stringify(extra));
+  assert.equal((await request(undefined, { method: 'PATCH' })).status, 405); assert.equal((await request(undefined, { search: '?channelId=3' })).status, 400); assert.equal((await request(undefined, { accountId: 'outside' })).status, 403);
+  for (const key of ['guildId', 'channelId', 'channelType', 'webhookUsername', 'webhookAvatarUrl']) { const original = state.settings[key]; state.settings[key] = key === 'channelType' ? '15' : key.endsWith('Id') ? '333333333333333333' : key === 'webhookAvatarUrl' ? 'https://images.example/changed.png' : 'Changed'; assert.equal((await request(payload)).data.error.code, 'DISCORD_SETTINGS_CHANGED', key); state.settings[key] = original; }
+  state.row.needsReconnection = true; assert.equal((await request()).status, 400); delete state.row.needsReconnection;
+  for (const field of ['roleAllowed', 'mappingAllowed']) { state.onRead = () => { state[field] = false; }; assert.equal((await request(payload)).status, field === 'roleAllowed' ? 403 : 409); state.onRead = null; state[field] = true; }
+  state.onRead = () => { state.row.platformUserId = 'replacement'; }; assert.equal((await request()).data.error.code, 'DISCORD_ACCOUNT_CHANGED'); state.onRead = null;
+  for (const settings of [{ ...state.settings, _id: 'other' }, { ...state.settings, platform: 'slack' }, { ...state.settings, guildId: 22 }, { ...state.settings, channelType: 0 }, { ...state.settings, webhookUsername: {} }, { ...state.settings, webhookAvatarUrl: 'https://localhost/a' }]) { state.readResponse = { account: settings }; assert.equal((await request()).status, 502); }
+  assert.equal(calls.some(row => row.method === 'PATCH'), false);
 });
 
-test('Discord uncertain receipts and readbacks durably fence fresh drafts and another project until operator review', async () => {
+test('Discord uncertain receipts and readbacks durably fence fresh drafts and another project until operator review', pg, async t => {
   for (const failure of ['receipt', 'wrongReceipt', 'readback', 'wrongReadback', 'role', 'mapping', 'account', 'channel', 'guild', 'provider', 'localReceipt']) {
-    const { db, state, request, reviewed } = discordFixture();
-    try {
-      if (failure === 'localReceipt') { await reviewed(); db.exec("CREATE TRIGGER reject_discord_receipt BEFORE UPDATE ON integration_operations BEGIN SELECT RAISE(FAIL,'receipt unavailable'); END"); }
-      if (failure === 'receipt') state.receipt = {};
-      if (failure === 'wrongReceipt') state.receipt = { account: { ...state.settings, webhookUsername: 'Wrong' } };
-      state.onWrite = () => { if (failure === 'readback') state.readFailure = true; if (failure === 'wrongReadback') state.readResponse = { account: { ...state.settings, webhookUsername: 'Wrong' } }; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'account') state.row.platformUserId = 'replacement'; if (failure === 'channel') state.settings.channelId = '333333333333333333'; if (failure === 'guild') state.settings.guildId = '333333333333333333'; };
-      if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'No acknowledgement', true);
-      if (failure === 'localReceipt') { await assert.rejects(reviewed({ webhookUsername: 'Requested', webhookAvatarUrl: '' }), /receipt unavailable/); db.exec('DROP TRIGGER reject_discord_receipt'); }
-      else { const result = await reviewed({ webhookUsername: 'Requested', webhookAvatarUrl: '' }); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure); }
-      state.readFailure = false; state.readResponse = null; state.roleAllowed = true; state.mappingAllowed = true; state.onWrite = null; state.writeFailure = null; state.receipt = null;
-      const writes = state.writes, blocked = await reviewed({ webhookUsername: 'New draft', webhookAvatarUrl: '' }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT', failure); assert.equal(blocked.data.operation.status, 'failed', failure); assert.equal(db.prepare('SELECT status FROM integration_operations WHERE id=?').get(blocked.data.operation.id).status, 'failed'); assert.equal((await reviewed({ webhookUsername: 'Other project', webhookAvatarUrl: '' }, { projectId: 'project-b' })).data.error.code, 'DISCORD_PREVIOUS_OUTCOME_UNRESOLVED', failure); assert.equal(state.writes, writes, failure);
-      db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=(SELECT request_key FROM zernio_discord_mutations)").run(); assert.equal((await reviewed({ webhookUsername: '', webhookAvatarUrl: '' })).status, 200, failure);
-    } finally { db.close(); }
+    const { state, request, reviewed, sql, pool } = await discordFixture(t);
+    if (failure === 'localReceipt') { await reviewed(); await rejectReceipts(pool, 'reject_discord_receipt'); }
+    if (failure === 'receipt') state.receipt = {};
+    if (failure === 'wrongReceipt') state.receipt = { account: { ...state.settings, webhookUsername: 'Wrong' } };
+    state.onWrite = () => { if (failure === 'readback') state.readFailure = true; if (failure === 'wrongReadback') state.readResponse = { account: { ...state.settings, webhookUsername: 'Wrong' } }; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'account') state.row.platformUserId = 'replacement'; if (failure === 'channel') state.settings.channelId = '333333333333333333'; if (failure === 'guild') state.settings.guildId = '333333333333333333'; };
+    if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'No acknowledgement', true);
+    if (failure === 'localReceipt') { await assert.rejects(reviewed({ webhookUsername: 'Requested', webhookAvatarUrl: '' }), receiptUnavailable); await acceptReceipts(pool, 'reject_discord_receipt'); }
+    else { const result = await reviewed({ webhookUsername: 'Requested', webhookAvatarUrl: '' }); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure); }
+    state.readFailure = false; state.readResponse = null; state.roleAllowed = true; state.mappingAllowed = true; state.onWrite = null; state.writeFailure = null; state.receipt = null;
+    const writes = state.writes, blocked = await reviewed({ webhookUsername: 'New draft', webhookAvatarUrl: '' }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT', failure); assert.equal(blocked.data.operation.status, 'failed', failure); assert.equal((await sql.get('SELECT status FROM integration_operations WHERE id=?', blocked.data.operation.id)).status, 'failed'); assert.equal((await reviewed({ webhookUsername: 'Other project', webhookAvatarUrl: '' }, { projectId: 'project-b' })).data.error.code, 'DISCORD_PREVIOUS_OUTCOME_UNRESOLVED', failure); assert.equal(state.writes, writes, failure);
+    await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=(SELECT request_key FROM zernio_discord_mutations)"); assert.equal((await reviewed({ webhookUsername: '', webhookAvatarUrl: '' })).status, 200, failure);
   }
 });
 
-test('Discord real transport uses scoped authenticated native PATCH and GET readback, and keeps malformed or lost acknowledgement uncertain', async () => {
-  const db = new DatabaseSync(':memory:'), original = globalThis.fetch, row = { ...account('discord-a', 'discord'), platformUserId: '111111111111111111' }, calls = [];
+test('Discord real transport uses scoped authenticated native PATCH and GET readback, and keeps malformed or lost acknowledgement uncertain', pg, async t => {
+  const { db, sql } = await testDatabase(t), original = globalThis.fetch, row = { ...account('discord-a', 'discord'), platformUserId: '111111111111111111' }, calls = [];
   let settings = { _id: row._id, platform: 'discord', guildId: '222222222222222222', channelId: '111111111111111111', channelType: '0', channelName: 'Updates', webhookUsername: 'Current', webhookAvatarUrl: 'https://images.example/current.png' }, receipt = 'good', sequence = 0;
   async function invoke(body, role = 'owner') {
     let response;
@@ -349,12 +339,12 @@ test('Discord real transport uses scoped authenticated native PATCH and GET read
     for (const failure of ['missingAccount', 'malformed', 'lost']) {
       snapshot = await invoke(); receipt = failure; saved = await invoke(payload(snapshot)); assert.equal(saved.status, 409, failure); assert.equal(saved.data.operation.status, 'uncertain', failure);
       const writes = calls.filter(row => row.options.method === 'PATCH').length, uncertainId = saved.data.operation.id; snapshot = await invoke(); const blocked = await invoke(payload(snapshot, true)); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.notEqual(blocked.data.operation.id, uncertainId); assert.equal(calls.filter(row => row.options.method === 'PATCH').length, writes);
-      db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'").run();
+      await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'");
     }
-  } finally { globalThis.fetch = original; db.close(); }
+  } finally { globalThis.fetch = original; }
 });
-function setup() {
-  const db = new DatabaseSync(':memory:'), calls = [], rows = [account(), account('whatsapp-a', 'whatsapp'), account('outside', 'facebook')]; rows[2].profileId = 'other-profile';
+async function setup(t) {
+  const { db, sql, pool } = await testDatabase(t), calls = [], rows = [account(), account('whatsapp-a', 'whatsapp'), account('outside', 'facebook')]; rows[2].profileId = 'other-profile';
   const state = { rows, health: rows.map(healthy), detail: {}, updateReceipt: null, readFailure: false, failAfterWrite: false, retainDisconnected: false, authUrl: 'https://provider.example.com/oauth?state=fixture', hold: null };
   let written = false;
   const api = async (path, query = {}, body, key, method = body === undefined ? 'GET' : 'POST') => {
@@ -376,98 +366,88 @@ function setup() {
     try { const handled = await handleZernioAccounts(context, api, profileId, action); return response || { handled }; }
     catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   }
-  return { db, calls, state, request };
+  return { db, sql, pool, calls, state, request };
 }
 
-test('connection health is project-scoped, validates provider details and does not expose secrets or global totals', async () => {
-  const { db, state, calls, request } = setup();
-  try {
-    let result = await request('health', { role: 'viewer' }); assert.equal(result.status, 200); assert.equal(result.data.accounts.length, 2); assert.equal(result.data.summary.total, 2); assert.equal(result.data.summary.healthy, 2); assert.equal(JSON.stringify(result).includes('outside'), false);
-    state.health = state.health.filter(row => row.accountId !== 'instagram-a'); result = await request('health'); assert.equal(result.data.summary.unknown, 1); assert.equal(result.data.accounts[0].health, null);
-    const count = calls.length; result = await request('outside/health'); assert.equal(result.status, 403); assert.equal(calls.length, count + 1, 'A foreign account is refused before its detail is requested.');
-    state.detail = { tokenStatus: { valid: true, secret: 'never-return' }, issues: ['Permission missing'], recommendations: ['Reconnect and grant publishing'], analyticsSync: { status: 'stalled', lastSyncedAt: null } };
-    result = await request('instagram-a/health', { role: 'viewer' }); assert.equal(result.status, 200); assert.equal(result.data.health.analyticsSync.status, 'stalled'); assert.equal(JSON.stringify(result).includes('never-return'), false);
-    state.detail = { status: 'error', tokenStatus: { valid: true }, platformConnection: { status: 'disconnected', checkedAt: '2026-10-18T00:00:00Z', inboundWebhookSubscribed: false }, messagingRestriction: { code: 131031, message: 'Business account locked', pausedUntil: null }, issues: ['WhatsApp link is disconnected'] };
-    result = await request('whatsapp-a/health'); assert.equal(result.status, 200); assert.equal(result.data.health.tokenStatus.valid, true); assert.equal(result.data.health.platformConnection.status, 'disconnected'); assert.equal(result.data.health.platformConnection.inboundWebhookSubscribed, false);
-    for (const bad of [{ accountId: 'outside' }, { platform: 'facebook' }, { profileId: 'other-profile' }, { status: 'fine' }, { tokenStatus: { valid: 'yes' } }, { issues: [{}] }, { analyticsSync: { status: 'ok', lastSyncedAt: 'yesterday-ish' } }, { permissions: { posting: [{ scope: 'publish', granted: 'yes', required: true }] } }, { platformConnection: { status: 'connected' } }, { messagingRestriction: { code: {} } }]) { state.detail = bad; assert.equal((await request('instagram-a/health')).status, 502, JSON.stringify(bad)); }
-    state.health.push({ accountId: 'instagram-a', platform: 'instagram', status: 'healthy', profileId: 'other-profile' }); result = await request('health'); assert.equal(result.status, 502);
-    state.health = [healthy(state.rows[0]), healthy(state.rows[0])]; assert.equal((await request('health')).status, 502);
-  } finally { db.close(); }
+test('connection health is project-scoped, validates provider details and does not expose secrets or global totals', pg, async t => {
+  const { state, calls, request } = await setup(t);
+  let result = await request('health', { role: 'viewer' }); assert.equal(result.status, 200); assert.equal(result.data.accounts.length, 2); assert.equal(result.data.summary.total, 2); assert.equal(result.data.summary.healthy, 2); assert.equal(JSON.stringify(result).includes('outside'), false);
+  state.health = state.health.filter(row => row.accountId !== 'instagram-a'); result = await request('health'); assert.equal(result.data.summary.unknown, 1); assert.equal(result.data.accounts[0].health, null);
+  const count = calls.length; result = await request('outside/health'); assert.equal(result.status, 403); assert.equal(calls.length, count + 1, 'A foreign account is refused before its detail is requested.');
+  state.detail = { tokenStatus: { valid: true, secret: 'never-return' }, issues: ['Permission missing'], recommendations: ['Reconnect and grant publishing'], analyticsSync: { status: 'stalled', lastSyncedAt: null } };
+  result = await request('instagram-a/health', { role: 'viewer' }); assert.equal(result.status, 200); assert.equal(result.data.health.analyticsSync.status, 'stalled'); assert.equal(JSON.stringify(result).includes('never-return'), false);
+  state.detail = { status: 'error', tokenStatus: { valid: true }, platformConnection: { status: 'disconnected', checkedAt: '2026-10-18T00:00:00Z', inboundWebhookSubscribed: false }, messagingRestriction: { code: 131031, message: 'Business account locked', pausedUntil: null }, issues: ['WhatsApp link is disconnected'] };
+  result = await request('whatsapp-a/health'); assert.equal(result.status, 200); assert.equal(result.data.health.tokenStatus.valid, true); assert.equal(result.data.health.platformConnection.status, 'disconnected'); assert.equal(result.data.health.platformConnection.inboundWebhookSubscribed, false);
+  for (const bad of [{ accountId: 'outside' }, { platform: 'facebook' }, { profileId: 'other-profile' }, { status: 'fine' }, { tokenStatus: { valid: 'yes' } }, { issues: [{}] }, { analyticsSync: { status: 'ok', lastSyncedAt: 'yesterday-ish' } }, { permissions: { posting: [{ scope: 'publish', granted: 'yes', required: true }] } }, { platformConnection: { status: 'connected' } }, { messagingRestriction: { code: {} } }]) { state.detail = bad; assert.equal((await request('instagram-a/health')).status, 502, JSON.stringify(bad)); }
+  state.health.push({ accountId: 'instagram-a', platform: 'instagram', status: 'healthy', profileId: 'other-profile' }); result = await request('health'); assert.equal(result.status, 502);
+  state.health = [healthy(state.rows[0]), healthy(state.rows[0])]; assert.equal((await request('health')).status, 502);
 });
 
-test('only administrators can reconnect scoped accounts using platform-specific OAuth and account identity guards', async () => {
-  const { db, calls, state, request } = setup();
-  try {
-    for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request('instagram-a/reconnect', { role })).status, 403); assert.equal(calls.length, before); }
-    let result = await request('instagram-a/reconnect'); assert.equal(result.status, 200); let call = calls.at(-1); assert.equal(call.path, '/connect/instagram'); assert.equal(call.query.reconnectAccountId, 'instagram-a'); assert.equal(call.query.profileId, profileId); assert.equal(new URL(call.query.redirect_url).searchParams.get('project'), 'project-a');
-    for (const [platform, route] of [['googleads', 'googleads'], ['redditads', 'redditads'], ['tiktokads', 'tiktok']]) { state.rows.push(account(platform, platform)); result = await request(`${platform}/reconnect`); assert.equal(result.status, 200); call = calls.at(-1); assert.equal(call.path, `/connect/${route}/ads`); assert.equal(call.query.force, true); }
-    state.rows.push({ ...account('xads-a', 'xads'), parentAccountId: 'x-a' }, account('x-a', 'twitter')); assert.equal((await request('xads-a/reconnect')).status, 200); assert.equal(calls.at(-1).query.accountId, 'x-a');
-    state.rows.push({ ...account('meta-a', 'metaads'), metadata: { tokenType: 'system-user' } }); assert.equal((await request('meta-a/reconnect')).status, 200); assert.equal(calls.at(-1).query.loginMode, 'business');
-    state.rows.push(account('unlinked-meta', 'metaads')); assert.equal((await request('unlinked-meta/reconnect')).status, 409);
-    state.rows.push({ ...account('foreign-parent', 'xads'), parentAccountId: 'outside' }); assert.equal((await request('foreign-parent/reconnect')).status, 403);
-    for (const platform of ['snapchat', 'openaiads', 'wordpress']) { state.rows.push(account(platform, platform)); assert.equal((await request(`${platform}/reconnect`)).status, 422); }
-    for (const authUrl of ['http://provider.example.com', 'https://user:secret@provider.example.com', 'javascript:alert(1)', undefined]) { state.authUrl = authUrl; assert.equal((await request('instagram-a/reconnect')).status, 502); }
-    assert.equal((await request('instagram-a/reconnect', { config: { appUrl: 'http://public.example.com' } })).status, 503);
-  } finally { db.close(); }
+test('only administrators can reconnect scoped accounts using platform-specific OAuth and account identity guards', pg, async t => {
+  const { calls, state, request } = await setup(t);
+  for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request('instagram-a/reconnect', { role })).status, 403); assert.equal(calls.length, before); }
+  let result = await request('instagram-a/reconnect'); assert.equal(result.status, 200); let call = calls.at(-1); assert.equal(call.path, '/connect/instagram'); assert.equal(call.query.reconnectAccountId, 'instagram-a'); assert.equal(call.query.profileId, profileId); assert.equal(new URL(call.query.redirect_url).searchParams.get('project'), 'project-a');
+  for (const [platform, route] of [['googleads', 'googleads'], ['redditads', 'redditads'], ['tiktokads', 'tiktok']]) { state.rows.push(account(platform, platform)); result = await request(`${platform}/reconnect`); assert.equal(result.status, 200); call = calls.at(-1); assert.equal(call.path, `/connect/${route}/ads`); assert.equal(call.query.force, true); }
+  state.rows.push({ ...account('xads-a', 'xads'), parentAccountId: 'x-a' }, account('x-a', 'twitter')); assert.equal((await request('xads-a/reconnect')).status, 200); assert.equal(calls.at(-1).query.accountId, 'x-a');
+  state.rows.push({ ...account('meta-a', 'metaads'), metadata: { tokenType: 'system-user' } }); assert.equal((await request('meta-a/reconnect')).status, 200); assert.equal(calls.at(-1).query.loginMode, 'business');
+  state.rows.push(account('unlinked-meta', 'metaads')); assert.equal((await request('unlinked-meta/reconnect')).status, 409);
+  state.rows.push({ ...account('foreign-parent', 'xads'), parentAccountId: 'outside' }); assert.equal((await request('foreign-parent/reconnect')).status, 403);
+  for (const platform of ['snapchat', 'openaiads', 'wordpress']) { state.rows.push(account(platform, platform)); assert.equal((await request(`${platform}/reconnect`)).status, 422); }
+  for (const authUrl of ['http://provider.example.com', 'https://user:secret@provider.example.com', 'javascript:alert(1)', undefined]) { state.authUrl = authUrl; assert.equal((await request('instagram-a/reconnect')).status, 502); }
+  assert.equal((await request('instagram-a/reconnect', { config: { appUrl: 'http://public.example.com' } })).status, 503);
 });
 
-test('Instagram reconnect preserves the current scoped native login method after account refresh', async () => {
-  const { db, calls, state, request } = setup();
-  try {
-    state.rows[0].metadata = { loginMethod: 'facebook_login' };
-    assert.equal((await request('health', { role: 'viewer' })).status, 200);
-    for (const metadata of [undefined, {}, { loginMethod: 'instagram_login' }, { loginMethod: 'facebook_login' }, {}]) {
-      if (metadata === undefined) delete state.rows[0].metadata; else state.rows[0].metadata = metadata;
-      const before = calls.length, result = await request('instagram-a/reconnect');
-      assert.equal(result.status, 200); assert.equal(calls.length, before + 2);
-      assert.deepEqual(calls[before], { path: '/accounts', query: { profileId }, body: undefined, key: undefined, method: 'GET' });
-      assert.deepEqual(calls.at(-1).query, { profileId, redirect_url: 'https://app.example.com/?view=integrations&project=project-a', reconnectAccountId: 'instagram-a', ...(metadata?.loginMethod ? { loginMethod: metadata.loginMethod } : {}) });
-      assert.equal(calls.at(-1).path, '/connect/instagram'); assert.equal(calls.at(-1).method, 'GET');
-      assert.deepEqual(result.data, { authUrl: state.authUrl, accountId: 'instagram-a' });
-    }
-    for (const platform of ['facebook', 'whatsapp', 'slack']) {
-      state.rows.push({ ...account(platform, platform), metadata: { loginMethod: 'not-an-instagram-account' } });
-      assert.equal((await request(`${platform}/reconnect`)).status, 200); assert.equal(calls.at(-1).path, `/connect/${platform}`); assert.equal(Object.hasOwn(calls.at(-1).query, 'loginMethod'), false);
-    }
-    state.rows[0].profileId = 'other-profile'; const before = calls.length;
-    assert.equal((await request('instagram-a/reconnect')).status, 403); assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).path, '/accounts');
-  } finally { db.close(); }
+test('Instagram reconnect preserves the current scoped native login method after account refresh', pg, async t => {
+  const { calls, state, request } = await setup(t);
+  state.rows[0].metadata = { loginMethod: 'facebook_login' };
+  assert.equal((await request('health', { role: 'viewer' })).status, 200);
+  for (const metadata of [undefined, {}, { loginMethod: 'instagram_login' }, { loginMethod: 'facebook_login' }, {}]) {
+    if (metadata === undefined) delete state.rows[0].metadata; else state.rows[0].metadata = metadata;
+    const before = calls.length, result = await request('instagram-a/reconnect');
+    assert.equal(result.status, 200); assert.equal(calls.length, before + 2);
+    assert.deepEqual(calls[before], { path: '/accounts', query: { profileId }, body: undefined, key: undefined, method: 'GET' });
+    assert.deepEqual(calls.at(-1).query, { profileId, redirect_url: 'https://app.example.com/?view=integrations&project=project-a', reconnectAccountId: 'instagram-a', ...(metadata?.loginMethod ? { loginMethod: metadata.loginMethod } : {}) });
+    assert.equal(calls.at(-1).path, '/connect/instagram'); assert.equal(calls.at(-1).method, 'GET');
+    assert.deepEqual(result.data, { authUrl: state.authUrl, accountId: 'instagram-a' });
+  }
+  for (const platform of ['facebook', 'whatsapp', 'slack']) {
+    state.rows.push({ ...account(platform, platform), metadata: { loginMethod: 'not-an-instagram-account' } });
+    assert.equal((await request(`${platform}/reconnect`)).status, 200); assert.equal(calls.at(-1).path, `/connect/${platform}`); assert.equal(Object.hasOwn(calls.at(-1).query, 'loginMethod'), false);
+  }
+  state.rows[0].profileId = 'other-profile'; const before = calls.length;
+  assert.equal((await request('instagram-a/reconnect')).status, 403); assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).path, '/accounts');
 });
 
-test('Instagram reconnect refuses ambiguous provider login metadata before requesting an authorization link', async () => {
-  const { db, calls, state, request } = setup();
-  try {
-    for (const metadata of [null, false, 'facebook_login', [], { loginMethod: null }, { loginMethod: '' }, { loginMethod: 'unknown' }, { loginMethod: true }, { loginMethod: ['facebook_login'] }, { loginMethod: {} }]) {
-      state.rows[0].metadata = metadata; const before = calls.length, result = await request('instagram-a/reconnect');
-      assert.equal(result.status, 502, JSON.stringify(metadata)); assert.equal(result.data.error.code, 'INVALID_PROVIDER_RESPONSE');
-      assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).path, '/accounts');
-    }
-    for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request('instagram-a/reconnect', { role })).status, 403); assert.equal(calls.length, before); }
-  } finally { db.close(); }
+test('Instagram reconnect refuses ambiguous provider login metadata before requesting an authorization link', pg, async t => {
+  const { calls, state, request } = await setup(t);
+  for (const metadata of [null, false, 'facebook_login', [], { loginMethod: null }, { loginMethod: '' }, { loginMethod: 'unknown' }, { loginMethod: true }, { loginMethod: ['facebook_login'] }, { loginMethod: {} }]) {
+    state.rows[0].metadata = metadata; const before = calls.length, result = await request('instagram-a/reconnect');
+    assert.equal(result.status, 502, JSON.stringify(metadata)); assert.equal(result.data.error.code, 'INVALID_PROVIDER_RESPONSE');
+    assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).path, '/accounts');
+  }
+  for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request('instagram-a/reconnect', { role })).status, 403); assert.equal(calls.length, before); }
 });
 
-test('account updates and disconnects preserve idempotency, project isolation, permissions and unknown outcomes', async () => {
-  const { db, calls, state, request } = setup();
-  try {
-    for (const task of ['update', 'disconnect']) for (const role of ['viewer', 'editor']) assert.equal((await request(`instagram-a/${task}`, { method: 'POST', body: { displayName: 'Updated' }, role })).status, 403);
-    const write = (action, body, key) => request(action, { method: 'POST', body, key });
-    let result = await write('instagram-a/update', { displayName: 'Updated' }, 'update-display-name'); assert.equal(result.status, 200); assert.equal(result.data.account.displayName, 'Updated'); const count = calls.length;
-    result = await write('instagram-a/update', { displayName: 'Updated' }, 'update-display-name'); assert.equal(result.status, 200); assert.equal(calls.length, count);
-    assert.equal((await write('instagram-a/update', { displayName: 'Other' }, 'update-display-name')).status, 409);
-    for (const body of [{ displayName: {} }, { displayName: 'x\nsecret' }, { xCapabilities: { unsupported: true } }, { profileId: 'other-profile' }, {}]) assert.equal((await write('instagram-a/update', body)).status, 400);
-    assert.equal((await write('instagram-a/update', { xCapabilities: { inbox: true } })).status, 400);
-    state.rows.push(account('x-a', 'twitter')); result = await write('x-a/update', { xCapabilities: { inbox: false, analytics: true } }); assert.equal(result.status, 200); assert.deepEqual(result.data.xCapabilities, { analytics: true, inbox: false });
-    assert.equal((await write('instagram-a/disconnect', { confirmAccountId: 'another-account' })).status, 400);
-    assert.equal((await write('outside/disconnect', { confirmAccountId: 'outside' })).status, 403);
-    result = await write('instagram-a/disconnect', { confirmAccountId: 'instagram-a' }, 'disconnect-confirmed'); assert.equal(result.status, 200); assert.equal(result.data.disconnected, true); const deletes = calls.filter(call => call.method === 'DELETE').length;
-    result = await write('instagram-a/disconnect', { confirmAccountId: 'instagram-a' }, 'disconnect-confirmed'); assert.equal(result.status, 200); assert.equal(calls.filter(call => call.method === 'DELETE').length, deletes, 'A completed disconnection replays after the account has disappeared.');
-    state.failAfterWrite = true; result = await write('whatsapp-a/update', { displayName: 'Unknown update' }, 'unknown-update'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); state.failAfterWrite = false;
-    const writes = calls.filter(call => call.method === 'PUT').length; assert.equal((await write('whatsapp-a/update', { displayName: 'Unknown update' }, 'different-key-for-unknown')).status, 409); assert.equal(calls.filter(call => call.method === 'PUT').length, writes);
-    db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'").run();
-    state.updateReceipt = {}; result = await write('whatsapp-a/update', { displayName: 'Unreadable receipt' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); state.updateReceipt = null;
-    db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'").run();
-    state.retainDisconnected = true; result = await write('whatsapp-a/disconnect', { confirmAccountId: 'whatsapp-a' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
-  } finally { db.close(); }
+test('account updates and disconnects preserve idempotency, project isolation, permissions and unknown outcomes', pg, async t => {
+  const { calls, state, request, sql } = await setup(t);
+  for (const task of ['update', 'disconnect']) for (const role of ['viewer', 'editor']) assert.equal((await request(`instagram-a/${task}`, { method: 'POST', body: { displayName: 'Updated' }, role })).status, 403);
+  const write = (action, body, key) => request(action, { method: 'POST', body, key });
+  let result = await write('instagram-a/update', { displayName: 'Updated' }, 'update-display-name'); assert.equal(result.status, 200); assert.equal(result.data.account.displayName, 'Updated'); const count = calls.length;
+  result = await write('instagram-a/update', { displayName: 'Updated' }, 'update-display-name'); assert.equal(result.status, 200); assert.equal(calls.length, count);
+  assert.equal((await write('instagram-a/update', { displayName: 'Other' }, 'update-display-name')).status, 409);
+  for (const body of [{ displayName: {} }, { displayName: 'x\nsecret' }, { xCapabilities: { unsupported: true } }, { profileId: 'other-profile' }, {}]) assert.equal((await write('instagram-a/update', body)).status, 400);
+  assert.equal((await write('instagram-a/update', { xCapabilities: { inbox: true } })).status, 400);
+  state.rows.push(account('x-a', 'twitter')); result = await write('x-a/update', { xCapabilities: { inbox: false, analytics: true } }); assert.equal(result.status, 200); assert.deepEqual(result.data.xCapabilities, { analytics: true, inbox: false });
+  assert.equal((await write('instagram-a/disconnect', { confirmAccountId: 'another-account' })).status, 400);
+  assert.equal((await write('outside/disconnect', { confirmAccountId: 'outside' })).status, 403);
+  result = await write('instagram-a/disconnect', { confirmAccountId: 'instagram-a' }, 'disconnect-confirmed'); assert.equal(result.status, 200); assert.equal(result.data.disconnected, true); const deletes = calls.filter(call => call.method === 'DELETE').length;
+  result = await write('instagram-a/disconnect', { confirmAccountId: 'instagram-a' }, 'disconnect-confirmed'); assert.equal(result.status, 200); assert.equal(calls.filter(call => call.method === 'DELETE').length, deletes, 'A completed disconnection replays after the account has disappeared.');
+  state.failAfterWrite = true; result = await write('whatsapp-a/update', { displayName: 'Unknown update' }, 'unknown-update'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); state.failAfterWrite = false;
+  const writes = calls.filter(call => call.method === 'PUT').length; assert.equal((await write('whatsapp-a/update', { displayName: 'Unknown update' }, 'different-key-for-unknown')).status, 409); assert.equal(calls.filter(call => call.method === 'PUT').length, writes);
+  await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'");
+  state.updateReceipt = {}; result = await write('whatsapp-a/update', { displayName: 'Unreadable receipt' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); state.updateReceipt = null;
+  await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'");
+  state.retainDisconnected = true; result = await write('whatsapp-a/disconnect', { confirmAccountId: 'whatsapp-a' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
 });
 
 test('connection UI retains uncertain action keys and refuses stale account mutations or stale list results', async () => {
@@ -497,19 +477,31 @@ test('account write keys survive server failures and pending receipts until a de
   failure = null; await write('update', { displayName: 'Name' }); assert.notEqual(calls.at(-1)[3], rejected);
 });
 
-test('account settings and disconnect share one concurrent resource guard', async () => {
-  const { db, state, request, calls } = setup(); let release, entered;
+test('account settings and disconnect share one concurrent resource guard', pg, async t => {
+  const { state, request, calls, sql } = await setup(t); let release, entered;
   try {
     state.hold = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; }); state.onWrite = entered;
     const pending = request('instagram-a/update', { method: 'POST', body: { displayName: 'Held update' } }); await started;
-    const result = await request('instagram-a/disconnect', { method: 'POST', body: { confirmAccountId: 'instagram-a' }, key: 'blocked-disconnect-key' }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(result.data.operation.status, 'failed'); assert.equal(db.prepare('SELECT status FROM integration_operations WHERE id=?').get(result.data.operation.id).status, 'failed'); assert.equal(calls.filter(call => call.method === 'DELETE').length, 0);
+    const result = await request('instagram-a/disconnect', { method: 'POST', body: { confirmAccountId: 'instagram-a' }, key: 'blocked-disconnect-key' }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(result.data.operation.status, 'failed'); assert.equal((await sql.get('SELECT status FROM integration_operations WHERE id=?', result.data.operation.id)).status, 'failed'); assert.equal(calls.filter(call => call.method === 'DELETE').length, 0);
     release(); state.hold = null; assert.equal((await pending).status, 200);
     assert.deepEqual(await request('instagram-a/disconnect', { method: 'POST', body: { confirmAccountId: 'instagram-a' }, key: 'blocked-disconnect-key' }), result); assert.equal(calls.filter(call => call.method === 'DELETE').length, 0);
-  } finally { release?.(); db.close(); }
+  } finally { release?.(); }
 });
 
-test('integration router uses scoped authenticated requests and preserves uncertainty if mappings change after an account write', async () => {
-  const db = new DatabaseSync(':memory:'), original = globalThis.fetch, project = { id: 'project-a', zernioProfileId: profileId }, rows = [account()]; let changed = false, mutate = false;
+test('a duplicate account update under a fresh key while the first is at the provider sends exactly one PUT', pg, async t => {
+  const { state, request, calls, sql } = await setup(t); let release, entered;
+  try {
+    state.hold = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; }); state.onWrite = entered;
+    const body = { displayName: 'Parallel update' }, first = request('instagram-a/update', { method: 'POST', body, key: 'parallel-update-a' }); await started;
+    const second = await request('instagram-a/update', { method: 'POST', body, key: 'parallel-update-b' }); assert.equal(second.status, 409); assert.equal(second.data.error.code, 'OPERATION_NOT_SENT');
+    release(); state.hold = null; assert.equal((await first).status, 200);
+    assert.equal(calls.filter(call => call.method === 'PUT').length, 1);
+    assert.deepEqual((await sql.all('SELECT status FROM integration_operations ORDER BY status')).map(row => row.status), ['complete', 'failed']);
+  } finally { release?.(); }
+});
+
+test('integration router uses scoped authenticated requests and preserves uncertainty if mappings change after an account write', pg, async t => {
+  const { db } = await testDatabase(t), original = globalThis.fetch, project = { id: 'project-a', zernioProfileId: profileId }, rows = [account()]; let changed = false, mutate = false;
   async function invoke(action, body, role = 'owner') {
     let response; const method = body === undefined ? 'GET' : 'POST';
     await handleIntegration({ db, project, role, req: { method, headers: { 'idempotency-key': 'router-account-operation' } }, url: new URL(`http://localhost/api/projects/project-a/integrations/accounts/${action}`), body: body || {}, config: { env: {}, ZERNIO_API_KEY: 'fixture-secret', appUrl: 'https://app.example.com' }, assertProjectMapping(expected) { if (changed || expected !== profileId) throw new Error('Mapping changed'); }, send(status, data) { response = { status, data }; } }); return response;
@@ -524,7 +516,7 @@ test('integration router uses scoped authenticated requests and preserves uncert
     assert.equal((await invoke('health', undefined, 'viewer')).status, 200);
     assert.equal((await invoke('instagram-a/update', { displayName: 'Changed' }, 'editor')).status, 403); assert.equal(mutate, false);
     const result = await invoke('instagram-a/update', { displayName: 'Changed' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(mutate, true);
-  } finally { globalThis.fetch = original; db.close(); }
+  } finally { globalThis.fetch = original; }
 });
 
 test('rendered health controls show WhatsApp link and permission evidence, hide administrative controls for readers, and do not imply token liveness', async () => {
@@ -546,8 +538,8 @@ test('rendered health controls show WhatsApp link and permission evidence, hide 
   render(false, true); render(true, true);
 });
 
-function blueskyFixture() {
-  const db = new DatabaseSync(':memory:'), calls = [], state = { row: { ...account('blue-a', 'bluesky'), platformUserId: 'did:plc:one' }, defaultLangs: ['en'], roleAllowed: true, mappingAllowed: true };
+async function blueskyFixture(t) {
+  const { db, sql, pool } = await testDatabase(t), calls = [], state = { row: { ...account('blue-a', 'bluesky'), platformUserId: 'did:plc:one' }, defaultLangs: ['en'], roleAllowed: true, mappingAllowed: true };
   const api = async (path, query, body, key, method = 'GET') => {
     calls.push({ path, body, key, method });
     if (path === '/accounts') return { accounts: [structuredClone(state.row)] };
@@ -563,53 +555,47 @@ function blueskyFixture() {
     try { await handleZernioAccounts(context, api, profileId, `${accountId}/bluesky-settings`); return response; }
     catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   };
-  return { db, calls, state, request, async reviewed(defaultLangs, options) { const loaded = await request(); return request({ defaultLangs, expectedVersion: loaded.data.version, confirmed: true }, options); } };
+  return { db, sql, pool, calls, state, request, async reviewed(defaultLangs, options) { const loaded = await request(); return request({ defaultLangs, expectedVersion: loaded.data.version, confirmed: true }, options); } };
 }
 
-test('Bluesky defaults use documented PATCH languages/null with fresh review, scoped access, checked receipt and readback', async () => {
-  const fixture = blueskyFixture(), { db, calls, state, request, reviewed } = fixture;
-  try {
-    const loaded = await request(undefined, { role: 'viewer' }); assert.equal(loaded.status, 200); assert.deepEqual(loaded.data.defaultLangs, ['en']); assert.equal(JSON.stringify(loaded).includes('never-return'), false);
-    let result = await reviewed(['pt', 'en-US']); assert.equal(result.status, 200); assert.equal(result.data.readback, true); assert.deepEqual(result.data.defaultLangs, ['pt', 'en-US']); assert.deepEqual(calls.find(row => row.method === 'PATCH').body, { defaultLangs: ['pt', 'en-US'] });
-    result = await reviewed(null); assert.equal(result.status, 200); assert.equal(result.data.defaultLangs, null);
-    const version = (await request()).data.version, payload = { defaultLangs: ['fr'], expectedVersion: version, confirmed: true };
-    for (const defaultLangs of [undefined, [], ['en_US'], ['en', 'EN'], ['en', 'pt', 'fr', 'de'], [''], ['en,pt'], 'en', [4]]) assert.equal((await request({ ...payload, defaultLangs })).status, 400, JSON.stringify(defaultLangs));
-    for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request(payload, { role })).status, 403); assert.equal(calls.length, before); }
-    assert.equal((await request(undefined, { accountId: 'foreign' })).status, 403);
-    state.row.platform = 'instagram'; assert.equal((await request()).status, 400); state.row.platform = 'bluesky';
-    state.defaultLangs = ['de']; assert.equal((await request(payload)).data.error.code, 'BLUESKY_SETTINGS_CHANGED');
-    for (const flag of ['roleAllowed', 'mappingAllowed']) { const fresh = (await request()).data; state.onRead = () => { state[flag] = false; }; const before = state.writes; result = await request({ ...payload, expectedVersion: fresh.version }); assert.equal(result.status, flag === 'roleAllowed' ? 403 : 409); assert.equal(state.writes, before); state.onRead = null; state[flag] = true; }
-    const fresh = (await request()).data; state.row.platformUserId = 'did:plc:replacement'; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).data.error.code, 'BLUESKY_SETTINGS_CHANGED');
-    state.readResponse = {}; assert.equal((await request()).status, 502);
-  } finally { db.close(); }
+test('Bluesky defaults use documented PATCH languages/null with fresh review, scoped access, checked receipt and readback', pg, async t => {
+  const fixture = await blueskyFixture(t), { calls, state, request, reviewed } = fixture;
+  const loaded = await request(undefined, { role: 'viewer' }); assert.equal(loaded.status, 200); assert.deepEqual(loaded.data.defaultLangs, ['en']); assert.equal(JSON.stringify(loaded).includes('never-return'), false);
+  let result = await reviewed(['pt', 'en-US']); assert.equal(result.status, 200); assert.equal(result.data.readback, true); assert.deepEqual(result.data.defaultLangs, ['pt', 'en-US']); assert.deepEqual(calls.find(row => row.method === 'PATCH').body, { defaultLangs: ['pt', 'en-US'] });
+  result = await reviewed(null); assert.equal(result.status, 200); assert.equal(result.data.defaultLangs, null);
+  const version = (await request()).data.version, payload = { defaultLangs: ['fr'], expectedVersion: version, confirmed: true };
+  for (const defaultLangs of [undefined, [], ['en_US'], ['en', 'EN'], ['en', 'pt', 'fr', 'de'], [''], ['en,pt'], 'en', [4]]) assert.equal((await request({ ...payload, defaultLangs })).status, 400, JSON.stringify(defaultLangs));
+  for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request(payload, { role })).status, 403); assert.equal(calls.length, before); }
+  assert.equal((await request(undefined, { accountId: 'foreign' })).status, 403);
+  state.row.platform = 'instagram'; assert.equal((await request()).status, 400); state.row.platform = 'bluesky';
+  state.defaultLangs = ['de']; assert.equal((await request(payload)).data.error.code, 'BLUESKY_SETTINGS_CHANGED');
+  for (const flag of ['roleAllowed', 'mappingAllowed']) { const fresh = (await request()).data; state.onRead = () => { state[flag] = false; }; const before = state.writes; result = await request({ ...payload, expectedVersion: fresh.version }); assert.equal(result.status, flag === 'roleAllowed' ? 403 : 409); assert.equal(state.writes, before); state.onRead = null; state[flag] = true; }
+  const fresh = (await request()).data; state.row.platformUserId = 'did:plc:replacement'; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).data.error.code, 'BLUESKY_SETTINGS_CHANGED');
+  state.readResponse = {}; assert.equal((await request()).status, 502);
 });
 
-test('Bluesky uncertain writes fence fresh keys and changed drafts until provider outcome review', async () => {
+test('Bluesky uncertain writes fence fresh keys and changed drafts until provider outcome review', pg, async t => {
   for (const failure of ['receipt', 'readback', 'wrongReadback', 'role', 'mapping', 'account', 'provider']) {
-    const { db, state, request, reviewed } = blueskyFixture();
-    try {
-      if (failure === 'receipt') state.receipt = {};
-      if (failure === 'wrongReadback') state.receipt = { defaultLangs: ['fr'] };
-      state.onWrite = () => { if (failure === 'readback') state.readFailure = true; if (failure === 'wrongReadback') state.defaultLangs = ['de']; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'account') state.row.platformUserId = 'did:plc:replacement'; };
-      if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'Provider did not confirm', true);
-      const result = await reviewed(['fr']); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure);
-      state.readFailure = false; state.roleAllowed = true; state.mappingAllowed = true; state.onWrite = null; state.receipt = null; state.writeFailure = null;
-      const writes = state.writes, retry = await reviewed(['es']); assert.equal(retry.status, 409, failure); assert.equal(retry.data.error.code, 'OPERATION_NOT_SENT', failure); assert.equal(retry.data.operation.status, 'failed', failure); assert.notEqual(retry.data.operation.id, result.data.operation.id, failure); assert.equal(state.writes, writes, failure);
-    } finally { db.close(); }
+    const { state, request, reviewed } = await blueskyFixture(t);
+    if (failure === 'receipt') state.receipt = {};
+    if (failure === 'wrongReadback') state.receipt = { defaultLangs: ['fr'] };
+    state.onWrite = () => { if (failure === 'readback') state.readFailure = true; if (failure === 'wrongReadback') state.defaultLangs = ['de']; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'account') state.row.platformUserId = 'did:plc:replacement'; };
+    if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'Provider did not confirm', true);
+    const result = await reviewed(['fr']); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure);
+    state.readFailure = false; state.roleAllowed = true; state.mappingAllowed = true; state.onWrite = null; state.receipt = null; state.writeFailure = null;
+    const writes = state.writes, retry = await reviewed(['es']); assert.equal(retry.status, 409, failure); assert.equal(retry.data.error.code, 'OPERATION_NOT_SENT', failure); assert.equal(retry.data.operation.status, 'failed', failure); assert.notEqual(retry.data.operation.id, result.data.operation.id, failure); assert.equal(state.writes, writes, failure);
   }
 });
 
-test('Bluesky retains a durable fence if saving the local operation receipt fails', async () => {
-  const { db, state, request, reviewed } = blueskyFixture();
-  try {
-    await request({ defaultLangs: [], confirmed: true, expectedVersion: 'a'.repeat(64) });
-    // Create the normal receipt table, then simulate a local durability failure after the provider write.
-    await reviewed(['pt']);
-    db.exec("CREATE TRIGGER reject_bluesky_receipt BEFORE UPDATE ON integration_operations BEGIN SELECT RAISE(FAIL,'receipt unavailable'); END");
-    await assert.rejects(reviewed(['fr']), /receipt unavailable/); const writes = state.writes;
-    db.exec('DROP TRIGGER reject_bluesky_receipt');
-    const blocked = await reviewed(['de']); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.equal(db.prepare('SELECT status FROM integration_operations WHERE id=?').get(blocked.data.operation.id).status, 'failed'); assert.equal(state.writes, writes);
-  } finally { db.close(); }
+test('Bluesky retains a durable fence if saving the local operation receipt fails', pg, async t => {
+  const { state, request, reviewed, sql, pool } = await blueskyFixture(t);
+  await request({ defaultLangs: [], confirmed: true, expectedVersion: 'a'.repeat(64) });
+  // Create the normal receipt table, then simulate a local durability failure after the provider write.
+  await reviewed(['pt']);
+  await rejectReceipts(pool, 'reject_bluesky_receipt');
+  await assert.rejects(reviewed(['fr']), receiptUnavailable); const writes = state.writes;
+  await acceptReceipts(pool, 'reject_bluesky_receipt');
+  const blocked = await reviewed(['de']); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.equal((await sql.get('SELECT status FROM integration_operations WHERE id=?', blocked.data.operation.id)).status, 'failed'); assert.equal(state.writes, writes);
 });
 
 test('Bluesky UI makes reset intentional, loads explicitly, and hides save controls from readers', async () => {
@@ -631,8 +617,8 @@ test('Bluesky UI makes reset intentional, loads explicitly, and hides save contr
   }
 });
 
-test('Bluesky GET/PATCH transport uses the project route, authorization and operation key and validates real JSON receipts', async () => {
-  const db = new DatabaseSync(':memory:'), original = globalThis.fetch, row = { ...account('blue-a', 'bluesky'), platformUserId: 'did:plc:one' }, calls = []; let defaultLangs = ['en'], badReceipt = false, sequence = 0;
+test('Bluesky GET/PATCH transport uses the project route, authorization and operation key and validates real JSON receipts', pg, async t => {
+  const { db } = await testDatabase(t), original = globalThis.fetch, row = { ...account('blue-a', 'bluesky'), platformUserId: 'did:plc:one' }, calls = []; let defaultLangs = ['en'], badReceipt = false, sequence = 0;
   async function invoke(body, role = 'owner') {
     let response;
     await handleIntegration({ db, project: { id: 'project-a', zernioProfileId: profileId }, role, req: { method: body === undefined ? 'GET' : 'POST', headers: { 'idempotency-key': `bluesky-router-${++sequence}` } }, url: new URL('http://localhost/api/projects/project-a/integrations/accounts/blue-a/bluesky-settings'), body: body || {}, config: { env: { ZERNIO_API_KEY: 'fixture-secret' } }, assertProjectMapping(expected) { assert.equal(expected, profileId); }, send(status, data) { response = { status, data }; } }); return response;
@@ -650,11 +636,11 @@ test('Bluesky GET/PATCH transport uses the project route, authorization and oper
     let saved = await invoke({ defaultLangs: ['fr'], expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(saved.status, 200); assert.equal(saved.data.readback, true); assert.deepEqual(saved.data.defaultLangs, ['fr']);
     snapshot = await invoke(); saved = await invoke({ defaultLangs: null, expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(saved.status, 200); assert.equal(saved.data.defaultLangs, null);
     snapshot = await invoke(); badReceipt = true; saved = await invoke({ defaultLangs: ['de'], expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(saved.status, 409); assert.equal(saved.data.operation.status, 'uncertain');
-  } finally { globalThis.fetch = original; db.close(); }
+  } finally { globalThis.fetch = original; }
 });
 
-function telegramFixture() {
-  const db = new DatabaseSync(':memory:'), calls = [], state = { row: { ...account('tg-a', 'telegram'), platformUserId: 'bot-one' }, commands: [{ command: 'start', description: 'Start here' }], roleAllowed: true, mappingAllowed: true };
+async function telegramFixture(t) {
+  const { db, sql, pool } = await testDatabase(t), calls = [], state = { row: { ...account('tg-a', 'telegram'), platformUserId: 'bot-one' }, commands: [{ command: 'start', description: 'Start here' }], roleAllowed: true, mappingAllowed: true };
   const api = async (path, query, body, key, method = 'GET') => {
     calls.push({ path, query, body, key, method });
     if (path === '/accounts') return { accounts: [structuredClone(state.row)] };
@@ -670,53 +656,47 @@ function telegramFixture() {
     try { await handleZernioAccounts(context, api, profileId, `${accountId}/telegram-commands`); return response; }
     catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   };
-  return { db, calls, state, request, async reviewed(commands, options) { const loaded = await request(); return request({ commands, clear: commands.length === 0, expectedVersion: loaded.data.version, confirmed: true }, options); } };
+  return { db, sql, pool, calls, state, request, async reviewed(commands, options) { const loaded = await request(); return request({ commands, clear: commands.length === 0, expectedVersion: loaded.data.version, confirmed: true }, options); } };
 }
 
-test('Telegram command menu replaces and explicitly clears the documented default menu with checked scoped readback', async () => {
-  const { db, calls, state, request, reviewed } = telegramFixture();
-  try {
-    const loaded = await request(undefined, { role: 'viewer' }); assert.equal(loaded.status, 200); assert.deepEqual(loaded.data.commands, state.commands); assert.equal(JSON.stringify(loaded).includes('never-return'), false);
-    const commands = [{ command: 'help_2', description: 'Get help' }, { command: 'about', description: '😀'.repeat(256) }];
-    let result = await reviewed(commands, { key: 'telegram-success' }); assert.equal(result.status, 200); assert.equal(result.data.readback, true); assert.deepEqual(result.data.commands, commands);
-    const dispatched = calls.find(row => row.method === 'PUT'); assert.deepEqual(dispatched.body, { commands }); assert.deepEqual(dispatched.query, {});
-    const count = calls.length; result = await request({ commands, clear: false, expectedVersion: loaded.data.version, confirmed: true }, { key: 'telegram-success' }); assert.equal(result.status, 200); assert.equal(calls.length, count);
-    result = await reviewed([]); assert.equal(result.status, 200); assert.deepEqual(result.data.commands, []); assert.equal(calls.find(row => row.method === 'DELETE').body, undefined);
-  } finally { db.close(); }
+test('Telegram command menu replaces and explicitly clears the documented default menu with checked scoped readback', pg, async t => {
+  const { calls, state, request, reviewed } = await telegramFixture(t);
+  const loaded = await request(undefined, { role: 'viewer' }); assert.equal(loaded.status, 200); assert.deepEqual(loaded.data.commands, state.commands); assert.equal(JSON.stringify(loaded).includes('never-return'), false);
+  const commands = [{ command: 'help_2', description: 'Get help' }, { command: 'about', description: '😀'.repeat(256) }];
+  let result = await reviewed(commands, { key: 'telegram-success' }); assert.equal(result.status, 200); assert.equal(result.data.readback, true); assert.deepEqual(result.data.commands, commands);
+  const dispatched = calls.find(row => row.method === 'PUT'); assert.deepEqual(dispatched.body, { commands }); assert.deepEqual(dispatched.query, {});
+  const count = calls.length; result = await request({ commands, clear: false, expectedVersion: loaded.data.version, confirmed: true }, { key: 'telegram-success' }); assert.equal(result.status, 200); assert.equal(calls.length, count);
+  result = await reviewed([]); assert.equal(result.status, 200); assert.deepEqual(result.data.commands, []); assert.equal(calls.find(row => row.method === 'DELETE').body, undefined);
 });
 
-test('Telegram menu refuses invalid input, unsupported scope/locale, foreign accounts, changed permissions and stale reviews before dispatch', async () => {
-  const { db, calls, state, request } = telegramFixture();
-  try {
-    const payload = { commands: [{ command: 'help', description: 'Help' }], clear: false, expectedVersion: (await request()).data.version, confirmed: true };
-    for (const commands of [undefined, null, [], [{ command: '/help', description: 'Help' }], [{ command: 'UPPER', description: 'Help' }], [{ command: 'a'.repeat(33), description: 'Help' }], [{ command: 'help', description: '' }], [{ command: 'help', description: 'a'.repeat(257) }], [{ command: 'help', description: 'line\nbreak' }], [...payload.commands, ...payload.commands], [{ ...payload.commands[0], scope: 'all_private_chats' }], Array.from({ length: 101 }, (_, index) => ({ command: `a_${index}`, description: 'Help' }))]) assert.equal((await request({ ...payload, commands })).status, 400, JSON.stringify(commands));
-    for (const body of [{ ...payload, clear: true }, { ...payload, clear: undefined }, { ...payload, confirmed: false }, { ...payload, scope: {} }, { ...payload, locale: 'en' }]) assert.equal((await request(body)).status, 400);
-    assert.equal((await request(undefined, { search: '?locale=en' })).status, 400);
-    for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request(payload, { role })).status, 403); assert.equal(calls.length, before); }
-    assert.equal((await request(undefined, { accountId: 'outside' })).status, 403);
-    state.row.platform = 'instagram'; assert.equal((await request()).status, 400); state.row.platform = 'telegram'; state.row.isActive = false; assert.equal((await request()).status, 400); state.row.isActive = true;
-    state.commands = [{ command: 'changed', description: 'Elsewhere' }]; assert.equal((await request(payload)).data.error.code, 'TELEGRAM_COMMANDS_CHANGED');
-    for (const flag of ['roleAllowed', 'mappingAllowed']) { const fresh = (await request()).data; state.onRead = () => { state[flag] = false; }; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).status, flag === 'roleAllowed' ? 403 : 409); state.onRead = null; state[flag] = true; }
-    const fresh = (await request()).data; state.row.platformUserId = 'bot-replaced'; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).data.error.code, 'TELEGRAM_COMMANDS_CHANGED');
-    state.onRead = () => { state.row.username = 'replacement'; }; assert.equal((await request()).data.error.code, 'TELEGRAM_ACCOUNT_CHANGED'); state.onRead = null;
-    state.readResponse = { commands: [] }; assert.equal((await request()).status, 502); state.readResponse = { data: [{ command: 'a', description: {} }] }; assert.equal((await request()).status, 502); assert.equal(state.writes, undefined);
-  } finally { db.close(); }
+test('Telegram menu refuses invalid input, unsupported scope/locale, foreign accounts, changed permissions and stale reviews before dispatch', pg, async t => {
+  const { calls, state, request } = await telegramFixture(t);
+  const payload = { commands: [{ command: 'help', description: 'Help' }], clear: false, expectedVersion: (await request()).data.version, confirmed: true };
+  for (const commands of [undefined, null, [], [{ command: '/help', description: 'Help' }], [{ command: 'UPPER', description: 'Help' }], [{ command: 'a'.repeat(33), description: 'Help' }], [{ command: 'help', description: '' }], [{ command: 'help', description: 'a'.repeat(257) }], [{ command: 'help', description: 'line\nbreak' }], [...payload.commands, ...payload.commands], [{ ...payload.commands[0], scope: 'all_private_chats' }], Array.from({ length: 101 }, (_, index) => ({ command: `a_${index}`, description: 'Help' }))]) assert.equal((await request({ ...payload, commands })).status, 400, JSON.stringify(commands));
+  for (const body of [{ ...payload, clear: true }, { ...payload, clear: undefined }, { ...payload, confirmed: false }, { ...payload, scope: {} }, { ...payload, locale: 'en' }]) assert.equal((await request(body)).status, 400);
+  assert.equal((await request(undefined, { search: '?locale=en' })).status, 400);
+  for (const role of ['viewer', 'editor']) { const before = calls.length; assert.equal((await request(payload, { role })).status, 403); assert.equal(calls.length, before); }
+  assert.equal((await request(undefined, { accountId: 'outside' })).status, 403);
+  state.row.platform = 'instagram'; assert.equal((await request()).status, 400); state.row.platform = 'telegram'; state.row.isActive = false; assert.equal((await request()).status, 400); state.row.isActive = true;
+  state.commands = [{ command: 'changed', description: 'Elsewhere' }]; assert.equal((await request(payload)).data.error.code, 'TELEGRAM_COMMANDS_CHANGED');
+  for (const flag of ['roleAllowed', 'mappingAllowed']) { const fresh = (await request()).data; state.onRead = () => { state[flag] = false; }; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).status, flag === 'roleAllowed' ? 403 : 409); state.onRead = null; state[flag] = true; }
+  const fresh = (await request()).data; state.row.platformUserId = 'bot-replaced'; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).data.error.code, 'TELEGRAM_COMMANDS_CHANGED');
+  state.onRead = () => { state.row.username = 'replacement'; }; assert.equal((await request()).data.error.code, 'TELEGRAM_ACCOUNT_CHANGED'); state.onRead = null;
+  state.readResponse = { commands: [] }; assert.equal((await request()).status, 502); state.readResponse = { data: [{ command: 'a', description: {} }] }; assert.equal((await request()).status, 502); assert.equal(state.writes, undefined);
 });
 
-test('Telegram lost receipts and failed readback keep durable fences across keys, drafts and projects until an operator review', async () => {
+test('Telegram lost receipts and failed readback keep durable fences across keys, drafts and projects until an operator review', pg, async t => {
   for (const failure of ['readback', 'wrongReadback', 'role', 'mapping', 'account', 'provider', 'localReceipt']) {
-    const { db, state, request, reviewed } = telegramFixture();
-    try {
-      if (failure === 'localReceipt') { await reviewed([{ command: 'ready', description: 'Ready' }]); db.exec("CREATE TRIGGER reject_telegram_receipt BEFORE UPDATE ON integration_operations BEGIN SELECT RAISE(FAIL,'receipt unavailable'); END"); }
-      state.onWrite = () => { if (failure === 'readback') state.readFailure = true; if (failure === 'wrongReadback') state.commands = []; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'account') state.row.platformUserId = 'replacement'; };
-      if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'No readable acknowledgement', true);
-      if (failure === 'localReceipt') { await assert.rejects(reviewed([{ command: 'help', description: 'Help' }]), /receipt unavailable/); db.exec('DROP TRIGGER reject_telegram_receipt'); }
-      else { const result = await reviewed([{ command: 'help', description: 'Help' }], { key: 'telegram-uncertain' }); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure); }
-      state.readFailure = false; state.roleAllowed = true; state.mappingAllowed = true; state.onWrite = null; state.writeFailure = null;
-      const writes = state.writes, retry = await reviewed([{ command: 'other', description: 'Other' }], { projectId: 'project-b' }); assert.equal(retry.data.error.code, 'TELEGRAM_PREVIOUS_OUTCOME_UNRESOLVED', failure); assert.equal(state.writes, writes);
-      db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=(SELECT request_key FROM zernio_telegram_mutations)").run();
-      assert.equal((await reviewed([])).status, 200, failure);
-    } finally { db.close(); }
+    const { state, request, reviewed, sql, pool } = await telegramFixture(t);
+    if (failure === 'localReceipt') { await reviewed([{ command: 'ready', description: 'Ready' }]); await rejectReceipts(pool, 'reject_telegram_receipt'); }
+    state.onWrite = () => { if (failure === 'readback') state.readFailure = true; if (failure === 'wrongReadback') state.commands = []; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'account') state.row.platformUserId = 'replacement'; };
+    if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'No readable acknowledgement', true);
+    if (failure === 'localReceipt') { await assert.rejects(reviewed([{ command: 'help', description: 'Help' }]), receiptUnavailable); await acceptReceipts(pool, 'reject_telegram_receipt'); }
+    else { const result = await reviewed([{ command: 'help', description: 'Help' }], { key: 'telegram-uncertain' }); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure); }
+    state.readFailure = false; state.roleAllowed = true; state.mappingAllowed = true; state.onWrite = null; state.writeFailure = null;
+    const writes = state.writes, retry = await reviewed([{ command: 'other', description: 'Other' }], { projectId: 'project-b' }); assert.equal(retry.data.error.code, 'TELEGRAM_PREVIOUS_OUTCOME_UNRESOLVED', failure); assert.equal(state.writes, writes);
+    await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=(SELECT request_key FROM zernio_telegram_mutations)");
+    assert.equal((await reviewed([])).status, 200, failure);
   }
 });
 
@@ -751,8 +731,8 @@ test('Telegram UI validates intentional clear, rejects stale responses and prese
   }
 });
 
-test('Telegram real transport handles documented empty 200 acknowledgements and malformed or lost receipts safely', async () => {
-  const db = new DatabaseSync(':memory:'), original = globalThis.fetch, row = { ...account('tg-a', 'telegram'), platformUserId: 'bot-one' }, calls = []; let commands = [], receipt = 'empty', sequence = 0;
+test('Telegram real transport handles documented empty 200 acknowledgements and malformed or lost receipts safely', pg, async t => {
+  const { db, sql } = await testDatabase(t), original = globalThis.fetch, row = { ...account('tg-a', 'telegram'), platformUserId: 'bot-one' }, calls = []; let commands = [], receipt = 'empty', sequence = 0;
   async function invoke(body) {
     let response;
     await handleIntegration({ db, project: { id: 'project-a', zernioProfileId: profileId }, role: 'owner', req: { method: body === undefined ? 'GET' : 'POST', headers: { 'idempotency-key': `telegram-router-${++sequence}` } }, url: new URL('http://localhost/api/projects/project-a/integrations/accounts/tg-a/telegram-commands'), body: body || {}, config: { env: { ZERNIO_API_KEY: 'fixture-secret' } }, assertProjectMapping(expected) { assert.equal(expected, profileId); }, send(status, data) { response = { status, data }; } }); return response;
@@ -772,12 +752,12 @@ test('Telegram real transport handles documented empty 200 acknowledgements and 
     snapshot = await invoke(); saved = await invoke({ commands: [], clear: true, expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(saved.status, 200); assert.deepEqual(saved.data.commands, []);
     snapshot = await invoke(); receipt = 'malformed'; saved = await invoke({ commands: [{ command: 'bad_receipt', description: 'Help' }], clear: false, expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(saved.status, 409); assert.equal(saved.data.operation.status, 'uncertain');
     const writes = calls.filter(row => row.options.method !== 'GET').length, uncertainId = saved.data.operation.id; snapshot = await invoke(); saved = await invoke({ commands: [], clear: true, expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(saved.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(saved.data.operation.status, 'failed'); assert.notEqual(saved.data.operation.id, uncertainId); assert.equal(calls.filter(row => row.options.method !== 'GET').length, writes);
-    db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'").run(); snapshot = await invoke(); receipt = 'lost'; saved = await invoke({ commands: [], clear: true, expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(saved.data.operation.status, 'uncertain');
-  } finally { globalThis.fetch = original; db.close(); }
+    await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'"); snapshot = await invoke(); receipt = 'lost'; saved = await invoke({ commands: [], clear: true, expectedVersion: snapshot.data.version, confirmed: true }); assert.equal(saved.data.operation.status, 'uncertain');
+  } finally { globalThis.fetch = original; }
 });
 
-function slackFixture() {
-  const db = new DatabaseSync(':memory:'), calls = [], state = { row: { ...account('slack-a', 'slack'), platformUserId: 'channel-one' }, settings: { _id: 'slack-a', platform: 'slack', teamId: 'T-one', teamName: 'Acme', channelId: 'C-one', channelName: 'Updates', channelType: 'public', defaultUsername: 'Updates', defaultIconUrl: 'https://images.example/avatar.png' }, roleAllowed: true, mappingAllowed: true };
+async function slackFixture(t) {
+  const { db, sql, pool } = await testDatabase(t), calls = [], state = { row: { ...account('slack-a', 'slack'), platformUserId: 'channel-one' }, settings: { _id: 'slack-a', platform: 'slack', teamId: 'T-one', teamName: 'Acme', channelId: 'C-one', channelName: 'Updates', channelType: 'public', defaultUsername: 'Updates', defaultIconUrl: 'https://images.example/avatar.png' }, roleAllowed: true, mappingAllowed: true };
   const api = async (path, query, body, key, method = 'GET') => {
     calls.push({ path, query, body, key, method });
     if (path === '/accounts') return { accounts: [structuredClone(state.row)] };
@@ -793,54 +773,48 @@ function slackFixture() {
     try { await handleZernioAccounts(context, api, profileId, `${accountId}/slack-settings`); return response; }
     catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   };
-  return { db, calls, state, request, async reviewed(defaults = { defaultUsername: 'Support', defaultIconUrl: 'https://images.example/support.png' }, options) { const loaded = await request(); return request({ ...defaults, clearUsername: defaults.defaultUsername === '', clearIcon: defaults.defaultIconUrl === '', expectedVersion: loaded.data.version, confirmed: true }, options); } };
+  return { db, sql, pool, calls, state, request, async reviewed(defaults = { defaultUsername: 'Support', defaultIconUrl: 'https://images.example/support.png' }, options) { const loaded = await request(); return request({ ...defaults, clearUsername: defaults.defaultUsername === '', clearIcon: defaults.defaultIconUrl === '', expectedVersion: loaded.data.version, confirmed: true }, options); } };
 }
 
-test('Slack identity loads only native scoped defaults, confirms exact PATCH readback and clears each field intentionally', async () => {
-  const { db, state, calls, request, reviewed } = slackFixture();
-  try {
-    const snapshot = await request(undefined, { role: 'viewer' }); assert.equal(snapshot.status, 200); assert.equal(snapshot.data.channelId, 'C-one'); assert.equal(snapshot.data.defaultUsername, 'Updates'); assert.match(snapshot.data.version, /^[a-f0-9]{64}$/); assert.equal(JSON.stringify(snapshot).includes('never-return'), false);
-    let result = await reviewed(); assert.equal(result.status, 200); assert.equal(result.data.readback, true); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.defaultUsername, 'Support');
-    result = await reviewed({ defaultUsername: '', defaultIconUrl: state.settings.defaultIconUrl }); assert.equal(result.status, 200); assert.equal(result.data.defaultUsername, ''); assert.ok(result.data.defaultIconUrl);
-    result = await reviewed({ defaultUsername: '', defaultIconUrl: '' }); assert.equal(result.status, 200); assert.equal(result.data.defaultIconUrl, '');
-    state.settings.defaultUsername = null; state.settings.defaultIconUrl = null; const cleared = await request(); assert.equal(cleared.data.defaultUsername, ''); assert.equal(cleared.data.defaultIconUrl, '');
-    const payload = { defaultUsername: 'Reviewed', defaultIconUrl: '', clearUsername: false, clearIcon: true, confirmed: true, expectedVersion: cleared.data.version };
-    const before = calls.length; assert.equal((await request(payload, { role: 'editor' })).status, 403); assert.equal(calls.length, before);
-    const key = 'slack-repeat-key'; result = await request(payload, { key }); const writes = state.writes; assert.equal(result.status, 200); assert.deepEqual(await request(payload, { key }), result); assert.equal(state.writes, writes);
-    assert.equal(calls.filter(row => row.method === 'PATCH').every(row => /^[a-z-]+(?:\d+)?$/.test(row.key) || row.key === key), true);
-  } finally { db.close(); }
+test('Slack identity loads only native scoped defaults, confirms exact PATCH readback and clears each field intentionally', pg, async t => {
+  const { state, calls, request, reviewed } = await slackFixture(t);
+  const snapshot = await request(undefined, { role: 'viewer' }); assert.equal(snapshot.status, 200); assert.equal(snapshot.data.channelId, 'C-one'); assert.equal(snapshot.data.defaultUsername, 'Updates'); assert.match(snapshot.data.version, /^[a-f0-9]{64}$/); assert.equal(JSON.stringify(snapshot).includes('never-return'), false);
+  let result = await reviewed(); assert.equal(result.status, 200); assert.equal(result.data.readback, true); assert.equal(result.data.operation.status, 'complete'); assert.equal(result.data.defaultUsername, 'Support');
+  result = await reviewed({ defaultUsername: '', defaultIconUrl: state.settings.defaultIconUrl }); assert.equal(result.status, 200); assert.equal(result.data.defaultUsername, ''); assert.ok(result.data.defaultIconUrl);
+  result = await reviewed({ defaultUsername: '', defaultIconUrl: '' }); assert.equal(result.status, 200); assert.equal(result.data.defaultIconUrl, '');
+  state.settings.defaultUsername = null; state.settings.defaultIconUrl = null; const cleared = await request(); assert.equal(cleared.data.defaultUsername, ''); assert.equal(cleared.data.defaultIconUrl, '');
+  const payload = { defaultUsername: 'Reviewed', defaultIconUrl: '', clearUsername: false, clearIcon: true, confirmed: true, expectedVersion: cleared.data.version };
+  const before = calls.length; assert.equal((await request(payload, { role: 'editor' })).status, 403); assert.equal(calls.length, before);
+  const key = 'slack-repeat-key'; result = await request(payload, { key }); const writes = state.writes; assert.equal(result.status, 200); assert.deepEqual(await request(payload, { key }), result); assert.equal(state.writes, writes);
+  assert.equal(calls.filter(row => row.method === 'PATCH').every(row => /^[a-z-]+(?:\d+)?$/.test(row.key) || row.key === key), true);
 });
 
-test('Slack settings enforce review, native fields, scope, stable channel identity and access before writing', async () => {
-  const { db, state, request } = slackFixture();
-  try {
-    const loaded = (await request()).data, payload = { defaultUsername: 'New', defaultIconUrl: '', clearUsername: false, clearIcon: true, expectedVersion: loaded.version, confirmed: true };
-    for (const extra of [{ confirmed: false }, { expectedVersion: 'bad' }, { iconUrl: 'https://example.com/a.png' }, { channelId: 'C-other' }, { clearIcon: undefined }, { defaultUsername: '' }, { defaultUsername: 'a'.repeat(81) }, { defaultUsername: 'bad\nname' }, { defaultIconUrl: '', clearIcon: false }, { defaultIconUrl: 'http://example.com/a.png', clearIcon: false }, { defaultIconUrl: 'https://127.0.0.1/a.png', clearIcon: false }, { defaultIconUrl: 'https://u:p@example.com/a.png', clearIcon: false }, { defaultUsername: null }]) assert.equal((await request({ ...payload, ...extra })).status, 400, JSON.stringify(extra));
-    assert.equal((await request(undefined, { method: 'PATCH' })).status, 405); assert.equal((await request(undefined, { search: '?username=other' })).status, 400); assert.equal((await request(undefined, { accountId: 'outside' })).status, 403);
-    state.row.platform = 'telegram'; assert.equal((await request()).status, 400); state.row.platform = 'slack'; state.row.isActive = false; assert.equal((await request()).status, 400); state.row.isActive = true;
-    state.settings.defaultUsername = 'External change'; assert.equal((await request(payload)).data.error.code, 'SLACK_SETTINGS_CHANGED');
-    for (const field of ['roleAllowed', 'mappingAllowed']) { const fresh = (await request()).data; state.onRead = () => { state[field] = false; }; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).status, field === 'roleAllowed' ? 403 : 409); state.onRead = null; state[field] = true; }
-    const fresh = (await request()).data; state.settings.channelId = 'C-replaced'; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).data.error.code, 'SLACK_SETTINGS_CHANGED');
-    state.onRead = () => { state.row.platformUserId = 'replacement'; }; assert.equal((await request()).data.error.code, 'SLACK_ACCOUNT_CHANGED'); state.onRead = null;
-    for (const account of [{ ...state.settings, _id: 'other' }, { ...state.settings, platform: 'discord' }, { ...state.settings, teamId: null }, { ...state.settings, defaultUsername: undefined }, { ...state.settings, defaultIconUrl: {} }]) { state.readResponse = { account }; assert.equal((await request()).status, 502); }
-    assert.equal(state.writes, undefined);
-  } finally { db.close(); }
+test('Slack settings enforce review, native fields, scope, stable channel identity and access before writing', pg, async t => {
+  const { state, request } = await slackFixture(t);
+  const loaded = (await request()).data, payload = { defaultUsername: 'New', defaultIconUrl: '', clearUsername: false, clearIcon: true, expectedVersion: loaded.version, confirmed: true };
+  for (const extra of [{ confirmed: false }, { expectedVersion: 'bad' }, { iconUrl: 'https://example.com/a.png' }, { channelId: 'C-other' }, { clearIcon: undefined }, { defaultUsername: '' }, { defaultUsername: 'a'.repeat(81) }, { defaultUsername: 'bad\nname' }, { defaultIconUrl: '', clearIcon: false }, { defaultIconUrl: 'http://example.com/a.png', clearIcon: false }, { defaultIconUrl: 'https://127.0.0.1/a.png', clearIcon: false }, { defaultIconUrl: 'https://u:p@example.com/a.png', clearIcon: false }, { defaultUsername: null }]) assert.equal((await request({ ...payload, ...extra })).status, 400, JSON.stringify(extra));
+  assert.equal((await request(undefined, { method: 'PATCH' })).status, 405); assert.equal((await request(undefined, { search: '?username=other' })).status, 400); assert.equal((await request(undefined, { accountId: 'outside' })).status, 403);
+  state.row.platform = 'telegram'; assert.equal((await request()).status, 400); state.row.platform = 'slack'; state.row.isActive = false; assert.equal((await request()).status, 400); state.row.isActive = true;
+  state.settings.defaultUsername = 'External change'; assert.equal((await request(payload)).data.error.code, 'SLACK_SETTINGS_CHANGED');
+  for (const field of ['roleAllowed', 'mappingAllowed']) { const fresh = (await request()).data; state.onRead = () => { state[field] = false; }; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).status, field === 'roleAllowed' ? 403 : 409); state.onRead = null; state[field] = true; }
+  const fresh = (await request()).data; state.settings.channelId = 'C-replaced'; assert.equal((await request({ ...payload, expectedVersion: fresh.version })).data.error.code, 'SLACK_SETTINGS_CHANGED');
+  state.onRead = () => { state.row.platformUserId = 'replacement'; }; assert.equal((await request()).data.error.code, 'SLACK_ACCOUNT_CHANGED'); state.onRead = null;
+  for (const account of [{ ...state.settings, _id: 'other' }, { ...state.settings, platform: 'discord' }, { ...state.settings, teamId: null }, { ...state.settings, defaultUsername: undefined }, { ...state.settings, defaultIconUrl: {} }]) { state.readResponse = { account }; assert.equal((await request()).status, 502); }
+  assert.equal(state.writes, undefined);
 });
 
-test('Slack uncertain writes fence fresh drafts and projects durably until operator review', async () => {
+test('Slack uncertain writes fence fresh drafts and projects durably until operator review', pg, async t => {
   for (const failure of ['readback', 'wrongReadback', 'role', 'mapping', 'account', 'channel', 'provider', 'localReceipt']) {
-    const { db, state, request, reviewed } = slackFixture();
-    try {
-      if (failure === 'localReceipt') { await reviewed(); db.exec("CREATE TRIGGER reject_slack_receipt BEFORE UPDATE ON integration_operations BEGIN SELECT RAISE(FAIL,'receipt unavailable'); END"); }
-      state.onWrite = () => { if (failure === 'readback') state.readFailure = true; if (failure === 'wrongReadback') state.settings.defaultUsername = 'Wrong'; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'account') state.row.platformUserId = 'replacement'; if (failure === 'channel') state.settings.channelId = 'C-replacement'; };
-      if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'No acknowledgement', true);
-      const defaults = { defaultUsername: 'Requested', defaultIconUrl: '' };
-      if (failure === 'localReceipt') { await assert.rejects(reviewed(defaults), /receipt unavailable/); db.exec('DROP TRIGGER reject_slack_receipt'); }
-      else { const result = await reviewed(defaults); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure); }
-      state.readFailure = false; state.roleAllowed = true; state.mappingAllowed = true; state.onWrite = null; state.writeFailure = null;
-      const writes = state.writes, blocked = await reviewed({ defaultUsername: 'Fresh draft', defaultIconUrl: '' }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT', failure); assert.equal(blocked.data.operation.status, 'failed', failure); assert.equal(db.prepare('SELECT status FROM integration_operations WHERE id=?').get(blocked.data.operation.id).status, 'failed'); assert.equal((await reviewed({ defaultUsername: 'Other project', defaultIconUrl: '' }, { projectId: 'project-b' })).data.error.code, 'SLACK_PREVIOUS_OUTCOME_UNRESOLVED', failure); assert.equal(state.writes, writes, failure);
-      db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=(SELECT request_key FROM zernio_slack_mutations)").run(); assert.equal((await reviewed({ defaultUsername: '', defaultIconUrl: '' })).status, 200, failure);
-    } finally { db.close(); }
+    const { state, request, reviewed, sql, pool } = await slackFixture(t);
+    if (failure === 'localReceipt') { await reviewed(); await rejectReceipts(pool, 'reject_slack_receipt'); }
+    state.onWrite = () => { if (failure === 'readback') state.readFailure = true; if (failure === 'wrongReadback') state.settings.defaultUsername = 'Wrong'; if (failure === 'role') state.roleAllowed = false; if (failure === 'mapping') state.mappingAllowed = false; if (failure === 'account') state.row.platformUserId = 'replacement'; if (failure === 'channel') state.settings.channelId = 'C-replacement'; };
+    if (failure === 'provider') state.writeFailure = new IntegrationError(502, 'PROVIDER_UNAVAILABLE', 'No acknowledgement', true);
+    const defaults = { defaultUsername: 'Requested', defaultIconUrl: '' };
+    if (failure === 'localReceipt') { await assert.rejects(reviewed(defaults), receiptUnavailable); await acceptReceipts(pool, 'reject_slack_receipt'); }
+    else { const result = await reviewed(defaults); assert.equal(result.status, 409, failure); assert.equal(result.data.operation.status, 'uncertain', failure); }
+    state.readFailure = false; state.roleAllowed = true; state.mappingAllowed = true; state.onWrite = null; state.writeFailure = null;
+    const writes = state.writes, blocked = await reviewed({ defaultUsername: 'Fresh draft', defaultIconUrl: '' }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT', failure); assert.equal(blocked.data.operation.status, 'failed', failure); assert.equal((await sql.get('SELECT status FROM integration_operations WHERE id=?', blocked.data.operation.id)).status, 'failed'); assert.equal((await reviewed({ defaultUsername: 'Other project', defaultIconUrl: '' }, { projectId: 'project-b' })).data.error.code, 'SLACK_PREVIOUS_OUTCOME_UNRESOLVED', failure); assert.equal(state.writes, writes, failure);
+    await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE request_key=(SELECT request_key FROM zernio_slack_mutations)"); assert.equal((await reviewed({ defaultUsername: '', defaultIconUrl: '' })).status, 200, failure);
   }
 });
 
@@ -885,8 +859,8 @@ test('Bluesky malformed app success retains its reviewed draft and action key un
   response = { accountId: 'blue-a', defaultLangs: ['fr'], version: 'b'.repeat(64), readback: true }; await save(); assert.equal(keys.current.size, 0); assert.equal(calls[0][3], calls[1][3]); assert.equal(accepted[1], 'fr');
 });
 
-test('Slack real transport accepts documented empty PATCH receipts, uses native fields and fences malformed or lost responses', async () => {
-  const db = new DatabaseSync(':memory:'), original = globalThis.fetch, row = { ...account('slack-a', 'slack'), platformUserId: 'channel-one' }, calls = []; let defaults = { defaultUsername: 'Current', defaultIconUrl: 'https://images.example/current.png' }, receipt = 'empty', sequence = 0;
+test('Slack real transport accepts documented empty PATCH receipts, uses native fields and fences malformed or lost responses', pg, async t => {
+  const { db, sql } = await testDatabase(t), original = globalThis.fetch, row = { ...account('slack-a', 'slack'), platformUserId: 'channel-one' }, calls = []; let defaults = { defaultUsername: 'Current', defaultIconUrl: 'https://images.example/current.png' }, receipt = 'empty', sequence = 0;
   async function invoke(body) {
     let response;
     await handleIntegration({ db, project: { id: 'project-a', zernioProfileId: profileId }, role: 'owner', req: { method: body === undefined ? 'GET' : 'POST', headers: { 'idempotency-key': `slack-router-${++sequence}` } }, url: new URL('http://localhost/api/projects/project-a/integrations/accounts/slack-a/slack-settings'), body: body || {}, config: { env: { ZERNIO_API_KEY: 'fixture-secret' } }, assertProjectMapping(expected) { assert.equal(expected, profileId); }, send(status, data) { response = { status, data }; } }); return response;
@@ -906,6 +880,6 @@ test('Slack real transport accepts documented empty PATCH receipts, uses native 
     snapshot = await invoke(); saved = await invoke(payload(snapshot, true)); assert.equal(saved.status, 200); assert.equal(saved.data.defaultUsername, ''); assert.equal(saved.data.defaultIconUrl, '');
     snapshot = await invoke(); receipt = 'malformed'; saved = await invoke(payload(snapshot)); assert.equal(saved.status, 409); assert.equal(saved.data.operation.status, 'uncertain');
     const writes = calls.filter(call => call.options.method === 'PATCH').length, uncertainId = saved.data.operation.id; snapshot = await invoke(); saved = await invoke(payload(snapshot, true)); assert.equal(saved.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(saved.data.operation.status, 'failed'); assert.notEqual(saved.data.operation.id, uncertainId); assert.equal(calls.filter(call => call.options.method === 'PATCH').length, writes);
-    db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'").run(); snapshot = await invoke(); receipt = 'lost'; saved = await invoke(payload(snapshot, true)); assert.equal(saved.data.operation.status, 'uncertain');
-  } finally { globalThis.fetch = original; db.close(); }
+    await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE status='uncertain'"); snapshot = await invoke(); receipt = 'lost'; saved = await invoke(payload(snapshot, true)); assert.equal(saved.data.operation.status, 'uncertain');
+  } finally { globalThis.fetch = original; }
 });

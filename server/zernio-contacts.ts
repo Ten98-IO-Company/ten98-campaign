@@ -1,7 +1,10 @@
+import { sql } from 'drizzle-orm';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
+import type { Executor } from './database.ts';
+import { advisoryLock } from './auth.ts';
 type Ctx = OperationContext & { body: any };
 import { createHash, randomUUID } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount, fail, reportObject as object } from './provider-core.ts';
+import { IntegrationError, claimFence, operation, releaseFence, scopedAccounts, requireAccount, fail, reportObject as object } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const text = (value: any, maximum = 20000, empty = false) => typeof value === 'string' && value.length <= maximum && (empty || !!value.trim()) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
@@ -101,15 +104,13 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
   const contactRoute = /^contacts\/([a-f0-9]{24})(?:\/(link|unlink|update|delete|subscription)|\/fields\/([a-z][a-z0-9_]{0,99})\/(set|clear))?$/i.exec(action), fieldRoute = /^fields\/([a-f0-9]{24})\/(update|delete)$/i.exec(action);
   const mutation = req.method === 'POST';
   if (!(req.method === 'GET' && ['overview', 'contacts', 'fields'].includes(action)) && !(contactRoute && (req.method === 'GET' && !contactRoute![2] && !contactRoute![4] || mutation && (contactRoute![2] || contactRoute![4]))) && !(mutation && (['contacts/create', 'contacts/bulk', 'fields/create'].includes(action) || fieldRoute))) return false;
-  db.exec(`CREATE TABLE IF NOT EXISTS zernio_contact_links(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,local_contact_id TEXT NOT NULL REFERENCES direct_contacts(id) ON DELETE CASCADE,provider_contact_id TEXT NOT NULL,channel_id TEXT NOT NULL,platform TEXT NOT NULL,identifier TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(project_id,profile_id,account_id,provider_contact_id,channel_id),UNIQUE(project_id,profile_id,account_id,local_contact_id));
-    CREATE TABLE IF NOT EXISTS zernio_contact_mutations(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)`);
-  const assertAccess = () => context.assertProjectMapping?.(profileId), operator = () => Boolean(context.user?.isOperator && db.prepare('SELECT 1 FROM instance_operators WHERE user_id=?').get(context.user.id) as ProviderRecord);
-  assertAccess(); let accounts = (await scopedAccounts(api, profileId)).filter(account => platforms.has(account.platform));
-  const localRows = () => context.contacts.list(project.id).map((contact: any) => ({ ...contact, version: localVersion(contact) }));
-  if (action === 'overview') { assertAccess(); send(200, { profileId, accounts: accounts.map(account => ({ id: account._id, platform: account.platform, name: account.displayName || account.username || account.platform, isActive: account.isActive !== false })), localContacts: localRows() }); return true; }
+  const assertAccess = async () => { await context.assertProjectMapping?.(profileId); }, operator = async () => Boolean(context.user?.isOperator && (await db.execute(sql`SELECT 1 FROM instance_operators WHERE user_id = ${context.user.id}`)).rowCount);
+  await assertAccess(); let accounts = (await scopedAccounts(api, profileId)).filter(account => platforms.has(account.platform));
+  const localRows = async () => (await context.contacts.list(project.id)).map((contact: any) => ({ ...contact, version: localVersion(contact) }));
+  if (action === 'overview') { await assertAccess(); send(200, { profileId, accounts: accounts.map(account => ({ id: account._id, platform: account.platform, name: account.displayName || account.username || account.platform, isActive: account.isActive !== false })), localContacts: await localRows() }); return true; }
   const accountId = mutation ? body.accountId || '' : url.searchParams.get('accountId') || '';
   if (accountId) requireAccount(accounts, accountId);
-  const links = (providerContactId: any) => (db.prepare('SELECT id,account_id AS accountId,local_contact_id AS localContactId,provider_contact_id AS providerContactId,channel_id AS channelId,platform,identifier,created_at AS createdAt FROM zernio_contact_links WHERE project_id=? AND profile_id=? AND provider_contact_id=?').all(project.id, profileId, providerContactId) as ProviderRecord[]).map((row: ProviderRecord) => ({ ...row }));
+  const links = async (providerContactId: any, ex: Executor = db) => (await ex.execute(sql`SELECT id, account_id AS "accountId", local_contact_id AS "localContactId", provider_contact_id AS "providerContactId", channel_id AS "channelId", platform, identifier, created_at AS "createdAt" FROM zernio_contact_links WHERE project_id = ${project.id} AND profile_id = ${profileId} AND provider_contact_id = ${providerContactId} ORDER BY created_at, id`)).rows as ProviderRecord[];
   const inProfile = (ids: any) => membership(api, profileId, '', new Set(ids));
   function scoped(contact: any, originHere: any): ProviderRecord {
     const ownChannels = contact.channels.filter((channel: any) => { const account = accounts.find(row => row._id === channel.accountId); if (account && account.platform !== channel.platform) invalid(); return !!account; });
@@ -121,34 +122,37 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
     const origin = accountId ? await inProfile([contactId]) : selected;
     return scoped(await readContact(api, contactId), origin.has(contactId));
   }
-  function view(contact: any): ProviderRecord {
-    const mixed = !contact.exclusive, linked = links(contact.id).filter((link: any) => !link.channelId && !link.accountId && contact.originHere || contact.ownChannels.some((channel: any) => channel.id === link.channelId && channel.accountId === link.accountId));
+  async function view(contact: any): Promise<ProviderRecord> {
+    const mixed = !contact.exclusive, linked = (await links(contact.id)).filter((link: any) => !link.channelId && !link.accountId && contact.originHere || contact.ownChannels.some((channel: any) => channel.id === link.channelId && channel.accountId === link.accountId));
     const safeFields = Object.fromEntries(Object.entries(contact.customFields).filter(([, value]) => value === null || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value) || text(value, 20000, true)));
-    return { id: contact.id, name: mixed ? 'Shared contact' : contact.name, ...(mixed ? {} : Object.fromEntries(metadata.filter(key => key !== 'name').map(key => [key, contact[key]]))), customFields: mixed ? {} : safeFields, isSubscribed: contact.isSubscribed, isBlocked: contact.isBlocked, version: contact.version, originHere: contact.originHere, exclusive: contact.exclusive, metadataMasked: mixed, canReviewShared: admins.has(role) && operator(), channels: contact.ownChannels.map((channel: any) => ({ ...channel, version: channelVersion(channel) })), links: linked };
+    return { id: contact.id, name: mixed ? 'Shared contact' : contact.name, ...(mixed ? {} : Object.fromEntries(metadata.filter(key => key !== 'name').map(key => [key, contact[key]]))), customFields: mixed ? {} : safeFields, isSubscribed: contact.isSubscribed, isBlocked: contact.isBlocked, version: contact.version, originHere: contact.originHere, exclusive: contact.exclusive, metadataMasked: mixed, canReviewShared: admins.has(role) && await operator(), channels: contact.ownChannels.map((channel: any) => ({ ...channel, version: channelVersion(channel) })), links: linked };
   }
-  async function freshAccounts() { assertAccess(); accounts = (await scopedAccounts(api, profileId)).filter(account => platforms.has(account.platform)); if (accountId && requireAccount(accounts, accountId).isActive === false) fail(409, 'CONTACT_CONNECTION_CHANGED', 'This connection needs reconnection before changing contacts.'); }
-  function reviewShared(contact: any) { if (!contact.exclusive && !(operator() && body.reviewSharedContactId === contact.id && body.reviewProfileId === profileId)) fail(403, 'SHARED_CONTACT_REVIEW_REQUIRED', 'An instance operator must review the shared contact and current project profile before changing global contact data.'); }
-  function local(id: any, expected: any) { const contact = context.contacts.get(project.id, id); if (!contact || localVersion(contact) !== expected) fail(409, 'LOCAL_CONTACT_CHANGED', 'This local contact or its channel permission changed. Reload and review it again.'); return contact; }
+  async function freshAccounts() { await assertAccess(); accounts = (await scopedAccounts(api, profileId)).filter(account => platforms.has(account.platform)); if (accountId && requireAccount(accounts, accountId).isActive === false) fail(409, 'CONTACT_CONNECTION_CHANGED', 'This connection needs reconnection before changing contacts.'); }
+  async function reviewShared(contact: any) { if (!contact.exclusive && !(await operator() && body.reviewSharedContactId === contact.id && body.reviewProfileId === profileId)) fail(403, 'SHARED_CONTACT_REVIEW_REQUIRED', 'An instance operator must review the shared contact and current project profile before changing global contact data.'); }
+  async function local(id: any, expected: any) { const contact = await context.contacts.get(project.id, id); if (!contact || localVersion(contact) !== expected) fail(409, 'LOCAL_CONTACT_CHANGED', 'This local contact or its channel permission changed. Reload and review it again.'); return contact; }
   function saveLink(contact: any, channel: any, localContact: any) {
-    const existing = db.prepare('SELECT id,provider_contact_id,channel_id FROM zernio_contact_links WHERE project_id=? AND profile_id=? AND account_id=? AND local_contact_id=?').get(project.id, profileId, channel.accountId, localContact.id) as ProviderRecord;
-    if (existing && (existing.provider_contact_id !== contact.id || existing.channel_id !== channel.id)) fail(409, 'LOCAL_CONTACT_ALREADY_LINKED', 'This local contact is linked to another channel on that connected account. Unlink it explicitly first.');
-    const other = links(contact.id).find((link: any) => link.accountId === channel.accountId && link.channelId === channel.id && link.localContactId !== localContact.id); if (other) fail(409, 'PROVIDER_CONTACT_ALREADY_LINKED', 'This provider channel is already linked to a different local contact.');
-    if (!existing) db.prepare('INSERT INTO zernio_contact_links VALUES(?,?,?,?,?,?,?,?,?,?)').run(randomUUID(), project.id, profileId, channel.accountId, localContact.id, contact.id, channel.id, channel.platform, channel.platformIdentifier, new Date().toISOString());
+    return db.transaction(async tx => {
+      // Links on different provider contacts run under different resource fences; serialise the per-project link checks below.
+      await advisoryLock(tx, 'zernio-contact-links:' + project.id);
+      const existing = (await tx.execute(sql`SELECT id, provider_contact_id, channel_id FROM zernio_contact_links WHERE project_id = ${project.id} AND profile_id = ${profileId} AND account_id = ${channel.accountId} AND local_contact_id = ${localContact.id}`)).rows[0] as ProviderRecord;
+      if (existing && (existing.provider_contact_id !== contact.id || existing.channel_id !== channel.id)) fail(409, 'LOCAL_CONTACT_ALREADY_LINKED', 'This local contact is linked to another channel on that connected account. Unlink it explicitly first.');
+      const other = (await links(contact.id, tx)).find((link: any) => link.accountId === channel.accountId && link.channelId === channel.id && link.localContactId !== localContact.id); if (other) fail(409, 'PROVIDER_CONTACT_ALREADY_LINKED', 'This provider channel is already linked to a different local contact.');
+      if (!existing) await tx.execute(sql`INSERT INTO zernio_contact_links (id, project_id, profile_id, account_id, local_contact_id, provider_contact_id, channel_id, platform, identifier, created_at) VALUES (${randomUUID()}, ${project.id}, ${profileId}, ${channel.accountId}, ${localContact.id}, ${contact.id}, ${channel.id}, ${channel.platform}, ${channel.platformIdentifier}, ${new Date().toISOString()})`);
+    });
   }
   async function runWrite(resource: any, run: any, related: string[] = []) {
     const outcome = await operation(context, async key => {
       if (!active.has(db)) active.set(db, new Set()); const busy = active.get(db), resources = [resource, ...related];
-      if (resources.some(resource => busy.has(resource))) fail(409, 'CONTACT_RESOURCE_BUSY', 'Another change to this contact or field definition is in progress.'); resources.forEach(resource => busy.add(resource)); let fenced = false, uncertain = false;
+      if (resources.some(resource => busy.has(resource))) fail(409, 'CONTACT_RESOURCE_BUSY', 'Another change to this contact or field definition is in progress.'); resources.forEach(resource => busy.add(resource)); const claimed: string[] = []; let uncertain = false;
       try {
-        for (const resource of resources) { const prior = db.prepare('SELECT m.project_id,m.request_key,o.status FROM zernio_contact_mutations m LEFT JOIN integration_operations o ON o.project_id=m.project_id AND o.request_key=m.request_key WHERE m.resource=?').get(resource) as ProviderRecord; if (prior && (!prior.status || ['pending', 'uncertain'].includes(prior.status))) fail(409, 'CONTACT_PREVIOUS_OUTCOME_UNRESOLVED', 'This new change was not sent. Review the previous contact action in provider outcomes first.'); }
-        for (const resource of resources) db.prepare('INSERT INTO zernio_contact_mutations VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, project.id, key); fenced = true;
+        for (const resource of resources) { if (!await claimFence(db, 'zernio_contact_mutations', resource, project.id, key)) fail(409, 'CONTACT_PREVIOUS_OUTCOME_UNRESOLVED', 'This new change was not sent. Review the previous contact action in provider outcomes first.'); claimed.push(resource); }
         return await run(key);
       } catch (error) { uncertain = !(error instanceof IntegrationError) || error.uncertain; throw error; }
-      finally { for (const resource of resources) { if (fenced && !uncertain) db.prepare('DELETE FROM zernio_contact_mutations WHERE resource=? AND project_id=? AND request_key=?').run(resource, project.id, key); busy.delete(resource); } }
+      finally { try { if (!uncertain) for (const resource of claimed) await releaseFence(db, 'zernio_contact_mutations', resource, project.id, key); } finally { resources.forEach(resource => busy.delete(resource)); } }
     }, `contacts:${resource}`); send(outcome.status, outcome.data); return true;
   }
   if (!mutation) {
-    if (action === 'fields') { const rows = await definitions(api, profileId); assertAccess(); send(200, { fields: rows }); return true; }
+    if (action === 'fields') { const rows = await definitions(api, profileId); await assertAccess(); send(200, { fields: rows }); return true; }
     if (action === 'contacts') {
       const keys = [...url.searchParams.keys()];
       if (new Set(keys).size !== keys.length || keys.some(key => !['accountId', 'search', 'platform', 'isSubscribed', 'tag', 'limit', 'skip'].includes(key))) fail(400, 'INVALID_CONTACT_FILTER', 'Use each contact filter once.');
@@ -160,15 +164,15 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
       const freshOrigin = await inProfile([...base]), fresh = (await scopedAccounts(api, profileId)).filter(account => platforms.has(account.platform));
       if (digest([...origin].sort()) !== digest([...freshOrigin].sort()) || digest(accounts.map(account => [account._id, account.platform]).sort()) !== digest(fresh.map(account => [account._id, account.platform]).sort())) fail(409, 'CONTACT_SCOPE_CHANGED', 'The contact or connected account scope changed. Reload contacts.');
       for (const contact of hydrated) {
-        const safe = view(scoped(contact, origin.has(contact.id)));
+        const safe = await view(scoped(contact, origin.has(contact.id)));
         if ((search || tag) && safe.metadataMasked || search && !['name', 'email', 'company'].some(key => String(safe[key] || '').toLowerCase().includes(search.toLowerCase())) || tag && !safe.tags?.includes(tag) || platform && !safe.channels.some((channel: any) => channel.platform === platform) || isSubscribed && safe.isSubscribed !== (isSubscribed === 'true')) continue;
         visible.push(safe);
       }
-      assertAccess(); send(200, { contacts: visible.slice(skip, skip + limit), pagination: { total: visible.length, limit, skip, hasMore: skip + limit < visible.length } }); return true;
+      await assertAccess(); send(200, { contacts: visible.slice(skip, skip + limit), pagination: { total: visible.length, limit, skip, hasMore: skip + limit < visible.length } }); return true;
     }
     const contact = await verified(contactRoute![1]); const channelResponse = await api(`/contacts/${contact.id}/channels`);
     if (channelResponse.success !== true || digest(channels(channelResponse.channels)) !== digest(contact.channels)) invalid();
-    const contactFields = contact.originHere ? await definitions(api, profileId) : []; assertAccess(); send(200, { contact: view(contact), fields: contactFields }); return true;
+    const contactFields = contact.originHere ? await definitions(api, profileId) : []; await assertAccess(); send(200, { contact: await view(contact), fields: contactFields }); return true;
   }
   const task = contactRoute?.[2] || contactRoute?.[4] || fieldRoute?.[2] || action.split('/')[1];
   if (!(task === 'link' || task === 'unlink' ? writers : admins).has(role)) fail(403, 'CONTACT_PERMISSION_REQUIRED', 'Your workspace role cannot perform this contact action.');
@@ -177,7 +181,7 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
     return runWrite(`fields:${profileId}`, async (key: any) => {
       let before = await definitions(api, profileId); const current = fieldRoute ? before.find((row: ProviderRecord) => row.id === fieldRoute[1]) : null;
       if (fieldRoute && (!current || current.version !== body.expectedVersion)) fail(409, 'CUSTOM_FIELD_CHANGED', 'Refresh and review the current field definition.');
-      if (task !== 'create' && !(operator() && body.confirmFieldId === current.id && body.reviewProfileId === profileId)) fail(403, 'CUSTOM_FIELD_SCOPE_REVIEW_REQUIRED', 'An instance operator must review changes affecting this profile’s contact fields.');
+      if (task !== 'create' && !(await operator() && body.confirmFieldId === current.id && body.reviewProfileId === profileId)) fail(403, 'CUSTOM_FIELD_SCOPE_REVIEW_REQUIRED', 'An instance operator must review changes affecting this profile’s contact fields.');
       if (body.confirmed !== true) fail(400, 'CONTACT_REVIEW_REQUIRED', 'Review this field definition before continuing.');
       let payload: any;
       if (task !== 'delete') {
@@ -187,9 +191,9 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
       }
       await freshAccounts();
       before = await definitions(api, profileId);
-      if (current && (!operator() || !before.some((row: ProviderRecord) => row.id === current.id && row.version === current.version))) fail(409, 'CUSTOM_FIELD_CHANGED', 'The field definition or operator permission changed. Reload and review it again.');
+      if (current && (!await operator() || !before.some((row: ProviderRecord) => row.id === current.id && row.version === current.version))) fail(409, 'CUSTOM_FIELD_CHANGED', 'The field definition or operator permission changed. Reload and review it again.');
       if (!current && before.some((row: ProviderRecord) => row.slug === body.slug)) fail(409, 'CUSTOM_FIELD_EXISTS', 'This field slug already exists in the project profile.');
-      assertAccess();
+      await assertAccess();
       let response;
       try { response = await api(current ? `/custom-fields/${current.id}` : '/custom-fields', {}, payload, key, task === 'delete' ? 'DELETE' : task === 'update' ? 'PATCH' : 'POST'); }
       catch (error) { if (task !== 'delete' || !(error instanceof IntegrationError) || error.code !== 'INVALID_PROVIDER_RESPONSE') throw error; response = {}; }
@@ -209,11 +213,12 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
       await freshAccounts(); const account = accountId ? requireAccount(accounts, accountId) : null;
       if (task === 'bulk') {
         if (!account || !['whatsapp', 'sms'].includes(account.platform) || !Array.isArray(body.contacts) || !body.contacts.length || body.contacts.length > 1000 || body.contacts.some((row: ProviderRecord) => !object(row)) || new Set(body.contacts.map((row: ProviderRecord) => row.localContactId)).size !== body.contacts.length) fail(400, 'INVALID_CONTACT_BULK', 'Select between 1 and 1,000 distinct local contacts and a WhatsApp or SMS account.');
-        const selected = body.contacts.map((row: ProviderRecord) => { fields(row, ['localContactId', 'expectedLocalVersion']); const contact = local(row.localContactId, row.expectedLocalVersion); if (!permitted(contact, { accountId, platform: account.platform, platformIdentifier: telephone(contact.phone) })) fail(409, 'LOCAL_CHANNEL_PERMISSION_REQUIRED', 'Bulk import cannot set subscription flags. Every imported phone contact needs current local permission and no suppression.'); return { contact, version: row.expectedLocalVersion }; });
+        const selected: ProviderRecord[] = [];
+        for (const row of body.contacts) { fields(row, ['localContactId', 'expectedLocalVersion']); const contact = await local(row.localContactId, row.expectedLocalVersion); if (!permitted(contact, { accountId, platform: account.platform, platformIdentifier: telephone(contact.phone) })) fail(409, 'LOCAL_CHANNEL_PERMISSION_REQUIRED', 'Bulk import cannot set subscription flags. Every imported phone contact needs current local permission and no suppression.'); selected.push({ contact, version: row.expectedLocalVersion }); }
         const before = await phoneRows(api, profileId, accountId), outgoing = selected.filter((row: ProviderRecord) => !before.some(provider => provider.phone === telephone(row.contact.phone)));
         let receipt = null;
         if (outgoing.length) {
-          await freshAccounts(); for (const row of selected) local(row.contact.id, row.version);
+          await freshAccounts(); for (const row of selected) await local(row.contact.id, row.version);
           // Empty tags prevent the provider's duplicate-import tag merge from changing another profile's shared metadata.
           const payload = { profileId, accountId, platform: account.platform, contacts: outgoing.map(({ contact }: any) => ({ name: contact.name || contact.phone, email: contact.email, company: contact.company, platformIdentifier: contact.phone, tags: [] })) };
           receipt = await api('/contacts/bulk', {}, payload, key);
@@ -226,28 +231,28 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
             if (candidates.length !== 1) { results.push({ localContactId: row.contact.id, status: candidates.length ? 'ambiguous' : 'not_found', error: candidates.length ? 'More than one provider contact matched this phone. Review them individually.' : 'No matching provider channel was returned. This row was not linked.' }); continue; }
             const candidate = await readContact(api, candidates[0].id), scopedCandidate = scoped(candidate, origin.has(candidate.id)), channel = candidate.channels.find((channel: any) => channel.accountId === accountId && channel.platform === account.platform && telephone(channel.platformIdentifier) === telephone(row.contact.phone));
             if (!channel) invalid();
-            local(row.contact.id, row.version); assertAccess(); saveLink(candidate, channel, row.contact); results.push({ localContactId: row.contact.id, providerContactId: candidate.id, channelId: channel.id, status: 'linked', contact: view(scopedCandidate) });
+            await local(row.contact.id, row.version); await assertAccess(); await saveLink(candidate, channel, row.contact); results.push({ localContactId: row.contact.id, providerContactId: candidate.id, channelId: channel.id, status: 'linked', contact: await view(scopedCandidate) });
           }
           return { results, partial: results.some(row => row.status !== 'linked'), providerReceipt: receipt ? { created: receipt.created, skipped: receipt.skipped, total: receipt.total, errorCount: receipt.errors.length } : null, existing: selected.length - outgoing.length, localConsentUnchanged: true };
         } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
       }
-      const selected = local(body.localContactId, body.expectedLocalVersion); let identifier: any;
+      const selected = await local(body.localContactId, body.expectedLocalVersion); let identifier: any;
       if (account) {
         identifier = ['whatsapp', 'sms'].includes(account.platform) ? telephone(selected.phone) : body.platformIdentifier;
         if (!token(identifier)) fail(400, 'CONTACT_CHANNEL_ID_REQUIRED', 'Provide a valid recipient identifier for this connected account.');
       } else if (body.platformIdentifier !== undefined) fail(400, 'CONTACT_ACCOUNT_REQUIRED', 'Select an account before supplying a channel identifier.');
       const payload: ProviderRecord = { profileId, name: selected.name || selected.email || selected.phone, email: selected.email, company: selected.company, tags: selected.tags, isSubscribed: !!account && permitted(selected, { platform: account.platform, accountId, platformIdentifier: identifier }), ...(account ? { accountId, platform: account.platform, platformIdentifier: identifier, displayIdentifier: ['whatsapp', 'sms'].includes(account.platform) ? selected.phone : identifier } : {}) };
       const before = await membership(api, profileId, '', null);
-      await freshAccounts(); local(selected.id, body.expectedLocalVersion);
+      await freshAccounts(); await local(selected.id, body.expectedLocalVersion);
       const response = await api('/contacts', {}, payload, key);
       try {
         if (response.success !== true || !providerId(response.contact?.id) || before.has(response.contact.id) || ['name', 'email', 'company', 'isSubscribed'].some(field => response.contact[field] !== payload[field]) || digest(response.contact.tags) !== digest(payload.tags)) invalid();
         const created: ProviderRecord = await readContact(api, response.contact.id), origin = await membership(api, profileId, '', new Set([created.id]));
         if (!origin.has(created.id) || ['name', 'email', 'company', 'isSubscribed'].some(field => created[field] !== payload[field]) || digest(created.tags) !== digest(payload.tags)) invalid();
         const scopedCreated = scoped(created, true);
-        if (account) { const match = created.channels.find((channel: any) => channel.accountId === accountId && channel.platform === account.platform && (telephone(identifier) ? telephone(channel.platformIdentifier) === telephone(identifier) : channel.platformIdentifier === identifier)); if (!match || response.channel?.id !== match.id || created.channels.length !== 1 || !payload.isSubscribed && match.isSubscribed !== false) invalid(); local(selected.id, body.expectedLocalVersion); saveLink(created, match, selected); }
-        else { if (created.channels.length) invalid(); saveLink(created, { id: '', accountId: '', platform: '', platformIdentifier: selected.email || selected.phone }, selected); }
-        assertAccess(); return { contact: view(scopedCreated), created: true };
+        if (account) { const match = created.channels.find((channel: any) => channel.accountId === accountId && channel.platform === account.platform && (telephone(identifier) ? telephone(channel.platformIdentifier) === telephone(identifier) : channel.platformIdentifier === identifier)); if (!match || response.channel?.id !== match.id || created.channels.length !== 1 || !payload.isSubscribed && match.isSubscribed !== false) invalid(); await local(selected.id, body.expectedLocalVersion); await saveLink(created, match, selected); }
+        else { if (created.channels.length) invalid(); await saveLink(created, { id: '', accountId: '', platform: '', platformIdentifier: selected.email || selected.phone }, selected); }
+        await assertAccess(); return { contact: await view(scopedCreated), created: true };
       } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
     });
   }
@@ -257,23 +262,26 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
   return runWrite(`contact:${contactId}`, async (key: any) => {
     let current = await verified(contactId); if (body.expectedVersion !== current.version) fail(409, 'PROVIDER_CONTACT_CHANGED', 'The connected contact changed. Reload and review it again.');
     if (task === 'link') {
-      const selected = local(body.localContactId, body.expectedLocalVersion), channel = !body.channelId && current.originHere && !current.channels.length ? { id: '', accountId: '', platform: '', platformIdentifier: selected.email || selected.phone } : current.ownChannels.find((row: ProviderRecord) => row.id === body.channelId);
+      const selected = await local(body.localContactId, body.expectedLocalVersion), channel = !body.channelId && current.originHere && !current.channels.length ? { id: '', accountId: '', platform: '', platformIdentifier: selected.email || selected.phone } : current.ownChannels.find((row: ProviderRecord) => row.id === body.channelId);
       if (!channel || (channel.id ? channelVersion(channel) : current.version) !== body.expectedChannelVersion) fail(409, 'CONTACT_CHANNEL_CHANGED', 'Choose a current channel belonging to this project.');
       if (['whatsapp', 'sms'].includes(channel.platform) && !localIdentity(selected, channel)) fail(409, 'CONTACT_IDENTITY_MISMATCH', 'The local phone number must match this provider channel exactly.');
-      assertAccess(); saveLink(current, channel, selected); return { contact: view(current), linked: true };
+      await assertAccess(); await saveLink(current, channel, selected); return { contact: await view(current), linked: true };
     }
-    if (task === 'unlink') { const link = links(contactId).find((row: ProviderRecord) => row.id === body.linkId); if (!link) fail(404, 'CONTACT_LINK_NOT_FOUND', 'This project contact link was not found.'); assertAccess(); db.prepare('DELETE FROM zernio_contact_links WHERE id=? AND project_id=?').run(link.id, project.id); return { contact: view(current), unlinked: true }; }
-    await freshAccounts(); current = scoped(current, current.originHere); reviewShared(current);
+    if (task === 'unlink') { const link = (await links(contactId)).find((row: ProviderRecord) => row.id === body.linkId); if (!link) fail(404, 'CONTACT_LINK_NOT_FOUND', 'This project contact link was not found.'); await assertAccess(); await db.execute(sql`DELETE FROM zernio_contact_links WHERE id = ${link.id} AND project_id = ${project.id}`); return { contact: await view(current), unlinked: true }; }
+    await freshAccounts(); current = scoped(current, current.originHere); await reviewShared(current);
     if (task === 'delete' && body.confirmContactId !== contactId) fail(400, 'CONTACT_DELETE_CONFIRMATION_REQUIRED', 'Confirm the exact contact before deleting all its provider channels.');
     let payload: any, definition: any, checkSubscription: any;
     if (task === 'update') payload = patch(body.changes);
     if (task === 'subscription') {
       if (typeof body.subscribed !== 'boolean') fail(400, 'INVALID_CONTACT_SUBSCRIPTION', 'Choose subscribe or unsubscribe explicitly.');
-      const mapped = links(contactId);
+      const mapped = await links(contactId);
       if (body.subscribed) {
-        checkSubscription = () => { if (!current.exclusive || !current.channels.length || current.isBlocked !== false || current.channels.some((channel: any) => { const link = mapped.find((row: ProviderRecord) => row.channelId === channel.id && row.accountId === channel.accountId), selected = link && context.contacts.get(project.id, link.localContactId); return !selected || !permitted(selected, channel); })) fail(409, 'LOCAL_CHANNEL_PERMISSION_REQUIRED', 'Subscription needs an unblocked, exclusive contact with every phone channel linked to a locally permitted, unsuppressed destination.'); };
-        checkSubscription();
-      } else for (const channel of current.ownChannels) if (['whatsapp', 'sms'].includes(channel.platform)) context.contacts.suppressDestination(project.id, channel.platform, '+' + telephone(channel.platformIdentifier), 'Unsubscribed in connected contact settings');
+        checkSubscription = async () => {
+          let unpermitted = false;
+          for (const channel of current.channels) { const link = mapped.find((row: ProviderRecord) => row.channelId === channel.id && row.accountId === channel.accountId), selected = link && await context.contacts.get(project.id, link.localContactId); if (!selected || !permitted(selected, channel)) { unpermitted = true; break; } }
+          if (!current.exclusive || !current.channels.length || current.isBlocked !== false || unpermitted) fail(409, 'LOCAL_CHANNEL_PERMISSION_REQUIRED', 'Subscription needs an unblocked, exclusive contact with every phone channel linked to a locally permitted, unsuppressed destination.'); };
+        await checkSubscription();
+      } else for (const channel of current.ownChannels) if (['whatsapp', 'sms'].includes(channel.platform)) await context.contacts.suppressDestination(project.id, channel.platform, '+' + telephone(channel.platformIdentifier), 'Unsubscribed in connected contact settings');
       payload = { isSubscribed: body.subscribed };
     }
     if (task === 'set' || task === 'clear') {
@@ -284,9 +292,9 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
     const target = `/contacts/${contactId}${definition ? `/fields/${definition.slug}` : ''}`;
     await freshAccounts(); const beforeWrite = await verified(contactId);
     if (beforeWrite.version !== body.expectedVersion) fail(409, 'PROVIDER_CONTACT_CHANGED', 'This contact changed while preparing the action. Reload and review it again.');
-    current = beforeWrite; reviewShared(current); checkSubscription?.(); assertAccess();
+    current = beforeWrite; await reviewShared(current); await checkSubscription?.(); await assertAccess();
     if (definition && !(await definitions(api, profileId)).some((row: ProviderRecord) => row.id === definition.id && row.version === definition.version)) fail(409, 'CUSTOM_FIELD_CHANGED', 'The field definition changed while preparing this value. Reload and review it again.');
-    assertAccess();
+    await assertAccess();
     let response;
     try { response = await api(target, {}, payload, key, task === 'delete' || task === 'clear' ? 'DELETE' : task === 'set' ? 'PUT' : 'PATCH'); }
     catch (error) { if (!['delete', 'set', 'clear'].includes(task) || !(error instanceof IntegrationError) || error.code !== 'INVALID_PROVIDER_RESPONSE') throw error; response = {}; }
@@ -294,12 +302,12 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
       if (task === 'delete') {
         if (response.success === false) invalid(); let removed = false;
         try { await readContact(api, contactId); } catch (error) { if (error instanceof IntegrationError && (error.providerStatus === 404 || error.status === 404)) removed = true; else throw error; }
-        if (!removed) invalid(); assertAccess(); db.prepare('DELETE FROM zernio_contact_links WHERE project_id=? AND profile_id=? AND provider_contact_id=?').run(project.id, profileId, contactId); return { deletedContactId: contactId, localContactsKept: true };
+        if (!removed) invalid(); await assertAccess(); await db.execute(sql`DELETE FROM zernio_contact_links WHERE project_id = ${project.id} AND profile_id = ${profileId} AND provider_contact_id = ${contactId}`); return { deletedContactId: contactId, localContactsKept: true };
       }
       await freshAccounts(); const fresh = await verified(contactId);
       if (task === 'set' ? digest(fresh.customFields[definition.slug]) !== digest(payload.value) : task === 'clear' ? Object.hasOwn(fresh.customFields, definition.slug) : response.success !== true || !object(response.contact) || response.contact.id !== contactId || Object.entries(payload).some(([key, value]) => digest(response.contact[key]) !== digest(value) || digest(fresh[key]) !== digest(value))) invalid();
       if (definition && !(await definitions(api, profileId)).some((row: ProviderRecord) => row.id === definition.id && row.version === definition.version)) invalid();
-      assertAccess(); return { contact: view(fresh), updated: true };
+      await assertAccess(); return { contact: await view(fresh), updated: true };
     } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
   }, task === 'set' || task === 'clear' ? [`fields:${profileId}`] : []);
 }

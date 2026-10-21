@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('HTTP OOH inventory, proposals, booking, delivery and cancellation preserve exact scope and concurrent action receipts', async () => {
+test('HTTP OOH inventory, proposals, booking, delivery and cancellation preserve exact scope and concurrent action receipts', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-ooh-workflows-')), origin = 'http://127.0.0.1:3000';
-  const app = createApp({ dataDir, appUrl: origin, env: { BROADSIGN_API_KEY: 'mock-ooh-key', BROADSIGN_ENVIRONMENT: 'sandbox' } });
+  const app = await testApp(t, { dataDir, appUrl: origin, env: { BROADSIGN_API_KEY: 'mock-ooh-key', BROADSIGN_ENVIRONMENT: 'sandbox' }, directScheduler: false });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`, originalFetch = globalThis.fetch, providerCalls = []; let cookie, providerStatus = 1, proposal, item, duringItemRead;
   globalThis.fetch = async (target, options = {}) => {
@@ -61,7 +61,7 @@ test('HTTP OOH inventory, proposals, booking, delivery and cancellation preserve
     const cancelWrites = () => providerCalls.filter(call => call.path.endsWith('/cancel')).length;
     result = await request(bookingPath + '/cancel', 'POST', { confirmCancellation: true }, 'ooh-no-double-cancel'); assert.equal(result.status, 409); assert.equal(cancelWrites(), 1);
     providerStatus = 12; result = await request(bookingPath + '/report'); assert.equal(result.status, 200); assert.equal(result.data.booking.stage, 'cancelled'); assert.ok(result.data.placements.every(placement => placement.status === 'cancelled'));
-  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); }
 });
 
 test('OOH write keys allow a manual retry after definitive rejection and preserve ambiguous or acknowledged requests', async () => {

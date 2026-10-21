@@ -1,10 +1,10 @@
-import type { DatabaseSync } from 'node:sqlite';
+import { sql } from 'drizzle-orm';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 type Ctx = OperationContext & { body: any };
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts, mediaUrl, validProviderInstant, fail, reportObject as object } from './provider-core.ts';
+import { IntegrationError, claimFence, operation, releaseFence, scopedAccounts, requireAccount, adAccounts, mediaUrl, validProviderInstant, fail, reportObject as object } from './provider-core.ts';
 
-const platforms = new Set(['metaads', 'facebook', 'instagram', 'linkedinads']), administrators = new Set(['owner', 'admin']), writers = new Set(['owner', 'admin', 'editor']), initialized = new WeakSet();
+const platforms = new Set(['metaads', 'facebook', 'instagram', 'linkedinads']), administrators = new Set(['owner', 'admin']), writers = new Set(['owner', 'admin', 'editor']);
 const token = (value: any) => typeof value === 'string' && !!value && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
 const identifier = (value: any) => { if (!token(value)) fail(400, 'INVALID_LEAD_ID', 'Choose a valid advertising account, form or lead.'); return value; };
 const text = (value: any, maximum = 20000) => typeof value === 'string' && value.length <= maximum && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
@@ -15,13 +15,6 @@ const digest = (value: any) => createHash('sha256').update(JSON.stringify(value)
 const encoded = (value: any) => encodeURIComponent(value);
 const formIdentifier = (value: any) => Number.isSafeInteger(value) && value >= 0 ? String(value) : value;
 const localized = (value: any) => typeof value === 'string' ? value : object(value?.localized) ? Object.values(value.localized).find(item => typeof item === 'string') || '' : '';
-function tables(db: DatabaseSync) {
-  if (initialized.has(db)) return;
-  db.exec(`CREATE TABLE IF NOT EXISTS zernio_lead_associations(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,form_id TEXT NOT NULL,lead_id TEXT NOT NULL,contact_id TEXT NOT NULL REFERENCES direct_contacts(id) ON DELETE CASCADE,lead_version TEXT NOT NULL,imported_at TEXT NOT NULL,PRIMARY KEY(project_id,profile_id,account_id,form_id,lead_id));
-    CREATE TABLE IF NOT EXISTS zernio_test_leads(project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,profile_id TEXT NOT NULL,account_id TEXT NOT NULL,form_id TEXT NOT NULL,lead_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(project_id,profile_id,account_id,form_id,lead_id));
-    CREATE TABLE IF NOT EXISTS zernio_lead_mutations(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,request_key TEXT NOT NULL);`);
-  initialized.add(db);
-}
 function page(value: any, _limit: any) {
   if (!object(value) || typeof value.hasMore !== 'boolean' || value.cursor != null && (!token(value.cursor) || value.cursor.length > 500) || value.hasMore && !value.cursor) invalid();
   return { hasMore: value.hasMore, cursor: value.cursor ?? null };
@@ -121,17 +114,15 @@ async function verifiedLead(api: ZernioApi, scope: any, formId: any, leadId: any
   fail(503, 'INCOMPLETE_PROVIDER_DATA', 'The lead is beyond the verified retrieval window. Use the provider export.');
 }
 function expected(value: any, actual: any, name: any) { if (value !== actual) fail(409, 'LEAD_REVIEW_CHANGED', `This ${name} changed. Refresh it and review the current fields before continuing.`); }
-function association(context: Ctx, scope: any, formId: any, leadId: any) {
-  return context.db.prepare('SELECT contact_id AS contactId,imported_at AS importedAt FROM zernio_lead_associations WHERE project_id=? AND profile_id=? AND account_id=? AND form_id=? AND lead_id=?').get(context.project.id, scope.profileId, scope.account._id, formId, leadId) as ProviderRecord || null;
+async function association(context: Ctx, scope: any, formId: any, leadId: any) {
+  return (await context.db.execute(sql`SELECT contact_id AS "contactId", imported_at AS "importedAt" FROM zernio_lead_associations WHERE project_id = ${context.project.id} AND profile_id = ${scope.profileId} AND account_id = ${scope.account._id} AND form_id = ${formId} AND lead_id = ${leadId}`)).rows[0] as ProviderRecord || null;
 }
 async function mutate(context: Ctx, run: any) {
-  tables(context.db);
+  const { db, project } = context;
   return operation(context, async key => {
-    const old = context.db.prepare('SELECT m.request_key,o.status FROM zernio_lead_mutations m LEFT JOIN integration_operations o ON o.project_id=m.project_id AND o.request_key=m.request_key WHERE m.project_id=?').get(context.project.id) as ProviderRecord;
-    if (old && old.request_key !== key && (!old.status || ['pending', 'uncertain'].includes(old.status))) fail(409, 'LEAD_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous lead action in provider outcomes before making another lead change.');
-    context.db.prepare('INSERT INTO zernio_lead_mutations VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET request_key=excluded.request_key').run(context.project.id, key);
-    try { const result = await run(key); context.db.prepare('DELETE FROM zernio_lead_mutations WHERE project_id=? AND request_key=?').run(context.project.id, key); return result; }
-    catch (error) { if (error instanceof IntegrationError && !error.uncertain) context.db.prepare('DELETE FROM zernio_lead_mutations WHERE project_id=? AND request_key=?').run(context.project.id, key); throw error; }
+    if (!await claimFence(db, 'zernio_lead_mutations', project.id, project.id, key, 'project_id')) fail(409, 'LEAD_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous lead action in provider outcomes before making another lead change.');
+    try { const result = await run(key); await releaseFence(db, 'zernio_lead_mutations', project.id, project.id, key, 'project_id'); return result; }
+    catch (error) { if (error instanceof IntegrationError && !error.uncertain) await releaseFence(db, 'zernio_lead_mutations', project.id, project.id, key, 'project_id'); throw error; }
   }, 'lead-acquisition');
 }
 function createBody(body: any, scope: any) {
@@ -212,7 +203,7 @@ export async function handleZernioLeads(context: Ctx, api: ZernioApi, profileId:
   const found = await leadAccount(api, profileId, accountId), { account, native } = found;
   if (match[2] === 'ad-accounts') { send(200, { accounts: native.filter((row: ProviderRecord) => row.selectable !== false).map((row: ProviderRecord) => ({ id: row.id, name: row.name || row.id, selectable: row.selectable !== false })) }); return true; }
   const adAccountId = identifier(mutation ? body.adAccountId : url.searchParams.get('adAccountId'));
-  const scope = { ...advertiser(found, adAccountId), profileId }; tables(context.db);
+  const scope = { ...advertiser(found, adAccountId), profileId };
   if (!formId) { send(200, { platform: account.platform, ...await forms(api, scope, filters(url)) }); return true; }
   if (creating) {
     const payload = createBody(body, scope), outcome = await mutate(context, async (key: any) => {
@@ -222,8 +213,8 @@ export async function handleZernioLeads(context: Ctx, api: ZernioApi, profileId:
   }
   if (!mutation) {
     const params = filters(url), detail = await verifiedForm(api, scope, formId);
-    if (match[4] === 'leads') { const response = await leads(api, scope, formId, params); send(200, { platform: account.platform, form: detail, ...response, leads: response.leads.map((row: ProviderRecord) => ({ ...row, association: association(context, scope, formId, row.id) })) }); }
-    else send(200, { platform: account.platform, form: detail, testLeads: context.db.prepare('SELECT lead_id AS id,created_at AS createdAt FROM zernio_test_leads WHERE project_id=? AND profile_id=? AND account_id=? AND form_id=?').all(context.project.id, profileId, accountId, formId) as ProviderRecord[] });
+    if (match[4] === 'leads') { const response = await leads(api, scope, formId, params); send(200, { platform: account.platform, form: detail, ...response, leads: await Promise.all(response.leads.map(async (row: ProviderRecord) => ({ ...row, association: await association(context, scope, formId, row.id) }))) }); }
+    else send(200, { platform: account.platform, form: detail, testLeads: (await context.db.execute(sql`SELECT lead_id AS id, created_at AS "createdAt" FROM zernio_test_leads WHERE project_id = ${context.project.id} AND profile_id = ${profileId} AND account_id = ${accountId} AND form_id = ${formId} ORDER BY created_at, lead_id`)).rows as ProviderRecord[] });
     return true;
   }
   fields(body, importing ? ['adAccountId', 'expectedLeadVersion', 'confirmImport', 'mapping'] : archiving ? ['adAccountId', 'expectedFormVersion', 'confirmArchive'] : testCreate ? ['adAccountId', 'expectedFormVersion', 'confirmTest', 'fieldData'] : ['adAccountId', 'confirmDelete']);
@@ -232,16 +223,16 @@ export async function handleZernioLeads(context: Ctx, api: ZernioApi, profileId:
     if (importing) {
       if (body.confirmImport !== true) fail(400, 'LEAD_IMPORT_CONFIRMATION_REQUIRED', 'Review the selected lead fields before importing this contact.');
       const current = await verifiedLead(api, scope, formId, leadId); expected(body.expectedLeadVersion, current.version, 'lead');
-      const previous = association(context, scope, formId, leadId);
-      if (previous) return { association: previous, contact: context.contacts.get(context.project.id, previous.contactId), alreadyImported: true };
+      const previous = await association(context, scope, formId, leadId);
+      if (previous) return { association: previous, contact: await context.contacts.get(context.project.id, previous.contactId), alreadyImported: true };
       fields(body.mapping, ['name', 'email', 'phone', 'company']);
       const mapped = Object.fromEntries(Object.entries(body.mapping as ProviderRecord).filter(([, value]) => value !== '').map(([name, source]) => { if (!text(source, 200) || !Object.hasOwn(current.fields, source)) fail(400, 'INVALID_LEAD_MAPPING', 'Map contact fields only from this verified lead’s answers.'); return [name, current.fields[source].trim()]; }));
       if (!mapped.email && !mapped.phone) fail(400, 'LEAD_CONTACT_IDENTITY_REQUIRED', 'Map an email address or international phone number before importing.');
       if (mapped.phone) mapped.phone = mapped.phone.replace(/[()\s.-]/g, '');
-      context.assertProjectMapping?.(profileId);
-      let contact; try { contact = context.contacts.save(context.project.id, mapped); } catch (error: any) { if (Number.isInteger(error.status)) fail(error.status, 'LEAD_CONTACT_REJECTED', error.message); throw error; }
+      await context.assertProjectMapping?.(profileId);
+      let contact; try { contact = await context.contacts.save(context.project.id, mapped); } catch (error: any) { if (Number.isInteger(error.status)) fail(error.status, 'LEAD_CONTACT_REJECTED', error.message); throw error; }
       // ponytail: the contact API owns its transaction; canonical destination matching makes a crash-before-association retry deduplicate instead of creating another contact.
-      const importedAt = new Date().toISOString(); context.db.prepare('INSERT INTO zernio_lead_associations VALUES(?,?,?,?,?,?,?,?)').run(context.project.id, profileId, accountId, formId, leadId, contact.id, current.version, importedAt);
+      const importedAt = new Date().toISOString(); await context.db.execute(sql`INSERT INTO zernio_lead_associations (project_id, profile_id, account_id, form_id, lead_id, contact_id, lead_version, imported_at) VALUES (${context.project.id}, ${profileId}, ${accountId}, ${formId}, ${leadId}, ${contact.id}, ${current.version}, ${importedAt})`);
       return { contact, association: { contactId: contact.id, importedAt } };
     }
     if (archiving) {
@@ -258,11 +249,11 @@ export async function handleZernioLeads(context: Ctx, api: ZernioApi, profileId:
       if (new Set(data.map((row: ProviderRecord) => row.name)).size !== data.length) fail(400, 'INVALID_TEST_LEAD', 'Supply each test question once.');
       const response = await api(`/ads/lead-forms/${encoded(formId)}/test-leads`, {}, { accountId, fieldData: data }, key);
       if (response.status !== 'success' || !token(response.testLead?.id)) invalid(true);
-      const createdAt = new Date().toISOString(); context.db.prepare('INSERT INTO zernio_test_leads VALUES(?,?,?,?,?,?)').run(context.project.id, profileId, accountId, formId, response.testLead.id, createdAt); return { testLead: { id: response.testLead.id, createdAt } };
+      const createdAt = new Date().toISOString(); await context.db.execute(sql`INSERT INTO zernio_test_leads (project_id, profile_id, account_id, form_id, lead_id, created_at) VALUES (${context.project.id}, ${profileId}, ${accountId}, ${formId}, ${response.testLead.id}, ${createdAt})`); return { testLead: { id: response.testLead.id, createdAt } };
     }
-    if (body.confirmDelete !== leadId || !(context.db.prepare('SELECT lead_id FROM zernio_test_leads WHERE project_id=? AND profile_id=? AND account_id=? AND form_id=? AND lead_id=?').get(context.project.id, profileId, accountId, formId, leadId) as ProviderRecord)) fail(403, 'TEST_LEAD_OUTSIDE_FORM', 'Choose a test lead created for this form by this project. Real leads cannot be deleted here.');
+    if (body.confirmDelete !== leadId || !(await context.db.execute(sql`SELECT lead_id FROM zernio_test_leads WHERE project_id = ${context.project.id} AND profile_id = ${profileId} AND account_id = ${accountId} AND form_id = ${formId} AND lead_id = ${leadId}`)).rowCount) fail(403, 'TEST_LEAD_OUTSIDE_FORM', 'Choose a test lead created for this form by this project. Real leads cannot be deleted here.');
     const response = await api(`/ads/lead-forms/${encoded(formId)}/test-leads`, { accountId, leadId }, undefined, key, 'DELETE');
     if (response.status !== 'success' || !Array.isArray(response.deleted) || response.deleted.length !== 1 || response.deleted[0] !== leadId) invalid(true);
-    context.db.prepare('DELETE FROM zernio_test_leads WHERE project_id=? AND profile_id=? AND account_id=? AND form_id=? AND lead_id=?').run(context.project.id, profileId, accountId, formId, leadId); return { deleted: leadId };
+    await context.db.execute(sql`DELETE FROM zernio_test_leads WHERE project_id = ${context.project.id} AND profile_id = ${profileId} AND account_id = ${accountId} AND form_id = ${formId} AND lead_id = ${leadId}`); return { deleted: leadId };
   }); send(outcome.status, outcome.data); return true;
 }

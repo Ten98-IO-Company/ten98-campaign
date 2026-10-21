@@ -1,25 +1,28 @@
+import { sql } from 'drizzle-orm';
+import { advisoryLock } from './auth.ts';
+import type { Executor } from './database.ts';
 import { fail, IntegrationError, providerRequest, operation, reportObject as object, type OperationContext, type ProviderRecord } from './provider-core.ts';
 
 type NativeContext = OperationContext & { project: ProviderRecord; user: ProviderRecord; role: string; store: ProviderRecord; send: (status: number, body: unknown) => void; body?: any };
-type CurrentCheck = (() => void) | undefined;
-type RefreshSaver = ((expected: string, next: string) => void) | undefined;
+type CurrentCheck = (() => void | Promise<void>) | undefined;
+type RefreshSaver = ((expected: string, next: string) => void | Promise<void>) | undefined;
 
 const BASE = 'https://googleads.googleapis.com/v25';
 const configured = (env: ProviderRecord) => ['GOOGLE_ADS_CLIENT_ID', 'GOOGLE_ADS_CLIENT_SECRET', 'GOOGLE_ADS_REFRESH_TOKEN', 'GOOGLE_ADS_DEVELOPER_TOKEN'].every(key => typeof env[key] === 'string' && Boolean(env[key].trim()));
 function customerId(value: any) { if (typeof value !== 'string' || !/^\d{10}$/.test(value)) fail(400, 'INVALID_GOOGLE_CUSTOMER', 'Enter the ten-digit Google Ads customer ID without hyphens.'); return value; }
 function fields(value: any, allowed: string[]) { if (!object(value) || Object.keys(value).some(key => !allowed.includes(key))) fail(400, 'UNSUPPORTED_GOOGLE_FIELD', 'Use only the supported Google Shopping fields.'); }
 function name(value: any, label = 'campaign name') { if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\u0000-\u001f]/.test(value)) fail(400, 'INVALID_GOOGLE_INPUT', `Enter a valid ${label} of at most 120 characters.`); return value.trim(); }
-function current(check: CurrentCheck, uncertain = false) { try { check?.(); } catch { throw new IntegrationError(409, 'NATIVE_GOOGLE_CONNECTION_CHANGED', 'The Google Ads authorization or project account changed. Refresh before continuing and review any unconfirmed provider outcome.', uncertain); } }
+async function current(check: CurrentCheck, uncertain = false) { try { await check?.(); } catch { throw new IntegrationError(409, 'NATIVE_GOOGLE_CONNECTION_CHANGED', 'The Google Ads authorization or project account changed. Refresh before continuing and review any unconfirmed provider outcome.', uncertain); } }
 async function googleToken(env: ProviderRecord, assertCurrent: CurrentCheck, persistRefresh: RefreshSaver) {
   if (!configured(env)) fail(503, 'NATIVE_GOOGLE_NOT_CONFIGURED', 'Configure the native Google Ads OAuth credentials and developer token first.');
   if (env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) customerId(env.GOOGLE_ADS_LOGIN_CUSTOMER_ID);
-  current(assertCurrent);
+  await current(assertCurrent);
   const result = await providerRequest('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: env.GOOGLE_ADS_CLIENT_ID, client_secret: env.GOOGLE_ADS_CLIENT_SECRET, refresh_token: env.GOOGLE_ADS_REFRESH_TOKEN, grant_type: 'refresh_token' }).toString() }, 'Google Ads authorization');
-  current(assertCurrent);
+  await current(assertCurrent);
   if (typeof result.access_token !== 'string' || !result.access_token || result.access_token.length > 8192 || /[\s\u0000-\u001f]/.test(result.access_token)) fail(502, 'INVALID_GOOGLE_AUTH_RESPONSE', 'Google did not return a usable access token.');
   if (result.refresh_token !== undefined && result.refresh_token !== env.GOOGLE_ADS_REFRESH_TOKEN) {
     if (typeof result.refresh_token !== 'string' || result.refresh_token.length < 8 || result.refresh_token.length > 4096 || /\s/.test(result.refresh_token) || !persistRefresh) fail(409, 'GOOGLE_AUTHORIZATION_CHANGED', 'The Google authorization changed and its refresh token could not be safely saved.');
-    persistRefresh(env.GOOGLE_ADS_REFRESH_TOKEN, result.refresh_token); env.GOOGLE_ADS_REFRESH_TOKEN = result.refresh_token;
+    await persistRefresh(env.GOOGLE_ADS_REFRESH_TOKEN, result.refresh_token); env.GOOGLE_ADS_REFRESH_TOKEN = result.refresh_token;
   }
   return result.access_token;
 }
@@ -27,9 +30,9 @@ const headers = (env: ProviderRecord, token: string) => ({ Authorization: `Beare
 
 export async function testNativeGoogleAds(env: ProviderRecord, assertCurrent: CurrentCheck, persistRefresh: RefreshSaver) {
   const token = await googleToken(env, assertCurrent, persistRefresh);
-  current(assertCurrent);
+  await current(assertCurrent);
   const result = await providerRequest(BASE + '/customers:listAccessibleCustomers', { headers: headers(env, token) }, 'Google Ads');
-  current(assertCurrent);
+  await current(assertCurrent);
   const resources = result.resourceNames === undefined ? [] : result.resourceNames;
   if (result.error || !Array.isArray(resources) || resources.length > 10000 || resources.some((value: any) => typeof value !== 'string' || !/^customers\/\d{10}$/.test(value))) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not return a readable customer list.');
   return { message: `Google Ads authorization works. ${resources.length} directly accessible account${resources.length === 1 ? '' : 's'} found. Map an advertising customer to each project; manager child accounts are verified when mapped.` };
@@ -40,10 +43,15 @@ export async function handleNativeGoogleAds(context: NativeContext) {
   const prefix = `/api/projects/${encodeURIComponent(project.id)}/native-google-ads/`;
   if (!url.pathname.startsWith(prefix)) return false;
   const action = url.pathname.slice(prefix.length), env = { ...(context.config?.env || process.env) };
-  db.exec('CREATE TABLE IF NOT EXISTS native_google_connections(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,customer_id TEXT UNIQUE NOT NULL)');
-  let connection = db.prepare('SELECT customer_id AS customerId FROM native_google_connections WHERE project_id=?').get(project.id) as { customerId: string } | undefined;
-  const originalCustomer = connection?.customerId || '';
-  const assertCurrent = () => { context.assertIntegrationSettings?.(); if (((db.prepare('SELECT customer_id FROM native_google_connections WHERE project_id=?').get(project.id) as ProviderRecord | undefined)?.customer_id || '') !== originalCustomer) throw new Error('Google customer mapping changed.'); };
+  const mapped = async (executor: Executor = db) => ((await executor.execute(sql`SELECT customer_id FROM native_google_connections WHERE project_id=${project.id}`)).rows[0]?.customer_id || '') as string;
+  const originalCustomer = await mapped(), connection = originalCustomer ? { customerId: originalCustomer } : undefined;
+  const assertCurrent = async (executor: Executor = db) => { await context.assertIntegrationSettings?.(executor); if (await mapped(executor) !== originalCustomer) throw new Error('Google customer mapping changed.'); };
+  // Mapping changes run under the project's lock (and the customer's when mapping one), so a parallel change of this
+  // project's mapping re-checks it after this one commits and a customer cannot be assigned to two projects.
+  const changeMapping = (customer: string, change: (tx: Executor) => Promise<unknown>) => db.transaction(async tx => {
+    await advisoryLock(tx, 'native-google-connection:' + project.id); if (customer) await advisoryLock(tx, 'native-google-customer:' + customer);
+    await current(() => assertCurrent(tx)); await change(tx);
+  });
   const persistRefresh = context.persistNativeRefreshToken ? (expected: string, next: string) => context.persistNativeRefreshToken('googleAdsNative', expected, next) : undefined;
   try {
     if (action === 'status' && req.method === 'GET') { send(200, { configured: configured(env), mapped: Boolean(connection), customerId: originalCustomer, videoCreationSupported: false }); return true; }
@@ -52,23 +60,24 @@ export async function handleNativeGoogleAds(context: NativeContext) {
     if (action === 'connection' && req.method === 'POST') {
       if (!user.isOperator || !['owner', 'admin'].includes(role)) fail(403, 'GOOGLE_MAPPING_PERMISSION_REQUIRED', 'An instance operator with workspace administration must map the native Google Ads customer.');
       fields(body, ['customerId']);
-      if (body.customerId === '') { current(assertCurrent); db.prepare('DELETE FROM native_google_connections WHERE project_id=?').run(project.id); store.activity(project.id, 'Native Google Ads customer disconnected.'); send(200, { mapped: false, customerId: '' }); return true; }
+      if (body.customerId === '') { await changeMapping('', tx => tx.execute(sql`DELETE FROM native_google_connections WHERE project_id=${project.id}`)); await store.activity(project.id, 'Native Google Ads customer disconnected.'); send(200, { mapped: false, customerId: '' }); return true; }
       customerId(body.customerId);
       const token = await googleToken(env, assertCurrent, persistRefresh);
       const account = await readCustomer(env, token, body.customerId, assertCurrent);
-      current(assertCurrent);
-      if (db.prepare('SELECT project_id FROM native_google_connections WHERE customer_id=? AND project_id<>?').get(body.customerId, project.id)) fail(409, 'GOOGLE_CUSTOMER_ALREADY_MAPPED', 'This Google advertising account is already assigned to another project.');
-      db.prepare('INSERT INTO native_google_connections VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET customer_id=excluded.customer_id').run(project.id, body.customerId);
-      store.activity(project.id, 'Native Google Ads customer mapped after verifying account access.'); send(200, { mapped: true, customerId: body.customerId, account }); return true;
+      await changeMapping(body.customerId, async tx => {
+        if ((await tx.execute(sql`SELECT project_id FROM native_google_connections WHERE customer_id=${body.customerId} AND project_id<>${project.id}`)).rowCount) fail(409, 'GOOGLE_CUSTOMER_ALREADY_MAPPED', 'This Google advertising account is already assigned to another project.');
+        await tx.execute(sql`INSERT INTO native_google_connections VALUES (${project.id}, ${body.customerId}) ON CONFLICT (project_id) DO UPDATE SET customer_id=excluded.customer_id`);
+      });
+      await store.activity(project.id, 'Native Google Ads customer mapped after verifying account access.'); send(200, { mapped: true, customerId: body.customerId, account }); return true;
     }
     if (!connection) fail(409, 'NATIVE_GOOGLE_NOT_MAPPED', 'Map a Google advertising customer to this project first.');
     const token = await googleToken(env, assertCurrent, persistRefresh);
     const call = async (endpoint: string, payload: ProviderRecord, mutation = false): Promise<ProviderRecord> => {
-      current(assertCurrent);
+      await current(assertCurrent);
       let result: ProviderRecord;
       try { result = await providerRequest(`${BASE}/customers/${originalCustomer}/${endpoint}`, { method: 'POST', headers: { ...headers(env, token), 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, 'Google Ads'); }
       catch (error) { if (!mutation && error instanceof IntegrationError) error.uncertain = false; throw error; }
-      current(assertCurrent, mutation); return result;
+      await current(assertCurrent, mutation); return result;
     };
     if (action === 'account' && req.method === 'GET') { const account = await readCustomer(env, token, originalCustomer, assertCurrent); send(200, { account }); return true; }
     if (action === 'campaigns' && req.method === 'GET') {
@@ -78,7 +87,7 @@ export async function handleNativeGoogleAds(context: NativeContext) {
       const counter = (value: any, integer = true) => value == null || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && (!integer || Number.isSafeInteger(value))) || (typeof value === 'string' && (integer ? /^\d{1,20}$/.test(value) : /^\d+(?:\.\d+)?$/.test(value)) && Number.isFinite(Number(value)));
       if (rows.some((row: ProviderRecord) => String(row.customer?.id) !== originalCustomer || !/^\d{1,20}$/.test(String(row.campaign?.id)) || !['SHOPPING', 'VIDEO'].includes(row.campaign?.advertisingChannelType))) fail(502, 'INVALID_GOOGLE_SCOPE', 'Google returned campaign data outside this customer.');
       if (new Set(rows.map((row: ProviderRecord) => String(row.campaign.id))).size !== rows.length || rows.some((row: ProviderRecord) => typeof row.campaign.name !== 'string' || !row.campaign.name || row.campaign.name.length > 1024 || !['ENABLED', 'PAUSED', 'UNKNOWN', 'UNSPECIFIED'].includes(row.campaign.status) || row.campaignBudget != null && !object(row.campaignBudget) || row.campaignBudget?.period !== undefined && !['DAILY', 'CUSTOM_PERIOD', 'UNKNOWN', 'UNSPECIFIED'].includes(row.campaignBudget.period) || !counter(row.campaignBudget?.amountMicros) || !counter(row.campaignBudget?.totalAmountMicros) || row.metrics != null && !object(row.metrics) || ['impressions', 'clicks', 'costMicros'].some((key: string) => !counter(row.metrics?.[key])) || !counter(row.metrics?.conversions, false)) || result.nextPageToken && result.nextPageToken === url.searchParams.get('pageToken')) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not return readable campaign states, budgets and performance counters.');
-      const managed = store.list(project.id, 'campaigns').filter((row: ProviderRecord) => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer);
+      const managed = (await store.list(project.id, 'campaigns')).filter((row: ProviderRecord) => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer);
       send(200, { campaigns: rows.map((row: ProviderRecord) => ({ id: String(row.campaign.id), name: row.campaign.name, status: row.campaign.status, channel: row.campaign.advertisingChannelType, budgetPeriod: row.campaignBudget?.period || 'UNKNOWN', ...(row.campaignBudget?.period === 'DAILY' ? { dailyBudgetMicros: row.campaignBudget.amountMicros } : row.campaignBudget?.period === 'CUSTOM_PERIOD' ? { totalBudgetMicros: row.campaignBudget.totalAmountMicros } : {}), metrics: row.metrics || {}, appManaged: managed.some((item: ProviderRecord) => item.nativeCampaignResource === `customers/${originalCustomer}/campaigns/${row.campaign.id}`) })), nextPageToken: result.nextPageToken || '', ...range }); return true;
     }
     if (action === 'campaign/cpc') {
@@ -86,7 +95,7 @@ export async function handleNativeGoogleAds(context: NativeContext) {
       fields(values, req.method === 'POST' ? ['campaignId', 'maxCpc', 'confirmChange'] : ['campaignId']);
       if (typeof values.campaignId !== 'string' || !/^\d{1,20}$/.test(values.campaignId)) fail(400, 'INVALID_GOOGLE_CAMPAIGN', 'Choose a Shopping campaign created by this app.');
       const resource = `customers/${originalCustomer}/campaigns/${values.campaignId}`;
-      const managed = store.list(project.id, 'campaigns').find((row: ProviderRecord) => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer && row.nativeCampaignResource === resource), children = managed?.nativeResources;
+      const managed = (await store.list(project.id, 'campaigns')).find((row: ProviderRecord) => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer && row.nativeCampaignResource === resource), children = managed?.nativeResources;
       if (!children || children.campaign !== resource || !new RegExp(`^customers/${originalCustomer}/adGroups/\\d+$`).test(children.adGroup) || !new RegExp(`^customers/${originalCustomer}/adGroupCriteria/${children.adGroup.split('/').at(-1)}~\\d+$`).test(children.listingGroup)) fail(409, 'GOOGLE_CREATED_RESOURCES_REQUIRED', 'This CPC editor only changes the all-products group created by this app.');
       const readBid = async () => {
         const campaignsResult = await call('googleAds:search', { query: `SELECT customer.id, campaign.id, campaign.status, campaign.advertising_channel_type, campaign.bidding_strategy_type, campaign.bidding_strategy FROM campaign WHERE campaign.resource_name = '${resource}'` }), campaigns = searchRows(campaignsResult);
@@ -107,7 +116,7 @@ export async function handleNativeGoogleAds(context: NativeContext) {
         const result = await call('googleAds:mutate', { partialFailure: false, responseContentType: 'RESOURCE_NAME_ONLY', mutateOperations: [{ adGroupOperation: { update: { resourceName: children.adGroup, cpcBidMicros: amount }, updateMask: 'cpc_bid_micros' } }, { adGroupCriterionOperation: { update: { resourceName: children.listingGroup, cpcBidMicros: amount }, updateMask: 'cpc_bid_micros' } }] }, true);
         if (result.partialFailureError || !Array.isArray(result.mutateOperationResponses) || result.mutateOperationResponses.length !== 2 || result.mutateOperationResponses[0]?.adGroupResult?.resourceName !== children.adGroup || result.mutateOperationResponses[1]?.adGroupCriterionResult?.resourceName !== children.listingGroup) throw new IntegrationError(502, 'GOOGLE_CPC_UNCONFIRMED', 'Google did not confirm the group and product CPC update.', true);
         let after; try { after = await readBid(); if (after.maxCpcMicros !== amount || after.groupMaxCpcMicros !== amount) throw new Error('CPC mismatch.'); } catch { throw new IntegrationError(502, 'GOOGLE_CPC_UNCONFIRMED', 'The updated CPC could not be read back. Review Google Ads before retrying.', true); }
-        current(assertCurrent, true); store.update(project.id, 'campaigns', managed.id, { maxCpc: values.maxCpc }); store.activity(project.id, 'Updated the native Shopping all-products maximum CPC after provider readback.');
+        await current(assertCurrent, true); await store.update(project.id, 'campaigns', managed.id, { maxCpc: values.maxCpc }); await store.activity(project.id, 'Updated the native Shopping all-products maximum CPC after provider readback.');
         return { ...after, currencyCode: account.currencyCode };
       }, ['ads', 'google', values.campaignId]); send(outcome.status, outcome.data); return true;
     }
@@ -128,7 +137,7 @@ export async function handleNativeGoogleAds(context: NativeContext) {
         if (selected.campaign.status === 'REMOVED') fail(409, 'GOOGLE_CAMPAIGN_REMOVED', 'A removed campaign cannot be changed.');
         if (!['PAUSED', 'ENABLED'].includes(selected.campaign.status)) fail(502, 'INVALID_GOOGLE_RESPONSE', 'Google did not confirm the campaign’s current switch.');
         const operations: ProviderRecord[] = [], expected: [string, string][] = [];
-        const managed = store.list(project.id, 'campaigns').find((row: ProviderRecord) => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer && row.nativeCampaignResource === resource);
+        const managed = (await store.list(project.id, 'campaigns')).find((row: ProviderRecord) => row.nativeProvider === 'googleAdsNative' && row.nativeCustomerId === originalCustomer && row.nativeCampaignResource === resource);
         let createdChildren: ProviderRecord | undefined;
         if (body.status) {
           operations.push({ campaignOperation: { update: { resourceName: resource, status: body.status }, updateMask: 'status' } }); expected.push(['campaignResult', resource]);
@@ -159,9 +168,9 @@ export async function handleNativeGoogleAds(context: NativeContext) {
             if (groups.length !== 1 || ads.length !== 1 || groups[0].adGroup?.resourceName !== createdChildren.adGroup || groups[0].adGroup?.status !== 'ENABLED' || ads[0].adGroupAd?.resourceName !== createdChildren.ad || ads[0].adGroupAd?.status !== 'ENABLED' || [groups[0], ads[0]].some(row => String(row.customer?.id) !== originalCustomer || String(row.campaign?.id) !== body.campaignId)) throw new Error('Child update mismatch.');
           }
         } catch { throw new IntegrationError(502, 'GOOGLE_UPDATE_UNCONFIRMED', 'The campaign update could not be read back. Review Google Ads before retrying.', true); }
-        current(assertCurrent, true);
-        if (managed) store.update(project.id, 'campaigns', managed.id, { ...(body.status ? { status: body.status === 'PAUSED' ? 'paused' : 'active' } : {}), ...(body.dailyBudget !== undefined ? { budget: body.dailyBudget } : {}) });
-        store.activity(project.id, 'Updated a native Google Shopping campaign after provider readback.');
+        await current(assertCurrent, true);
+        if (managed) await store.update(project.id, 'campaigns', managed.id, { ...(body.status ? { status: body.status === 'PAUSED' ? 'paused' : 'active' } : {}), ...(body.dailyBudget !== undefined ? { budget: body.dailyBudget } : {}) });
+        await store.activity(project.id, 'Updated a native Google Shopping campaign after provider readback.');
         return { campaignId: body.campaignId, status: after[0].campaign.status, dailyBudgetMicros: after[0].campaignBudget?.amountMicros, enabledCreatedChildren: Boolean(createdChildren) };
       }, ['ads', 'google', body.campaignId]); send(result.status, result.data); return true;
     }
@@ -183,9 +192,9 @@ export async function handleNativeGoogleAds(context: NativeContext) {
         try { rows = searchRows(await call('googleAds:search', { query: `SELECT customer.id, campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign_budget.amount_micros FROM campaign WHERE campaign.resource_name = '${created.campaign}'` })); }
         catch (error: any) { error.uncertain = true; throw error; }
         if (rows.length !== 1 || String(rows[0].customer?.id) !== originalCustomer || rows[0].campaign?.status !== 'PAUSED' || rows[0].campaign?.advertisingChannelType !== 'SHOPPING' || rows[0].campaign?.name !== body.name.trim() || `customers/${originalCustomer}/campaigns/${rows[0].campaign?.id}` !== created.campaign || String(rows[0].campaignBudget?.amountMicros) !== payload.mutateOperations[0].campaignBudgetOperation.create.amountMicros) throw new IntegrationError(502, 'GOOGLE_CREATION_UNCONFIRMED', 'The created Shopping campaign could not be verified as paused with the requested budget.', true);
-        current(assertCurrent, true);
-        const campaign = store.create(project.id, 'campaigns', { name: body.name.trim(), channel: 'paid', status: 'paused', budget: body.dailyBudget, budgetType: 'daily', spent: 0, currency: account.currencyCode, platform: 'google', nativeProvider: 'googleAdsNative', nativeCustomerId: originalCustomer, nativeCampaignResource: created.campaign, platformCampaignId: String(rows[0].campaign.id), nativeResources: created });
-        store.activity(project.id, 'Created a paused native Google Shopping campaign and all-products ad group.'); return { campaign, resources: created, customerId: originalCustomer, status: 'PAUSED' };
+        await current(assertCurrent, true);
+        const campaign = await store.create(project.id, 'campaigns', { name: body.name.trim(), channel: 'paid', status: 'paused', budget: body.dailyBudget, budgetType: 'daily', spent: 0, currency: account.currencyCode, platform: 'google', nativeProvider: 'googleAdsNative', nativeCustomerId: originalCustomer, nativeCampaignResource: created.campaign, platformCampaignId: String(rows[0].campaign.id), nativeResources: created });
+        await store.activity(project.id, 'Created a paused native Google Shopping campaign and all-products ad group.'); return { campaign, resources: created, customerId: originalCustomer, status: 'PAUSED' };
       }); send(outcome.status, outcome.data); return true;
     }
     fail(404, 'NATIVE_GOOGLE_ACTION_NOT_FOUND', 'This native Google Ads action was not found.');
@@ -201,9 +210,9 @@ function dateRange(url: URL) {
   if (!valid(fromDate) || fromDate > toDate || Date.parse(toDate) - Date.parse(fromDate) >= 366 * 86400000) fail(400, 'INVALID_DATE', 'Choose a report window of at most 366 days.'); return { fromDate, toDate };
 }
 async function readCustomer(env: ProviderRecord, token: string, target: string, assertCurrent: CurrentCheck) {
-  current(assertCurrent);
+  await current(assertCurrent);
   const result = await providerRequest(`${BASE}/customers/${customerId(target)}/googleAds:search`, { method: 'POST', headers: { ...headers(env, token), 'Content-Type': 'application/json' }, body: JSON.stringify({ query: 'SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone, customer.manager, customer.test_account FROM customer LIMIT 1' }) }, 'Google Ads').catch(error => { if (error instanceof IntegrationError) error.uncertain = false; throw error; });
-  current(assertCurrent);
+  await current(assertCurrent);
   const rows = searchRows(result), account = rows[0]?.customer;
   if (rows.length !== 1 || String(account?.id) !== target || !/^[A-Z]{3}$/.test(account?.currencyCode) || account.manager === true || account.descriptiveName !== undefined && (typeof account.descriptiveName !== 'string' || account.descriptiveName.length > 1024) || account.timeZone !== undefined && (typeof account.timeZone !== 'string' || account.timeZone.length > 150)) fail(502, 'INVALID_GOOGLE_CUSTOMER', 'Google did not verify this advertising customer and its currency. Manager accounts cannot run Shopping campaigns.');
   return { id: target, name: account.descriptiveName || target, currencyCode: account.currencyCode, timeZone: account.timeZone, testAccount: account.testAccount === true };

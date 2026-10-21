@@ -1,20 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
-import { openDatabase, createStore } from '../server/database.ts';
+import { createStore } from '../server/database.ts';
 import { handleCalendar } from '../server/calendar.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 
-test('Calendar listing accepts a genuine empty collection and honors browser-local instant boundaries', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'ten98-calendar-window-')), db = openDatabase(directory), store = createStore(db), originalFetch = globalThis.fetch;
-  db.prepare('INSERT INTO workspaces VALUES(?,?)').run('workspace', 'Calendar audit');
-  db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run('project', 'workspace', 'Calendar audit');
+test('Calendar listing accepts a genuine empty collection and honors browser-local instant boundaries', { skip: postgresSkip }, async t => {
+  const { db, sql } = await testDatabase(t), store = createStore(db), originalFetch = globalThis.fetch;
+  await sql.run('INSERT INTO workspaces (id, name) VALUES (?,?)', 'workspace', 'Calendar audit');
+  await sql.run('INSERT INTO projects (id,workspace_id,name) VALUES (?,?,?)', 'project', 'workspace', 'Calendar audit');
   const calls = [], events = [{ id: 'lateoctober', summary: 'October 31 late in New York', start: { dateTime: '2026-11-01T03:30:00Z' }, end: { dateTime: '2026-11-01T03:45:00Z' } }, { id: 'septemberlate', summary: 'September 30 late in New York', start: { dateTime: '2026-10-01T03:30:00Z' }, end: { dateTime: '2026-10-01T03:45:00Z' } }];
   let empty = false;
   globalThis.fetch = async (target, options) => {
@@ -42,7 +40,7 @@ test('Calendar listing accepts a genuine empty collection and honors browser-loc
     empty = true;
     const cleared = await invoke('events?fromDate=2026-10-01&toDate=2026-10-31');
     assert.equal(cleared.status, 200); assert.deepEqual(cleared.data.events, []); assert.equal(cleared.data.complete, true);
-  } finally { globalThis.fetch = originalFetch; db.close(); rmSync(directory, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test('Calendar UI sends local month boundaries across daylight saving', async () => {

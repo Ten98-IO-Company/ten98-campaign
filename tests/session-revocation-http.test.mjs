@@ -4,12 +4,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('revoked sessions cannot complete provider reads or imports, while accepted writes retain uncertain receipts', async () => {
+test('revoked sessions cannot complete provider reads or imports, while accepted writes retain uncertain receipts', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-session-revocation-')), origin = 'http://127.0.0.1:3018';
   const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
-  const app = createApp({ dataDir, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'session-fixture-zernio-key', GOOGLE_SERVICE_ACCOUNT_EMAIL: 'session-fixture@example.test', GOOGLE_PRIVATE_KEY: privateKey } });
+  const app = await testApp(t, { dataDir, appUrl: origin, directScheduler: false, env: { ZERNIO_API_KEY: 'session-fixture-zernio-key', GOOGLE_SERVICE_ACCOUNT_EMAIL: 'session-fixture@example.test', GOOGLE_PRIVATE_KEY: privateKey } });
   const originalFetch = globalThis.fetch; let pause, cookie, writes = 0;
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
@@ -52,31 +52,31 @@ test('revoked sessions cannot complete provider reads or imports, while accepted
     assert.equal((await api('/settings/integrations/zernio/test', { method: 'POST', body: { projectId: state.projectId } })).data.ok, true);
     assert.equal((await api(project + '/integrations/accounts')).data.accounts[0]._id, 'private-account');
     for (const change of [
-      { pathname: '/api/v1/connect/facebook', action: () => api(project + '/integrations/connect?platform=facebook'), remove: () => app.db.prepare("UPDATE memberships SET role='viewer' WHERE workspace_id=? AND user_id=?").run(state.workspaces[0].id, state.user.id), restore: () => app.db.prepare("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?").run(state.workspaces[0].id, state.user.id), forbidden: 'authUrl' },
-      { pathname: '/api/v1/profiles', action: () => api('/settings/integrations/zernio/test', { method: 'POST', body: { projectId: state.projectId } }), remove: () => app.db.prepare('DELETE FROM instance_operators WHERE user_id=?').run(state.user.id), restore: () => app.db.prepare('INSERT INTO instance_operators VALUES(?)').run(state.user.id), forbidden: 'ok' },
+      { pathname: '/api/v1/connect/facebook', action: () => api(project + '/integrations/connect?platform=facebook'), remove: () => app.sql.run("UPDATE memberships SET role='viewer' WHERE workspace_id=? AND user_id=?", state.workspaces[0].id, state.user.id), restore: () => app.sql.run("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?", state.workspaces[0].id, state.user.id), forbidden: 'authUrl' },
+      { pathname: '/api/v1/profiles', action: () => api('/settings/integrations/zernio/test', { method: 'POST', body: { projectId: state.projectId } }), remove: () => app.sql.run('DELETE FROM instance_operators WHERE user_id=?', state.user.id), restore: () => app.sql.run('INSERT INTO instance_operators VALUES(?)', state.user.id), forbidden: 'ok' },
     ]) {
       let started, release; const entered = new Promise(resolve => { started = resolve; }), wait = new Promise(resolve => { release = resolve; });
       pause = { pathname: change.pathname, started, wait }; const pending = change.action();
       try {
         await Promise.race([entered, new Promise((_, reject) => { setTimeout(() => reject(new Error('Expected permission-change boundary was not reached.')), 3000).unref(); })]);
-        change.remove(); release(); const denied = await pending;
+        await change.remove(); release(); const denied = await pending;
         assert.equal(denied.status, 403); assert.equal(denied.data[change.forbidden], undefined);
-      } finally { release(); change.restore(); }
+      } finally { release(); await change.restore(); }
     }
     let result = await revokeDuring('/api/v1/profiles', () => api('/settings/integrations/zernio/test', { method: 'POST', body: { projectId: state.projectId } }));
     assert.equal(result.status, 403); assert.equal(result.data.ok, undefined);
     result = await revokeDuring('/api/v1/accounts', () => api(project + '/integrations/accounts'));
     assert.equal(result.status, 403); assert.equal(result.data.accounts, undefined);
     result = await revokeDuring('/drive/v3/files', () => api(project + '/integrations/drive/sync', { method: 'POST', body: {} }));
-    assert.equal(result.status, 403); assert.equal(app.store.list(state.projectId, 'assets').length, 0);
+    assert.equal(result.status, 403); assert.equal((await app.store.list(state.projectId, 'assets')).length, 0);
     const upload = { name: 'Private fixture image', mimeType: 'image/jpeg', contentBase64: Buffer.from('synthetic image fixture').toString('base64') };
     result = await revokeDuring('/upload/drive/v3/files', () => api(project + '/integrations/drive/upload', { method: 'POST', body: upload, key: 'revoked-upload-original' }));
     assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(writes, 1);
-    assert.equal(app.db.prepare('SELECT status FROM integration_operations WHERE id=? AND project_id=?').get(result.data.operation.id, state.projectId).status, 'uncertain');
-    assert.equal(app.store.list(state.projectId, 'assets').length, 0, 'A revoked session must not import provider results after the write.');
+    assert.equal((await app.sql.get('SELECT status FROM integration_operations WHERE id=? AND project_id=?', result.data.operation.id, state.projectId)).status, 'uncertain');
+    assert.equal((await app.store.list(state.projectId, 'assets')).length, 0, 'A revoked session must not import provider results after the write.');
     const blocked = await api(project + '/integrations/drive/upload', { method: 'POST', body: upload, key: 'revoked-upload-fresh-key' });
     assert.equal(blocked.status, 409); assert.equal(writes, 1, 'A fresh session and action key cannot duplicate an unconfirmed external write.');
     const current = await api(project + '/integrations/drive/sync', { method: 'POST', body: {} });
     assert.equal(current.status, 200); assert.equal(current.data.synced, 1, 'A separate request with the current session can import provider data.');
-  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); }
 });

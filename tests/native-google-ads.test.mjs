@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, singleConnection, testApp } from './postgres.mjs';
 import { testNativeGoogleAds } from '../server/native-google-ads.ts';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -13,9 +13,10 @@ import * as ui from '@ten98/ui';
 
 const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_ADS_CLIENT_SECRET: 'fixture-client-secret', GOOGLE_ADS_REFRESH_TOKEN: 'fixture-refresh-token', GOOGLE_ADS_DEVELOPER_TOKEN: 'fixture-developer-token', GOOGLE_ADS_LOGIN_CUSTOMER_ID: '9999999999' };
 
-test('native Google Shopping uses an atomic paused resource graph, customer mapping, validation, report cursors and durable unconfirmed outcomes over HTTP', async () => {
+test('native Google Shopping uses an atomic paused resource graph, customer mapping, validation, report cursors and durable unconfirmed outcomes over HTTP', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-native-google-')), origin = 'http://127.0.0.1:3000';
-  const app = createApp({ dataDir: directory, appUrl: origin, env: { ...env }, directScheduler: false }), originalFetch = globalThis.fetch, calls = [], creates = [], updates = [], customerId = '1234567890';
+  // One pool connection: the mapping transaction must re-check access on its own connection.
+  const app = await testApp(t, { dataDir: directory, appUrl: origin, env: { ...env }, directScheduler: false }, singleConnection), originalFetch = globalThis.fetch, calls = [], creates = [], updates = [], customerId = '1234567890';
   let cookie, projectId, badReceipt = false, readbackFailure = false, badReadbackStatus = false, mappingChange = false, foreignReport = false, sharedBudget = false, malformedReport = {};
   let lastCampaign = null, counter = 0, budgetPeriod = 'DAILY', biddingStrategy = 'MANUAL_CPC', badListing = {}, listingRows = 1, foreignListing = false, failCpcReadback = false;
   let updateHook, releaseUpdate, heldUpdate, timer, accountReadFailure;
@@ -58,7 +59,7 @@ test('native Google Shopping uses an atomic paused resource graph, customer mapp
       else {
         creates.push(payload); const campaignId = String(1000 + ++counter), groupId = String(2000 + counter); lastCampaign = { id: campaignId, name: campaign.name, budget: budget.amountMicros, status: 'PAUSED', groupId, groupStatus: 'PAUSED', adStatus: 'PAUSED', groupCpc: group.cpcBidMicros, listingCpc: listing.cpcBidMicros };
         result = { mutateOperationResponses: [{ campaignBudgetResult: { resourceName: `customers/${customerId}/campaignBudgets/3001` } }, { campaignResult: { resourceName: `customers/${badReceipt ? '2222222222' : customerId}/campaigns/${campaignId}` } }, { adGroupResult: { resourceName: `customers/${customerId}/adGroups/${groupId}` } }, { adGroupAdResult: { resourceName: `customers/${customerId}/adGroupAds/${groupId}~4001` } }, { adGroupCriterionResult: { resourceName: `customers/${customerId}/adGroupCriteria/${groupId}~5001` } }, { campaignCriterionResult: { resourceName: `customers/${customerId}/campaignCriteria/${campaignId}~6001` } }, { campaignCriterionResult: { resourceName: `customers/${customerId}/campaignCriteria/${campaignId}~6002` } }] };
-        if (mappingChange) app.db.prepare('UPDATE native_google_connections SET customer_id=? WHERE project_id=?').run('2222222222', projectId);
+        if (mappingChange) await app.sql.run('UPDATE native_google_connections SET customer_id=? WHERE project_id=?', '2222222222', projectId);
       }
     } else throw new Error('Unexpected native Google request ' + url.href);
     return new Response(JSON.stringify(result));
@@ -72,36 +73,36 @@ test('native Google Shopping uses an atomic paused resource graph, customer mapp
     assert.equal((await request(route + 'connection', { customerId: '123-456-7890' })).status, 400);
     let result = await request(route + 'connection', { customerId }); assert.equal(result.status, 200); assert.equal(result.data.account.currencyCode, 'USD'); assert.equal(result.data.account.testAccount, true);
     const ownerId = state.user.id, workspaceId = state.workspaces[0].id;
-    app.db.prepare('DELETE FROM instance_operators WHERE user_id=?').run(ownerId); assert.equal((await request(route + 'connection', { customerId })).status, 403); app.db.prepare('INSERT INTO instance_operators VALUES(?)').run(ownerId);
-    app.db.prepare('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?').run('viewer', ownerId, workspaceId); assert.equal((await request(route + 'shopping/create', {})).status, 403); app.db.prepare('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?').run('owner', ownerId, workspaceId);
+    await app.sql.run('DELETE FROM instance_operators WHERE user_id=?', ownerId); assert.equal((await request(route + 'connection', { customerId })).status, 403); await app.sql.run('INSERT INTO instance_operators VALUES(?)', ownerId);
+    await app.sql.run('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?', 'viewer', ownerId, workspaceId); assert.equal((await request(route + 'shopping/create', {})).status, 403); await app.sql.run('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?', 'owner', ownerId, workspaceId);
     const body = { name: 'Shopping launch', merchantId: '987654', feedLabel: 'AE_PRODUCTS', priority: 1, dailyBudget: 25, maxCpc: 1.5, countries: ['AE', 'SA'], euPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING', confirmCreate: true };
-    result = await request(route + 'shopping/create', { ...body, validateOnly: true }); assert.equal(result.status, 200); assert.equal(result.data.validated, true); assert.equal(creates.length, 0); assert.equal(app.store.list(projectId, 'campaigns').length, 0);
+    result = await request(route + 'shopping/create', { ...body, validateOnly: true }); assert.equal(result.status, 200); assert.equal(result.data.validated, true); assert.equal(creates.length, 0); assert.equal((await app.store.list(projectId, 'campaigns')).length, 0);
     for (const changes of [{ confirmCreate: false }, { status: 'ENABLED' }, { campaignType: 'VIDEO' }, { countries: ["AE'); DELETE FROM campaigns;"] }, { euPoliticalAdvertising: undefined }, { feedLabel: 'lowercase' }, { dailyBudget: 0.001 }, { maxCpc: -1 }]) { result = await request(route + 'shopping/create', { ...body, ...changes }); assert.equal(result.status, 400, JSON.stringify(changes)); }
     assert.equal(creates.length, 0);
-    result = await request(route + 'shopping/create', body, 'create-one-native'); assert.equal(result.status, 200); assert.equal(result.data.campaign.status, 'paused'); assert.equal(result.data.campaign.nativeProvider, 'googleAdsNative'); assert.equal(result.data.campaign.nativeCustomerId, customerId); assert.equal(creates.length, 1); assert.equal(app.store.list(projectId, 'campaigns').length, 1);
-    result = await request(route + 'shopping/create', body, 'create-one-native'); assert.equal(result.status, 200); assert.equal(creates.length, 1); assert.equal(app.store.list(projectId, 'campaigns').length, 1);
+    result = await request(route + 'shopping/create', body, 'create-one-native'); assert.equal(result.status, 200); assert.equal(result.data.campaign.status, 'paused'); assert.equal(result.data.campaign.nativeProvider, 'googleAdsNative'); assert.equal(result.data.campaign.nativeCustomerId, customerId); assert.equal(creates.length, 1); assert.equal((await app.store.list(projectId, 'campaigns')).length, 1);
+    result = await request(route + 'shopping/create', body, 'create-one-native'); assert.equal(result.status, 200); assert.equal(creates.length, 1); assert.equal((await app.store.list(projectId, 'campaigns')).length, 1);
     const campaignId = result.data.campaign.platformCampaignId;
     const safeRetry = { campaignId, status: 'PAUSED', confirmChange: true }, beforeAccountRead = updates.length;
     for (const failure of ['network', 'http', 'invalid']) { accountReadFailure = failure; result = await request(route + 'campaign/update', safeRetry, 'account-read-' + failure); assert.equal(result.status, 502); assert.equal(result.data.operation.status, 'failed', 'A failed read before any mutation must remain safely retryable.'); assert.equal(updates.length, beforeAccountRead); }
     accountReadFailure = undefined; result = await request(route + 'campaign/update', safeRetry, 'after-account-read-failure'); assert.equal(result.status, 200); assert.equal(updates.length, beforeAccountRead + 1, 'A fresh key can retry once the read-only preflight recovers.');
     const enable = { campaignId, status: 'ENABLED', enableCreatedChildren: true, confirmChange: true };
     lastCampaign.groupStatus = 'UNKNOWN'; const unknownChildWrites = updates.length; result = await request(route + 'campaign/update', enable); assert.equal(result.status, 403); assert.equal(updates.length, unknownChildWrites); lastCampaign.groupStatus = 'PAUSED';
-    result = await request(route + 'campaign/update', enable, 'enable-native-created-graph'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.enabledCreatedChildren, true); assert.equal(lastCampaign.status, 'ENABLED'); assert.equal(lastCampaign.groupStatus, 'ENABLED'); assert.equal(lastCampaign.adStatus, 'ENABLED'); assert.equal(updates.at(-1).mutateOperations.length, 3); assert.equal(app.store.list(projectId, 'campaigns')[0].status, 'active');
+    result = await request(route + 'campaign/update', enable, 'enable-native-created-graph'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.enabledCreatedChildren, true); assert.equal(lastCampaign.status, 'ENABLED'); assert.equal(lastCampaign.groupStatus, 'ENABLED'); assert.equal(lastCampaign.adStatus, 'ENABLED'); assert.equal(updates.at(-1).mutateOperations.length, 3); assert.equal((await app.store.list(projectId, 'campaigns'))[0].status, 'active');
     const enabledCount = updates.length; result = await request(route + 'campaign/update', enable, 'enable-native-created-graph'); assert.equal(result.status, 200); assert.equal(updates.length, enabledCount);
     result = await request(route + 'campaign/update', { campaignId, status: 'PAUSED', confirmChange: true }, 'pause-native-parent'); assert.equal(result.status, 200); assert.equal(lastCampaign.status, 'PAUSED'); assert.equal(lastCampaign.adStatus, 'ENABLED'); assert.equal(updates.at(-1).mutateOperations.length, 1);
     sharedBudget = true; const beforeShared = updates.length; result = await request(route + 'campaign/update', { campaignId, dailyBudget: 40, confirmChange: true }, 'reject-shared-native-budget'); assert.equal(result.status, 409); assert.equal(updates.length, beforeShared); sharedBudget = false;
-    result = await request(route + 'campaign/update', { campaignId, dailyBudget: 40, confirmChange: true }, 'update-native-budget'); assert.equal(result.status, 200); assert.equal(lastCampaign.budget, '40000000'); assert.equal(app.store.list(projectId, 'campaigns')[0].budget, 40);
+    result = await request(route + 'campaign/update', { campaignId, dailyBudget: 40, confirmChange: true }, 'update-native-budget'); assert.equal(result.status, 200); assert.equal(lastCampaign.budget, '40000000'); assert.equal((await app.store.list(projectId, 'campaigns'))[0].budget, 40);
     for (const period of ['CUSTOM_PERIOD', 'UNKNOWN', undefined]) { budgetPeriod = period; const count = updates.length; result = await request(route + 'campaign/update', { campaignId, dailyBudget: 45, confirmChange: true }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'GOOGLE_DAILY_BUDGET_REQUIRED'); assert.equal(updates.length, count, 'A total or unconfirmed budget must never be replaced with a daily amount.'); } budgetPeriod = 'DAILY';
     result = await request(route + 'campaign/cpc?' + new URLSearchParams({ campaignId })); assert.equal(result.status, 200); assert.equal(result.data.maxCpcMicros, '1500000'); assert.equal(result.data.currencyCode, 'USD');
     assert.equal((await request(route + 'campaign/cpc?campaignId=99999')).status, 409);
     const cpcBody = { campaignId, maxCpc: 2.75, confirmChange: true }, beforeCpc = updates.length;
     for (const changes of [{ confirmChange: false }, { maxCpc: 0 }, { maxCpc: '2.75' }, { maxCpc: 0.0000001 }, { adGroupId: 'foreign' }]) assert.equal((await request(route + 'campaign/cpc', { ...cpcBody, ...changes })).status, 400);
-    app.db.prepare('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?').run('viewer', ownerId, workspaceId); assert.equal((await request(route + 'campaign/cpc', cpcBody)).status, 403); app.db.prepare('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?').run('owner', ownerId, workspaceId);
+    await app.sql.run('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?', 'viewer', ownerId, workspaceId); assert.equal((await request(route + 'campaign/cpc', cpcBody)).status, 403); await app.sql.run('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?', 'owner', ownerId, workspaceId);
     biddingStrategy = 'TARGET_ROAS'; assert.equal((await request(route + 'campaign/cpc', cpcBody)).status, 409); biddingStrategy = 'MANUAL_CPC';
     for (const listing of [{ negative: true }, { negative: 'false' }, { listingGroup: { type: 'SUBDIVISION' } }, { listingGroup: { type: 'UNIT', parentAdGroupCriterion: 'parent' } }, { resourceName: `customers/${customerId}/adGroupCriteria/888~999` }]) { badListing = listing; assert.equal((await request(route + 'campaign/cpc', cpcBody)).status, 409); } badListing = {};
     listingRows = 2; assert.equal((await request(route + 'campaign/cpc', cpcBody)).status, 409); listingRows = 1;
     foreignListing = true; assert.equal((await request(route + 'campaign/cpc', cpcBody)).status, 409); foreignListing = false; assert.equal(updates.length, beforeCpc);
-    result = await request(route + 'campaign/cpc', cpcBody, 'change-shopping-cpc'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.maxCpcMicros, '2750000'); assert.equal(result.data.groupMaxCpcMicros, '2750000'); assert.equal(updates.at(-1).mutateOperations.length, 2); assert.equal(app.store.list(projectId, 'campaigns')[0].maxCpc, 2.75);
+    result = await request(route + 'campaign/cpc', cpcBody, 'change-shopping-cpc'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.maxCpcMicros, '2750000'); assert.equal(result.data.groupMaxCpcMicros, '2750000'); assert.equal(updates.at(-1).mutateOperations.length, 2); assert.equal((await app.store.list(projectId, 'campaigns'))[0].maxCpc, 2.75);
     const cpcCount = updates.length; result = await request(route + 'campaign/cpc', cpcBody, 'change-shopping-cpc'); assert.equal(result.status, 200); assert.equal(updates.length, cpcCount);
     let reached; const started = new Promise(resolve => { reached = resolve; }), held = new Promise(resolve => { releaseUpdate = resolve; });
     updateHook = async () => { updateHook = null; reached(); await held; };
@@ -115,7 +116,7 @@ test('native Google Shopping uses an atomic paused resource graph, customer mapp
     for (const blocked of blockedRequests) assert.deepEqual((await request(route + blocked.action, blocked.body, blocked.key)).data, blocked.receipt);
     assert.equal(updates.length, heldCount, 'Previously blocked keys remain unsent after the held action completes.');
     assert.equal((await request(route + 'campaign/update', { campaignId, status: 'PAUSED', confirmChange: true }, 'after-held-native-pause')).status, 200);
-    assert.equal((await request(route + 'campaign/update', heldBody, 'held-native-enable')).status, 200); assert.equal(lastCampaign.status, 'PAUSED'); assert.equal(app.store.list(projectId, 'campaigns')[0].status, 'paused');
+    assert.equal((await request(route + 'campaign/update', heldBody, 'held-native-enable')).status, 200); assert.equal(lastCampaign.status, 'PAUSED'); assert.equal((await app.store.list(projectId, 'campaigns'))[0].status, 'paused');
     failCpcReadback = true; const unknownCpc = { ...cpcBody, maxCpc: 3 }; result = await request(route + 'campaign/cpc', unknownCpc, 'unknown-shopping-cpc'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); const unknownCount = updates.length; result = await request(route + 'campaign/cpc', unknownCpc, 'new-key-shopping-cpc'); assert.equal(result.status, 409); assert.equal(updates.length, unknownCount); failCpcReadback = false;
     assert.equal((await request(route + 'campaign/update', { campaignId: '555', status: 'ENABLED', confirmChange: true })).status, 403);
     assert.equal((await request(route + 'campaign/update', { campaignId, status: 'ENABLED', dailyBudget: 40, confirmChange: true })).status, 400);
@@ -128,8 +129,8 @@ test('native Google Shopping uses an atomic paused resource graph, customer mapp
     result = await request(route + 'shopping/create', uncertainBody, 'fresh-native-duplicate'); assert.equal(result.status, 409); assert.equal(creates.length, count); badReceipt = false;
     readbackFailure = true; result = await request(route + 'shopping/create', { ...body, name: 'Readback unavailable' }, 'native-readback-failure'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); readbackFailure = false;
     badReadbackStatus = true; result = await request(route + 'shopping/create', { ...body, name: 'Unexpected active readback' }, 'native-active-readback'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); badReadbackStatus = false;
-    mappingChange = true; result = await request(route + 'shopping/create', { ...body, name: 'Mapping changed during creation' }, 'native-remapped-write'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal(app.store.list(projectId, 'campaigns').length, 1);
-  } finally { clearTimeout(timer); releaseUpdate?.(); await heldUpdate?.catch(() => {}); globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
+    mappingChange = true; result = await request(route + 'shopping/create', { ...body, name: 'Mapping changed during creation' }, 'native-remapped-write'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); assert.equal((await app.store.list(projectId, 'campaigns')).length, 1);
+  } finally { clearTimeout(timer); releaseUpdate?.(); await heldUpdate?.catch(() => {}); globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });
 
 test('native Google read-only connection tests save rotated OAuth tokens and never return secrets', async () => {

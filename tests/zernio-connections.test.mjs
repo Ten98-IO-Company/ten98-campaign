@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
@@ -10,10 +9,12 @@ import { transformWithOxc } from 'vite';
 import { handleZernioConnections } from '../server/zernio-connections.ts';
 import { handleIntegration } from '../server/integrations.ts';
 import { IntegrationError } from '../server/provider-core.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
+const pg = { skip: postgresSkip };
 const profileId = 'profile-a';
-function setup() {
-  const db = new DatabaseSync(':memory:'), calls = [], state = { accounts: [], accountActivity: true, malformed: false, receipt: null, failure: null, status: 'pending', authUrl: 'https://provider.example.test/authorize' };
+async function setup(t) {
+  const { db, sql } = await testDatabase(t), calls = [], state = { accounts: [], accountActivity: true, malformed: false, receipt: null, failure: null, status: 'pending', authUrl: 'https://provider.example.test/authorize' };
   const api = async (path, query = {}, body, key, method = body === undefined ? 'GET' : 'POST') => {
     calls.push({ path, query, body: structuredClone(body), key, method });
     if (path === '/accounts') { assert.deepEqual(query, { profileId }); return { accounts: state.accounts }; }
@@ -31,93 +32,82 @@ function setup() {
     let response; const context = { db, project: { id: 'project-a', zernioProfileId: profileId }, role, req: { method: action.endsWith('/oauth') ? 'GET' : 'POST', headers: { 'idempotency-key': key } }, url: new URL(`https://campaign.example.test/api/projects/project-a/integrations/connections/${action}${query}`), body: body || {}, config: { appUrl: 'https://campaign.example.test' }, send(status, data) { response = { status, data }; } };
     try { await handleZernioConnections(context, api, profileId, action); return response; } catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   }
-  return { db, calls, state, request };
+  return { db, sql, calls, state, request };
 }
 
-test('credential connections derive profile/state server-side, verify returned identity and never return secrets', async () => {
-  const { db, calls, request } = setup();
-  try {
-    for (const [platform, body, upstream] of [
-      ['bluesky', { identifier: 'brand.bsky.social', appPassword: 'fixture-app-password' }, '/connect/bluesky/credentials'],
-      ['wordpress', { siteUrl: 'https://brand.example.test/blog', username: 'editor', applicationPassword: 'fixture application password' }, '/connect/wordpress/token'],
-      ['shopify', { shop: 'Brand-Shop.myshopify.com', accessToken: 'fixture-admin-token' }, '/connect/shopify/token'],
-      ['whop', { apiKey: 'fixture-whop-key' }, '/connect/whop-ads/credentials'],
-      ['telegram', { chatId: '@brandchannel' }, '/connect/telegram'],
-    ]) {
-      const key = 'connect-' + platform, result = await request(platform + '/credentials', { body, key }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete'); assert.equal(JSON.stringify(result).includes('never-return'), false);
-      const call = calls.findLast(row => row.path === upstream); assert.ok(call); assert.equal(call.key, key);
-      if (platform === 'bluesky') { assert.equal(call.body.state, 'api-user-profile-a'); assert.equal(call.body.profileId, undefined); } else assert.equal(call.body.profileId, profileId);
-      if (platform === 'shopify') assert.equal(call.body.shop, 'brand-shop.myshopify.com');
-      const before = calls.length; assert.deepEqual(await request(platform + '/credentials', { body, key }), result); assert.equal(calls.length, before);
-    }
-    for (const role of ['editor', 'viewer']) { const before = calls.length; assert.equal((await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'fixture' }, role })).status, 403); assert.equal(calls.length, before); }
-    assert.equal((await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'fixture', profileId: 'outside' } })).status, 400);
-    for (const siteUrl of ['http://brand.example.test', 'https://127.0.0.1/', 'https://user:password@brand.example.test/', 'https://brand.example.test/?token=hidden']) assert.equal((await request('wordpress/credentials', { body: { siteUrl, username: 'user', applicationPassword: 'fixture' } })).status, 400);
-  } finally { db.close(); }
+test('credential connections derive profile/state server-side, verify returned identity and never return secrets', pg, async t => {
+  const { calls, request } = await setup(t);
+  for (const [platform, body, upstream] of [
+    ['bluesky', { identifier: 'brand.bsky.social', appPassword: 'fixture-app-password' }, '/connect/bluesky/credentials'],
+    ['wordpress', { siteUrl: 'https://brand.example.test/blog', username: 'editor', applicationPassword: 'fixture application password' }, '/connect/wordpress/token'],
+    ['shopify', { shop: 'Brand-Shop.myshopify.com', accessToken: 'fixture-admin-token' }, '/connect/shopify/token'],
+    ['whop', { apiKey: 'fixture-whop-key' }, '/connect/whop-ads/credentials'],
+    ['telegram', { chatId: '@brandchannel' }, '/connect/telegram'],
+  ]) {
+    const key = 'connect-' + platform, result = await request(platform + '/credentials', { body, key }); assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete'); assert.equal(JSON.stringify(result).includes('never-return'), false);
+    const call = calls.findLast(row => row.path === upstream); assert.ok(call); assert.equal(call.key, key);
+    if (platform === 'bluesky') { assert.equal(call.body.state, 'api-user-profile-a'); assert.equal(call.body.profileId, undefined); } else assert.equal(call.body.profileId, profileId);
+    if (platform === 'shopify') assert.equal(call.body.shop, 'brand-shop.myshopify.com');
+    const before = calls.length; assert.deepEqual(await request(platform + '/credentials', { body, key }), result); assert.equal(calls.length, before);
+  }
+  for (const role of ['editor', 'viewer']) { const before = calls.length; assert.equal((await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'fixture' }, role })).status, 403); assert.equal(calls.length, before); }
+  assert.equal((await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'fixture', profileId: 'outside' } })).status, 400);
+  for (const siteUrl of ['http://brand.example.test', 'https://127.0.0.1/', 'https://user:password@brand.example.test/', 'https://brand.example.test/?token=hidden']) assert.equal((await request('wordpress/credentials', { body: { siteUrl, username: 'user', applicationPassword: 'fixture' } })).status, 400);
 });
 
-test('accepted malformed or contradictory connections stay uncertain and changed credentials cannot bypass review', async () => {
+test('accepted malformed or contradictory connections stay uncertain and changed credentials cannot bypass review', pg, async t => {
   for (const receipt of [{}, { account: { _id: 'bluesky-a', platform: 'facebook' } }, { account: { _id: 'outside', platform: 'bluesky' } }, { account: { _id: 'bluesky-a', platform: 'bluesky', profileId: 'outside' } }]) {
-    const { db, calls, state, request } = setup();
-    try {
-      state.receipt = receipt; const result = await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'fixture' } }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
-      const writes = calls.filter(row => row.method === 'POST').length;
-      assert.equal((await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'replacement-fixture' } })).status, 409); assert.equal(calls.filter(row => row.method === 'POST').length, writes);
-    } finally { db.close(); }
+    const { calls, state, request } = await setup(t);
+    state.receipt = receipt; const result = await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'fixture' } }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
+    const writes = calls.filter(row => row.method === 'POST').length;
+    assert.equal((await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'replacement-fixture' } })).status, 409); assert.equal(calls.filter(row => row.method === 'POST').length, writes);
   }
 });
 
-test('provider credential errors cannot echo passwords into application receipts', async () => {
-  const { db, state, request } = setup();
-  try { state.failure = new IntegrationError(401, 'INVALID_CREDENTIALS', 'Rejected fixture-secret-password'); const result = await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'fixture-secret-password' } }); assert.equal(result.status, 401); assert.equal(JSON.stringify(result).includes('fixture-secret-password'), false); assert.equal(db.prepare('SELECT response FROM integration_operations').get().response.includes('fixture-secret-password'), false); }
-  finally { db.close(); }
+test('provider credential errors cannot echo passwords into application receipts', pg, async t => {
+  const { sql, state, request } = await setup(t);
+  state.failure = new IntegrationError(401, 'INVALID_CREDENTIALS', 'Rejected fixture-secret-password'); const result = await request('bluesky/credentials', { body: { identifier: 'brand.bsky.social', appPassword: 'fixture-secret-password' } }); assert.equal(result.status, 401); assert.equal(JSON.stringify(result).includes('fixture-secret-password'), false); assert.equal((await sql.get('SELECT response FROM integration_operations')).response.includes('fixture-secret-password'), false);
 });
 
-test('store OAuth validates domains/callback URLs and exposes only a fresh secure handoff', async () => {
-  const { db, calls, state, request } = setup();
-  try {
-    assert.equal((await request('shopify/oauth', { query: '?shop=brand-shop' })).status, 200); assert.equal(calls.at(-1).query.shop, 'brand-shop.myshopify.com'); assert.equal(new URL(calls.at(-1).query.redirect_url).searchParams.get('project'), 'project-a');
-    for (const shop of ['https://brand.myshopify.com', 'brand.example.com', 'brand/path', '-bad']) assert.equal((await request('shopify/oauth', { query: '?shop=' + encodeURIComponent(shop) })).status, 400);
-    for (const authUrl of ['http://provider.example.test', 'javascript:alert(1)', 'https://user:secret@provider.example.test']) { state.authUrl = authUrl; assert.equal((await request('wordpress/oauth')).status, 502); }
-  } finally { db.close(); }
+test('store OAuth validates domains/callback URLs and exposes only a fresh secure handoff', pg, async t => {
+  const { calls, state, request } = await setup(t);
+  assert.equal((await request('shopify/oauth', { query: '?shop=brand-shop' })).status, 200); assert.equal(calls.at(-1).query.shop, 'brand-shop.myshopify.com'); assert.equal(new URL(calls.at(-1).query.redirect_url).searchParams.get('project'), 'project-a');
+  for (const shop of ['https://brand.myshopify.com', 'brand.example.com', 'brand/path', '-bad']) assert.equal((await request('shopify/oauth', { query: '?shop=' + encodeURIComponent(shop) })).status, 400);
+  for (const authUrl of ['http://provider.example.test', 'javascript:alert(1)', 'https://user:secret@provider.example.test']) { state.authUrl = authUrl; assert.equal((await request('wordpress/oauth')).status, 502); }
 });
 
-test('Telegram access codes are bound to a project/profile and connected status requires a scoped account readback', async () => {
-  const { db, calls, state, request } = setup();
-  try {
-    const result = await request('telegram/code', { body: {} }); assert.equal(result.status, 200); assert.equal(result.data.code, 'ZRN-ABC123');
-    const before = calls.length; assert.equal((await request('telegram/status', { body: { code: 'ZRN-FOREIGN' } })).status, 403); assert.equal(calls.length, before);
-    assert.equal((await request('telegram/status', { body: { code: result.data.code } })).data.status, 'pending'); state.status = 'connected';
-    assert.equal((await request('telegram/status', { body: { code: result.data.code } })).status, 502);
-    state.accounts = [{ _id: 'telegram-a', platform: 'telegram', profileId, isActive: true }]; const confirmed = await request('telegram/status', { body: { code: result.data.code } }); assert.equal(confirmed.data.account.accountId, 'telegram-a');
-    db.prepare('UPDATE integration_telegram_codes SET profile_id=?').run('outside'); assert.equal((await request('telegram/status', { body: { code: result.data.code } })).status, 403);
-    db.prepare('UPDATE integration_telegram_codes SET profile_id=?,expires_at=?').run(profileId, '2020-01-01'); const count = calls.length; assert.equal((await request('telegram/status', { body: { code: result.data.code } })).data.status, 'expired'); assert.equal(calls.length, count);
-  } finally { db.close(); }
+test('Telegram access codes are bound to a project/profile and connected status requires a scoped account readback', pg, async t => {
+  const { sql, calls, state, request } = await setup(t);
+  const result = await request('telegram/code', { body: {} }); assert.equal(result.status, 200); assert.equal(result.data.code, 'ZRN-ABC123');
+  const before = calls.length; assert.equal((await request('telegram/status', { body: { code: 'ZRN-FOREIGN' } })).status, 403); assert.equal(calls.length, before);
+  assert.equal((await request('telegram/status', { body: { code: result.data.code } })).data.status, 'pending'); state.status = 'connected';
+  assert.equal((await request('telegram/status', { body: { code: result.data.code } })).status, 502);
+  state.accounts = [{ _id: 'telegram-a', platform: 'telegram', profileId, isActive: true }]; const confirmed = await request('telegram/status', { body: { code: result.data.code } }); assert.equal(confirmed.data.account.accountId, 'telegram-a');
+  await sql.run('UPDATE integration_telegram_codes SET profile_id=?', 'outside'); assert.equal((await request('telegram/status', { body: { code: result.data.code } })).status, 403);
+  await sql.run('UPDATE integration_telegram_codes SET profile_id=?,expires_at=?', profileId, '2020-01-01'); const count = calls.length; assert.equal((await request('telegram/status', { body: { code: result.data.code } })).data.status, 'expired'); assert.equal(calls.length, count);
 });
 
-test('Telegram direct and code confirmation require positive scoped account activity', async () => {
+test('Telegram direct and code confirmation require positive scoped account activity', pg, async t => {
   for (const flow of ['direct', 'code']) for (const activity of [undefined, null, true]) {
-    const { db, calls, state, request } = setup(), valid = activity === true;
-    try {
-      state.accountActivity = activity;
-      const body = flow === 'direct' ? { chatId: '@brandchannel' } : { code: (await request('telegram/code', { body: {} })).data.code };
-      if (flow === 'code') { state.status = 'connected'; state.accounts = [{ _id: 'telegram-a', platform: 'telegram', profileId, ...(activity === undefined ? {} : { isActive: activity }) }]; }
-      const route = flow === 'direct' ? 'telegram/credentials' : 'telegram/status', key = 'telegram-activity-proof';
-      const result = await request(route, { body, key });
-      assert.equal(result.status, valid ? 200 : flow === 'direct' ? 409 : 502, flow + '/' + String(activity));
-      assert.equal(result.data.account?.accountId, valid ? 'telegram-a' : undefined);
-      if (flow === 'direct') {
-        assert.equal(result.data.operation.status, valid ? 'complete' : 'uncertain');
-        const beforeReplay = calls.length; state.accountActivity = true;
-        assert.equal((await request(route, { body, key })).status, valid ? 200 : 409);
-        assert.equal(calls.length, beforeReplay, 'A dispatched ambiguous connection cannot send again or become confirmed on replay.');
-        assert.equal(calls.filter(row => row.path === '/connect/telegram' && row.method === 'POST').length, 1);
-      } else {
-        state.accounts[0].isActive = true;
-        assert.equal((await request(route, { body })).data.account.accountId, 'telegram-a', 'A status poll may confirm after positive activity becomes readable.');
-        assert.equal(calls.filter(row => row.path === '/connect/telegram' && row.method === 'POST').length, 0, 'Code status confirmation never reconnects the account.');
-      }
-    } finally { db.close(); }
+    const { calls, state, request } = await setup(t), valid = activity === true;
+    state.accountActivity = activity;
+    const body = flow === 'direct' ? { chatId: '@brandchannel' } : { code: (await request('telegram/code', { body: {} })).data.code };
+    if (flow === 'code') { state.status = 'connected'; state.accounts = [{ _id: 'telegram-a', platform: 'telegram', profileId, ...(activity === undefined ? {} : { isActive: activity }) }]; }
+    const route = flow === 'direct' ? 'telegram/credentials' : 'telegram/status', key = 'telegram-activity-proof';
+    const result = await request(route, { body, key });
+    assert.equal(result.status, valid ? 200 : flow === 'direct' ? 409 : 502, flow + '/' + String(activity));
+    assert.equal(result.data.account?.accountId, valid ? 'telegram-a' : undefined);
+    if (flow === 'direct') {
+      assert.equal(result.data.operation.status, valid ? 'complete' : 'uncertain');
+      const beforeReplay = calls.length; state.accountActivity = true;
+      assert.equal((await request(route, { body, key })).status, valid ? 200 : 409);
+      assert.equal(calls.length, beforeReplay, 'A dispatched ambiguous connection cannot send again or become confirmed on replay.');
+      assert.equal(calls.filter(row => row.path === '/connect/telegram' && row.method === 'POST').length, 1);
+    } else {
+      state.accounts[0].isActive = true;
+      assert.equal((await request(route, { body })).data.account.accountId, 'telegram-a', 'A status poll may confirm after positive activity becomes readable.');
+      assert.equal(calls.filter(row => row.path === '/connect/telegram' && row.method === 'POST').length, 0, 'Code status confirmation never reconnects the account.');
+    }
   }
 });
 
@@ -130,13 +120,18 @@ test('connection UI retains write identity after gateway/pending responses and i
   assert.equal(keys.current.size, 1); assert.equal(new Set(calls.map(row => row[3])).size, 1); current = false; await assert.rejects(write('/connections/bluesky/credentials', {}), { name: 'AbortError' }); assert.equal(calls.length, 3);
 });
 
-test('credential connection dispatch uses authenticated mapped-profile integration routing', async () => {
-  const db = new DatabaseSync(':memory:'), previous = globalThis.fetch, calls = []; let response;
+test('credential connection dispatch uses authenticated mapped-profile integration routing', pg, async t => {
+  const { db, pool } = await testDatabase(t), previous = globalThis.fetch, calls = []; let response;
+  await pool.query(`INSERT INTO workspaces (id, name) VALUES ('w', 'W'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'w', 'Project A', '${profileId}')`);
   try {
     globalThis.fetch = async (target, options = {}) => { const url = new URL(target); calls.push({ url, options }); assert.equal(options.headers.Authorization, 'Bearer synthetic-key'); const body = options.body && JSON.parse(options.body); return new Response(JSON.stringify(url.pathname.endsWith('/users') ? { currentUserId: 'api-user' } : url.pathname.endsWith('/accounts') ? { accounts: [{ _id: 'blue-a', platform: 'bluesky', username: 'brand.bsky.social', profileId, isActive: true }] } : { account: { _id: 'blue-a', platform: 'bluesky', username: body.identifier } })); };
-    await handleIntegration({ db, req: { method: 'POST', headers: { 'idempotency-key': 'router-connection' } }, url: new URL('https://campaign.example.test/api/projects/project-a/integrations/connections/bluesky/credentials'), project: { id: 'project-a', zernioProfileId: profileId }, config: { env: { ZERNIO_API_KEY: 'synthetic-key' } }, role: 'owner', body: { identifier: 'brand.bsky.social', appPassword: 'fixture' }, send(status, data) { response = { status, data }; } });
+    const dispatch = () => handleIntegration({ db, req: { method: 'POST', headers: { 'idempotency-key': 'router-connection' } }, url: new URL('https://campaign.example.test/api/projects/project-a/integrations/connections/bluesky/credentials'), project: { id: 'project-a', zernioProfileId: profileId }, config: { env: { ZERNIO_API_KEY: 'synthetic-key' } }, role: 'owner', body: { identifier: 'brand.bsky.social', appPassword: 'fixture' }, send(status, data) { response = { status, data }; } });
+    await dispatch();
     assert.equal(response.status, 200); assert.equal(response.data.account.accountId, 'blue-a'); assert.equal(calls[0].url.pathname, '/api/v1/users');
-  } finally { globalThis.fetch = previous; db.close(); }
+    // A same-key retry replays the receipt: exactly one credential request reached the provider transport.
+    const before = calls.length; await dispatch(); assert.equal(response.status, 200); assert.equal(calls.length, before);
+    assert.equal(calls.filter(call => call.url.pathname === '/api/v1/connect/bluesky/credentials').length, 1);
+  } finally { globalThis.fetch = previous; }
 });
 
 const connectionSource = await readFile(new URL('../src/ZernioConnection.tsx', import.meta.url), 'utf8');

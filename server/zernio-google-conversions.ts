@@ -1,10 +1,9 @@
-import type { DatabaseSync } from 'node:sqlite';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 type Ctx = OperationContext & { body: any };
 import { createHash } from 'node:crypto';
-import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts, campaignTree, validProviderInstant, fail, reportObject as object } from './provider-core.ts';
+import { IntegrationError, operation, claimFence, releaseFence, scopedAccounts, requireAccount, adAccounts, campaignTree, validProviderInstant, fail, reportObject as object } from './provider-core.ts';
 
-const writers = new Set(['owner', 'admin', 'editor']), initialized = new WeakSet();
+const writers = new Set(['owner', 'admin', 'editor']);
 const categories = ['DEFAULT', 'PAGE_VIEW', 'PURCHASE', 'SIGNUP', 'DOWNLOAD', 'ADD_TO_CART', 'BEGIN_CHECKOUT', 'SUBSCRIBE_PAID', 'PHONE_CALL_LEAD', 'IMPORTED_LEAD', 'SUBMIT_LEAD_FORM', 'BOOK_APPOINTMENT', 'REQUEST_QUOTE', 'GET_DIRECTIONS', 'OUTBOUND_CLICK', 'CONTACT', 'ENGAGEMENT', 'STORE_VISIT', 'STORE_SALE', 'QUALIFIED_LEAD', 'CONVERTED_LEAD'];
 const actionSettings = ['name', 'status', 'defaultValue', 'alwaysUseDefaultValue', 'category', 'countingType', 'defaultCurrency', 'clickThroughLookbackWindowDays', 'viewThroughLookbackWindowDays', 'primaryForGoal'];
 const invalid = (uncertain = false) => fail(502, 'INVALID_GOOGLE_CONVERSION_RESPONSE', 'Zernio returned unreadable or unscoped Google conversion settings.', uncertain);
@@ -100,15 +99,13 @@ function selectedActions(value: any, available: any) {
   if (!Array.isArray(value) || !value.length || value.length > 100 || value.some(item => !numeric(item) || !available.some((row: ProviderRecord) => row.id === item && row.status !== 'REMOVED')) || new Set(value).size !== value.length) fail(400, 'GOOGLE_CONVERSION_ACTION_OUTSIDE_CUSTOMER', 'Choose between 1 and 100 distinct non-removed conversion actions from this account.');
   return [...value].sort();
 }
-function tables(db: DatabaseSync) { if (initialized.has(db)) return; db.exec('CREATE TABLE IF NOT EXISTS zernio_google_conversion_mutations(customer_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)'); initialized.add(db); }
 async function mutate(context: Ctx, scope: any, run: any) {
-  tables(context.db);
   return operation(context, async key => {
-    const values = [scope.adAccountId, context.project.id, key], old = context.db.prepare('SELECT m.request_key,o.status FROM zernio_google_conversion_mutations m LEFT JOIN integration_operations o ON o.project_id=m.project_id AND o.request_key=m.request_key WHERE m.customer_id=?').get(scope.adAccountId) as ProviderRecord;
-    if (old && (!old.status || ['pending', 'uncertain'].includes(old.status))) fail(409, 'GOOGLE_CONVERSION_PREVIOUS_OUTCOME_UNRESOLVED', 'This new change was not sent. An administrator must review the previous action for this Google customer in provider outcomes first.');
-    context.db.prepare('INSERT INTO zernio_google_conversion_mutations VALUES(?,?,?) ON CONFLICT(customer_id) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(...values);
-    try { const result = await run(key); context.db.prepare('DELETE FROM zernio_google_conversion_mutations WHERE customer_id=? AND project_id=? AND request_key=?').run(...values); return result; }
-    catch (error) { if (error instanceof IntegrationError && !error.uncertain) context.db.prepare('DELETE FROM zernio_google_conversion_mutations WHERE customer_id=? AND project_id=? AND request_key=?').run(...values); throw error; }
+    // One change per Google customer at a time; an unresolved earlier change keeps the fence held.
+    const fence = ['zernio_google_conversion_mutations', scope.adAccountId, context.project.id, key, 'customer_id'] as const;
+    if (!await claimFence(context.db, ...fence)) fail(409, 'GOOGLE_CONVERSION_PREVIOUS_OUTCOME_UNRESOLVED', 'This new change was not sent. An administrator must review the previous action for this Google customer in provider outcomes first.');
+    try { const result = await run(key); await releaseFence(context.db, ...fence); return result; }
+    catch (error) { if (error instanceof IntegrationError && !error.uncertain) await releaseFence(context.db, ...fence); throw error; }
   }, ['google-conversions', scope.adAccountId]);
 }
 function confirmed(check: any) { if (!check) invalid(true); }

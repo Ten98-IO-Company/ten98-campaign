@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { handleIntegration } from '../server/integrations.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
 // Independent provider contract: GET /ads/{id} enriches RSA creative only with
 // explicit cache metadata; cachedAt:null + stale:false is successful enrichment.
 // https://docs.zernio.com/ad-campaigns/get-ad
 // https://docs.zernio.com/platforms/google-ads/create-ads#edit-responsive-search-ad-text
-async function fixture(run) {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch;
+async function fixture(t, run) {
+  const { db, sql } = await testDatabase(t), originalFetch = globalThis.fetch;
   const project = { id: 'rsa-project', zernioProfileId: 'rsa-profile' };
   const ad = { _id: 'rsa-ad', profileId: project.zernioProfileId, platform: 'google', accountId: 'rsa-connection', platformAdAccountId: '1234567890', platformCampaignId: '12345', platformAdSetId: '67890', platformAdId: '111', advertisingChannelType: 'SEARCH', status: 'paused' };
   const initial = { headlines: [{ text: 'Pinned headline', pinnedField: 'HEADLINE_1' }, { text: 'Second headline' }, { text: 'Third headline' }], descriptions: [{ text: 'Pinned description', pinnedField: 'DESCRIPTION_1' }, { text: 'Second description' }], finalUrls: ['https://brand.example/one', 'https://brand.example/two'] };
@@ -39,10 +39,10 @@ async function fixture(run) {
     return response;
   }
   const review = async () => { const result = await invoke('ads/details?adId=rsa-ad'); assert.equal(result.status, 200, JSON.stringify(result)); return result.data.creativeReview; };
-  try { await run({ db, state, ad, initial, invoke, review }); } finally { globalThis.fetch = originalFetch; db.close(); }
+  try { await run({ sql, state, ad, initial, invoke, review }); } finally { globalThis.fetch = originalFetch; }
 }
 
-test('RSA reviews require explicit recent creative enrichment and verified native scope', () => fixture(async ({ state, review, invoke }) => {
+test('RSA reviews require explicit recent creative enrichment and verified native scope', { skip: postgresSkip }, t => fixture(t, async ({ state, review, invoke }) => {
   for (const metadata of [{ cachedAt: null, stale: false }, { cachedAt: new Date().toISOString(), stale: false }]) {
     state.metadata = metadata; const current = await review();
     assert.match(current.version, /^[a-f0-9]{64}$/); assert.ok(Date.parse(current.expiresAt) > Date.now()); assert.ok(Date.parse(current.observedAt) <= Date.now());
@@ -57,7 +57,7 @@ test('RSA reviews require explicit recent creative enrichment and verified nativ
   assert.equal(state.writes.length, 0);
 }));
 
-test('RSA native ad identity cannot change between the reviewed snapshot and dispatch', () => fixture(async ({ state, ad, review, invoke }) => {
+test('RSA native ad identity cannot change between the reviewed snapshot and dispatch', { skip: postgresSkip }, t => fixture(t, async ({ state, ad, review, invoke }) => {
   const current = await review(), body = { adId: ad._id, expectedCreativeVersion: current.version, finalUrls: ['https://brand.example/changed'] };
   state.detailOverrides = { platformAdId: '222' };
   const mismatched = await invoke('ads/edit', body);
@@ -69,7 +69,7 @@ test('RSA native ad identity cannot change between the reviewed snapshot and dis
   assert.equal(state.writes.length, 0, 'Neither a list/detail mismatch nor a changed native ad may reach the provider mutation.');
 }));
 
-test('RSA full-list edits preserve pins and all retained URLs, confirm readback and replay the same receipt', () => fixture(async ({ state, initial, review, invoke }) => {
+test('RSA full-list edits preserve pins and all retained URLs, confirm readback and replay the same receipt', { skip: postgresSkip }, t => fixture(t, async ({ state, initial, review, invoke }) => {
   const current = await review(), body = { adId: 'rsa-ad', expectedCreativeVersion: current.version, headlines: ['Third headline', 'Pinned headline', 'Changed second headline'], finalUrls: ['https://brand.example/new', initial.finalUrls[1]] };
   const result = await invoke('ads/edit', body, 'rsa-success-receipt');
   assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.operation.status, 'complete');
@@ -79,7 +79,7 @@ test('RSA full-list edits preserve pins and all retained URLs, confirm readback 
   assert.equal(state.calls.filter(call => call.path === '/api/v1/ads/rsa-ad' && call.method === 'GET').length, 3, 'Review, pre-dispatch check and confirmed post-write readback all use the actual detail endpoint.');
 }));
 
-test('RSA structured lists can replace pinned text, move pins, unpin and remove entries after a current review', () => fixture(async ({ state, initial, review, invoke }) => {
+test('RSA structured lists can replace pinned text, move pins, unpin and remove entries after a current review', { skip: postgresSkip }, t => fixture(t, async ({ state, initial, review, invoke }) => {
   const headlines = [{ text: 'Replacement pinned headline', pinnedField: 'HEADLINE_3' }, { text: 'Second headline', pinnedField: 'HEADLINE_1' }, { text: 'Third headline' }, { text: 'Fourth headline' }];
   let body = { adId: 'rsa-ad', expectedCreativeVersion: (await review()).version, headlines, descriptions: [{ text: 'Pinned description' }, { text: 'Second description', pinnedField: 'DESCRIPTION_2' }] };
   let result = await invoke('ads/edit', body, 'rsa-structured-update');
@@ -93,7 +93,7 @@ test('RSA structured lists can replace pinned text, move pins, unpin and remove 
   assert.deepEqual(state.creative.descriptions, [{ text: 'Pinned description' }, { text: 'Second description', pinnedField: 'DESCRIPTION_2' }]);
 }));
 
-test('RSA structured edits validate exact text, positions and complete lists before dispatch', () => fixture(async ({ state, initial, review, invoke }) => {
+test('RSA structured edits validate exact text, positions and complete lists before dispatch', { skip: postgresSkip }, t => fixture(t, async ({ state, initial, review, invoke }) => {
   const base = { adId: 'rsa-ad', expectedCreativeVersion: (await review()).version };
   for (const headlines of [
     [{ text: 'One' }, { text: 'Two' }],
@@ -112,7 +112,7 @@ test('RSA structured edits validate exact text, positions and complete lists bef
   assert.equal(state.writes.length, 0, 'Pin-only provider changes invalidate the reviewed version.');
 }));
 
-test('RSA pin mismatches after an accepted write retain an uncertain receipt and block duplicate writes', () => fixture(async ({ db, state, review, invoke }) => {
+test('RSA pin mismatches after an accepted write retain an uncertain receipt and block duplicate writes', { skip: postgresSkip }, t => fixture(t, async ({ sql, state, review, invoke }) => {
   const body = { adId: 'rsa-ad', expectedCreativeVersion: (await review()).version, headlines: [{ text: 'Pinned headline' }, { text: 'Second headline' }, { text: 'Third headline', pinnedField: 'HEADLINE_2' }] };
   state.afterWrite = () => { state.creative.headlines[0].pinnedField = 'HEADLINE_1'; };
   const result = await invoke('ads/edit', body, 'rsa-pin-readback');
@@ -121,11 +121,11 @@ test('RSA pin mismatches after an accepted write retain an uncertain receipt and
   const blocked = await invoke('ads/edit', body, 'rsa-pin-new-request');
   assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(blocked.data.operation.status, 'failed'); assert.equal(state.writes.length, 1, 'A new key cannot blindly repeat the same unresolved request.');
   assert.notEqual(blocked.data.operation.id, result.data.operation.id);
-  db.prepare("UPDATE integration_operations SET status='reviewed-not-applied' WHERE id=?").run(result.data.operation.id);
+  await sql.run("UPDATE integration_operations SET status='reviewed-not-applied' WHERE id=?", result.data.operation.id);
   assert.deepEqual((await invoke('ads/edit', body, 'rsa-pin-new-request')).data, blocked.data); assert.equal(state.writes.length, 1);
 }));
 
-test('RSA edits reject missing or changed reviews, pinned removals, stale reads, and role or mapping races before mutation', () => fixture(async ({ state, review, invoke }) => {
+test('RSA edits reject missing or changed reviews, pinned removals, stale reads, and role or mapping races before mutation', { skip: postgresSkip }, t => fixture(t, async ({ state, review, invoke }) => {
   const current = await review(), body = { adId: 'rsa-ad', expectedCreativeVersion: current.version, headlines: ['Pinned headline', 'New second headline', 'Third headline'] };
   assert.equal((await invoke('ads/edit', { ...body, expectedCreativeVersion: undefined })).data.error.code, 'GOOGLE_CREATIVE_REVIEW_REQUIRED');
   assert.equal((await invoke('ads/edit', { ...body, expectedCreativeVersion: '0'.repeat(64) })).data.error.code, 'GOOGLE_CREATIVE_REVIEW_CHANGED');
@@ -149,8 +149,8 @@ test('RSA edits reject missing or changed reviews, pinned removals, stale reads,
   assert.equal((await invoke('ads/ad-status', { adId: 'rsa-ad', status: 'paused' })).status, 200, 'A creative read outage must not block an independent delivery switch.');
 }));
 
-test('RSA unconfirmed creative or unreadable readback preserves an uncertain receipt without another write', async () => {
-  for (const mode of ['no-application', 'lost-readback']) await fixture(async ({ state, review, invoke }) => {
+test('RSA unconfirmed creative or unreadable readback preserves an uncertain receipt without another write', { skip: postgresSkip }, async t => {
+  for (const mode of ['no-application', 'lost-readback']) await fixture(t, async ({ state, review, invoke }) => {
     const current = await review(), body = { adId: 'rsa-ad', expectedCreativeVersion: current.version, finalUrls: ['https://brand.example/reviewed-change'] };
     state.apply = mode !== 'no-application'; state.loseReadback = mode === 'lost-readback';
     const result = await invoke('ads/edit', body, 'rsa-unknown-receipt');

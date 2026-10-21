@@ -4,10 +4,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('record deletion preserves assignments and administrators can remove sample data without touching real or other-project records', async () => {
-  const dataDir = await mkdtemp(join(tmpdir(), 'ten98-record-lifecycle-')), origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, env: {}, appUrl: origin });
+test('record deletion preserves assignments and administrators can remove sample data without touching real or other-project records', { skip: postgresSkip }, async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'ten98-record-lifecycle-')), origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir, env: {}, appUrl: origin });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${app.server.address().port}`, secret = 'record lifecycle fixture password'; let ownerCookie;
   async function request(path, { method = 'GET', body, cookie = ownerCookie } = {}) {
@@ -18,12 +18,12 @@ test('record deletion preserves assignments and administrators can remove sample
     const setup = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Lifecycle owner', email: 'lifecycle-owner@example.test', password: secret, sample: true } });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const initial = (await request('/api/state')).data, projectId = initial.projectId, project = `/api/projects/${projectId}`, workspaceId = initial.workspaces[0].id;
-    const hash = app.db.prepare('SELECT password FROM users WHERE id=?').get(initial.user.id).password;
+    const hash = (await app.sql.get('SELECT password FROM users WHERE id=?', initial.user.id)).password;
     const cookies = {};
     for (const role of ['admin', 'editor', 'viewer']) {
       const id = randomUUID(), email = `lifecycle-${role}@example.test`;
-      app.db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(id, role, email, hash);
-      app.db.prepare('INSERT INTO memberships VALUES(?,?,?)').run(workspaceId, id, role);
+      await app.sql.run('INSERT INTO users VALUES(?,?,?,?)', id, role, email, hash);
+      await app.sql.run('INSERT INTO memberships VALUES(?,?,?)', workspaceId, id, role);
       cookies[role] = (await request('/api/auth/login', { method: 'POST', body: { email, password: secret }, cookie: null })).cookie;
     }
     async function create(collection, body) { const result = await request(`${project}/${collection}`, { method: 'POST', body }); assert.equal(result.status, 201); return result.data.record; }
@@ -31,17 +31,17 @@ test('record deletion preserves assignments and administrators can remove sample
       assert.equal((await request(project + '/campaigns', { method: 'POST', body: { name: 'Forged native receipt', [field]: 'forged' } })).status, 400);
     }
     for (const nativeProvider of ['googleAdsNative', 'microsoft']) {
-      const managed = app.store.create(projectId, 'campaigns', { name: 'Confirmed native campaign', nativeProvider, status: 'paused', budget: 25 });
+      const managed = await app.store.create(projectId, 'campaigns', { name: 'Confirmed native campaign', nativeProvider, status: 'paused', budget: 25 });
       assert.equal((await request(`${project}/campaigns/${managed.id}`, { method: 'PATCH', body: { status: 'active', budget: 100 } })).status, 400);
       assert.equal((await request(`${project}/campaigns/${managed.id}`, { method: 'DELETE' })).status, 400);
-      assert.equal(app.store.get(projectId, 'campaigns', managed.id).status, 'paused');
+      assert.equal((await app.store.get(projectId, 'campaigns', managed.id)).status, 'paused');
     }
     const campaign = await create('campaigns', { name: 'Keep my real campaign' }), provider = await create('providers', { name: 'Keep my real provider' }), asset = await create('assets', { name: 'Keep my real asset', url: 'https://cdn.example.com/real.jpg' });
     const post = await create('posts', { content: 'A real linked draft', platforms: ['facebook'], campaignId: campaign.id, assetId: asset.id });
     const placement = await create('placements', { name: 'A real booking', location: 'Dubai', providerId: provider.id });
     for (const [collection, record] of [['campaigns', campaign], ['assets', asset], ['providers', provider]]) {
       const result = await request(`${project}/${collection}/${record.id}`, { method: 'DELETE' });
-      assert.equal(result.status, 409); assert.match(result.data.error, /Remove its assignments/); assert.ok(app.store.get(projectId, collection, record.id));
+      assert.equal(result.status, 409); assert.match(result.data.error, /Remove its assignments/); assert.ok(await app.store.get(projectId, collection, record.id));
     }
     assert.equal((await request(`${project}/posts/${post.id}`, { method: 'PATCH', body: { content: 'Still editable after a rejected deletion' } })).status, 200);
     assert.equal((await request(`${project}/posts/${post.id}`, { method: 'PATCH', body: { campaignId: '', assetId: '' } })).status, 200);
@@ -51,8 +51,8 @@ test('record deletion preserves assignments and administrators can remove sample
 
     const linkedSample = initial.assets.find(record => record.sample), realWithSample = await create('posts', { content: 'Real draft using a sample creative', platforms: ['facebook'], assetId: linkedSample.id });
     const second = await request('/api/projects', { method: 'POST', body: { workspaceId, name: 'Other project' } });
-    const otherSample = app.store.create(second.data.project.id, 'campaigns', { name: 'Unrelated sample', sample: true });
-    const providerPost = app.store.create(projectId, 'posts', { content: 'Keep actual provider evidence', source: 'zernio', externalId: 'provider-live', status: 'published' });
+    const otherSample = await app.store.create(second.data.project.id, 'campaigns', { name: 'Unrelated sample', sample: true });
+    const providerPost = await app.store.create(projectId, 'posts', { content: 'Keep actual provider evidence', source: 'zernio', externalId: 'provider-live', status: 'published' });
     assert.equal((await request(project + '/sample-data', { method: 'DELETE', cookie: null })).status, 401);
     assert.equal((await request(project + '/sample-data', { method: 'DELETE', cookie: cookies.editor })).status, 403);
     assert.equal((await request(project + '/sample-data', { method: 'DELETE', cookie: cookies.viewer })).status, 403);
@@ -67,7 +67,7 @@ test('record deletion preserves assignments and administrators can remove sample
     for (const collection of ['campaigns', 'posts', 'placements', 'assets', 'providers', 'activity']) assert.equal(final[collection].some(row => row.sample), false, collection);
     for (const record of [post, realWithSample, providerPost]) assert.ok(final.posts.find(row => row.id === record.id));
     assert.ok(final.placements.find(row => row.id === placement.id));
-    assert.ok(app.store.get(second.data.project.id, 'campaigns', otherSample.id));
+    assert.ok(await app.store.get(second.data.project.id, 'campaigns', otherSample.id));
     assert.equal((await request(project + '/sample-data', { method: 'DELETE' })).data.removed, 0, 'Cleanup is safe to repeat.');
-  } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
