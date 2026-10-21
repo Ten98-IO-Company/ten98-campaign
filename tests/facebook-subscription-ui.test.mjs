@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
+import * as design from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 
@@ -21,12 +22,12 @@ async function browser(respond = async (_path, method) => method ? receipt() : s
   const useMemo = (compute, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) hooks[index] = { dependencies, value: compute() }; return hooks[index].value; };
   const useEffect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = async (...args) => { calls.push(args); return respond(...args); };
-  const Component = new Function('React', 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', code + ';return FacebookPageSubscription;')(React, useState, useRef, useEffect, useEffect, useMemo);
+  const Component = new Function('React', ...Object.keys(design), 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', code + ';return FacebookPageSubscription;')(React, ...Object.values(design), useState, useRef, useEffect, useEffect, useMemo);
   function paint(force = false) { dirty ||= force; for (let pass = 0; dirty; pass++) { assert.ok(pass < 20, 'Rendering settles.'); dirty = false; cursor = 0; tree = Component({ request, ...props }); while (queued.length) queued.shift()(); } }
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
-  const button = text => { const found = nodes(tree).find(node => node.type === 'button' && React.Children.toArray(node.props.children).join('') === text); assert.ok(found, text); return found; };
+  const button = text => { const found = nodes(tree).find(node => node.type === design.Button && React.Children.toArray(node.props.children).join('') === text); assert.ok(found, text); return found; };
   const click = text => { const result = button(text).props.onClick(); paint(); return result; };
-  const confirm = (checked = true) => { const input = nodes(tree).find(node => node.type === 'input' && node.props.type === 'checkbox'); assert.ok(input, 'Consequence acknowledgement'); input.props.onChange({ target: { checked } }); paint(); };
+  const confirm = (checked = true) => { const input = nodes(tree).find(node => node.type === design.Checkbox); assert.ok(input, 'Consequence acknowledgement'); input.props.onChange({ target: { checked } }); paint(); };
   const unmount = () => { for (const hook of hooks) hook?.close?.(); };
   paint(); await tick();
   return { calls, tick, click, button, confirm, html: () => renderToStaticMarkup(tree), handler: text => button(text).props.onClick, scope: value => { props = { ...props, ...value }; paint(true); }, rerender: () => paint(true), unmount,

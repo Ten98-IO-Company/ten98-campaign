@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
+import * as design from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioAccounts } from '../server/zernio-accounts.ts';
@@ -91,11 +92,11 @@ async function whatsappNumberUi(respond, initial = {}) {
   const useMemo = (compute, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) hooks[index] = { dependencies, value: compute() }; return hooks[index].value; };
   const useEffect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = async (...args) => { calls.push(args); return respond(...args); };
-  const Component = new Function('React', 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', code + ';return WhatsAppNumberStatus;')(React, useState, useRef, useEffect, useEffect, useMemo);
+  const Component = new Function('React', ...Object.keys(design), 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', code + ';return WhatsAppNumberStatus;')(React, ...Object.values(design), useState, useRef, useEffect, useEffect, useMemo);
   const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
   function paint(force = false) { if (!alive) return; dirty ||= force; for (let pass = 0; dirty; pass++) { assert.ok(pass < 20); dirty = false; cursor = 0; tree = Component({ request, ...props }); while (queued.length) queued.shift()(); } }
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
-  const button = () => nodes(tree).find(node => node.type === 'button'), click = () => { const result = button().props.onClick(); paint(); return result; };
+  const button = () => nodes(tree).find(node => node.type === design.Button), click = () => { const result = button().props.onClick(); paint(); return result; };
   paint(); await tick();
   return { calls, tick, click, button, handler: () => button().props.onClick, html: () => renderToStaticMarkup(tree), scope: value => { props = { ...props, ...value }; paint(true); }, rerender: () => paint(true), unmount: () => { alive = false; for (const hook of hooks) hook?.close?.(); }, updatesAfterUnmount: () => updatesAfterUnmount };
 }
@@ -527,21 +528,21 @@ test('integration router uses scoped authenticated requests and preserves uncert
 });
 
 test('rendered health controls show WhatsApp link and permission evidence, hide administrative controls for readers, and do not imply token liveness', async () => {
-  const source = await readFile(new URL('../src/ZernioAccounts.tsx', import.meta.url), 'utf8'), start = source.indexOf('  return <section'), end = source.indexOf('\n}', start);
+  const source = await readFile(new URL('../src/ZernioAccounts.tsx', import.meta.url), 'utf8'), start = source.indexOf('  return <Stack as="section"'), end = source.indexOf('\n}', start);
   const { code } = await transformWithOxc(`const render = () => (${source.slice(start + '  return '.length, end).trim().replace(/;$/, '')});`, 'AccountsView.tsx', { jsx: { runtime: 'classic' } });
   const selected = { _id: 'wa', platform: 'whatsapp', displayName: 'Support number', username: '+12025550101', health: null, canReconnect: true };
   const shown = { status: 'error', tokenStatus: { valid: true }, issues: ['WhatsApp channel disconnected'], recommendations: ['Reconnect the number'], permissions: { canPost: false, canFetchAnalytics: false, posting: [{ scope: 'messages', granted: false, required: true }], analytics: [], optional: [], missingRequired: ['messages'] }, platformConnection: { status: 'disconnected', inboundWebhookSubscribed: false } };
   function render(canManage, busy = false) {
     let chosen;
-    const context = { React, projectId: 'project-a', request() {}, WhatsAppNumberStatus() { return null; }, busy, loaded: true, accounts: [selected], selected, selectedId: selected._id, detail: shown, shown, draft: { displayName: '', username: '', analytics: '', inbox: '' }, error: '', notice: '', authUrl: '', canManage, action() {}, loadAccounts() {}, choose: account => { chosen = account; }, checkSelected() {}, reconnect() {}, disconnect() {}, save() {}, setDraft() {}, name: row => row.displayName, yes: value => value == null ? 'Not reported' : value ? 'Yes' : 'No', when: () => 'Not reported' };
-    const tree = new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))(), nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
-    const manage = nodes(tree).find(node => node.type === 'button' && node.props['aria-label'] === 'Manage Support number');
-    assert.ok(manage); assert.equal(manage.props.children, 'Manage'); assert.equal(manage.props['aria-pressed'], true); assert.equal(manage.props.disabled, busy);
+    const context = { React, ...design, confirming: undefined, setConfirming() {}, disconnectSelected() {}, projectId: 'project-a', request() {}, WhatsAppNumberStatus() { return null; }, busy, loaded: true, accounts: [selected], selected, selectedId: selected._id, detail: shown, shown, draft: { displayName: '', username: '', analytics: '', inbox: '' }, error: '', notice: '', authUrl: '', canManage, action() {}, loadAccounts() {}, choose: account => { chosen = account; }, checkSelected() {}, reconnect() {}, disconnect() {}, save() {}, setDraft() {}, name: row => row.displayName, yes: value => value == null ? 'Not reported' : value ? 'Yes' : 'No', when: () => 'Not reported' };
+    const tree = new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))(), nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes), ...(node.type === design.DataTable ? node.props.rows.flatMap(row => [...node.props.columns.map(column => column.render?.(row)), node.props.rowActions?.(row)]).flatMap(nodes) : [])];
+    const manage = nodes(tree).find(node => node.type === design.Button && node.props['aria-label'] === 'Manage Support number');
+    assert.ok(manage); assert.equal(manage.props.children, 'Manage'); assert.equal(manage.props.pressed, true); assert.equal(manage.props.disabled, busy);
     if (!busy) { manage.props.onClick(); assert.equal(chosen, selected); }
-    assert.ok(nodes(tree).some(node => node.type === 'div' && node.props.className === 'table-scroll'));
+    assert.ok(nodes(tree).some(node => node.type === design.DataTable && node.props.ariaLabel === 'Connected accounts'));
     const html = renderToStaticMarkup(tree); return html.replace(/<[^>]*>/g, ' ');
   }
-  const viewer = render(false), admin = render(true); assert.match(viewer, /WhatsApp platform link:.*disconnected/); assert.match(viewer, /valid token alone does not confirm/); assert.match(viewer, /Inbound webhook subscribed:.*No/); assert.match(viewer, /Permission details/); assert.doesNotMatch(viewer, /Disconnect account|Save account settings|Reconnect account/); assert.match(admin, /Reconnect account/); assert.match(admin, /Save account settings/);
+  const viewer = render(false), admin = render(true); assert.match(viewer, /WhatsApp platform link:.*disconnected/); assert.match(viewer, /valid token alone does not confirm/); assert.match(viewer, /Inbound webhook subscribed:.*No/); assert.match(viewer, /Permission details/); assert.doesNotMatch(viewer, /Disconnect account|Save account settings|Reconnect account/); assert.match(admin, /Reconnect account/); assert.match(admin, /Save account settings/); assert.doesNotMatch(source, /window.confirm/);
   render(false, true); render(true, true);
 });
 
@@ -625,7 +626,7 @@ test('Bluesky UI makes reset intentional, loads explicitly, and hides save contr
   const markup = source.slice(source.indexOf("      {selected.platform === 'bluesky'"), source.indexOf('      {canManage && <>'));
   const { code } = await transformWithOxc(`const render = () => <div>${markup}</div>;`, 'BlueskyView.tsx', { jsx: { runtime: 'classic' } });
   for (const canManage of [false, true]) {
-    const context = { React, selected: { _id: 'blue-a', platform: 'bluesky' }, busy: false, loadBluesky() {}, bluesky: { accountId: 'blue-a', defaultLangs: ['en'] }, canManage, languageText: 'fr', clearLanguages: false, setLanguageText() {}, setBlueskyReview() {}, setClearLanguages() {}, blueskyReview: null };
+    const context = { React, ...design, selected: { _id: 'blue-a', platform: 'bluesky' }, busy: false, loadBluesky() {}, bluesky: { accountId: 'blue-a', defaultLangs: ['en'] }, canManage, languageText: 'fr', clearLanguages: false, setLanguageText() {}, setBlueskyReview() {}, setClearLanguages() {}, blueskyReview: null };
     const html = renderToStaticMarkup(new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))()); assert.match(html, /Load default languages/); assert.equal(html.includes('Review latest settings'), canManage); assert.equal(html.includes('Clear default languages'), canManage);
   }
 });
@@ -745,7 +746,7 @@ test('Telegram UI validates intentional clear, rejects stale responses and prese
   const markup = source.slice(source.indexOf("      {selected.platform === 'telegram'"), source.indexOf("      {selected.platform === 'bluesky'"));
   const { code } = await transformWithOxc(`const render = () => <div>${markup}</div>;`, 'TelegramView.tsx', { jsx: { runtime: 'classic' } });
   for (const canManage of [false, true]) {
-    const context = { React, selected: { _id: 'tg-a', platform: 'telegram' }, busy: false, loadTelegram() {}, telegram: { accountId: 'tg-a', commands }, canManage, commandDraft: commands, clearCommands: false, setCommandDraft() {}, setTelegramReview() {}, setClearCommands() {}, telegramReview: { settings: { commands }, commands: [], clear: true }, saveTelegram() {}, name: () => 'Support bot' };
+    const context = { React, ...design, selected: { _id: 'tg-a', platform: 'telegram' }, busy: false, loadTelegram() {}, telegram: { accountId: 'tg-a', commands }, canManage, commandDraft: commands, clearCommands: false, setCommandDraft() {}, setTelegramReview() {}, setClearCommands() {}, telegramReview: { settings: { commands }, commands: [], clear: true }, saveTelegram() {}, name: () => 'Support bot' };
     const html = renderToStaticMarkup(new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))()); assert.match(html, /Load bot commands/); assert.match(html, /no custom scope or locale/); assert.equal(html.includes('Confirm and save bot menu'), canManage); assert.equal(html.includes('Clear all bot commands'), canManage); if (canManage) { assert.match(html, /Review Telegram bot menu replacement/); assert.match(html, /Command 1/); assert.match(html, /Description 1/); }
   }
 });
@@ -869,7 +870,7 @@ test('Slack native review UI validates resets, discards stale reads and retains 
   const markup = source.slice(source.indexOf("      {selected.platform === 'slack'"), source.indexOf("      {selected.platform === 'telegram'"));
   const { code } = await transformWithOxc(`const render = () => <div>${markup}</div>;`, 'SlackView.tsx', { jsx: { runtime: 'classic' } });
   for (const canManage of [false, true]) {
-    const context = { React, selected: { _id: 'slack-a', platform: 'slack' }, busy: false, loadSlack() {}, slack: settings, canManage, slackDraft: defaults, clearSlackUsername: false, clearSlackIcon: true, setSlackDraft() {}, setSlackReview() {}, setClearSlackUsername() {}, setClearSlackIcon() {}, slackReview: { settings, defaults }, saveSlack() {}, name: () => 'Updates' };
+    const context = { React, ...design, selected: { _id: 'slack-a', platform: 'slack' }, busy: false, loadSlack() {}, slack: settings, canManage, slackDraft: defaults, clearSlackUsername: false, clearSlackIcon: true, setSlackDraft() {}, setSlackReview() {}, setClearSlackUsername() {}, setClearSlackIcon() {}, slackReview: { settings, defaults }, saveSlack() {}, name: () => 'Updates' };
     const html = renderToStaticMarkup(new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))()); assert.match(html, /Load Slack identity/); assert.match(html, /Per-post username and icon URL override/); assert.match(html, /APP badge/); assert.equal(html.includes('Confirm and save Slack identity'), canManage); if (canManage) { assert.match(html, /type="url"/); assert.match(html, /Review Slack identity change/); assert.match(html, /Clear default author name/); assert.match(html, /Clear default avatar/); }
   }
 });

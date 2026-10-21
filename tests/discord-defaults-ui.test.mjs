@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { AppField as Field } from '@ten98/ui/app';
+import * as design from '@ten98/ui';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 import { transformWithOxc } from 'vite';
 
@@ -11,7 +11,7 @@ const source = await readFile(new URL('../src/ZernioAccounts.tsx', import.meta.u
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace(/export (?:default )?function /g, 'function '), 'DiscordInteraction.tsx', { jsx: { runtime: 'classic' } });
 const settings = { accountId: 'discord-a', guildId: '222222222222222222', channelId: '111111111111111111', channelName: 'Updates', channelType: '0', webhookUsername: 'Current', webhookAvatarUrl: 'https://images.example/current.png', accountVersion: 'a'.repeat(64), version: 'b'.repeat(64) };
 const rows = [{ _id: 'discord-a', platform: 'discord', displayName: 'Updates', isActive: true, health: null }];
-const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
+const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes), ...(node.type === design.DataTable ? node.props.rows.flatMap(row => [...node.props.columns.map(column => column.render?.(row)), node.props.rowActions?.(row)]).flatMap(nodes) : [])];
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 
 async function browser(respond, canManage = true) {
@@ -21,15 +21,15 @@ async function browser(respond, canManage = true) {
   const useMemo = (compute, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) hooks[index] = { dependencies, value: compute() }; return hooks[index].value; };
   const useEffect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = async (...args) => { calls.push(args); return args[0].endsWith('/health') ? { accounts: rows } : respond(...args); };
-  const Component = new Function('React', 'Field', 'publicMediaUrl', 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', code + ';return ZernioAccounts;')(React, Field, publicMediaUrl, useState, useRef, useEffect, useEffect, useMemo);
+  const Component = new Function('React', ...Object.keys(design), 'publicMediaUrl', 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', code + ';return ZernioAccounts;')(React, ...Object.values(design), publicMediaUrl, useState, useRef, useEffect, useEffect, useMemo);
   function paint(force = false) { dirty ||= force; for (let pass = 0; dirty; pass++) { assert.ok(pass < 20, 'Rendering settles.'); dirty = false; cursor = 0; tree = Component({ request, ...props }); while (queued.length) queued.shift()(); } }
   function discard(value) { const committed = [...hooks], pending = queued.length; cursor = 0; try { Component({ request, ...props, ...value }); } finally { hooks.splice(0, hooks.length, ...committed); queued.length = pending; } }
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
   const html = () => renderToStaticMarkup(tree);
-  const handler = text => { const button = nodes(tree).find(node => node.type === 'button' && (node.props['aria-label'] || React.Children.toArray(node.props.children).join('')) === text); assert.ok(button, text); return button.props.onClick; };
+  const handler = text => { const button = nodes(tree).find(node => node.type === design.Button && (node.props['aria-label'] || React.Children.toArray(node.props.children).join('')) === text); assert.ok(button, text); return button.props.onClick; };
   const click = text => { const result = handler(text)(); paint(); return result; };
-  const change = (label, value) => { const field = nodes(tree).find(node => node.type === Field && node.props.label === label); assert.ok(field, label); field.props.onChange({ target: { value } }); paint(); };
-  const check = (text, checked) => { const label = nodes(tree).find(node => node.type === 'label' && React.Children.toArray(node.props.children).includes(text)); assert.ok(label, text); nodes(label).find(node => node.type === 'input').props.onChange({ target: { checked } }); paint(); };
+  const change = (label, value) => { const field = nodes(nodes(tree).find(node => node.type === design.Field && node.props.label === label)).find(node => node.type === design.Input); assert.ok(field, label); field.props.onChange({ target: { value } }); paint(); };
+  const check = (text, checked) => { const box = nodes(tree).find(node => node.type === design.Checkbox && node.props.label === text.trim()); assert.ok(box, text); box.props.onChange({ target: { checked } }); paint(); };
   paint(); await tick(); await click('Manage Updates'); await tick();
   return { calls, tick, click, handler, change, check, html, discard, rerender: () => paint(true), scope: value => { props = { ...props, ...value }; paint(true); } };
 }

@@ -42,17 +42,9 @@
     "element": 531,
     "styling": 250
   },
-  "src/ZernioAccounts.tsx": {
-    "element": 246,
-    "styling": 74
-  },
   "src/ZernioAdEvents.tsx": {
     "element": 48,
     "styling": 14
-  },
-  "src/ZernioBlogDrafts.tsx": {
-    "element": 120,
-    "styling": 51
   },
   "src/ZernioContacts.tsx": {
     "element": 218,

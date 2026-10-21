@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { AppField as Field } from '@ten98/ui/app';
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, DescriptionList, Disclosure, Field, Fieldset, FormActions, FormGrid, Heading, Inline, Input, Link, List, ListItem, Option, Select, Stack, StatusLine, Text } from '@ten98/ui';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 type Health = { status: string; canPost?: boolean; canFetchAnalytics?: boolean; tokenValid?: boolean; tokenExpiresAt?: string; needsReconnect?: boolean; issues: string[]; recommendations: string[]; tokenStatus?: { valid?: boolean; needsRefresh?: boolean; expiresAt?: string; expiresIn?: string }; permissions?: { canPost?: boolean; canFetchAnalytics?: boolean; missingRequired: string[]; posting: Permission[]; analytics: Permission[]; optional: Permission[] }; analyticsSync?: { status: string; lastSyncedAt?: string }; platformConnection?: { status: string; checkedAt?: string; phoneStatus?: string; inboundWebhookSubscribed?: boolean }; messagingRestriction?: { code?: number; subcode?: number; message?: string; firstSeenAt?: string; lastSeenAt?: string; pausedUntil?: string } };
@@ -19,7 +19,7 @@ const when = (value?: string) => value ? new Date(value).toLocaleString() : 'Not
 
 export default function ZernioAccounts({ projectId, canManage, request, onAccountsChanged }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]), [loaded, setLoaded] = useState(false), [selectedId, setSelectedId] = useState(''), [detail, setDetail] = useState<Health | null>(null);
-  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [authUrl, setAuthUrl] = useState('');
+  const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [authUrl, setAuthUrl] = useState(''), [confirming, setConfirming] = useState<Account>();
   const [draft, setDraft] = useState({ displayName: '', username: '', analytics: '', inbox: '' });
   const [bluesky, setBluesky] = useState<BlueskySettings | null>(null), [languageText, setLanguageText] = useState(''), [clearLanguages, setClearLanguages] = useState(false), [blueskyReview, setBlueskyReview] = useState<{ settings: BlueskySettings; defaultLangs: string[] | null } | null>(null);
   const [telegram, setTelegram] = useState<TelegramSettings | null>(null), [commandDraft, setCommandDraft] = useState<TelegramCommand[]>([]), [clearCommands, setClearCommands] = useState(false), [telegramReview, setTelegramReview] = useState<{ settings: TelegramSettings; commands: TelegramCommand[]; clear: boolean } | null>(null);
@@ -36,7 +36,7 @@ export default function ZernioAccounts({ projectId, canManage, request, onAccoun
   }, [canManage, view, path, selectedId, onAccountsChanged, request]);
   const selected = accounts.find(account => account._id === selectedId), current = () => active.current && scope.current === view;
   useEffect(() => {
-    active.current = true; busyRef.current = false; setBusy(false); setAccounts([]); setLoaded(false); setSelectedId(''); setDetail(null); setError(''); setNotice(''); setAuthUrl(''); keys.current.clear();
+    active.current = true; busyRef.current = false; setBusy(false); setAccounts([]); setLoaded(false); setSelectedId(''); setDetail(null); setError(''); setNotice(''); setAuthUrl(''); setConfirming(undefined); keys.current.clear();
     setBluesky(null); setLanguageText(''); setClearLanguages(false); setBlueskyReview(null);
     setTelegram(null); setCommandDraft([]); setClearCommands(false); setTelegramReview(null);
     setSlack(null); setSlackDraft({ defaultUsername: '', defaultIconUrl: '' }); setClearSlackUsername(false); setClearSlackIcon(false); setSlackReview(null);
@@ -44,7 +44,7 @@ export default function ZernioAccounts({ projectId, canManage, request, onAccoun
     action(loadAccounts);
     return () => { active.current = false; reads.current++; };
   }, [path]);
-  useEffect(() => { setBlueskyReview(null); setTelegramReview(null); setSlackReview(null); setDiscordReview(null); }, [canManage]);
+  useEffect(() => { setBlueskyReview(null); setTelegramReview(null); setSlackReview(null); setDiscordReview(null); setConfirming(undefined); }, [canManage]);
   async function action(run: () => Promise<void>) {
     if (!current() || busyRef.current) return;
     busyRef.current = true; setBusy(true); setError(''); setNotice('');
@@ -64,7 +64,7 @@ export default function ZernioAccounts({ projectId, canManage, request, onAccoun
     setTelegram(null); setCommandDraft([]); setClearCommands(false); setTelegramReview(null);
     setSlack(null); setSlackDraft({ defaultUsername: '', defaultIconUrl: '' }); setClearSlackUsername(false); setClearSlackIcon(false); setSlackReview(null);
     setDiscord(null); setDiscordDraft({ webhookUsername: '', webhookAvatarUrl: '' }); setClearDiscordUsername(false); setClearDiscordAvatar(false); setDiscordReview(null); discordRevision.current++;
-    setSelectedId(account._id); setDetail(null); setAuthUrl(''); setError(''); setNotice('');
+    setSelectedId(account._id); setDetail(null); setAuthUrl(''); setConfirming(undefined); setError(''); setNotice('');
     setDraft({ displayName: account.displayName || '', username: account.username || '', analytics: '', inbox: '' });
   }
   async function checkSelected() {
@@ -100,8 +100,9 @@ export default function ZernioAccounts({ projectId, canManage, request, onAccoun
       setAuthUrl(url.href); setNotice('Continue with the same platform account and accept all requested permissions. Refresh health after returning.');
     });
   }
-  async function disconnect() {
-    if (!selected || !window.confirm(`Disconnect “${name(selected)}” from Zernio? Scheduled posts, messages and advertising that use this connection may stop working. Existing provider campaigns are not paused by this action.`)) return;
+  function disconnect() { if (selected) setConfirming(selected); }
+  async function disconnectSelected() {
+    if (!selected || confirming?._id !== selected._id) return;
     await action(async () => { await write('disconnect', { confirmAccountId: selected._id }); if (current()) { setSelectedId(''); setNotice('Account disconnected from Zernio.'); } await loadAccounts(); });
   }
   function intendedDiscordDefaults() {
@@ -269,92 +270,90 @@ export default function ZernioAccounts({ projectId, canManage, request, onAccoun
     });
   }
   const shown = detail || selected?.health;
-  return <section className="panel settings-panel">
-    <div className="panel-heading"><div><h2>Connection health</h2><p>Check the accounts available to this project and repair access.</p></div><button type="button" className="button" disabled={busy} onClick={() => action(loadAccounts)}>{busy ? 'Working…' : 'Refresh connections'}</button></div>
-    {error && <p className="alert" role="alert">{error}</p>}{notice && <p className="helper-note" role="status">{notice}</p>}
-    {loaded && !accounts.length && <p>No Zernio accounts are connected to this project.</p>}
-    {accounts.length > 0 && <div className="table-scroll"><table><thead><tr><th>Account</th><th>Platform</th><th>Health</th><th>Action</th></tr></thead><tbody>{accounts.map(account => <tr key={account._id}>
-      <td><strong>{name(account)}</strong>{account.username && <><br/><small>{account.username}</small></>}</td><td>{account.platform}</td><td>{account.isActive === false ? 'Inactive' : account.health?.status || 'Not checked'}{(account.needsReconnection || account.health?.needsReconnect) && <><br/><small>Reconnection needed</small></>}</td><td><button type="button" className="button" disabled={busy} aria-pressed={selectedId === account._id} aria-label={`Manage ${name(account)}`} onClick={() => choose(account)}>Manage</button></td>
-    </tr>)}</tbody></table></div>}
-    {selected && <div className="settings-panel">
-      <h3>{name(selected)}</h3><button type="button" className="button" disabled={busy} onClick={() => action(checkSelected)}>Check detailed health</button>
+  return <Stack as="section" gap={3}>
+    <Inline justify="between" align="center"><Stack gap={1}><Heading level={3} size="sm">Connection health</Heading><Text tone="muted">Check the accounts available to this project and repair access.</Text></Stack><Button variant="secondary" disabled={busy} onClick={() => action(loadAccounts)}>{busy ? 'Working…' : 'Refresh connections'}</Button></Inline>
+    {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}
+    {loaded && !accounts.length && <Text>No Zernio accounts are connected to this project.</Text>}
+    {accounts.length > 0 && <DataTable searchable={false} sortable={false} pagination={false} ariaLabel="Connected accounts" rows={accounts} rowKey={account => account._id} columns={[
+      { key: 'account', header: 'Account', rowHeader: true, render: account => <Stack gap={0}><Text as="strong">{name(account)}</Text>{account.username && <Text as="small" tone="muted">{account.username}</Text>}</Stack> }, { key: 'platform', header: 'Platform', render: account => account.platform }, { key: 'health', header: 'Health', render: account => <Stack gap={0}><Text as="span">{account.isActive === false ? 'Inactive' : account.health?.status || 'Not checked'}</Text>{(account.needsReconnection || account.health?.needsReconnect) && <Text as="small" tone="muted">Reconnection needed</Text>}</Stack> }
+    ]} rowActionsLabel="Action" rowActions={account => <Button variant="secondary" size="sm" disabled={busy} pressed={selectedId === account._id} aria-label={`Manage ${name(account)}`} onClick={() => choose(account)}>Manage</Button>}/>}
+    {selected && <Stack gap={3}>
+      <Inline justify="between" align="center"><Heading level={4} size="sm">{name(selected)}</Heading><Button variant="secondary" disabled={busy} onClick={() => action(checkSelected)}>Check detailed health</Button></Inline>
       {shown && <>
-        <p>Health: <strong>{shown.status}</strong> · Token valid: {yes(detail ? shown.tokenStatus?.valid : shown.tokenValid)} · Can publish: {yes(detail ? shown.permissions?.canPost : shown.canPost)} · Can read analytics: {yes(detail ? shown.permissions?.canFetchAnalytics : shown.canFetchAnalytics)}</p>
-        {(shown.tokenStatus?.expiresAt || shown.tokenExpiresAt) && <p className="helper-note">Token expires: {when(shown.tokenStatus?.expiresAt || shown.tokenExpiresAt)}{shown.tokenStatus?.needsRefresh ? ' · Refresh required soon' : ''}</p>}
-        {shown.analyticsSync && <p>Analytics synchronization: <strong>{shown.analyticsSync.status.replaceAll('_', ' ')}</strong> · Last success: {when(shown.analyticsSync.lastSyncedAt)}</p>}
-        {shown.platformConnection && <><p>WhatsApp platform link: <strong>{shown.platformConnection.status}</strong> · Inbound webhook subscribed: {yes(shown.platformConnection.inboundWebhookSubscribed)}</p><p className="helper-note">Checked {when(shown.platformConnection.checkedAt)}. A valid token alone does not confirm that the WhatsApp number can send or receive. Reconnect if the link is disconnected or the inbound webhook is missing.</p></>}
-        {shown.messagingRestriction && <p className="alert">Messaging restriction observed on a previous send: {shown.messagingRestriction.message || shown.messagingRestriction.code || shown.messagingRestriction.subcode || 'Provider restriction'}.{shown.messagingRestriction.pausedUntil && ` Retry paused until ${when(shown.messagingRestriction.pausedUntil)}.`} This is an observed restriction, not a new live send test.</p>}
-        {shown.issues.length > 0 && <><h4>Issues</h4><ul>{shown.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul></>}
-        {shown.recommendations.length > 0 && <><h4>Recommended action</h4><ul>{shown.recommendations.map((item, index) => <li key={index}>{item}</li>)}</ul></>}
-        {shown.permissions && <details><summary>Permission details</summary>{shown.permissions.missingRequired.length > 0 && <p className="alert">Missing required permissions: {shown.permissions.missingRequired.join(', ')}</p>}<div className="table-scroll"><table><thead><tr><th>Use</th><th>Permission</th><th>Granted</th><th>Required</th></tr></thead><tbody>{(['posting', 'analytics', 'optional'] as const).flatMap(kind => shown.permissions![kind].map(permission => <tr key={kind + ':' + permission.scope}><td>{kind}</td><td>{permission.scope}</td><td>{yes(permission.granted)}</td><td>{yes(permission.required)}</td></tr>))}</tbody></table></div></details>}
+        <Text>Health: <Text as="strong">{shown.status}</Text> · Token valid: {yes(detail ? shown.tokenStatus?.valid : shown.tokenValid)} · Can publish: {yes(detail ? shown.permissions?.canPost : shown.canPost)} · Can read analytics: {yes(detail ? shown.permissions?.canFetchAnalytics : shown.canFetchAnalytics)}</Text>
+        {(shown.tokenStatus?.expiresAt || shown.tokenExpiresAt) && <Text tone="muted">Token expires: {when(shown.tokenStatus?.expiresAt || shown.tokenExpiresAt)}{shown.tokenStatus?.needsRefresh ? ' · Refresh required soon' : ''}</Text>}
+        {shown.analyticsSync && <Text>Analytics synchronization: <Text as="strong">{shown.analyticsSync.status.replaceAll('_', ' ')}</Text> · Last success: {when(shown.analyticsSync.lastSyncedAt)}</Text>}
+        {shown.platformConnection && <><Text>WhatsApp platform link: <Text as="strong">{shown.platformConnection.status}</Text> · Inbound webhook subscribed: {yes(shown.platformConnection.inboundWebhookSubscribed)}</Text><Text tone="muted">Checked {when(shown.platformConnection.checkedAt)}. A valid token alone does not confirm that the WhatsApp number can send or receive. Reconnect if the link is disconnected or the inbound webhook is missing.</Text></>}
+        {shown.messagingRestriction && <Alert tone="warning" role="note">Messaging restriction observed on a previous send: {shown.messagingRestriction.message || shown.messagingRestriction.code || shown.messagingRestriction.subcode || 'Provider restriction'}.{shown.messagingRestriction.pausedUntil && ` Retry paused until ${when(shown.messagingRestriction.pausedUntil)}.`} This is an observed restriction, not a new live send test.</Alert>}
+        {shown.issues.length > 0 && <><Heading level={5} size="sm">Issues</Heading><List>{shown.issues.map((issue, index) => <ListItem key={index}>{issue}</ListItem>)}</List></>}
+        {shown.recommendations.length > 0 && <><Heading level={5} size="sm">Recommended action</Heading><List>{shown.recommendations.map((item, index) => <ListItem key={index}>{item}</ListItem>)}</List></>}
+        {shown.permissions && <Disclosure summary="Permission details"><Stack gap={3}>{shown.permissions.missingRequired.length > 0 && <Alert tone="warning" role="note">Missing required permissions: {shown.permissions.missingRequired.join(', ')}</Alert>}<DataTable searchable={false} sortable={false} pagination={false} ariaLabel="Permissions" rows={(['posting', 'analytics', 'optional'] as const).flatMap(kind => shown.permissions![kind].map(permission => ({ kind, permission })))} rowKey={row => row.kind + ':' + row.permission.scope} columns={[{ key: 'kind', header: 'Use', render: row => row.kind }, { key: 'scope', header: 'Permission', render: row => row.permission.scope }, { key: 'granted', header: 'Granted', render: row => yes(row.permission.granted) }, { key: 'required', header: 'Required', render: row => yes(row.permission.required) }]}/></Stack></Disclosure>}
       </>}
       {selected.platform === 'facebook' && <FacebookPageSubscription key={`${projectId}:${selected._id}`} projectId={projectId} account={selected} canManage={canManage} request={request}/>}
       {selected.platform === 'whatsapp' && <WhatsAppNumberStatus key={`${projectId}:${selected._id}`} projectId={projectId} account={selected} canManage={canManage} request={request}/>}
-      {selected.platform === 'discord' && <div className="settings-panel">
-        <h4>Discord default message identity</h4><p>Set the author name and avatar for posts in this connected channel. Per-post author and avatar settings override these defaults.</p>
-        <button type="button" className="button" disabled={busy} onClick={() => loadDiscord()}>Load Discord identity</button>
-        {discord?.accountId === selected._id && <><p>Server: <strong>{discord.guildId}</strong> · Channel: <strong>{discord.channelName || discord.channelId}</strong> ({discord.channelId})</p><p>Current author: {discord.webhookUsername || 'Zernio (default)'} · Current avatar: {discord.webhookAvatarUrl || 'Default bot avatar'}</p>{canManage && <fieldset disabled={busy}>
-          <legend>Edit Discord message identity</legend>
-          <Field label="Discord default author name" value={discordDraft.webhookUsername} maxLength={160} disabled={clearDiscordUsername} onChange={event => { editDiscord(); setDiscordDraft({ ...discordDraft, webhookUsername: event.target.value }); }}/>
-          <label><input type="checkbox" checked={clearDiscordUsername} onChange={event => { editDiscord(); setClearDiscordUsername(event.target.checked); }}/> Clear default author name</label>
-          <Field label="Discord default avatar URL (public HTTPS)" type="url" value={discordDraft.webhookAvatarUrl} maxLength={4000} disabled={clearDiscordAvatar} onChange={event => { editDiscord(); setDiscordDraft({ ...discordDraft, webhookAvatarUrl: event.target.value }); }}/>
-          <label><input type="checkbox" checked={clearDiscordAvatar} onChange={event => { editDiscord(); setClearDiscordAvatar(event.target.checked); }}/> Clear default avatar</label>
-          <p className="helper-note">Use 1 to 80 characters without clyde or discord. A blank field is not a reset; select Clear for each default you want to remove.</p>
-          <button type="button" className="button" onClick={() => loadDiscord(true)}>Review latest Discord identity</button>
-          {discordReview && <div role="region" aria-label="Review Discord identity change"><p>Account: <strong>{name(selected)}</strong> · Server: {discordReview.settings.guildId} · Channel: {discordReview.settings.channelName || discordReview.settings.channelId} ({discordReview.settings.channelId})</p><p>Current author: {discordReview.settings.webhookUsername || 'Zernio (default)'} · Current avatar: {discordReview.settings.webhookAvatarUrl || 'Default bot avatar'}</p><p>After saving: author <strong>{discordReview.defaults.webhookUsername || 'Zernio (clear)'}</strong> · avatar <strong>{discordReview.defaults.webhookAvatarUrl || 'Default bot avatar (clear)'}</strong></p><button type="button" className="button primary" onClick={saveDiscord}>Confirm and save Discord identity</button><button type="button" className="button" onClick={() => { editDiscord(); }}>Cancel review</button></div>}
-        </fieldset>}</>}
-      </div>}
-      {selected.platform === 'slack' && <div className="settings-panel">
-        <h4>Slack default message identity</h4><p>Set the author name and avatar for messages in this connected channel. Per-post username and icon URL override these defaults. Messages retain Slack’s APP badge; this does not change the app’s global profile.</p>
-        <button type="button" className="button" disabled={busy} onClick={() => loadSlack()}>Load Slack identity</button>
-        {slack?.accountId === selected._id && <><p>Workspace: <strong>{slack.teamName || slack.teamId}</strong> · Channel: <strong>{slack.channelName || slack.channelId}</strong></p><p>Current author: {slack.defaultUsername || 'App default'} · Current avatar: {slack.defaultIconUrl || 'App default'}</p>{canManage && <fieldset disabled={busy}>
-          <legend>Edit default message identity</legend>
-          <label className="field"><span>Default author name</span><input value={slackDraft.defaultUsername} maxLength={80} disabled={clearSlackUsername} onChange={event => { setSlackDraft({ ...slackDraft, defaultUsername: event.target.value }); setSlackReview(null); }}/></label>
-          <label><input type="checkbox" checked={clearSlackUsername} onChange={event => { setClearSlackUsername(event.target.checked); setSlackReview(null); }}/> Clear default author name</label>
-          <label className="field"><span>Default avatar URL (public HTTPS)</span><input type="url" value={slackDraft.defaultIconUrl} maxLength={4000} disabled={clearSlackIcon} onChange={event => { setSlackDraft({ ...slackDraft, defaultIconUrl: event.target.value }); setSlackReview(null); }}/></label>
-          <label><input type="checkbox" checked={clearSlackIcon} onChange={event => { setClearSlackIcon(event.target.checked); setSlackReview(null); }}/> Clear default avatar</label>
-          <p className="helper-note">A blank field is not a reset. Select Clear for each default you want to remove.</p>
-          <button type="button" className="button" onClick={() => loadSlack(true)}>Review latest Slack identity</button>
-          {slackReview && <div role="region" aria-label="Review Slack identity change"><p>Account: <strong>{name(selected)}</strong> · Workspace: {slackReview.settings.teamName || slackReview.settings.teamId} · Channel: {slackReview.settings.channelName || slackReview.settings.channelId}</p><p>Current author: {slackReview.settings.defaultUsername || 'App default'} · Current avatar: {slackReview.settings.defaultIconUrl || 'App default'}</p><p>After saving: author <strong>{slackReview.defaults.defaultUsername || 'App default (clear)'}</strong> · avatar <strong>{slackReview.defaults.defaultIconUrl || 'App default (clear)'}</strong></p><button type="button" className="button primary" onClick={saveSlack}>Confirm and save Slack identity</button><button type="button" className="button" onClick={() => setSlackReview(null)}>Cancel review</button></div>}
-        </fieldset>}</>}
-      </div>}
-      {selected.platform === 'telegram' && <div className="settings-panel">
-        <h4>Telegram bot commands</h4><p>Replace the bot’s command menu in Telegram chats. Zernio exposes the provider-default menu with no custom scope or locale controls. Commands describe menu entries; they do not add automated replies.</p>
-        <button type="button" className="button" disabled={busy} onClick={() => loadTelegram()}>Load bot commands</button>
-        {telegram?.accountId === selected._id && <><p>Current menu: {telegram.commands.length ? `${telegram.commands.length} commands` : 'No commands'}</p><ul>{telegram.commands.map(row => <li key={row.command}><strong>/{row.command}</strong> — {row.description}</li>)}</ul>{canManage && <fieldset disabled={busy}>
-          <legend>Edit bot command menu</legend>
-          <label><input type="checkbox" checked={clearCommands} onChange={event => { setClearCommands(event.target.checked); setTelegramReview(null); }}/> Clear all bot commands</label>
-          {!clearCommands && <>{commandDraft.map((row, index) => <div className="form-grid" key={index}>
-            <label className="field"><span>Command {index + 1} (without /)</span><input value={row.command} maxLength={32} pattern="[a-z0-9_]+" onChange={event => { setCommandDraft(commandDraft.map((item, itemIndex) => itemIndex === index ? { ...item, command: event.target.value } : item)); setTelegramReview(null); }}/></label>
-            <label className="field"><span>Description {index + 1}</span><input value={row.description} maxLength={512} onChange={event => { setCommandDraft(commandDraft.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item)); setTelegramReview(null); }}/></label>
-            <button type="button" className="button" aria-label={`Remove command ${index + 1}`} onClick={() => { setCommandDraft(commandDraft.filter((_, itemIndex) => itemIndex !== index)); setTelegramReview(null); }}>Remove</button>
-          </div>)}<button type="button" className="button" disabled={commandDraft.length >= 100} onClick={() => { setCommandDraft([...commandDraft, { command: '', description: '' }]); setTelegramReview(null); }}>Add command</button></>}
-          <p className="helper-note">Saving replaces every current menu entry. Names use 1 to 32 lowercase letters, digits or underscores; descriptions use 1 to 256 characters. To remove every entry, select Clear all bot commands.</p>
-          <button type="button" className="button" onClick={() => loadTelegram(true)}>Review bot menu replacement</button>
-          {telegramReview && <div role="region" aria-label="Review Telegram bot menu replacement"><p>Account: <strong>{name(selected)}</strong> · Provider-default scope and locale</p><p>Current menu:</p>{telegramReview.settings.commands.length ? <ul>{telegramReview.settings.commands.map(row => <li key={row.command}>/{row.command} — {row.description}</li>)}</ul> : <p>No commands</p>}<p>After saving: <strong>{telegramReview.clear ? 'Clear all bot commands' : 'Replace entire menu'}</strong></p>{telegramReview.commands.length > 0 && <ul>{telegramReview.commands.map(row => <li key={row.command}>/{row.command} — {row.description}</li>)}</ul>}<button type="button" className="button primary" onClick={saveTelegram}>Confirm and save bot menu</button><button type="button" className="button" onClick={() => setTelegramReview(null)}>Cancel review</button></div>}
-        </fieldset>}</>}
-      </div>}
-      {selected.platform === 'bluesky' && <div className="settings-panel">
-        <h4>Bluesky default languages</h4><p>Defaults apply when a future post has no post-specific languages. Existing published posts keep their languages.</p>
-        <button type="button" className="button" disabled={busy} onClick={() => loadBluesky()}>Load default languages</button>
-        {bluesky?.accountId === selected._id && <><p>Current default: <strong>{bluesky.defaultLangs?.join(', ') || 'No default'}</strong></p>{canManage && <fieldset disabled={busy}>
-          <label className="field"><span>Language codes, separated by commas</span><input value={languageText} maxLength={304} disabled={clearLanguages} placeholder="en, pt, en-US" onChange={event => { setLanguageText(event.target.value); setBlueskyReview(null); }}/></label>
-          <label><input type="checkbox" checked={clearLanguages} onChange={event => { setClearLanguages(event.target.checked); setBlueskyReview(null); }}/> Clear default languages</label><p className="helper-note">Choose 1 to 3 distinct BCP-47 codes. A blank input is not a reset; select Clear default languages to remove the default.</p>
-          <button type="button" className="button" onClick={() => loadBluesky(true)}>Review latest settings</button>
-          {blueskyReview && <div role="region" aria-label="Review Bluesky language change"><p>Account: <strong>{name(selected)}</strong></p><p>Current: {blueskyReview.settings.defaultLangs?.join(', ') || 'No default'}</p><p>After saving: <strong>{blueskyReview.defaultLangs?.join(', ') || 'No default (clear)'}</strong></p><button type="button" className="button primary" onClick={saveBluesky}>Confirm and save default languages</button><button type="button" className="button" onClick={() => setBlueskyReview(null)}>Cancel review</button></div>}
-        </fieldset>}</>}
-      </div>}
+      {selected.platform === 'discord' && <Stack gap={3}>
+        <Stack gap={1}><Heading level={5} size="sm">Discord default message identity</Heading><Text tone="muted">Set the author name and avatar for posts in this connected channel. Per-post author and avatar settings override these defaults.</Text></Stack>
+        <FormActions><Button variant="secondary" disabled={busy} onClick={() => loadDiscord()}>Load Discord identity</Button></FormActions>
+        {discord?.accountId === selected._id && <><Text>Server: <Text as="strong">{discord.guildId}</Text> · Channel: <Text as="strong">{discord.channelName || discord.channelId}</Text> ({discord.channelId})</Text><Text>Current author: {discord.webhookUsername || 'Zernio (default)'} · Current avatar: {discord.webhookAvatarUrl || 'Default bot avatar'}</Text>{canManage && <Fieldset legend="Edit Discord message identity" disabled={busy}>
+          <Field label="Discord default author name"><Input value={discordDraft.webhookUsername} maxLength={160} disabled={clearDiscordUsername} onChange={event => { editDiscord(); setDiscordDraft({ ...discordDraft, webhookUsername: event.target.value }); }}/></Field>
+          <Checkbox label="Clear default author name" checked={clearDiscordUsername} onChange={event => { editDiscord(); setClearDiscordUsername(event.target.checked); }}/>
+          <Field label="Discord default avatar URL (public HTTPS)"><Input type="url" value={discordDraft.webhookAvatarUrl} maxLength={4000} disabled={clearDiscordAvatar} onChange={event => { editDiscord(); setDiscordDraft({ ...discordDraft, webhookAvatarUrl: event.target.value }); }}/></Field>
+          <Checkbox label="Clear default avatar" checked={clearDiscordAvatar} onChange={event => { editDiscord(); setClearDiscordAvatar(event.target.checked); }}/>
+          <Text tone="muted">Use 1 to 80 characters without clyde or discord. A blank field is not a reset; select Clear for each default you want to remove.</Text>
+          <FormActions><Button variant="secondary" onClick={() => loadDiscord(true)}>Review latest Discord identity</Button></FormActions>
+          {discordReview && <Stack as="section" gap={2} aria-label="Review Discord identity change"><Text>Account: <Text as="strong">{name(selected)}</Text> · Server: {discordReview.settings.guildId} · Channel: {discordReview.settings.channelName || discordReview.settings.channelId} ({discordReview.settings.channelId})</Text><Text>Current author: {discordReview.settings.webhookUsername || 'Zernio (default)'} · Current avatar: {discordReview.settings.webhookAvatarUrl || 'Default bot avatar'}</Text><Text>After saving: author <Text as="strong">{discordReview.defaults.webhookUsername || 'Zernio (clear)'}</Text> · avatar <Text as="strong">{discordReview.defaults.webhookAvatarUrl || 'Default bot avatar (clear)'}</Text></Text><FormActions><Button variant="primary" onClick={saveDiscord}>Confirm and save Discord identity</Button><Button variant="secondary" onClick={() => { editDiscord(); }}>Cancel review</Button></FormActions></Stack>}
+        </Fieldset>}</>}
+      </Stack>}
+      {selected.platform === 'slack' && <Stack gap={3}>
+        <Stack gap={1}><Heading level={5} size="sm">Slack default message identity</Heading><Text tone="muted">Set the author name and avatar for messages in this connected channel. Per-post username and icon URL override these defaults. Messages retain Slack’s APP badge; this does not change the app’s global profile.</Text></Stack>
+        <FormActions><Button variant="secondary" disabled={busy} onClick={() => loadSlack()}>Load Slack identity</Button></FormActions>
+        {slack?.accountId === selected._id && <><Text>Workspace: <Text as="strong">{slack.teamName || slack.teamId}</Text> · Channel: <Text as="strong">{slack.channelName || slack.channelId}</Text></Text><Text>Current author: {slack.defaultUsername || 'App default'} · Current avatar: {slack.defaultIconUrl || 'App default'}</Text>{canManage && <Fieldset legend="Edit default message identity" disabled={busy}>
+          <Field label="Default author name"><Input value={slackDraft.defaultUsername} maxLength={80} disabled={clearSlackUsername} onChange={event => { setSlackDraft({ ...slackDraft, defaultUsername: event.target.value }); setSlackReview(null); }}/></Field>
+          <Checkbox label="Clear default author name" checked={clearSlackUsername} onChange={event => { setClearSlackUsername(event.target.checked); setSlackReview(null); }}/>
+          <Field label="Default avatar URL (public HTTPS)"><Input type="url" value={slackDraft.defaultIconUrl} maxLength={4000} disabled={clearSlackIcon} onChange={event => { setSlackDraft({ ...slackDraft, defaultIconUrl: event.target.value }); setSlackReview(null); }}/></Field>
+          <Checkbox label="Clear default avatar" checked={clearSlackIcon} onChange={event => { setClearSlackIcon(event.target.checked); setSlackReview(null); }}/>
+          <Text tone="muted">A blank field is not a reset. Select Clear for each default you want to remove.</Text>
+          <FormActions><Button variant="secondary" onClick={() => loadSlack(true)}>Review latest Slack identity</Button></FormActions>
+          {slackReview && <Stack as="section" gap={2} aria-label="Review Slack identity change"><Text>Account: <Text as="strong">{name(selected)}</Text> · Workspace: {slackReview.settings.teamName || slackReview.settings.teamId} · Channel: {slackReview.settings.channelName || slackReview.settings.channelId}</Text><Text>Current author: {slackReview.settings.defaultUsername || 'App default'} · Current avatar: {slackReview.settings.defaultIconUrl || 'App default'}</Text><Text>After saving: author <Text as="strong">{slackReview.defaults.defaultUsername || 'App default (clear)'}</Text> · avatar <Text as="strong">{slackReview.defaults.defaultIconUrl || 'App default (clear)'}</Text></Text><FormActions><Button variant="primary" onClick={saveSlack}>Confirm and save Slack identity</Button><Button variant="secondary" onClick={() => setSlackReview(null)}>Cancel review</Button></FormActions></Stack>}
+        </Fieldset>}</>}
+      </Stack>}
+      {selected.platform === 'telegram' && <Stack gap={3}>
+        <Stack gap={1}><Heading level={5} size="sm">Telegram bot commands</Heading><Text tone="muted">Replace the bot’s command menu in Telegram chats. Zernio exposes the provider-default menu with no custom scope or locale controls. Commands describe menu entries; they do not add automated replies.</Text></Stack>
+        <FormActions><Button variant="secondary" disabled={busy} onClick={() => loadTelegram()}>Load bot commands</Button></FormActions>
+        {telegram?.accountId === selected._id && <><Text>Current menu: {telegram.commands.length ? `${telegram.commands.length} commands` : 'No commands'}</Text><List>{telegram.commands.map(row => <ListItem key={row.command}><Text as="strong">/{row.command}</Text> — {row.description}</ListItem>)}</List>{canManage && <Fieldset legend="Edit bot command menu" disabled={busy}>
+          <Checkbox label="Clear all bot commands" checked={clearCommands} onChange={event => { setClearCommands(event.target.checked); setTelegramReview(null); }}/>
+          {!clearCommands && <>{commandDraft.map((row, index) => <FormGrid key={index}>
+            <Field label={`Command ${index + 1} (without /)`}><Input value={row.command} maxLength={32} pattern="[a-z0-9_]+" onChange={event => { setCommandDraft(commandDraft.map((item, itemIndex) => itemIndex === index ? { ...item, command: event.target.value } : item)); setTelegramReview(null); }}/></Field>
+            <Field label={`Description ${index + 1}`}><Input value={row.description} maxLength={512} onChange={event => { setCommandDraft(commandDraft.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item)); setTelegramReview(null); }}/></Field>
+            <FormActions><Button variant="secondary" aria-label={`Remove command ${index + 1}`} onClick={() => { setCommandDraft(commandDraft.filter((_, itemIndex) => itemIndex !== index)); setTelegramReview(null); }}>Remove</Button></FormActions>
+          </FormGrid>)}<FormActions><Button variant="secondary" disabled={commandDraft.length >= 100} onClick={() => { setCommandDraft([...commandDraft, { command: '', description: '' }]); setTelegramReview(null); }}>Add command</Button></FormActions></>}
+          <Text tone="muted">Saving replaces every current menu entry. Names use 1 to 32 lowercase letters, digits or underscores; descriptions use 1 to 256 characters. To remove every entry, select Clear all bot commands.</Text>
+          <FormActions><Button variant="secondary" onClick={() => loadTelegram(true)}>Review bot menu replacement</Button></FormActions>
+          {telegramReview && <Stack as="section" gap={2} aria-label="Review Telegram bot menu replacement"><Text>Account: <Text as="strong">{name(selected)}</Text> · Provider-default scope and locale</Text><Text>Current menu:</Text>{telegramReview.settings.commands.length ? <List>{telegramReview.settings.commands.map(row => <ListItem key={row.command}>/{row.command} — {row.description}</ListItem>)}</List> : <Text>No commands</Text>}<Text>After saving: <Text as="strong">{telegramReview.clear ? 'Clear all bot commands' : 'Replace entire menu'}</Text></Text>{telegramReview.commands.length > 0 && <List>{telegramReview.commands.map(row => <ListItem key={row.command}>/{row.command} — {row.description}</ListItem>)}</List>}<FormActions><Button variant="primary" onClick={saveTelegram}>Confirm and save bot menu</Button><Button variant="secondary" onClick={() => setTelegramReview(null)}>Cancel review</Button></FormActions></Stack>}
+        </Fieldset>}</>}
+      </Stack>}
+      {selected.platform === 'bluesky' && <Stack gap={3}>
+        <Stack gap={1}><Heading level={5} size="sm">Bluesky default languages</Heading><Text tone="muted">Defaults apply when a future post has no post-specific languages. Existing published posts keep their languages.</Text></Stack>
+        <FormActions><Button variant="secondary" disabled={busy} onClick={() => loadBluesky()}>Load default languages</Button></FormActions>
+        {bluesky?.accountId === selected._id && <><Text>Current default: <Text as="strong">{bluesky.defaultLangs?.join(', ') || 'No default'}</Text></Text>{canManage && <Stack as="fieldset" gap={3} disabled={busy}>
+          <Field label="Language codes, separated by commas"><Input value={languageText} maxLength={304} disabled={clearLanguages} placeholder="en, pt, en-US" onChange={event => { setLanguageText(event.target.value); setBlueskyReview(null); }}/></Field>
+          <Checkbox label="Clear default languages" checked={clearLanguages} onChange={event => { setClearLanguages(event.target.checked); setBlueskyReview(null); }}/><Text tone="muted">Choose 1 to 3 distinct BCP-47 codes. A blank input is not a reset; select Clear default languages to remove the default.</Text>
+          <FormActions><Button variant="secondary" onClick={() => loadBluesky(true)}>Review latest settings</Button></FormActions>
+          {blueskyReview && <Stack as="section" gap={2} aria-label="Review Bluesky language change"><Text>Account: <Text as="strong">{name(selected)}</Text></Text><Text>Current: {blueskyReview.settings.defaultLangs?.join(', ') || 'No default'}</Text><Text>After saving: <Text as="strong">{blueskyReview.defaultLangs?.join(', ') || 'No default (clear)'}</Text></Text><FormActions><Button variant="primary" onClick={saveBluesky}>Confirm and save default languages</Button><Button variant="secondary" onClick={() => setBlueskyReview(null)}>Cancel review</Button></FormActions></Stack>}
+        </Stack>}</>}
+      </Stack>}
       {canManage && <>
-        <div className="button-row">{selected.canReconnect && <button type="button" className="button" disabled={busy} onClick={reconnect}>Reconnect account</button>}{authUrl && <a className="button primary" href={authUrl} target="_blank" rel="noopener noreferrer">Continue reconnection</a>}<button type="button" className="button danger" disabled={busy} onClick={disconnect}>Disconnect account</button></div>
-        {!selected.canReconnect && <p className="helper-note">This account uses a credential or platform-specific connection flow. Update it in its connection settings.</p>}
-        <details><summary>Account settings</summary><form onSubmit={save}><fieldset disabled={busy}>
-          <div className="form-grid"><label className="field"><span>Display name override</span><input maxLength={200} value={draft.displayName} onChange={event => setDraft({ ...draft, displayName: event.target.value })}/></label><label className="field"><span>Username override</span><input maxLength={200} value={draft.username} onChange={event => setDraft({ ...draft, username: event.target.value })}/></label></div>
-          {selected.platform === 'twitter' && <><p className="helper-note">X background analytics reads and inbox polling incur provider usage charges. Each setting is unchanged unless you choose Enable or Disable. Publishing remains available independently.</p>{(['analytics', 'inbox'] as const).map(key => <label key={key} className="field"><span>{key === 'analytics' ? 'X analytics reads' : 'X inbox polling'}</span><select value={draft[key]} onChange={event => setDraft({ ...draft, [key]: event.target.value })}><option value="">Leave unchanged</option><option value="true">Enable paid background reads</option><option value="false">Disable background reads</option></select></label>)}</>}
-          <button className="button">Save account settings</button>
-        </fieldset></form></details>
+        <FormActions>{selected.canReconnect && <Button variant="secondary" disabled={busy} onClick={reconnect}>Reconnect account</Button>}{authUrl && <Link variant="standalone" href={authUrl} target="_blank" rel="noopener noreferrer">Continue reconnection</Link>}<Button variant="danger" disabled={busy} onClick={disconnect}>Disconnect account</Button></FormActions>
+        {!selected.canReconnect && <Text tone="muted">This account uses a credential or platform-specific connection flow. Update it in its connection settings.</Text>}
+        <Disclosure summary="Account settings"><Stack as="form" onSubmit={save}><Stack as="fieldset" gap={3} disabled={busy}>
+          <FormGrid><Field label="Display name override"><Input maxLength={200} value={draft.displayName} onChange={event => setDraft({ ...draft, displayName: event.target.value })}/></Field><Field label="Username override"><Input maxLength={200} value={draft.username} onChange={event => setDraft({ ...draft, username: event.target.value })}/></Field></FormGrid>
+          {selected.platform === 'twitter' && <><Text tone="muted">X background analytics reads and inbox polling incur provider usage charges. Each setting is unchanged unless you choose Enable or Disable. Publishing remains available independently.</Text>{(['analytics', 'inbox'] as const).map(key => <Field key={key} label={key === 'analytics' ? 'X analytics reads' : 'X inbox polling'}><Select value={draft[key]} onChange={event => setDraft({ ...draft, [key]: event.target.value })}><Option value="">Leave unchanged</Option><Option value="true">Enable paid background reads</Option><Option value="false">Disable background reads</Option></Select></Field>)}</>}
+          <FormActions><Button variant="secondary" type="submit">Save account settings</Button></FormActions>
+        </Stack></Stack></Disclosure>
       </>}
-    </div>}
-  </section>;
+    </Stack>}
+    {canManage && <ConfirmDialog open={!!confirming} onOpenChange={open => { if (!open) setConfirming(undefined); }} danger title={`Disconnect “${confirming ? name(confirming) : ''}” from Zernio?`} description="Scheduled posts, messages and advertising that use this connection may stop working. Existing provider campaigns are not paused by this action." confirmLabel="Disconnect account" onConfirm={disconnectSelected}/>}
+  </Stack>;
 }
 
 type WhatsAppNumberInfo = { accountId: string; platform: 'whatsapp'; loadedAt: string; phone?: { display_phone_number?: string; verified_name?: string; name_status?: string; quality_rating?: string; messaging_limit_tier?: string; status?: string; platform_type?: string; is_official_business_account?: boolean; throughput?: { level?: string } }; waba?: { name?: string; business_verification_status?: string; timezone_id?: string } | null };
@@ -391,16 +390,16 @@ export function WhatsAppNumberStatus({ projectId, account, canManage, request }:
     finally { view.pending = false; }
   }
   const snapshot = state.snapshot, reported = (value?: string) => value?.trim() ? value : 'Not reported';
-  return <section className="settings-panel" aria-label="WhatsApp number status">
-    <h4>WhatsApp number status</h4><p>Read this number’s current quality, messaging tier and throughput from Meta.</p>
-    <button type="button" className="button" disabled={state.busy} onClick={load}>{snapshot ? 'Refresh WhatsApp number status' : 'Load WhatsApp number status'}</button>
-    {state.busy && <p role="status">Loading WhatsApp number status…</p>}{state.error && <p className="alert" role="alert">{state.error}</p>}
-    {snapshot && <><p>Connected account: <strong>{name(account)}</strong> · {snapshot.accountId}</p><p className="helper-note">Snapshot loaded {when(snapshot.loadedAt)}.</p><dl>
-      {([['Display number', snapshot.phone?.display_phone_number], ['Verified display name', snapshot.phone?.verified_name], ['Display name approval', snapshot.phone?.name_status], ['Quality rating', snapshot.phone?.quality_rating], ['Messaging limit tier', snapshot.phone?.messaging_limit_tier], ['Throughput level', snapshot.phone?.throughput?.level], ['Number connection status', snapshot.phone?.status], ['Platform type', snapshot.phone?.platform_type], ['Business account name', snapshot.waba?.name], ['Business verification status', snapshot.waba?.business_verification_status], ['Meta timezone ID', snapshot.waba?.timezone_id]] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{reported(value)}</dd></div>)}
-      <div><dt>Official business account</dt><dd>{yes(snapshot.phone?.is_official_business_account)}</dd></div>
-    </dl></>}
-    <p className="helper-note">Missing values are not reported. Throughput is the provider’s level, not a measured sending rate. Detailed Meta health signals are not included; this snapshot does not verify message delivery.</p>
-  </section>;
+  return <Stack as="section" gap={3} aria-label="WhatsApp number status">
+    <Stack gap={1}><Heading level={5} size="sm">WhatsApp number status</Heading><Text tone="muted">Read this number’s current quality, messaging tier and throughput from Meta.</Text></Stack>
+    <FormActions><Button variant="secondary" disabled={state.busy} onClick={load}>{snapshot ? 'Refresh WhatsApp number status' : 'Load WhatsApp number status'}</Button></FormActions>
+    {state.busy && <StatusLine busy>Loading WhatsApp number status…</StatusLine>}{state.error && <Alert tone="danger">{state.error}</Alert>}
+    {snapshot && <><Text>Connected account: <Text as="strong">{name(account)}</Text> · {snapshot.accountId}</Text><Text tone="muted">Snapshot loaded {when(snapshot.loadedAt)}.</Text><DescriptionList items={[
+      ...([['Display number', snapshot.phone?.display_phone_number], ['Verified display name', snapshot.phone?.verified_name], ['Display name approval', snapshot.phone?.name_status], ['Quality rating', snapshot.phone?.quality_rating], ['Messaging limit tier', snapshot.phone?.messaging_limit_tier], ['Throughput level', snapshot.phone?.throughput?.level], ['Number connection status', snapshot.phone?.status], ['Platform type', snapshot.phone?.platform_type], ['Business account name', snapshot.waba?.name], ['Business verification status', snapshot.waba?.business_verification_status], ['Meta timezone ID', snapshot.waba?.timezone_id]] as const).map(([label, value]) => ({ key: label, term: label, description: reported(value) })),
+      { key: 'Official business account', term: 'Official business account', description: yes(snapshot.phone?.is_official_business_account) }
+    ]}/></>}
+    <Text tone="muted">Missing values are not reported. Throughput is the provider’s level, not a measured sending rate. Detailed Meta health signals are not included; this snapshot does not verify message delivery.</Text>
+  </Stack>;
 }
 
 type FacebookSubscription = { accountId: string; pageId: string; appSubscribed: boolean; leadgen: boolean; subscribedFields: string[]; warning: string | null; accountVersion: string; version: string };
@@ -462,14 +461,14 @@ export function FacebookPageSubscription({ projectId, account, canManage, reques
       if (current()) { revision.current++; setState(previous => ({ ...previous, snapshot: null, error: problem.message || 'The subscription outcome could not be confirmed.', closed: closed ? `The prior action is closed after operator review · ${problem.operation?.id || 'Operation ID unavailable'} · ${problem.operation?.status || 'Reviewed'}. Load Page event access and explicitly review a new repair.` : unsent ? 'The earlier request was not sent. Load Page event access and explicitly review a new repair.' : '' })); }
     } finally { original.pending = false; original.notify?.(); original.notify = undefined; }
   }
-  const facts = (settings: FacebookSubscription) => <><p>Account: <strong>{settings.accountId}</strong> · Native Page ID: <strong>{settings.pageId}</strong></p><p>Zernio subscribed to this Page: <strong>{yes(settings.appSubscribed)}</strong> · Lead event access: <strong>{yes(settings.leadgen)}</strong></p><p>Returned subscribed fields: {settings.subscribedFields.join(', ') || 'None returned'}</p>{settings.warning && <p className="helper-note">{settings.warning}</p>}</>;
-  return <section className="settings-panel" aria-label="Facebook Page event access">
-    <h4>Facebook Page event access</h4><p>Inspect the connected Page’s current event subscription with Meta.</p>
-    {state.error && <p className="alert" role="alert">{state.error}</p>}{state.notice && <p className="helper-note" role="status">{state.notice}</p>}{state.closed && <p className="helper-note" role="status">{state.closed}</p>}
-    {!attempt && <button type="button" className="button" disabled={busy} onClick={() => load()}>{state.snapshot ? 'Refresh Page event access' : 'Load Page event access'}</button>}
+  const facts = (settings: FacebookSubscription) => <><Text>Account: <Text as="strong">{settings.accountId}</Text> · Native Page ID: <Text as="strong">{settings.pageId}</Text></Text><Text>Zernio subscribed to this Page: <Text as="strong">{yes(settings.appSubscribed)}</Text> · Lead event access: <Text as="strong">{yes(settings.leadgen)}</Text></Text><Text>Returned subscribed fields: {settings.subscribedFields.join(', ') || 'None returned'}</Text>{settings.warning && <Text tone="muted">{settings.warning}</Text>}</>;
+  return <Stack as="section" gap={3} aria-label="Facebook Page event access">
+    <Stack gap={1}><Heading level={5} size="sm">Facebook Page event access</Heading><Text tone="muted">Inspect the connected Page’s current event subscription with Meta.</Text></Stack>
+    {state.error && <Alert tone="danger">{state.error}</Alert>}{state.notice && <StatusLine>{state.notice}</StatusLine>}{state.closed && <StatusLine>{state.closed}</StatusLine>}
+    {!attempt && <FormActions><Button variant="secondary" disabled={busy} onClick={() => load()}>{state.snapshot ? 'Refresh Page event access' : 'Load Page event access'}</Button></FormActions>}
     {state.snapshot && facts(state.snapshot)}
-    {canManage && !attempt && <fieldset disabled={busy || !state.snapshot}><button type="button" className="button" onClick={() => load(true)}>Review Page event repair</button></fieldset>}
-    {canManage && state.review && state.review.scope === view && state.review.revision === revision.current && <section className="helper-note" aria-label="Review Facebook Page event repair"><h5>Review Page event repair</h5><p>Account: {state.review.accountName}</p>{facts(state.review.settings)}<label><input type="checkbox" checked={state.confirmed} disabled={busy} onChange={event => { if (!current() || generation !== revision.current || !canManage || view.pending || facebookSubscriptionAttempts.has(target) || state.review?.scope !== view || state.review.revision !== revision.current) return; confirmation.current = event.target.checked ? state.review : null; setState(previous => ({ ...previous, confirmed: event.target.checked })); }}/> I understand that Zernio requests its event field set, Meta may grant fewer fields, and this does not prove event delivery.</label><button type="button" className="button primary" disabled={busy || !state.confirmed} onClick={() => resubscribe()}>Resubscribe Page events</button><button type="button" className="button" disabled={busy} onClick={() => { if (!current() || generation !== revision.current) return; revision.current++; confirmation.current = null; setState(previous => ({ ...previous, review: null, confirmed: false })); }}>Cancel Page event review</button></section>}
-    {attempt && <section className="alert" role="status"><p>{attempt.pending ? 'The subscription request is in progress.' : 'The outcome is unknown.'} The original Page, review and action key are retained. Check outcome uses that same action. Resolve it in Provider outcomes if operator review is required.</p>{facts(attempt.review.settings)}<button type="button" className="button" disabled={busy || !canManage} onClick={() => resubscribe(attempt)}>{attempt.pending ? 'Checking outcome…' : 'Check outcome'}</button></section>}
-  </section>;
+    {canManage && !attempt && <Stack as="fieldset" disabled={busy || !state.snapshot}><FormActions><Button variant="secondary" onClick={() => load(true)}>Review Page event repair</Button></FormActions></Stack>}
+    {canManage && state.review && state.review.scope === view && state.review.revision === revision.current && <Stack as="section" gap={2} aria-label="Review Facebook Page event repair"><Heading level={6} size="sm">Review Page event repair</Heading><Text>Account: {state.review.accountName}</Text>{facts(state.review.settings)}<Checkbox label="I understand that Zernio requests its event field set, Meta may grant fewer fields, and this does not prove event delivery." checked={state.confirmed} disabled={busy} onChange={event => { if (!current() || generation !== revision.current || !canManage || view.pending || facebookSubscriptionAttempts.has(target) || state.review?.scope !== view || state.review.revision !== revision.current) return; confirmation.current = event.target.checked ? state.review : null; setState(previous => ({ ...previous, confirmed: event.target.checked })); }}/><FormActions><Button variant="primary" disabled={busy || !state.confirmed} onClick={() => resubscribe()}>Resubscribe Page events</Button><Button variant="secondary" disabled={busy} onClick={() => { if (!current() || generation !== revision.current) return; revision.current++; confirmation.current = null; setState(previous => ({ ...previous, review: null, confirmed: false })); }}>Cancel Page event review</Button></FormActions></Stack>}
+    {attempt && <Alert tone="warning"><Stack gap={2}><Text>{attempt.pending ? 'The subscription request is in progress.' : 'The outcome is unknown.'} The original Page, review and action key are retained. Check outcome uses that same action. Resolve it in Provider outcomes if operator review is required.</Text>{facts(attempt.review.settings)}<FormActions><Button variant="secondary" disabled={busy || !canManage} onClick={() => resubscribe(attempt)}>{attempt.pending ? 'Checking outcome…' : 'Check outcome'}</Button></FormActions></Stack></Alert>}
+  </Stack>;
 }
