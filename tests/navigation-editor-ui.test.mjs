@@ -351,7 +351,7 @@ test('a terminal failed preflight releases its key even when the newly reviewed 
 test('main navigation reveals its current route after delayed sidebar mount, route changes and mobile reopening', () => {
   const effect = source.split(/\r?\n/).find(line => line.includes('useEffect(() => { mainNavigationRef.current?'));
   assert.ok(effect);
-  assert.match(source, /<nav ref=\{mainNavigationRef\} aria-label="Main navigation">/);
+  assert.match(source, /<aside ref=\{mainNavigationRef\} className=/); assert.match(source, /<SidebarNav label="Main navigation" /);
   assert.doesNotMatch(effect, /\.focus\(/);
   const reference = { current: null }, calls = []; let dependencies;
   const useEffect = (callback, next) => {
