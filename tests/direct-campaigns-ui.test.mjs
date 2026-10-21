@@ -138,7 +138,7 @@ test('explicit message shortening preserves HTML/template content and ignores st
 });
 
 test('reply navigation carries the selected campaign account and recipient without choosing another channel', () => {
-  const calls = [], open = compile(section('function openReplies(', '  return <div className="direct-campaigns">'), { onOpenReplies: (...args) => calls.push(args) });
+  const calls = [], open = compile(section('function openReplies(', '\n  const deliveries: any[] ='),{ onOpenReplies: (...args) => calls.push(args) });
   open({ channel: 'whatsapp', accountId: 'campaign-account' }, '+971501234567'); open({ channel: 'sms', accountId: 'unused' }, '+971501234567'); open({ channel: 'email' }, 'person@example.com');
   assert.deepEqual(calls, [['whatsapp', 'campaign-account', '+971501234567'], ['sms', undefined, '+971501234567']]);
 });
