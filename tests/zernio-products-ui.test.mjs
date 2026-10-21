@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
-import { Alert } from '@ten98/ui';
+import * as UI from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { AppField as Field } from '@ten98/ui/app';
 import { transformWithOxc } from 'vite';
@@ -15,7 +15,21 @@ const store = (id = accounts[0].id) => ({ accountId: id, platform: 'shopify', na
 const product = (id = 'product/a', accountId = accounts[0].id) => ({ id, accountId, platform: 'shopify', title: 'Provider product', descriptionHtml: '<img src="https://never.example/a" onerror="bad()"><script>bad()</script>', handle: null, vendor: 'Provider vendor', productType: null, tags: ['<tag>'], status: 'active', platformStatus: 'ACTIVE', featuredImage: { id: null, url: 'https://never.example/featured', altText: '<featured>' }, images: [{ id: null, url: 'javascript:bad()', altText: null }], options: [{ name: 'Size', values: ['S'] }], variants: [{ id: 'variant/a', title: 'Small', sku: null, barcode: null, price: { amount: '12345678901234567890.00100', currency: 'USD' }, compareAtPrice: { amount: '00030.0000', currency: 'AED' }, inventoryQuantity: 0, availableForSale: false, options: [{ name: 'Size', value: 'S' }] }], totalInventory: 0, url: 'javascript:bad()', seo: { title: null, description: '<seo>' }, createdAt: null, updatedAt: null, publishedAt: null, platformData: { secret: 'SHOULD_NOT_RENDER' } });
 const page = (rows = [product()], nextCursor = null) => ({ products: rows, nextCursor, coverage });
 const detail = (row = product()) => ({ product: row, coverage });
-const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
+const { Alert, Button, Checkbox, CodeBlock, DataTable, DescriptionList, ReviewSummary, Select } = UI;
+const uiNames = source.match(/^import \{ (.+) \} from '@ten98\/ui';$/m)[1].split(', ').filter(name => !name.startsWith('type '));
+// Walks authored elements, library slot props, table cells/actions and the hook-free in-file review adapter.
+const nodes = value => {
+  if (Array.isArray(value)) return value.flatMap(nodes);
+  if (!React.isValidElement(value)) return [];
+  const props = value.props || {}, inner = [];
+  if (value.type?.name === 'ReviewedMutationForm') inner.push(value.type(props));
+  else for (const [key, prop] of Object.entries(props)) if (key === 'children') inner.push(React.Children.toArray(prop)); else if (React.isValidElement(prop) || Array.isArray(prop)) inner.push(prop);
+  if (value.type === DataTable) for (const row of props.rows) inner.push(props.rowActions?.(row), props.columns.map(column => column.render?.(row)));
+  if (value.type === DescriptionList) inner.push(props.items.map(item => item.description));
+  if (value.type === ReviewSummary) inner.push(props.changes.map(change => [change.before, change.after]));
+  return [value, ...nodes(inner)];
+};
+const isForm = node => node.props?.as === 'form', isFieldset = node => node.props?.as === 'fieldset', isCheckbox = node => node.type === Checkbox;
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
 test('every product recovery caller checks receipts only while retaining its exact reviewed action', async () => {
@@ -35,6 +49,13 @@ test('every product recovery caller checks receipts only while retaining its exa
   }
 });
 
+test('all five reviewed editors render the one shared review adapter and its ReviewSummary', async () => {
+  for (const [name, make, prepare] of [['collection', collectionEditor, reviewCollectionTitle], ['content', editor, reviewUpdate], ['create', creator, reviewCreation], ['price', priceEditor, reviewPrice], ['state', stateReview, reviewState]]) {
+    const ui = await make(); assert.equal(ui.find(() => true).type.name, 'ReviewedMutationForm', name); assert.equal(ui.find(node => node.type === ReviewSummary), undefined, name);
+    await prepare(ui); const summary = ui.find(node => node.type === ReviewSummary); assert.ok(summary, name); assert.ok(nodes(summary).some(isCheckbox), name);
+  }
+});
+
 async function browser(respond, connected = accounts, options = {}) {
   const { kind = 'ZernioProducts', ...initialProps } = options;
   const hooks = [], queued = [], calls = []; let activeHooks = hooks, children = new Map(), seen = new Set(), cursor = 0, dirty = true, tree, props = initialProps;
@@ -49,18 +70,18 @@ async function browser(respond, connected = accounts, options = {}) {
     const key = attributes.key; seen.add(key); if (!children.has(key)) children.set(key, []);
     const parentHooks = activeHooks, parentCursor = cursor; activeHooks = children.get(key); cursor = 0; const result = type(attributes); activeHooks = parentHooks; cursor = parentCursor; return result;
   } };
-  const Component = new Function('React', 'Field', 'Alert', 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', code + `;return ${kind};`)(runtimeReact, Field, Alert, state, ref, effect, effect, memo);
+  const Component = new Function('React', 'AppField', ...uiNames, 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', code + `;return ${kind};`)(runtimeReact, Field, ...uiNames.map(name => UI[name]), state, ref, effect, effect, memo);
   function paint() { for (let pass = 0; dirty; pass++) { assert.ok(pass < 20, 'Rendering settles.'); dirty = false; cursor = 0; activeHooks = hooks; seen = new Set(); tree = Component({ ...props, request: renderingRequest }); for (const [key, frame] of children) if (!seen.has(key)) { frame.forEach(hook => hook.close?.()); children.delete(key); } while (queued.length) queued.shift()(); } }
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
   const html = () => renderToStaticMarkup(tree);
-  const find = predicate => nodes(tree).find(predicate), button = text => find(node => node.type === 'button' && React.Children.toArray(node.props.children).join('') === text);
-  function field(label) { const shared = find(node => node.type === Field && node.props.label === label), native = find(node => node.type === 'label' && nodes(node).some(child => child.type === 'span' && child.props.children === label)); return shared ? nodes(Field(shared.props)).find(node => ['input', 'textarea'].includes(node.type)) : nodes(native).find(node => ['select', 'input', 'textarea'].includes(node.type)); }
+  const find = predicate => nodes(tree).find(predicate), button = text => find(node => node.type === Button && React.Children.toArray(node.props.children).join('') === text);
+  function field(label) { const shared = find(node => node.type === Field && node.props.label === label), native = find(node => node.type === UI.Field && node.props.label === label); return shared ? nodes(Field(shared.props)).find(node => ['input', 'textarea'].includes(node.type)) : nodes(native).find(node => node.type === Select); }
   async function change(label, value) { const input = field(label); assert.ok(input, label); input.props.onChange({ target: { value } }); await tick(); }
   const click = text => { const control = button(text); assert.ok(control, text); assert.equal(!!control.props.disabled, false, text); const pending = control.props.onClick(); paint(); return pending; };
-  const submit = () => { const pending = find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); paint(); return pending; };
+  const submit = () => { const pending = find(isForm).props.onSubmit({ preventDefault() {} }); paint(); return pending; };
   paint(); await tick();
   return { calls, tick, html, change, click, submit, field, button, find,
-    confirm: (checked = true) => { const input = find(node => node.type === 'input' && node.props.type === 'checkbox'); assert.ok(input); input.props.onChange({ target: { checked } }); paint(); },
+    confirm: (checked = true) => { const input = find(isCheckbox); assert.ok(input); input.props.onChange({ target: { checked } }); paint(); },
     setProps: changes => { props = { ...props, ...changes }; dirty = true; paint(); },
     renewRequest: () => { renderingRequest = (...args) => request(...args); dirty = true; paint(); },
     discardProps: changes => { const oldProps = props, oldTree = tree, oldHooks = hooks.slice(), oldQueued = queued.slice(), oldChildren = new Map([...children].map(([key, frame]) => [key, frame.slice()])); props = { ...props, ...changes }; cursor = 0; activeHooks = hooks; Component({ ...props, request }); props = oldProps; tree = oldTree; hooks.splice(0, hooks.length, ...oldHooks); children = oldChildren; queued.splice(0, queued.length, ...oldQueued); },
@@ -172,7 +193,7 @@ test('collection title editor uses fresh exact review, literal text and one ackn
   assert.equal(ui.field('Collection title').type, 'input'); assert.match(ui.html(), /Current collection title: Returned collection/); assert.match(ui.html(), /membership and publication are unknown/);
   await ui.change('Collection title', '  Renamed collection  '); await ui.click('Review collection title'); await ui.tick();
   assert.equal(ui.calls.length, 2); assert.equal(ui.button('Save collection title').props.disabled, true); await ui.submit(); assert.equal(ui.calls.length, 2);
-  assert.match(ui.html(), /Review Shopify collection title.*Account shop\/a.*shop.example.*Native collection gid:\/\/shopify\/Collection\/7001.*Before: Returned collection.*After: Renamed collection/);
+  assert.match(ui.html(), /Review Shopify collection title.*Account shop\/a.*shop.example.*Native collection gid:\/\/shopify\/Collection\/7001.*Title<\/th><td>Returned collection<\/td><td>Renamed collection/);
   assert.doesNotMatch(ui.html(), /collection-version|<img|<script|<iframe|<a\s/); ui.confirm(); await ui.submit(); await ui.tick();
   const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 1); assert.equal(writes[0][0], 'products/shop%2Fa/collections/gid%3A%2F%2Fshopify%2FCollection%2F7001/rename'); assert.deepEqual(writes[0][1], { version: 'collection-version', title: 'Renamed collection' }); assert.equal(validated, 1);
   assert.match(ui.html(), /Collection title confirmed by Shopify readback/); assert.equal(ui.field('Collection title').props.value, '  Renamed collection  '); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 1);
@@ -184,7 +205,7 @@ test('collection title validation and missing grants prevent review reads or mut
     const ui = await collectionEditor(); await ui.change('Collection title', value); await ui.click('Review collection title'); await ui.tick(); await ui.submit(); assert.equal(ui.calls.length, 1); assert.match(ui.html(), /Enter a collection title|Change the collection title/);
   }
   for (const props of [{ readOnly: true }, { account: { ...accounts[0], isActive: false } }, { account: { ...accounts[0], needsReconnection: true } }, { store: collectionStore() }, { store: { ...collectionWriteStore(), missingCapabilities: ['collections.read'] } }, { store: { ...collectionWriteStore(), missingCapabilities: ['collections.write'] } }, { collection: { ...collection(), accountId: 'other' } }]) {
-    const ui = await collectionEditor(async () => assert.fail('Ineligible editor must not request'), props); await ui.button('Review collection title').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 0); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true);
+    const ui = await collectionEditor(async () => assert.fail('Ineligible editor must not request'), props); await ui.button('Review collection title').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 0); assert.equal(ui.find(isFieldset).props.disabled, true);
   }
 });
 
@@ -197,7 +218,7 @@ test('collection fresh review refuses drift and malformed scopes while retaining
 
 test('collection retained review, acknowledgement and submit cannot survive committed changes or edited content', async () => {
   for (const mode of ['read-only', 'inactive', 'store-grant', 'collection-refresh', 'account-refresh', 'store-refresh', 'A-B-A', 'edit', 'unconfirm', 'refresh']) {
-    const ui = await collectionEditor(); await reviewCollectionTitle(ui); const submit = ui.find(node => node.type === 'form').props.onSubmit, confirm = ui.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange;
+    const ui = await collectionEditor(); await reviewCollectionTitle(ui); const submit = ui.find(isForm).props.onSubmit, confirm = ui.find(isCheckbox).props.onChange;
     if (mode === 'read-only') ui.setProps({ readOnly: true }); if (mode === 'inactive') ui.setProps({ account: { ...accounts[0], isActive: false } }); if (mode === 'store-grant') ui.setProps({ store: { ...collectionWriteStore(), missingCapabilities: ['collections.write'] } }); if (mode === 'collection-refresh') ui.setProps({ collection: collection() }); if (mode === 'account-refresh') ui.setProps({ account: { ...accounts[0] } }); if (mode === 'store-refresh') ui.setProps({ store: collectionWriteStore() }); if (mode === 'A-B-A') { ui.setProps({ readOnly: true }); ui.setProps({ readOnly: false }); } if (mode === 'edit') await ui.change('Collection title', 'Newer authored title'); if (mode === 'unconfirm') ui.confirm(false); if (mode === 'refresh') { await ui.click('Refresh current collection review'); await ui.tick(); }
     if (mode !== 'unconfirm') confirm({ target: { checked: true } }); await submit({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0, mode); assert.equal(ui.field('Collection title').props.value, mode === 'edit' ? 'Newer authored title' : '  Renamed collection  ');
   }
@@ -207,8 +228,8 @@ test('collection retained review, acknowledgement and submit cannot survive comm
 test('collection malformed receipts require explicit permission-gated checks of the same action without automatic retries', async () => {
   for (const requestValidates of [false, true]) for (const mutate of [r => { r.accountId = 'other'; }, r => { r.collection.id = 'other'; }, r => { r.collection.title = 'Wrong accepted title'; }, r => { r.store.domain = 'other.example'; }, r => { r.store.missingCapabilities = ['collections.write']; }, r => { r.readback = false; }, r => { r.operation.status = 'pending'; }, r => { r.operation.id = ''; }]) {
     let malformed = true; const ui = await collectionEditor(async (_path, body, validate) => { if (!body) return collectionEdit(); const value = collectionReceipt(); if (malformed) mutate(value); if (requestValidates) validate(value); return value; }); await reviewCollectionTitle(ui); await ui.submit(); await ui.tick();
-    assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /Collection title confirmed|Review Shopify collection title|Refresh current collection review/); assert.equal(ui.field('Collection title').props.value, '  Renamed collection  '); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); assert.equal(ui.calls.filter(call => call[1]).length, 1);
-    const retained = ui.find(node => node.type === 'form').props.onSubmit; ui.setProps({ readOnly: true }); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 1); assert.equal(ui.button('Check outcome').props.disabled, true);
+    assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /Collection title confirmed|Review Shopify collection title|Refresh current collection review/); assert.equal(ui.field('Collection title').props.value, '  Renamed collection  '); assert.equal(ui.find(isFieldset).props.disabled, true); assert.equal(ui.calls.filter(call => call[1]).length, 1);
+    const retained = ui.find(isForm).props.onSubmit; ui.setProps({ readOnly: true }); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 1); assert.equal(ui.button('Check outcome').props.disabled, true);
     ui.setProps({ readOnly: false }); malformed = false; await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 2); assert.deepEqual(writes[0].slice(0, 2), writes[1].slice(0, 2)); assert.match(ui.html(), /Collection title confirmed/);
   }
 });
@@ -221,7 +242,7 @@ test('collection known-unsent and failed attempts withdraw recovery, retain titl
       if (attempts.length === 1) throw new Error('Response lost');
       if (!terminal) { terminal = true; keys.delete(payload); throw Object.assign(new Error('Earlier request was not sent'), { status: 409, ...rejection }); }
       const value = collectionReceipt(); validate(value); return value;
-    }); await reviewCollectionTitle(ui); await ui.submit(); await ui.tick(); const retained = ui.find(node => node.type === 'form').props.onSubmit; assert.match(ui.html(), /outcome is unknown/); assert.ok(ui.button('Check outcome')); await ui.submit(); await ui.tick();
+    }); await reviewCollectionTitle(ui); await ui.submit(); await ui.tick(); const retained = ui.find(isForm).props.onSubmit; assert.match(ui.html(), /outcome is unknown/); assert.ok(ui.button('Check outcome')); await ui.submit(); await ui.tick();
     assert.deepEqual(attempts[0], attempts[1]); assert.match(ui.html(), /Earlier request was not sent.*Refresh.*review a new action/); assert.doesNotMatch(ui.html(), /outcome is unknown|Review Shopify/); assert.equal(ui.field('Collection title').props.value, '  Renamed collection  ');
     await retained({ preventDefault() {} }); await ui.submit(); await ui.button('Review collection title').props.onClick(); assert.equal(attempts.length, 2);
     await ui.click('Refresh current collection review'); await ui.tick(); await ui.click('Review collection title'); await ui.tick(); await ui.submit(); assert.equal(attempts.length, 2); ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(attempts.length, 3); assert.notEqual(attempts[0].key, attempts[2].key); assert.match(attempts[2].payload, /fresh-after-not-sent/); assert.match(ui.html(), /Collection title confirmed/);
@@ -406,11 +427,11 @@ test('product type and full tags keep exact labels and complete before/after val
   await ui.change('Product type', '  Exact, Type  '); await ui.click('Clear all tags');
   for (const [index, value] of tags.entries()) { await ui.click('Add tag'); await ui.change(`Tag ${index + 1}`, value); }
   await ui.click('Review product changes'); await ui.tick();
-  for (const value of ['Product type: "Original type"', 'Product type: "  Exact, Type  "', 'Tags: ' + JSON.stringify(original.tags), 'Tags: ' + JSON.stringify(tags)]) { const block = ui.find(node => node.type === 'pre' && React.Children.toArray(node.props.children).join('') === value); assert.ok(block, value); assert.deepEqual(block.props.style, { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }); }
+  for (const value of ['Product type: "Original type"', 'Product type: "  Exact, Type  "', 'Tags: ' + JSON.stringify(original.tags), 'Tags: ' + JSON.stringify(tags)]) { const block = ui.find(node => node.type === CodeBlock && node.props.code === value); assert.ok(block, value); assert.equal(block.props.wrap, true); }
   assert.match(ui.html(), /Changes: Product type, Tags/); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
   ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(validated, true); assert.match(ui.html(), /Product update confirmed/);
   assert.equal(ui.field('Product type').props.value, '  Exact, Type  '); for (const [index, value] of tags.entries()) assert.equal(ui.field(`Tag ${index + 1}`).props.value, value);
-  assert.ok(ui.find(node => node.type === 'pre' && React.Children.toArray(node.props.children).join('') === 'Accepted tags: ' + JSON.stringify([...tags].reverse())));
+  assert.ok(ui.find(node => node.type === CodeBlock && node.props.code === 'Accepted tags: ' + JSON.stringify([...tags].reverse())));
 });
 
 test('null product type stays untouched until explicit replacement and clearing all tags requires the exact reviewed empty list', async () => {
@@ -434,7 +455,7 @@ test('classification validation and every tag edit withdraw prior acknowledgemen
     const ui = await editor(); if (field === 'Product type') await ui.click('Replace unavailable product type'); await ui.change(field, value); await ui.click('Review product changes'); await ui.tick(); assert.equal(ui.calls.length, 1); assert.match(ui.html(), expected); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
   }
   for (const mode of ['type', 'tag', 'add', 'remove', 'clear', 'scope']) {
-    const ui = await editor(); await reviewUpdate(ui); const retained = ui.find(node => node.type === 'form').props.onSubmit;
+    const ui = await editor(); await reviewUpdate(ui); const retained = ui.find(isForm).props.onSubmit;
     if (mode === 'type') await ui.click('Replace unavailable product type'); if (mode === 'tag') await ui.change('Tag 1', 'New, exact tag'); if (mode === 'add') await ui.click('Add tag'); if (mode === 'remove') await ui.click('Remove tag 1'); if (mode === 'clear') await ui.click('Clear all tags'); if (mode === 'scope') ui.setProps({ store: { ...writeStore(), missingCapabilities: ['products.update'] } });
     await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0, mode);
   }
@@ -447,7 +468,7 @@ test('classification receipt mismatches retain exact drafts and check only the s
       if (!body) return editDetail(); const row = { ...product(), productType: 'Reviewed type', tags: [...tags] }; if (malformed) mutate(row); const value = updateReceipt(row); if (validateInRequest) validate(value); return value;
     });
     await ui.click('Replace unavailable product type'); await ui.change('Product type', 'Reviewed type'); await ui.change('Tag 1', tags[0]); await ui.click('Add tag'); await ui.change('Tag 2', tags[1]); await ui.click('Add tag'); await ui.change('Tag 3', tags[2]); await ui.click('Review product changes'); await ui.tick(); ui.confirm(); await ui.submit(); await ui.tick();
-    assert.match(ui.html(), /outcome is unknown/); assert.equal(ui.calls.filter(call => call[1]).length, 1); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); assert.equal(ui.field('Product type').props.value, 'Reviewed type'); assert.equal(ui.field('Tag 1').props.value, 'Blue,Red');
+    assert.match(ui.html(), /outcome is unknown/); assert.equal(ui.calls.filter(call => call[1]).length, 1); assert.equal(ui.find(isFieldset).props.disabled, true); assert.equal(ui.field('Product type').props.value, 'Reviewed type'); assert.equal(ui.field('Tag 1').props.value, 'Blue,Red');
     malformed = false; await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 2); assert.deepEqual(writes[0].slice(0, 2), writes[1].slice(0, 2)); assert.equal(writes[0][3], false); assert.equal(writes[1][3], true); assert.match(ui.html(), /Product update confirmed/);
   }
 });
@@ -470,10 +491,10 @@ test('collection and product state outcome recovery renders the real warning Ale
     ['delete', deletionReview, reviewDeletion, () => stateDetail(archivedStateProduct()), deletionReceipt],
   ]) {
     let uncertain = true; const ui = await make(async (_path, body, validate) => { if (!body) return snapshot(); if (uncertain) throw new Error('Acknowledgement lost'); const value = receipt(); validate(value); return value; });
-    await prepare(ui); await ui.submit(); await ui.tick(); const alert = ui.find(node => node.type === Alert); assert.ok(alert, name); assert.equal(alert.props.title, 'Outcome unknown'); assert.equal(alert.props.tone, 'warning'); assert.equal(alert.props.role, 'status');
-    const content = alert.props.children; assert.equal(content.type, 'div'); assert.equal(content.props.className, 't98-settings-fields'); assert.deepEqual(React.Children.toArray(content.props.children).map(node => node.type), ['p', 'p', 'button']);
+    await prepare(ui); await ui.submit(); await ui.tick(); const alert = ui.find(node => node.type === Alert && node.props.title === 'Outcome unknown'); assert.ok(alert, name); assert.equal(alert.props.title, 'Outcome unknown'); assert.equal(alert.props.tone, 'warning'); assert.equal(alert.props.role, 'status');
+    const content = alert.props.children; assert.equal(content.type, UI.Stack); assert.deepEqual(React.Children.toArray(content.props.children).map(node => node.type), [UI.Text, UI.Text]); assert.equal(alert.props.actions.type, Button);
     const rendered = renderToStaticMarkup(alert); assert.match(rendered, /t98-alert t98-tone--warning/); assert.match(rendered, /role="status"/); assert.match(rendered, /t98-alert-title">Outcome unknown/); assert.match(rendered, /t98-alert-description/);
-    assert.equal(ui.button('Check outcome').props.type, 'submit'); assert.equal(ui.button('Check outcome').props.name, undefined); const retained = ui.find(node => node.type === 'form').props.onSubmit;
+    assert.equal(ui.button('Check outcome').props.type, 'submit'); assert.equal(ui.button('Check outcome').props.name, undefined); const retained = ui.find(isForm).props.onSubmit;
     ui.setProps({ readOnly: true }); assert.equal(ui.button('Check outcome').props.disabled, true); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 1, name);
     ui.setProps({ readOnly: false }); uncertain = false; await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 2, name); assert.deepEqual(writes[0].slice(0, 2), writes[1].slice(0, 2), name); assert.equal(writes[1][3], true, name); assert.doesNotMatch(ui.html(), /Outcome unknown/);
   }
@@ -482,8 +503,8 @@ test('collection and product state outcome recovery renders the real warning Ale
 test('vendor edits are explicit, changed-only and require fresh acknowledgement before the existing update', async () => {
   for (const vendor of ['Reviewed vendor', '']) {
     let validated = false; const ui = await editor(async (path, body, validate) => { if (!body) return editDetail(); assert.equal(path, 'products/shop%2Fa/product%2Fa/update'); assert.deepEqual(body, { version: 'product-version', confirmUpdate: true, vendor }); const result = updateReceipt({ ...product(), vendor }); validate(result); validated = true; return result; });
-    assert.equal(ui.field('Vendor').props.value, 'Provider vendor'); await ui.change('Vendor', vendor); await ui.click('Review product changes'); await ui.tick(); assert.match(ui.html(), /Vendor: Provider vendor/); assert.match(ui.html(), /Changes: Vendor/); if (vendor === '') assert.match(ui.html(), /clear vendor/);
-    await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0); ui.confirm(); const retained = ui.find(node => node.type === 'form').props.onSubmit; await ui.change('Vendor', 'Newer vendor'); assert.doesNotMatch(ui.html(), /Review Shopify product update/); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 0);
+    assert.equal(ui.field('Vendor').props.value, 'Provider vendor'); await ui.change('Vendor', vendor); await ui.click('Review product changes'); await ui.tick(); assert.match(ui.html(), /Vendor<\/th><td>Provider vendor<\/td>/); assert.match(ui.html(), /Changes: Vendor/); if (vendor === '') assert.match(ui.html(), /clear vendor/);
+    await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0); ui.confirm(); const retained = ui.find(isForm).props.onSubmit; await ui.change('Vendor', 'Newer vendor'); assert.doesNotMatch(ui.html(), /Review Shopify product update/); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 0);
     await ui.change('Vendor', vendor); await ui.click('Review product changes'); await ui.tick(); ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(validated, true); assert.match(ui.html(), /Product update confirmed/); assert.match(ui.html(), vendor ? /Accepted vendor: Reviewed vendor/ : /Accepted vendor: \(empty\)/); assert.equal(ui.calls.filter(call => call[1]).length, 1);
   }
 });
@@ -494,14 +515,14 @@ test('unavailable vendor stays omitted until a deliberate replacement, including
     const ui = await editor(async (_path, body, validate) => { if (!body) return editDetail(original); const row = { ...original, ...(replace ? { vendor: '' } : { title: 'Only title' }) }, result = updateReceipt(row); assert.deepEqual(body, { version: 'product-version', confirmUpdate: true, ...(replace ? { vendor: '' } : { title: 'Only title' }) }); validate(result); return result; }, { product: original });
     assert.ok(ui.button('Replace unavailable vendor')); assert.match(ui.html(), /Vendor was not returned/);
     if (replace) { await ui.click('Replace unavailable vendor'); assert.equal(ui.field('Vendor').props.value, ''); } else await ui.change('Product title', 'Only title');
-    await ui.click('Review product changes'); await ui.tick(); assert.match(ui.html(), replace ? /Vendor: \(clear vendor\)/ : /Vendor: Not returned \(unchanged\)/); ui.confirm(); await ui.submit(); await ui.tick(); assert.match(ui.html(), /Product update confirmed/);
+    await ui.click('Review product changes'); await ui.tick(); assert.match(ui.html(), replace ? /Vendor<\/th><td>Not returned<\/td><td>\(clear vendor\)<\/td>/ : /Vendor<\/th><td>Not returned<\/td><td>Not returned \(unchanged\)/); ui.confirm(); await ui.submit(); await ui.tick(); assert.match(ui.html(), /Product update confirmed/);
   }
   const absentVendor = product(); delete absentVendor.vendor; const malformed = await editor(async () => editDetail(absentVendor)); assert.match(malformed.html(), /could not be verified/); await malformed.click('Review product changes'); await malformed.submit(); assert.equal(malformed.calls.filter(call => call[1]).length, 0);
 });
 
 test('vendor validation and current-snapshot/access changes block stale submissions while preserving authored text', async () => {
   for (const vendor of ['x'.repeat(10001), 'bad\nvendor', 'bad\tvendor', 'bad\u0000vendor']) { const ui = await editor(); await ui.change('Vendor', vendor); await ui.click('Review product changes'); await ui.tick(); assert.match(ui.html(), /Vendor must be at most/); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0); }
-  for (const changed of [{ readOnly: true }, { store: { ...writeStore(), missingCapabilities: ['products.update'] } }, { product: product('other') }]) { const ui = await editor(); await ui.change('Vendor', 'Authored vendor'); await ui.click('Review product changes'); await ui.tick(); ui.confirm(); const retained = ui.find(node => node.type === 'form').props.onSubmit; ui.setProps(changed); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 0); }
+  for (const changed of [{ readOnly: true }, { store: { ...writeStore(), missingCapabilities: ['products.update'] } }, { product: product('other') }]) { const ui = await editor(); await ui.change('Vendor', 'Authored vendor'); await ui.click('Review product changes'); await ui.tick(); ui.confirm(); const retained = ui.find(isForm).props.onSubmit; ui.setProps(changed); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 0); }
   let fresh = editDetail(); const drift = await editor(async () => fresh); await drift.change('Vendor', 'Authored vendor'); fresh = editDetail({ ...product(), vendor: 'Changed externally' }, 'changed-version'); await drift.click('Review product changes'); await drift.tick(); assert.match(drift.html(), /product changed on Shopify/); assert.equal(drift.field('Vendor').props.value, 'Authored vendor'); await drift.submit(); assert.equal(drift.calls.filter(call => call[1]).length, 0);
   const literal = await editor(); await literal.change('Vendor', '<script>Vendor</script>'); await literal.click('Review product changes'); await literal.tick(); assert.match(literal.html(), /&lt;script&gt;Vendor&lt;\/script&gt;/); assert.doesNotMatch(literal.html(), /<script|<img/);
 });
@@ -533,7 +554,7 @@ test('edit entry requires a committed callback, matching active account, explici
 test('product editor loads fresh content into the real shared native controls and keeps HTML inert in review', async () => {
   const ui = await editor(); assert.equal(ui.calls[0][0], 'products/shop%2Fa/product%2Fa'); assert.equal(ui.field('Product title').type, 'input'); assert.equal(ui.field('Description HTML').type, 'textarea'); assert.equal(ui.field('Description HTML').props.value, product().descriptionHtml);
   await reviewUpdate(ui, '<img src="https://never.example/edited"><script>raw()</script>');
-  const html = ui.html(); assert.match(html, /Review Shopify product update|Native product product\/a/); assert.match(html, /Before.*Provider product.*After.*Updated title/); assert.match(html, /live storefront immediately/); assert.match(html, /&lt;script&gt;raw\(\)&lt;\/script&gt;/); assert.doesNotMatch(html, /<img|<script|<iframe|<a\s/);
+  const html = ui.html(); assert.match(html, /Review Shopify product update|Native product product\/a/); assert.match(html, /Title<\/th><td>Provider product<\/td><td>Updated title/); assert.match(html, /live storefront immediately/); assert.match(html, /&lt;script&gt;raw\(\)&lt;\/script&gt;/); assert.doesNotMatch(html, /<img|<script|<iframe|<a\s/);
   await ui.change('Description HTML', '<p>Newer edits</p>'); assert.doesNotMatch(ui.html(), /Review Shopify product update/); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
 });
 
@@ -572,13 +593,13 @@ test('fresh product version, store and permission changes reject review while re
     let initial = true; const ui = await editor(async () => { if (initial) { initial = false; return editDetail(); } return fresh; }); await ui.change('Product title', 'Authored product title'); await ui.click('Review product changes'); await ui.tick(); assert.doesNotMatch(ui.html(), /Review Shopify product update/); assert.equal(ui.field('Product title').props.value, 'Authored product title'); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
   }
   for (const result of [new Error('No store access'), { ...editDetail(), version: null }, { ...editDetail(), store: { ...writeStore(), accountId: 'other' } }]) {
-    const ui = await editor(async () => { if (result instanceof Error) throw result; return result; }); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); await ui.button('Review product changes').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 1);
+    const ui = await editor(async () => { if (result instanceof Error) throw result; return result; }); assert.equal(ui.find(isFieldset).props.disabled, true); await ui.button('Review product changes').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 1);
   }
 });
 
 test('retained review, confirmation and save events cannot bypass role, scopes, account changes, edits or withdrawn confirmation', async () => {
   for (const mode of ['read-only', 'inactive', 'reconnect', 'scope', 'deleted', 'edit', 'unconfirm', 'A-B-A']) {
-    const ui = await editor(); await reviewUpdate(ui); const retained = ui.find(node => node.type === 'form').props.onSubmit, confirmation = ui.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange;
+    const ui = await editor(); await reviewUpdate(ui); const retained = ui.find(isForm).props.onSubmit, confirmation = ui.find(isCheckbox).props.onChange;
     if (mode === 'read-only') ui.setProps({ readOnly: true }); if (mode === 'inactive') ui.setProps({ account: { ...accounts[0], isActive: false } }); if (mode === 'reconnect') ui.setProps({ account: { ...accounts[0], needsReconnection: true } }); if (mode === 'scope') ui.setProps({ store: { ...writeStore(), missingCapabilities: ['products.update'] } }); if (mode === 'deleted') ui.setProps({ product: { ...product(), status: 'deleted' } }); if (mode === 'edit') await ui.change('Description HTML', '<p>Newer edits</p>'); if (mode === 'unconfirm') ui.confirm(false); if (mode === 'A-B-A') { ui.setProps({ readOnly: true }); ui.setProps({ readOnly: false }); }
     if (!['edit', 'unconfirm'].includes(mode)) confirmation({ target: { checked: true } }); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0, mode); assert.equal(ui.field('Product title').props.value, '  Updated title  ');
   }
@@ -588,7 +609,7 @@ test('retained review, confirmation and save events cannot bypass role, scopes, 
 test('independent malformed receipt validation preserves the original body for deliberate uncertain recovery without automatic retry', async () => {
   for (const validateInRequest of [false, true]) for (const mutate of [r => { r.accountId = 'other'; }, r => { r.product.id = 'other'; }, r => { r.product.title = 'Wrong accepted title'; }, r => { r.product.descriptionHtml = null; }, r => { r.store.domain = 'different.example'; }, r => { r.readback = false; }, r => { r.operation.status = 'pending'; }, r => { r.operation.id = ''; }]) {
     let malformed = true; const ui = await editor(async (path, body, validate) => { if (!body) return editDetail(); const result = updateReceipt(); if (malformed) mutate(result); if (validateInRequest) validate(result); return result; }); await reviewUpdate(ui); await ui.submit(); await ui.tick();
-    assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /Product update confirmed/); assert.equal(ui.field('Product title').props.value, '  Updated title  '); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); assert.equal(ui.calls.filter(call => call[1]).length, 1);
+    assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /Product update confirmed/); assert.equal(ui.field('Product title').props.value, '  Updated title  '); assert.equal(ui.find(isFieldset).props.disabled, true); assert.equal(ui.calls.filter(call => call[1]).length, 1);
     malformed = false; await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 2); assert.equal(writes[0][0], writes[1][0]); assert.deepEqual(writes[0][1], writes[1][1]); assert.match(ui.html(), /Product update confirmed/);
   }
 });
@@ -599,12 +620,12 @@ test('pending receipts survive access withdrawal, and late resource reads cannot
 });
 
 test('read-only and ungranted editor props never read or mutate a product', async () => {
-  for (const props of [{ readOnly: true }, { account: { ...accounts[0], isActive: false } }, { store: store() }, { store: { ...writeStore(), missingCapabilities: ['products.read'] } }, { product: { ...product(), status: 'deleted' } }]) { const ui = await editor(async () => assert.fail('Unwritable editor must not request'), props); assert.equal(ui.calls.length, 0); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); await ui.button('Review product changes').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 0); }
+  for (const props of [{ readOnly: true }, { account: { ...accounts[0], isActive: false } }, { store: store() }, { store: { ...writeStore(), missingCapabilities: ['products.read'] } }, { product: { ...product(), status: 'deleted' } }]) { const ui = await editor(async () => assert.fail('Unwritable editor must not request'), props); assert.equal(ui.calls.length, 0); assert.equal(ui.find(isFieldset).props.disabled, true); await ui.button('Review product changes').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 0); }
 });
 
 test('uncertain recovery stays permission gated and reuses the reviewed action after access returns', async () => {
   let failed = true; const ui = await editor(async (path, body) => { if (!body) return editDetail(); if (failed) throw Object.assign(new Error('Provider outcome pending'), { status: 409, code: 'OPERATION_PENDING' }); return updateReceipt(); }); await reviewUpdate(ui); await ui.submit(); await ui.tick();
-  const retained = ui.find(node => node.type === 'form').props.onSubmit; ui.setProps({ readOnly: true }); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 1);
+  const retained = ui.find(isForm).props.onSubmit; ui.setProps({ readOnly: true }); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 1);
   ui.setProps({ readOnly: false }); failed = false; await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 2); assert.deepEqual(writes[0][1], writes[1][1]); assert.match(ui.html(), /Product update confirmed/);
 });
 
@@ -621,7 +642,7 @@ test('an operator-closed uncertain action preserves edits and requires an explic
     return updateReceipt();
   });
   await reviewUpdate(ui); await ui.submit(); await ui.tick(); assert.match(ui.html(), /outcome is unknown/);
-  const closedSubmit = ui.find(node => node.type === 'form').props.onSubmit; await ui.submit(); await ui.tick(); assert.equal(writes, 2); assert.equal(reads, 2, 'Closure never reloads or mutates automatically.'); assert.doesNotMatch(ui.html(), /outcome is unknown|Check the same product update|Review Shopify product update|Product update confirmed/);
+  const closedSubmit = ui.find(isForm).props.onSubmit; await ui.submit(); await ui.tick(); assert.equal(writes, 2); assert.equal(reads, 2, 'Closure never reloads or mutates automatically.'); assert.doesNotMatch(ui.html(), /outcome is unknown|Check the same product update|Review Shopify product update|Product update confirmed/);
   assert.match(ui.html(), /closed-product-operation.*reviewed-failed/); assert.equal(ui.field('Product title').props.value, '  Updated title  '); assert.equal(ui.field('Description HTML').props.value, ' <p>Submitted HTML</p> ');
   assert.ok(ui.button('Refresh current product review'), 'A closed operation leaves a usable explicit refresh path.'); await closedSubmit({ preventDefault() {} }); await ui.submit(); assert.equal(writes, 2);
   ui.setProps({ readOnly: true }); assert.doesNotMatch(ui.html(), /Refresh current product review/); ui.setProps({ readOnly: false }); await ui.click('Refresh current product review'); await ui.tick(); assert.equal(reads, 3); assert.equal(writes, 2); assert.equal(ui.field('Product title').props.value, '  Updated title  '); assert.equal(ui.field('Description HTML').props.value, ' <p>Submitted HTML</p> ');
@@ -653,7 +674,7 @@ test('new draft uses native literal fields, fresh store review and one decimal s
   let validations = 0; const ui = await creator(async (_path, body, validate) => { if (!body) return creationReview(); const result = creationReceipt(); validate(result); validations++; return result; });
   assert.equal(ui.calls.length, 0); assert.equal(ui.field('Product title').type, 'input'); assert.equal(ui.field('Description HTML').type, 'textarea'); assert.equal(ui.field('Price in USD').props.type, 'text');
   await reviewCreation(ui); assert.equal(ui.calls.length, 1); assert.equal(ui.calls[0][0], 'products/shop%2Fa/store');
-  assert.match(ui.html(), /Review Shopify draft product.*Account shop\/a.*shop.example.*Currency USD/); assert.match(ui.html(), /Single variant price: 12345678901234567890.12 USD/); assert.match(ui.html(), /&lt;script&gt;raw\(\)&lt;\/script&gt;/); assert.doesNotMatch(ui.html(), /<img|<script|<iframe|<a\s/);
+  assert.match(ui.html(), /Review Shopify draft product.*Account shop\/a.*shop.example.*Currency USD/); assert.match(ui.html(), /Single variant price<\/th><td>Not created<\/td><td>12345678901234567890.12 USD/); assert.match(ui.html(), /&lt;script&gt;raw\(\)&lt;\/script&gt;/); assert.doesNotMatch(ui.html(), /<img|<script|<iframe|<a\s/);
   await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 1); assert.equal(writes[0][0], 'products/shop%2Fa/create');
   assert.deepEqual(writes[0][1], { version: 'creation-version', confirmCreate: true, title: 'Draft title', descriptionHtml: ' <img src="https://never.example/new"><script>raw()</script> ', price: '12345678901234567890.12' }); assert.equal(validations, 1);
   assert.match(ui.html(), /Draft product creation confirmed by Shopify readback.*Native product 1001.*draft.*DRAFT/); assert.match(ui.html(), /Accepted single variant price: 0012345678901234567890.12000 USD/); assert.match(ui.html(), /Accepted description HTML.*&lt;p&gt;Canonical HTML&lt;\/p&gt;/);
@@ -675,7 +696,7 @@ test('fresh mismatched stores, permissions and missing creation versions reject 
 
 test('stale draft creation events cannot bypass changed content, access, account or confirmation', async () => {
   for (const mode of ['read-only', 'inactive', 'scope', 'edit', 'unconfirm', 'A-B-A']) {
-    const ui = await creator(); await reviewCreation(ui); const retained = ui.find(node => node.type === 'form').props.onSubmit, confirm = ui.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange;
+    const ui = await creator(); await reviewCreation(ui); const retained = ui.find(isForm).props.onSubmit, confirm = ui.find(isCheckbox).props.onChange;
     if (mode === 'read-only') ui.setProps({ readOnly: true }); if (mode === 'inactive') ui.setProps({ account: { ...accounts[0], isActive: false } }); if (mode === 'scope') ui.setProps({ store: { ...createStore(), missingCapabilities: ['products.create'] } }); if (mode === 'edit') await ui.change('Product title', 'Newer draft'); if (mode === 'unconfirm') ui.confirm(false); if (mode === 'A-B-A') { ui.setProps({ readOnly: true }); ui.setProps({ readOnly: false }); }
     if (!['edit', 'unconfirm'].includes(mode)) confirm({ target: { checked: true } }); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0, mode); assert.equal(ui.field('Product title').props.value, mode === 'edit' ? 'Newer draft' : '  Draft title  ');
   }
@@ -685,15 +706,15 @@ test('stale draft creation events cannot bypass changed content, access, account
 test('malformed creation receipts retain the exact original action for explicit permission gated recovery', async () => {
   for (const validateInRequest of [false, true]) for (const mutate of [r => { r.accountId = 'other'; }, r => { r.product.id = ''; }, r => { r.product.id = 'bad\u0000id'; }, r => { r.product.title = 'Wrong title'; }, r => { r.product.status = 'active'; }, r => { r.product.platformStatus = 'ACTIVE'; }, r => { r.product.url = 'https://shop.example/products/new'; }, r => { r.product.publishedAt = '2026-10-19T00:00:00Z'; }, r => { r.product.variants[0].price.amount = '12345678901234567890.13'; }, r => { r.product.variants[0].price.currency = 'AED'; }, r => { r.product.variants.push(r.product.variants[0]); }, r => { r.product.descriptionHtml = null; }, r => { r.store.domain = 'other.example'; }, r => { r.readback = false; }, r => { r.operation.status = 'pending'; }]) {
     let malformed = true; const ui = await creator(async (_path, body, validate) => { if (!body) return creationReview(); const result = creationReceipt(); if (malformed) mutate(result); if (validateInRequest) validate(result); return result; });
-    await reviewCreation(ui); await ui.submit(); await ui.tick(); assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /creation confirmed/); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); assert.equal(ui.calls.filter(call => call[1]).length, 1);
-    const retained = ui.find(node => node.type === 'form').props.onSubmit; ui.setProps({ readOnly: true }); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 1); ui.setProps({ readOnly: false }); malformed = false;
+    await reviewCreation(ui); await ui.submit(); await ui.tick(); assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /creation confirmed/); assert.equal(ui.find(isFieldset).props.disabled, true); assert.equal(ui.calls.filter(call => call[1]).length, 1);
+    const retained = ui.find(isForm).props.onSubmit; ui.setProps({ readOnly: true }); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 1); ui.setProps({ readOnly: false }); malformed = false;
     await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 2); assert.deepEqual(writes[0].slice(0, 2), writes[1].slice(0, 2)); assert.match(ui.html(), /Draft product creation confirmed/);
   }
 });
 
 test('operator closure preserves the creation draft and requires explicit fresh store review and confirmation', async () => {
   let writes = 0, reads = 0; const ui = await creator(async (_path, body) => { if (!body) { reads++; return creationReview(writes > 1 ? 'after-closure' : 'original-version'); } writes++; if (writes === 1) throw Object.assign(new Error('Pending outcome'), { status: 409, code: 'OPERATION_PENDING' }); if (writes === 2) throw Object.assign(new Error('Closed by operator review'), { status: 409, code: 'OPERATION_REVIEWED', operation: { id: 'closed-create', status: 'reviewed-failed' } }); return creationReceipt(); });
-  await reviewCreation(ui); await ui.submit(); await ui.tick(); const retained = ui.find(node => node.type === 'form').props.onSubmit; await ui.submit(); await ui.tick(); assert.equal(reads, 1); assert.equal(writes, 2); assert.match(ui.html(), /closed-create.*reviewed-failed/); assert.doesNotMatch(ui.html(), /outcome is unknown|Review Shopify draft product/); assert.equal(ui.field('Product title').props.value, '  Draft title  ');
+  await reviewCreation(ui); await ui.submit(); await ui.tick(); const retained = ui.find(isForm).props.onSubmit; await ui.submit(); await ui.tick(); assert.equal(reads, 1); assert.equal(writes, 2); assert.match(ui.html(), /closed-create.*reviewed-failed/); assert.doesNotMatch(ui.html(), /outcome is unknown|Review Shopify draft product/); assert.equal(ui.field('Product title').props.value, '  Draft title  ');
   await retained({ preventDefault() {} }); await ui.submit(); assert.equal(writes, 2); await ui.click('Review draft product'); await ui.tick(); assert.equal(reads, 2); assert.equal(ui.button('Create draft product').props.disabled, true); ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(writes, 3); assert.equal(ui.calls.filter(call => call[1]).at(-1)[1].version, 'after-closure'); assert.match(ui.html(), /Draft product creation confirmed/);
 });
 
@@ -723,8 +744,8 @@ test('price entry requires its own grant and committed callback independently of
 
 test('price editor freshly loads one product, explicitly selects a returned variant and confirms only its decimal string price', async () => {
   let validations = 0; const ui = await priceEditor(async (path, body, validate) => { if (!body) return priceDetail(); assert.equal(path, 'products/shop%2Fa/501/price'); const receipt = priceReceipt(); validate(receipt); validations++; return receipt; });
-  assert.equal(ui.calls[0][0], 'products/shop%2Fa/501'); assert.equal(ui.field('Product variant').type, 'select'); assert.equal(ui.field('Product variant').props.value, ''); assert.equal(ui.field('New price in USD').props.type, 'text'); assert.match(ui.html(), /first 100 variants.*partial list/); assert.doesNotMatch(ui.html(), /<img|<script|<iframe|<a\s/);
-  await reviewPrice(ui); assert.equal(ui.calls.length, 2); assert.match(ui.html(), /Review Shopify variant price.*Account shop\/a.*shop.example.*Native product 501.*Native variant 102.*&lt;Large&gt;/); assert.match(ui.html(), /Before.*00029.9900 USD.*After.*12345678901234567890.12 USD/); assert.match(ui.html(), /live storefront immediately/); assert.equal(ui.button('Save variant price').props.disabled, false);
+  assert.equal(ui.calls[0][0], 'products/shop%2Fa/501'); assert.equal(ui.field('Product variant').type, Select); assert.equal(ui.field('Product variant').props.value, ''); assert.equal(ui.field('New price in USD').props.type, 'text'); assert.match(ui.html(), /first 100 variants.*partial list/); assert.doesNotMatch(ui.html(), /<img|<script|<iframe|<a\s/);
+  await reviewPrice(ui); assert.equal(ui.calls.length, 2); assert.match(ui.html(), /Review Shopify variant price.*Account shop\/a.*shop.example.*Native product 501.*Native variant 102.*&lt;Large&gt;/); assert.match(ui.html(), /Price<\/th><td>00029.9900 USD<\/td><td>12345678901234567890.12 USD/); assert.match(ui.html(), /live storefront immediately/); assert.equal(ui.button('Save variant price').props.disabled, false);
   await ui.submit(); await ui.tick(); assert.deepEqual(ui.calls.find(call => call[1])[1], { version: 'price-version', confirmPrice: true, variantId: '102', price: '12345678901234567890.12' }); assert.equal(validations, 1); assert.match(ui.html(), /Variant price confirmed by Shopify readback.*Native product 501.*Native variant 102/); assert.match(ui.html(), /Accepted price: 0012345678901234567890.12000 USD/); assert.equal(ui.field('New price in USD').props.value, '12345678901234567890.12'); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 1);
 });
 
@@ -738,14 +759,14 @@ test('price review rejects absent or unknown variants, unchanged values, and inv
 
 test('unverified price snapshots, inactive accounts and missing price grants cannot reach a mutation', async () => {
   for (const invalid of [{ ...priceDetail(), version: null }, priceDetail({ ...priceProduct(), id: 'other' }), { ...priceDetail(), store: { ...priceStore(), currency: 'AED' } }, { ...priceDetail(), store: { ...priceStore(), missingCapabilities: ['products.price'] } }, priceDetail({ ...priceProduct(), variants: [priceProduct().variants[0], priceProduct().variants[0]] }), priceDetail({ ...priceProduct(), variants: [{ ...priceProduct().variants[0], id: 'bad\u0000id' }] }), priceDetail({ ...priceProduct(), variants: [{ ...priceProduct().variants[0], price: { amount: '1.00\n', currency: 'USD' } }] })]) {
-    const ui = await priceEditor(async () => invalid); assert.match(ui.html(), /could not be verified/); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); await ui.button('Review price change').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 1);
+    const ui = await priceEditor(async () => invalid); assert.match(ui.html(), /could not be verified/); assert.equal(ui.find(isFieldset).props.disabled, true); await ui.button('Review price change').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 1);
   }
   for (const props of [{ readOnly: true }, { account: { ...accounts[0], isActive: false } }, { account: { ...accounts[0], needsReconnection: true } }, { store: writeStore() }, { store: { ...priceStore(), missingCapabilities: ['products.read'] } }, { product: { ...priceProduct(), status: 'deleted' } }]) { const ui = await priceEditor(async () => assert.fail('No access must not request'), props); await ui.button('Review price change').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 0); }
 });
 
 test('price confirmation and submit events cannot survive edited values, variants, revoked access or A to B to A roles', async () => {
   for (const mode of ['price', 'variant', 'read-only', 'inactive', 'scope', 'deleted', 'unconfirm', 'A-B-A']) {
-    const ui = await priceEditor(); await reviewPrice(ui); const retained = ui.find(node => node.type === 'form').props.onSubmit, confirm = ui.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange;
+    const ui = await priceEditor(); await reviewPrice(ui); const retained = ui.find(isForm).props.onSubmit, confirm = ui.find(isCheckbox).props.onChange;
     if (mode === 'price') await ui.change('New price in USD', '8.00'); if (mode === 'variant') await ui.change('Product variant', '101'); if (mode === 'read-only') ui.setProps({ readOnly: true }); if (mode === 'inactive') ui.setProps({ account: { ...accounts[0], isActive: false } }); if (mode === 'scope') ui.setProps({ store: { ...priceStore(), missingCapabilities: ['products.price'] } }); if (mode === 'deleted') ui.setProps({ product: { ...priceProduct(), status: 'deleted' } }); if (mode === 'unconfirm') ui.confirm(false); if (mode === 'A-B-A') { ui.setProps({ readOnly: true }); ui.setProps({ readOnly: false }); }
     if (!['price', 'variant', 'unconfirm'].includes(mode)) confirm({ target: { checked: true } }); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0, mode); assert.equal(ui.field('New price in USD').props.value, mode === 'price' ? '8.00' : '12345678901234567890.12');
   }
@@ -759,19 +780,19 @@ test('a changed product review and explicit refresh retain authored price while 
 
 test('independently rejected price receipts keep the original selected variant and request for explicit permission gated recovery', async () => {
   for (const validateInRequest of [false, true]) for (const mutate of [r => { r.accountId = 'other'; }, r => { r.product.id = 'other'; }, r => { r.product.status = 'deleted'; }, r => { r.store.domain = 'other.example'; }, r => { r.product.variants[1].id = 'different'; }, r => { r.product.variants[1].price.currency = 'AED'; }, r => { r.product.variants[1].price.amount = '12345678901234567890.13'; }, r => { r.product.variants[1].price.amount += '\n'; }, r => { r.product.variants.push(r.product.variants[1]); }, r => { r.readback = false; }, r => { r.operation.status = 'pending'; }, r => { r.operation.id = ''; }]) {
-    let malformed = true; const ui = await priceEditor(async (_path, body, validate) => { if (!body) return priceDetail(); const result = priceReceipt(); if (malformed) mutate(result); if (validateInRequest) validate(result); return result; }); await reviewPrice(ui); await ui.submit(); await ui.tick(); assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /Variant price confirmed/); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); assert.equal(ui.calls.filter(call => call[1]).length, 1);
-    const retained = ui.find(node => node.type === 'form').props.onSubmit; ui.setProps({ readOnly: true }); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 1); ui.setProps({ readOnly: false }); malformed = false; await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 2); assert.deepEqual(writes[0].slice(0, 2), writes[1].slice(0, 2)); assert.match(ui.html(), /Variant price confirmed/);
+    let malformed = true; const ui = await priceEditor(async (_path, body, validate) => { if (!body) return priceDetail(); const result = priceReceipt(); if (malformed) mutate(result); if (validateInRequest) validate(result); return result; }); await reviewPrice(ui); await ui.submit(); await ui.tick(); assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /Variant price confirmed/); assert.equal(ui.find(isFieldset).props.disabled, true); assert.equal(ui.calls.filter(call => call[1]).length, 1);
+    const retained = ui.find(isForm).props.onSubmit; ui.setProps({ readOnly: true }); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 1); ui.setProps({ readOnly: false }); malformed = false; await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 2); assert.deepEqual(writes[0].slice(0, 2), writes[1].slice(0, 2)); assert.match(ui.html(), /Variant price confirmed/);
   }
 });
 
 test('operator closure requires an explicit product price refresh and fresh review while retaining authored price and variant', async () => {
   let writes = 0, reads = 0; const ui = await priceEditor(async (_path, body) => { if (!body) { reads++; return priceDetail(undefined, writes > 1 ? 'after-price-closure' : 'price-version'); } writes++; if (writes === 1) throw Object.assign(new Error('Pending price outcome'), { status: 409, code: 'OPERATION_PENDING' }); if (writes === 2) throw Object.assign(new Error('Closed price action'), { status: 409, code: 'OPERATION_REVIEWED', operation: { id: 'closed-price', status: 'reviewed-failed' } }); return priceReceipt(); });
-  await reviewPrice(ui); await ui.submit(); await ui.tick(); const retained = ui.find(node => node.type === 'form').props.onSubmit; await ui.submit(); await ui.tick(); assert.equal(reads, 2); assert.equal(writes, 2); assert.match(ui.html(), /closed-price.*reviewed-failed/); assert.doesNotMatch(ui.html(), /outcome is unknown|Review Shopify variant price|Variant price confirmed/); assert.equal(ui.field('New price in USD').props.value, '12345678901234567890.12');
+  await reviewPrice(ui); await ui.submit(); await ui.tick(); const retained = ui.find(isForm).props.onSubmit; await ui.submit(); await ui.tick(); assert.equal(reads, 2); assert.equal(writes, 2); assert.match(ui.html(), /closed-price.*reviewed-failed/); assert.doesNotMatch(ui.html(), /outcome is unknown|Review Shopify variant price|Variant price confirmed/); assert.equal(ui.field('New price in USD').props.value, '12345678901234567890.12');
   await retained({ preventDefault() {} }); await ui.submit(); assert.equal(writes, 2); await ui.click('Refresh current product prices'); await ui.tick(); assert.equal(reads, 3); assert.equal(ui.field('Product variant').props.value, '102'); assert.equal(ui.field('New price in USD').props.value, '12345678901234567890.12'); await ui.click('Review price change'); await ui.tick(); assert.equal(reads, 4); assert.equal(ui.button('Save variant price').props.disabled, true); ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(writes, 3); assert.equal(ui.calls.filter(call => call[1]).at(-1)[1].version, 'after-price-closure'); assert.match(ui.html(), /Variant price confirmed/);
 });
 
 test('late product reads and price receipts cannot replace a newer destination draft', async () => {
-  const reads = [], ui = await priceEditor(async () => { reads.push(deferred()); return reads.at(-1).promise; }); ui.setProps({ product: priceProduct('502') }); await ui.tick(); ui.setProps({ product: priceProduct() }); await ui.tick(); reads[0].resolve(priceDetail({ ...priceProduct(), title: 'STALE A' })); reads[1].resolve(priceDetail(priceProduct('502'))); await ui.tick(); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); reads[2].resolve(priceDetail()); await ui.tick(); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, false); assert.doesNotMatch(ui.html(), /STALE A/);
+  const reads = [], ui = await priceEditor(async () => { reads.push(deferred()); return reads.at(-1).promise; }); ui.setProps({ product: priceProduct('502') }); await ui.tick(); ui.setProps({ product: priceProduct() }); await ui.tick(); reads[0].resolve(priceDetail({ ...priceProduct(), title: 'STALE A' })); reads[1].resolve(priceDetail(priceProduct('502'))); await ui.tick(); assert.equal(ui.find(isFieldset).props.disabled, true); reads[2].resolve(priceDetail()); await ui.tick(); assert.equal(ui.find(isFieldset).props.disabled, false); assert.doesNotMatch(ui.html(), /STALE A/);
   const pending = deferred(), changing = await priceEditor(async (path, body) => body ? pending.promise : priceDetail(priceProduct(path.endsWith('/502') ? '502' : '501'))); await reviewPrice(changing); const write = changing.submit(); changing.setProps({ product: priceProduct('502') }); await changing.tick(); await changing.change('Product variant', '102'); await changing.change('New price in USD', '88.00'); pending.resolve(priceReceipt()); await write; await changing.tick(); assert.doesNotMatch(changing.html(), /Variant price confirmed/); assert.equal(changing.field('New price in USD').props.value, '88.00');
 });
 
@@ -784,7 +805,7 @@ async function stockBrowser(respond = async () => stockResponse(), selectedStore
 
 test('stock and locations load only after explicit detail action and show returned quantities, unknown coverage and inert native text', async () => {
   const ui = await stockBrowser(); assert.equal(ui.calls.filter(call => call[0].endsWith('/inventory')).length, 0); assert.ok(ui.button('Load stock and locations')); await ui.click('Load stock and locations'); await ui.tick(); assert.equal(ui.calls.at(-1)[0], 'products/shop%2Fa/501/inventory'); assert.ok(ui.calls.every(call => call.length === 1), 'All stock, catalog and detail requests are reads.');
-  const html = ui.html(); assert.match(html, /Returned rows only.*Inventory completeness: unknown.*Location completeness: unknown/); assert.match(html, /Loaded at .*browser time.*Provider freshness is unknown/); assert.match(html, /Available<\/th><th>On hand<\/th><th>Committed<\/th><th>Incoming/); assert.match(html, /<td>0<\/td><td>-3<\/td><td>2<\/td><td>Unknown<\/td>/); assert.match(html, /<td>902<\/td><td>Location name not returned<\/td><td>5<\/td><td>7<\/td><td>-1<\/td><td>3<\/td>/);
+  const html = ui.html(); assert.match(html, /Returned rows only.*Inventory completeness: unknown.*Location completeness: unknown/); assert.match(html, /Loaded at .*browser time.*Provider freshness is unknown/); assert.match(html, /Available<\/th><th scope="col">On hand<\/th><th scope="col">Committed<\/th><th scope="col">Incoming/); assert.match(html, /<td>0<\/td><td>-3<\/td><td>2<\/td><td>Unknown<\/td>/); assert.match(html, /<td>902<\/td><td>Location name not returned<\/td><td>5<\/td><td>7<\/td><td>-1<\/td><td>3<\/td>/);
   assert.match(html, /Native variant 999.*Variant name not returned within product coverage.*OUTSIDE-FIRST-100.*Tracking unknown/); assert.match(html, /Native variant 102.*Untracked.*Location levels unknown/); assert.match(html, /No location level rows returned.*Inventory completeness is unknown/); assert.match(html, /Name not returned.*Unknown.*Unknown.*Address unknown/); assert.match(html, /&lt;Warehouse&gt;|&lt;sku&gt;|&lt;script&gt;bad\(\)&lt;\/script&gt;/); assert.doesNotMatch(html, /<img|<script|<iframe|<a\s|Adjust stock|Save stock|Fresh stock|Stock is current/); assert.ok(ui.button('Refresh stock and locations'));
 });
 
@@ -860,7 +881,7 @@ test('permanent deletion entry is archived-only and retains exact committed call
 test('permanent deletion requires fresh archived review and irreversible acknowledgement then renders a deletion reference', async () => {
   let validated = false; const ui = await deletionReview(async (path, body, validate) => { if (!body) return stateDetail(archivedStateProduct()); assert.equal(path, 'products/shop%2Fa/501/delete'); assert.deepEqual(body, { version: 'delete-state-version', confirmDelete: true }); validate(deletionReceipt()); validated = true; return deletionReceipt(); });
   await ui.click('Review permanent deletion'); await ui.tick(); assert.equal(ui.button('Permanently delete product').props.disabled, true); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
-  assert.match(ui.html(), /Before: Archived.*archived.*ARCHIVED/); assert.match(ui.html(), /cannot be undone/); assert.match(ui.html(), /variants and inventory items, sales-channel publications/); assert.doesNotMatch(ui.html(), /<script|<img|After:.*DELETED/);
+  assert.match(ui.html(), /Product status<\/th><td>Archived · archived · ARCHIVED<\/td>/); assert.match(ui.html(), /cannot be undone/); assert.match(ui.html(), /variants and inventory items, sales-channel publications/); assert.doesNotMatch(ui.html(), /<script|<img|After:.*DELETED/);
   ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(validated, true); assert.match(ui.html(), /Product deletion confirmed.*501.*2026-10-20/); assert.doesNotMatch(ui.html(), /Product state confirmed/); assert.equal(ui.calls.filter(call => call[1]).length, 1);
 });
 
@@ -868,7 +889,7 @@ test('deletion rejects unavailable sources, missing action version, drift and st
   for (const props of [{ product: stateProduct() }, { product: draftStateProduct() }, { product: { ...archivedStateProduct(), platformStatus: 'DRAFT' } }, { readOnly: true }, { account: { ...accounts[0], isActive: false } }, { store: { ...stateStore(), missingCapabilities: ['products.status'] } }]) { const ui = await deletionReview(async () => assert.fail('Unavailable deletion must not read'), props); await ui.submit(); assert.equal(ui.calls.length, 0); }
   const missing = await deletionReview(async () => ({ ...stateDetail(archivedStateProduct()), deleteVersion: undefined })); assert.match(missing.html(), /could not be verified/); await missing.submit(); assert.equal(missing.calls.filter(call => call[1]).length, 0);
   let fresh = stateDetail(archivedStateProduct()); const changed = await deletionReview(async () => fresh); fresh = stateDetail(archivedStateProduct(), 'changed'); await changed.click('Review permanent deletion'); await changed.tick(); assert.match(changed.html(), /product changed on Shopify/);
-  for (const change of [{ readOnly: true }, { stateAction: 'archive' }, { store: { ...stateStore(), missingCapabilities: ['products.status'] } }]) { const ui = await deletionReview(); await reviewDeletion(ui); const retained = ui.find(node => node.type === 'form').props.onSubmit; ui.setProps(change); await retained({ preventDefault() {} }); ui.setProps({ stateAction: 'delete', readOnly: false, store: stateStore() }); await ui.tick(); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 0); }
+  for (const change of [{ readOnly: true }, { stateAction: 'archive' }, { store: { ...stateStore(), missingCapabilities: ['products.status'] } }]) { const ui = await deletionReview(); await reviewDeletion(ui); const retained = ui.find(isForm).props.onSubmit; ui.setProps(change); await retained({ preventDefault() {} }); ui.setProps({ stateAction: 'delete', readOnly: false, store: stateStore() }); await ui.tick(); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 0); }
 });
 
 test('deletion accepts only scoped absence references and keeps malformed acknowledgements receipt-only', async () => {
@@ -894,7 +915,7 @@ test('activation reviews Draft to Active with explicit availability copy and sen
     if (!body) return stateDetail(draftStateProduct()); assert.equal(path, 'products/shop%2Fa/501/activate'); assert.deepEqual(body, { version: 'activate-state-version', confirmActivate: true }); validate(activationReceipt()); validated = true; return activationReceipt();
   });
   await ui.click('Review activation'); await ui.tick(); assert.equal(ui.button('Activate product').props.disabled, true); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
-  assert.match(ui.html(), /Before: Draft.*draft.*DRAFT/); assert.match(ui.html(), /After: Active.*active.*ACTIVE/); assert.match(ui.html(), /may affect customer availability/); assert.match(ui.html(), /Channel publication is separately unverified/); assert.doesNotMatch(ui.html(), /<script|<img|<a\s|no storefront impact/i);
+  assert.match(ui.html(), /Product status<\/th><td>Draft · draft · DRAFT<\/td><td>Active · active · ACTIVE<\/td>/); assert.match(ui.html(), /may affect customer availability/); assert.match(ui.html(), /Channel publication is separately unverified/); assert.doesNotMatch(ui.html(), /<script|<img|<a\s|no storefront impact/i);
   ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(validated, true); assert.equal(ui.calls.filter(call => call[1]).length, 1); assert.match(ui.html(), /Product state confirmed.*active.*ACTIVE/);
 });
 
@@ -905,7 +926,7 @@ test('activation rejects unknown or conflicting sources, missing action versions
   const missing = await activationReview(async () => ({ ...stateDetail(draftStateProduct()), activateVersion: undefined })); assert.match(missing.html(), /could not be verified/); await missing.submit(); assert.equal(missing.calls.filter(call => call[1]).length, 0);
   let fresh = stateDetail(draftStateProduct()); const changed = await activationReview(async () => fresh); fresh = stateDetail(draftStateProduct(), 'changed-start'); await changed.click('Review activation'); await changed.tick(); assert.match(changed.html(), /product changed on Shopify/); await changed.submit(); assert.equal(changed.calls.filter(call => call[1]).length, 0);
   for (const change of [{ readOnly: true }, { stateAction: 'archive' }, { store: { ...stateStore(), missingCapabilities: ['products.status'] } }]) {
-    const ui = await activationReview(); await reviewActivation(ui); const retained = ui.find(node => node.type === 'form').props.onSubmit, confirm = ui.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange;
+    const ui = await activationReview(); await reviewActivation(ui); const retained = ui.find(isForm).props.onSubmit, confirm = ui.find(isCheckbox).props.onChange;
     ui.setProps(change); confirm({ target: { checked: true } }); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
     if (change.stateAction) { ui.setProps({ stateAction: 'activate' }); await ui.tick(); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 0); }
   }
@@ -941,7 +962,7 @@ test('archive reviews each starting state and submits only its action-bound vers
       if (!body) return stateDetail(row); assert.equal(path, 'products/shop%2Fa/501/archive'); assert.deepEqual(body, { version: 'archive-state-version', confirmArchive: true }); validate(archiveReceipt()); validated = true; return archiveReceipt();
     }, { product: row });
     await ui.click('Review archive'); await ui.tick(); assert.equal(ui.button('Archive product').props.disabled, true); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
-    assert.match(ui.html(), /unavailable to customers on sales channels and apps/); assert.match(ui.html(), new RegExp('Before: .*' + status + '.*' + status.toUpperCase())); assert.match(ui.html(), /After: Archived.*archived.*ARCHIVED/); assert.doesNotMatch(ui.html(), /<script|<img|<a\s/);
+    assert.match(ui.html(), /unavailable to customers on sales channels and apps/); assert.match(ui.html(), new RegExp('Product status</th><td>[^<]* · ' + status + ' · ' + status.toUpperCase() + '</td><td>Archived · archived · ARCHIVED</td>')); assert.doesNotMatch(ui.html(), /<script|<img|<a\s/);
     ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(validated, true); assert.equal(ui.calls.filter(call => call[1]).length, 1); assert.match(ui.html(), /Product state confirmed.*archived.*ARCHIVED/);
   }
 });
@@ -950,7 +971,7 @@ test('archive rejects missing action versions, changed starting snapshots and st
   const missing = await archiveReview(async () => ({ ...stateDetail(), archiveVersion: undefined })); assert.match(missing.html(), /could not be verified/); await missing.submit(); assert.equal(missing.calls.filter(call => call[1]).length, 0);
   let fresh = stateDetail(); const changed = await archiveReview(async () => fresh); fresh = stateDetail({ ...stateProduct(), status: 'draft', platformStatus: 'DRAFT' }, 'changed-start'); await changed.click('Review archive'); await changed.tick(); assert.match(changed.html(), /product changed on Shopify/); await changed.submit(); assert.equal(changed.calls.filter(call => call[1]).length, 0);
   for (const change of [{ readOnly: true }, { stateAction: 'deactivate' }, { store: { ...stateStore(), missingCapabilities: ['products.status'] } }]) {
-    const ui = await archiveReview(); await reviewArchive(ui); const retained = ui.find(node => node.type === 'form').props.onSubmit, confirm = ui.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange;
+    const ui = await archiveReview(); await reviewArchive(ui); const retained = ui.find(isForm).props.onSubmit, confirm = ui.find(isCheckbox).props.onChange;
     ui.setProps(change); confirm({ target: { checked: true } }); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
     if (change.stateAction) { ui.setProps({ stateAction: 'archive' }); await ui.tick(); await retained({ preventDefault() {} }); assert.equal(ui.calls.filter(call => call[1]).length, 0); }
   }
@@ -985,13 +1006,13 @@ test('product state review loads fresh exact identity, renders provider text ine
     if (!body) return stateDetail(); assert.equal(path, 'products/shop%2Fa/501/deactivate'); assert.deepEqual(body, { version: 'state-version', confirmDeactivate: true }); validate(stateReceipt()); validated = true; return stateReceipt();
   });
   assert.equal(ui.calls[0][0], 'products/shop%2Fa/501'); await ui.click('Review move to draft'); await ui.tick(); assert.equal(ui.button('Move to draft').props.disabled, true); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
-  const html = ui.html(); assert.match(html, /Move this product from Active to Draft/); assert.match(html, /Account shop\/a.*shop.example.*Native product 501/); assert.match(html, /Before: Active.*ACTIVE.*After: Draft.*DRAFT/); assert.match(html, /&lt;script&gt;Product title&lt;\/script&gt;/); assert.doesNotMatch(html, /<script|<img|<iframe|<a\s|storefront|sales channel|publish|archive|delete/i);
+  const html = ui.html(); assert.match(html, /Move this product from Active to Draft/); assert.match(html, /Account shop\/a.*shop.example.*Native product 501/); assert.match(html, /Product status<\/th><td>Active · active · ACTIVE<\/td><td>Draft · draft · DRAFT<\/td>/); assert.match(html, /&lt;script&gt;Product title&lt;\/script&gt;/); assert.doesNotMatch(html, /<script|<img|<iframe|<a\s|storefront|sales channel|publish|archive|delete/i);
   ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(validated, true); assert.match(ui.html(), /Product state confirmed by Shopify readback.*draft.*DRAFT/); assert.equal(ui.calls.filter(call => !call[1]).length, 2);
 });
 
 test('state review refuses read-only, disconnected, mismatched, malformed and contradictory permission scopes', async () => {
   for (const props of [{ readOnly: true }, { account: { ...accounts[0], isActive: false } }, { account: { ...accounts[0], needsReconnection: true } }, { store: writeStore() }, { store: { ...stateStore(), missingCapabilities: ['products.read'] } }, { store: { ...stateStore(), missingCapabilities: ['products.status'] } }, { store: stateStore(), product: { ...stateProduct(), accountId: 'other' } }, { product: { ...stateProduct(), platformStatus: 'DRAFT' } }, { product: { ...stateProduct(), status: 'archived' } }]) {
-    const ui = await stateReview(async () => assert.fail('No access must not request'), props); await ui.button('Review move to draft').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 0); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true);
+    const ui = await stateReview(async () => assert.fail('No access must not request'), props); await ui.button('Review move to draft').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 0); assert.equal(ui.find(isFieldset).props.disabled, true);
   }
   for (const mutate of [r => { r.product.id = '502'; }, r => { r.product.accountId = 'other'; }, r => { r.store.domain = 'other.example'; }, r => { r.store.missingCapabilities = ['products.status']; }, r => { r.product.status = 'draft'; }, r => { r.product.platformStatus = 'DRAFT'; }, r => { r.version = ''; }]) {
     const ui = await stateReview(async () => { const result = stateDetail(); mutate(result); return result; }); assert.match(ui.html(), /could not be verified/); await ui.button('Review move to draft').props.onClick(); await ui.submit(); assert.equal(ui.calls.length, 1);
@@ -1000,7 +1021,7 @@ test('state review refuses read-only, disconnected, mismatched, malformed and co
 
 test('state acknowledgements and retained submits are withdrawn by every committed context change including A to B to A', async () => {
   for (const mode of ['read-only', 'inactive', 'account-name', 'store-grant', 'product-title', 'product-refresh', 'store-refresh', 'account-refresh', 'A-B-A', 'unconfirm']) {
-    const ui = await stateReview(); await reviewState(ui); const retained = ui.find(node => node.type === 'form').props.onSubmit, confirm = ui.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange;
+    const ui = await stateReview(); await reviewState(ui); const retained = ui.find(isForm).props.onSubmit, confirm = ui.find(isCheckbox).props.onChange;
     if (mode === 'read-only') ui.setProps({ readOnly: true }); if (mode === 'inactive') ui.setProps({ account: { ...accounts[0], isActive: false } }); if (mode === 'account-name') ui.setProps({ account: { ...accounts[0], name: 'Updated name' } }); if (mode === 'store-grant') ui.setProps({ store: { ...stateStore(), missingCapabilities: ['products.status'] } }); if (mode === 'product-title') ui.setProps({ product: { ...stateProduct(), title: 'New title' } }); if (mode === 'product-refresh') ui.setProps({ product: stateProduct() }); if (mode === 'store-refresh') ui.setProps({ store: stateStore() }); if (mode === 'account-refresh') ui.setProps({ account: { ...accounts[0] } }); if (mode === 'A-B-A') { ui.setProps({ readOnly: true }); ui.setProps({ readOnly: false }); } if (mode === 'unconfirm') ui.confirm(false);
     if (mode !== 'unconfirm') confirm({ target: { checked: true } }); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0, mode); if (mode !== 'unconfirm') assert.doesNotMatch(ui.html(), /Review Shopify product state/, mode);
   }
@@ -1009,12 +1030,12 @@ test('state acknowledgements and retained submits are withdrawn by every committ
 
 test('state review requires explicit reload after a fresh version changes and never survives a refresh', async () => {
   let version = 'state-version'; const ui = await stateReview(async (_path, body) => body ? stateReceipt() : stateDetail(undefined, version)); version = 'changed-state-version'; await ui.click('Review move to draft'); await ui.tick(); assert.match(ui.html(), /product changed on Shopify/); assert.doesNotMatch(ui.html(), /Review Shopify product state/); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0);
-  await ui.click('Refresh current product state'); await ui.tick(); await reviewState(ui); const retained = ui.find(node => node.type === 'form').props.onSubmit; await ui.click('Refresh current product state'); await ui.tick(); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0); await reviewState(ui); await ui.submit(); await ui.tick(); assert.equal(ui.calls.find(call => call[1])[1].version, 'changed-state-version');
+  await ui.click('Refresh current product state'); await ui.tick(); await reviewState(ui); const retained = ui.find(isForm).props.onSubmit; await ui.click('Refresh current product state'); await ui.tick(); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 0); await reviewState(ui); await ui.submit(); await ui.tick(); assert.equal(ui.calls.find(call => call[1])[1].version, 'changed-state-version');
 });
 
 test('strict state receipts leave uncertainty and only explicit same-key outcome checks can resolve it', async () => {
   for (const validateInRequest of [false, true]) for (const mutate of [r => { r.accountId = 'other'; }, r => { r.product.id = 'other'; }, r => { r.product.accountId = 'other'; }, r => { r.store.domain = 'other.example'; }, r => { r.store.missingCapabilities = ['products.status']; }, r => { r.product.status = 'active'; }, r => { r.product.platformStatus = 'ACTIVE'; }, r => { r.readback = false; }, r => { r.operation.status = 'pending'; }, r => { r.operation.id = ''; }]) {
-    let malformed = true; const ui = await stateReview(async (_path, body, validate) => { if (!body) return stateDetail(); const result = stateReceipt(); if (malformed) mutate(result); if (validateInRequest) validate(result); return result; }); await reviewState(ui); await ui.submit(); await ui.tick(); assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /Product state confirmed|Review Shopify product state|Refresh current product state/); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); assert.ok(ui.button('Check outcome')); const retained = ui.find(node => node.type === 'form').props.onSubmit;
+    let malformed = true; const ui = await stateReview(async (_path, body, validate) => { if (!body) return stateDetail(); const result = stateReceipt(); if (malformed) mutate(result); if (validateInRequest) validate(result); return result; }); await reviewState(ui); await ui.submit(); await ui.tick(); assert.match(ui.html(), /outcome is unknown/); assert.doesNotMatch(ui.html(), /Product state confirmed|Review Shopify product state|Refresh current product state/); assert.equal(ui.find(isFieldset).props.disabled, true); assert.ok(ui.button('Check outcome')); const retained = ui.find(isForm).props.onSubmit;
     ui.setProps({ readOnly: true }); await retained({ preventDefault() {} }); await ui.submit(); assert.equal(ui.calls.filter(call => call[1]).length, 1); assert.equal(ui.button('Check outcome').props.disabled, true);
     ui.setProps({ readOnly: false }); malformed = false; await ui.submit(); await ui.tick(); const writes = ui.calls.filter(call => call[1]); assert.equal(writes.length, 2); assert.deepEqual(writes[0].slice(0, 2), writes[1].slice(0, 2)); assert.match(ui.html(), /Product state confirmed/);
   }
@@ -1022,12 +1043,12 @@ test('strict state receipts leave uncertainty and only explicit same-key outcome
 
 test('operator closure withdraws the old action and requires explicit state reload and acknowledgement', async () => {
   let writes = 0; const ui = await stateReview(async (_path, body) => { if (!body) return stateDetail(undefined, writes > 1 ? 'after-closure' : 'state-version'); writes++; if (writes === 1) throw Object.assign(new Error('Pending state outcome'), { status: 409, code: 'OPERATION_PENDING' }); if (writes === 2) throw Object.assign(new Error('Closed state action'), { status: 409, code: 'OPERATION_REVIEWED', operation: { id: 'closed-state', status: 'reviewed-failed' } }); return stateReceipt(); });
-  await reviewState(ui); await ui.submit(); await ui.tick(); const retained = ui.find(node => node.type === 'form').props.onSubmit; await ui.submit(); await ui.tick(); assert.match(ui.html(), /closed-state.*reviewed-failed/); assert.doesNotMatch(ui.html(), /outcome is unknown|Review Shopify product state|Product state confirmed/); await retained({ preventDefault() {} }); await ui.submit(); await ui.button('Review move to draft').props.onClick(); assert.equal(writes, 2);
+  await reviewState(ui); await ui.submit(); await ui.tick(); const retained = ui.find(isForm).props.onSubmit; await ui.submit(); await ui.tick(); assert.match(ui.html(), /closed-state.*reviewed-failed/); assert.doesNotMatch(ui.html(), /outcome is unknown|Review Shopify product state|Product state confirmed/); await retained({ preventDefault() {} }); await ui.submit(); await ui.button('Review move to draft').props.onClick(); assert.equal(writes, 2);
   await ui.click('Refresh current product state'); await ui.tick(); await ui.click('Review move to draft'); await ui.tick(); assert.equal(ui.button('Move to draft').props.disabled, true); await ui.submit(); assert.equal(writes, 2); ui.confirm(); await ui.submit(); await ui.tick(); assert.equal(writes, 3); assert.equal(ui.calls.filter(call => call[1]).at(-1)[1].version, 'after-closure'); assert.match(ui.html(), /Product state confirmed/);
 });
 
 test('late state reads and receipts cannot replace a newer product or revive A to B to A reviews', async () => {
-  const reads = [], ui = await stateReview(async () => { reads.push(deferred()); return reads.at(-1).promise; }); ui.setProps({ product: stateProduct('502') }); await ui.tick(); ui.setProps({ product: stateProduct() }); await ui.tick(); reads[0].resolve(stateDetail({ ...stateProduct(), title: 'STALE PRODUCT' })); reads[1].resolve(stateDetail(stateProduct('502'))); await ui.tick(); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, true); reads[2].resolve(stateDetail()); await ui.tick(); assert.doesNotMatch(ui.html(), /STALE PRODUCT/); assert.equal(ui.find(node => node.type === 'fieldset').props.disabled, false);
+  const reads = [], ui = await stateReview(async () => { reads.push(deferred()); return reads.at(-1).promise; }); ui.setProps({ product: stateProduct('502') }); await ui.tick(); ui.setProps({ product: stateProduct() }); await ui.tick(); reads[0].resolve(stateDetail({ ...stateProduct(), title: 'STALE PRODUCT' })); reads[1].resolve(stateDetail(stateProduct('502'))); await ui.tick(); assert.equal(ui.find(isFieldset).props.disabled, true); reads[2].resolve(stateDetail()); await ui.tick(); assert.doesNotMatch(ui.html(), /STALE PRODUCT/); assert.equal(ui.find(isFieldset).props.disabled, false);
   const pending = deferred(), changing = await stateReview(async (path, body) => body ? pending.promise : stateDetail(stateProduct(path.endsWith('/502') ? '502' : '501'))); await reviewState(changing); const write = changing.submit(); changing.setProps({ product: stateProduct('502') }); await changing.tick(); pending.resolve(stateReceipt()); await write; await changing.tick(); assert.doesNotMatch(changing.html(), /Product state confirmed|outcome is unknown/); await changing.click('Review move to draft'); await changing.tick(); assert.match(changing.html(), /Native product 502/);
 });
 
@@ -1050,9 +1071,9 @@ test('all product mutators withdraw known-unsent attempts after lost replies or 
       if (!terminal) { terminal = true; keys.delete(payload); throw Object.assign(new Error('This attempt did not reach the provider.'), { status: rejected.status || 409, code: rejected.code, operation: { id: 'unsent-attempt', status: 'failed' } }); }
       const result = row.receipt(); validate(result); return result;
     });
-    await row.initial(ui); const originalSubmit = ui.find(node => node.type === 'form').props.onSubmit, originalConfirm = ui.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange; await ui.submit(); await ui.tick();
+    await row.initial(ui); const originalSubmit = ui.find(isForm).props.onSubmit, originalConfirm = ui.find(isCheckbox).props.onChange; await ui.submit(); await ui.tick();
     let outcomeSubmit;
-    if (rejected.lost) { assert.match(ui.html(), /outcome is unknown/, row.name); outcomeSubmit = ui.find(node => node.type === 'form').props.onSubmit; await ui.submit(); await ui.tick(); assert.equal(attempts[0].key, attempts[1].key); assert.equal(attempts[0].payload, attempts[1].payload); }
+    if (rejected.lost) { assert.match(ui.html(), /outcome is unknown/, row.name); outcomeSubmit = ui.find(isForm).props.onSubmit; await ui.submit(); await ui.tick(); assert.equal(attempts[0].key, attempts[1].key); assert.equal(attempts[0].payload, attempts[1].payload); }
     const writes = attempts.length; assert.equal(writes, rejected.lost ? 2 : 1); assert.match(ui.html(), /Earlier request was not sent\. Refresh.*review a new action/, row.name); assert.doesNotMatch(ui.html(), /outcome is unknown|operator review|Review Shopify/, row.name);
     originalConfirm({ target: { checked: true } }); await originalSubmit({ preventDefault() {} }); if (outcomeSubmit) await outcomeSubmit({ preventDefault() {} }); await ui.submit(); assert.equal(attempts.length, writes, row.name);
     if (row.refresh) { await ui.button(row.review).props.onClick(); assert.equal(attempts.length, writes); await ui.click(row.refresh); await ui.tick(); }
