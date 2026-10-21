@@ -349,27 +349,29 @@ test('a terminal failed preflight releases its key even when the newly reviewed 
 
 
 test('main navigation reveals its current route after delayed sidebar mount, route changes and mobile reopening', () => {
-  const effect = source.split(/\r?\n/).find(line => line.includes('useEffect(() => { mainNavigationRef.current?'));
+  const selector = 'nav[aria-label="Main navigation"] [aria-current="page"]';
+  const effect = source.split(/\r?\n/).find(line => line.includes('useEffect(() => { document.querySelector<HTMLElement>(\'nav[aria-label="Main navigation"]'));
   assert.ok(effect);
-  assert.match(source, /<aside ref=\{mainNavigationRef\} className=/); assert.match(source, /<SidebarNav label="Main navigation" /);
+  assert.match(source, /<AppShell sidebarLabel="Campaign navigation" /); assert.match(source, /<SidebarNav label="Main navigation" /);
   assert.doesNotMatch(effect, /\.focus\(/);
-  const reference = { current: null }, calls = []; let dependencies;
+  const calls = []; let dependencies, current = null;
   const useEffect = (callback, next) => {
     if (!dependencies || next.some((value, index) => !Object.is(value, dependencies[index]))) callback();
     dependencies = next;
   };
-  const render = new Function('useEffect', 'mainNavigationRef', 'page', 'project', 'mobile', stripTypeScriptTypes(effect));
-  const nav = { querySelector(selector) { assert.equal(selector, '[aria-current="page"]'); return { scrollIntoView(options) { calls.push(options); }, focus() { assert.fail('Route reveal must not move focus'); } }; } };
-  render(useEffect, reference, 'Media providers', undefined, false); assert.equal(calls.length, 0, 'A deep link begins before the asynchronous sidebar mounts.');
-  reference.current = nav;
-  render(useEffect, reference, 'Media providers', { id: 'a' }, false); assert.equal(calls.length, 1, 'Loading the actual project reveals a same-route deep link.');
-  render(useEffect, reference, 'Media providers', { id: 'a' }, false); assert.equal(calls.length, 1, 'Unrelated renders do not scroll.');
-  render(useEffect, reference, 'Integrations', { id: 'a' }, false); assert.equal(calls.length, 2);
-  render(useEffect, reference, 'Integrations', { id: 'a' }, true); assert.equal(calls.length, 3, 'Opening mobile navigation reveals the selected route again.');
-  render(useEffect, reference, 'Integrations', { id: 'a' }, false);
-  render(useEffect, reference, 'Integrations', { id: 'a' }, true); assert.equal(calls.length, 5, 'Reopening is not limited to the first mobile open.');
-  render(useEffect, reference, 'Integrations', { id: 'b' }, true); assert.equal(calls.length, 6, 'A loaded project change remains a readiness transition.');
-  reference.current = { querySelector: () => null };
-  render(useEffect, reference, 'Settings', { id: 'b' }, true); assert.equal(calls.length, 6, 'Settings is outside the scrollable main nav and needs no reveal.');
+  const documentStub = { querySelector(query) { assert.equal(query, selector); return current; } };
+  const render = new Function('useEffect', 'document', 'page', 'project', 'mobile', stripTypeScriptTypes(effect));
+  const item = { scrollIntoView(options) { calls.push(options); }, focus() { assert.fail('Route reveal must not move focus'); } };
+  render(useEffect, documentStub, 'Media providers', undefined, false); assert.equal(calls.length, 0, 'A deep link begins before the asynchronous sidebar mounts.');
+  current = item;
+  render(useEffect, documentStub, 'Media providers', { id: 'a' }, false); assert.equal(calls.length, 1, 'Loading the actual project reveals a same-route deep link.');
+  render(useEffect, documentStub, 'Media providers', { id: 'a' }, false); assert.equal(calls.length, 1, 'Unrelated renders do not scroll.');
+  render(useEffect, documentStub, 'Integrations', { id: 'a' }, false); assert.equal(calls.length, 2);
+  render(useEffect, documentStub, 'Integrations', { id: 'a' }, true); assert.equal(calls.length, 3, 'Opening mobile navigation reveals the selected route again.');
+  render(useEffect, documentStub, 'Integrations', { id: 'a' }, false);
+  render(useEffect, documentStub, 'Integrations', { id: 'a' }, true); assert.equal(calls.length, 5, 'Reopening is not limited to the first mobile open.');
+  render(useEffect, documentStub, 'Integrations', { id: 'b' }, true); assert.equal(calls.length, 6, 'A loaded project change remains a readiness transition.');
+  current = null;
+  render(useEffect, documentStub, 'Settings', { id: 'b' }, true); assert.equal(calls.length, 6, 'Nothing to reveal when no route is current.');
   for (const options of calls) assert.deepEqual(options, { block: 'nearest', inline: 'nearest' });
 });
