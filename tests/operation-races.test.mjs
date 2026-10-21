@@ -25,7 +25,7 @@ const outcome = promise => promise.then(result => ({ status: result.status, code
 
 test('a parallel retry of one idempotency key reaches the provider once', pg, async t => {
   const { pool, context, provider } = await fixture(t);
-  // Without the key lock both requests find no receipt and the second insert fails instead of reporting the first as pending.
+  // Without the key and request-hash locks both requests find no receipt and the second insert fails instead of reporting the first as pending.
   const gate = await blockWrites(pool, 'integration_operations');
   const requests = [outcome(operation(context('same-key-123'), provider.call)), outcome(operation(context('same-key-123'), provider.call))];
   await gate.waiting(2); await gate.release();
@@ -34,6 +34,19 @@ test('a parallel retry of one idempotency key reaches the provider once', pg, as
   assert.equal(provider.calls, 1);
   assert.deepEqual(results.map(result => result.code).sort(), ['OPERATION_UNCERTAIN', 'sent']);
   assert.equal(second.code, 'OPERATION_UNCERTAIN');
+  assert.equal((await pool.query('SELECT count(*) AS count FROM integration_operations')).rows[0].count, 1);
+});
+
+test('a parallel reuse of one idempotency key for a different request reaches the provider once', pg, async t => {
+  const { pool, context, provider } = await fixture(t);
+  // Different bodies take different request-hash locks, so only the key lock lets the second see the first receipt.
+  const gate = await blockWrites(pool, 'integration_operations');
+  const requests = [outcome(operation(context('reused-key-123', { name: 'first' }), provider.call)), outcome(operation(context('reused-key-123', { name: 'second' }), provider.call))];
+  await gate.waiting(2); await gate.release();
+  await settleOrDuplicate(requests, provider);
+  const results = await Promise.all(requests);
+  assert.equal(provider.calls, 1);
+  assert.deepEqual(results.map(result => result.code).sort(), ['IDEMPOTENCY_CONFLICT', 'sent']);
   assert.equal((await pool.query('SELECT count(*) AS count FROM integration_operations')).rows[0].count, 1);
 });
 
