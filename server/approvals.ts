@@ -5,7 +5,7 @@ import { createStore, type Executor } from './database.ts';
 import { fail, IntegrationError, postRestrictions, targetConfiguration, zernioClient, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
 import { queueList, reviewedQueue } from './zernio-queues.ts';
-import { SOCIAL_UPDATE_FIELDS, socialUpdateProposal } from './integrations.ts';
+import { PROPOSAL_FIELDS, providerUpdateProposal } from './integrations.ts';
 
 type ApprovalContext = Omit<OperationContext, 'project' | 'body'> & { project: ProviderRecord; body?: any };
 const administrators = new Set(['owner', 'admin']);
@@ -44,7 +44,8 @@ async function postSnapshot(context: ApprovalContext, post: ProviderRecord, load
     const scheduledFor = typeof target.scheduledFor === 'string' && Date.parse(target.scheduledFor) !== Date.parse(accountOverrides[id]?.scheduledAt || post.scheduledAt || post.scheduledFor) ? target.scheduledFor : '';
     return JSON.stringify(actual) === JSON.stringify(expected) && !scheduledFor ? [] : [{ platform: target.platform, accountId: String(target.accountId?._id || target.accountId), ...actual, ...(scheduledFor ? { scheduledFor } : {}) }];
   });
-  return { tags: normalizePostTags(post.tags, { preserve: true }), ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), ...(Object.keys(accountVariants).length ? { accountOverrides: accountVariants } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null };
+  // `publishedEdit` (a proposed edit of a published copy) is added only when present, so other posts keep their fingerprints.
+  return { tags: normalizePostTags(post.tags, { preserve: true }), ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), ...(Object.keys(accountVariants).length ? { accountOverrides: accountVariants } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null, ...(post.publishedEdit ? { publishedEdit: post.publishedEdit } : {}) };
 }
 const fingerprint = (snapshot: ProviderRecord) => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
 const latest = (db: Executor, projectId: string, postId: string) => first(db.execute(sql`SELECT * FROM post_approval_reviews WHERE project_id=${projectId} AND post_id=${postId} ORDER BY seq DESC LIMIT 1`));
@@ -122,12 +123,17 @@ async function assertSelfApprovalAllowed(tx: Executor, projectId: string, userId
   const others = reviewers.filter(row => row.id !== userId).map(row => String(row.name)).sort((a, b) => a.localeCompare(b));
   fail(403, 'APPROVAL_SELF_REVIEW', `You requested this review, so another owner or administrator must approve it${others.length ? `: ${others.join(', ')}` : ''}.`);
 }
-// Council decision ten98-code-system#30 (Q2): with a proposal, a submitted post's review covers the post that
-// social/update would send (the provider copy merged with the proposal). The newest proposal supersedes pending reviews.
+// Council decision ten98-code-system#30 (Q2): with a proposal, a submitted post's review covers the post that the
+// provider update would leave (the provider copy merged with the proposal). `action` names the update: social/update
+// (the default), or social/edit-published or social/update-metadata for a published copy. The newest proposal
+// supersedes pending reviews.
 async function requestProposal(context: ApprovalContext, post: ProviderRecord) {
   const { project, user, db, body } = context;
-  fields(body, ['proposal']); fields(body.proposal, SOCIAL_UPDATE_FIELDS);
-  const proposed = await socialUpdateProposal(context, post, body.proposal), snapshot = await postSnapshot(context, proposed), hash = fingerprint(snapshot);
+  fields(body, ['proposal', 'action']);
+  const action = body.action ?? 'social/update';
+  if (typeof action !== 'string' || !Object.hasOwn(PROPOSAL_FIELDS, action)) fail(400, 'INVALID_APPROVAL_FIELDS', 'Use only the fields shown in the approval form.');
+  fields(body.proposal, PROPOSAL_FIELDS[action]);
+  const proposed = await providerUpdateProposal(context, post, action, body.proposal), snapshot = await postSnapshot(context, proposed), hash = fingerprint(snapshot);
   if ((await policy(db, project.id)).requireApproval) approvalAccounts(proposed);
   await db.transaction(async (tx: Executor) => {
     await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
