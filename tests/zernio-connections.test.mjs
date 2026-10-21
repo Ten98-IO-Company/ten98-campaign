@@ -168,9 +168,9 @@ test('connection authorization links remain valid unchanged and disappear immedi
   const original = ui.link().props.href; assert.match(decodeURIComponent(original), /accountId=x-a/); await ui.tick(); assert.equal(ui.link().props.href, original);
   await ui.change('X posting account *', 'x-b'); assert.equal(ui.link(), undefined); assert.doesNotMatch(ui.html(), /Continue with the provider, then return/);
   await ui.submit(); await ui.tick(); assert.match(decodeURIComponent(ui.link().props.href), /accountId=x-b/);
-  await ui.change('Channel or store', 'store:shopify'); await ui.change('Store domain *', 'shop-a.myshopify.com'); await ui.submit(); await ui.tick(); assert.match(decodeURIComponent(ui.link().props.href), /shop-a.myshopify.com/);
+  await ui.change('Channel or store', 'store:shopify'); await ui.change('Store domain *', 'shop-a.myshopify.com'); await ui.submit(); await ui.tick(); assert.ok(decodeURIComponent(ui.link().props.href).includes('shop-a.myshopify.com'));
   await ui.change('Store domain *', 'shop-b.myshopify.com'); assert.equal(ui.link(), undefined); assert.doesNotMatch(ui.html(), /Continue with the provider, then return/);
-  await ui.submit(); await ui.tick(); assert.match(decodeURIComponent(ui.link().props.href), /shop-b.myshopify.com/);
+  await ui.submit(); await ui.tick(); assert.ok(decodeURIComponent(ui.link().props.href).includes('shop-b.myshopify.com'));
 });
 
 test('posting-account refresh withdraws the old authorization link before loading, including account removal', async () => {
