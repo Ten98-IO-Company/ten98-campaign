@@ -70,9 +70,11 @@ function assertPlatformRules(post: ProviderRecord, assets: ProviderRecord[], fai
   const owned = new Set<string>(failed ? assets.map(asset => asset.deliveryUrl) : []);
   let errors: ProviderRecord[];
   try { errors = failed ? postRestrictions(post, [...new Set<string>(failed.map(copy => copy.platform))], assets, failed, owned).errors : [...(base.length || !targets.length ? postRestrictions(post, base, assets).errors : []), ...(targets.length ? postRestrictions(post, [], assets, targets).errors : [])]; }
-  catch (error) { if (error instanceof IntegrationError) fail(422, 'APPROVAL_POST_RESTRICTIONS', error.message); throw error; }
-  if (errors.length) fail(422, 'APPROVAL_POST_RESTRICTIONS', errors.map(item => item.platform ? `${item.platform}: ${item.message}` : item.message).join(' ').slice(0, 4000));
+  catch (error) { if (error instanceof IntegrationError) errors = [{ platform: '', field: 'mediaItems', message: error.message }]; else throw error; }
+  // `details` lists each failed rule (platform, field, message and, for a customised account, accountId) for the form.
+  if (errors.length) throw Object.assign(new IntegrationError(422, 'APPROVAL_POST_RESTRICTIONS', errors.map(item => item.platform ? `${item.platform}: ${item.message}` : item.message).join(' ').slice(0, 4000)), { details: errors.slice(0, 100).map(({ platform, field, message, accountId }) => ({ platform, field, message, ...(accountId ? { accountId } : {}) })) });
 }
+const errorBody = (error: unknown) => error instanceof IntegrationError ? { code: error.code, message: error.message, ...((error as ProviderRecord).details ? { details: (error as ProviderRecord).details } : {}) } : { code: 'APPROVAL_ERROR', message: 'The content approval action could not be completed.' };
 function approvalAccounts(post: ProviderRecord) {
   if (!Array.isArray(post.accounts) || !post.accounts.length) fail(409, 'APPROVAL_ACCOUNTS_REQUIRED', 'Edit this post, select its connected publishing accounts, and save it before requesting approval or publishing.');
 }
@@ -256,7 +258,7 @@ export async function handleApprovals(context: ApprovalContext) {
       const results: ProviderRecord[] = [];
       for (const { postId, reviewId } of body.items) {
         try { const { status, item } = await decide(context, await reviewTarget(context, postId, false), input(reviewId), true); results.push({ postId, reviewId, status, item }); }
-        catch (error) { results.push({ postId, reviewId, status: 'failed', error: { code: error instanceof IntegrationError ? error.code : 'APPROVAL_ERROR', message: error instanceof IntegrationError ? error.message : 'The content approval action could not be completed.' } }); }
+        catch (error) { results.push({ postId, reviewId, status: 'failed', error: errorBody(error) }); }
       }
       send(200, { results }); return true;
     }
@@ -288,6 +290,6 @@ export async function handleApprovals(context: ApprovalContext) {
       send(200, { item: await queueItem(context, post, queue ? { ...queue, ready: true } : null) }); return true;
     }
   } catch (error) {
-    send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'APPROVAL_ERROR', message: error instanceof IntegrationError ? error.message : 'The content approval action could not be completed.' } }); return true;
+    send(error instanceof IntegrationError ? error.status : 500, { error: errorBody(error) }); return true;
   }
 }

@@ -393,14 +393,16 @@ test('approving a post that fails a platform restriction is refused, singly and 
   const medialess = await create({ content: 'Instagram needs media', platforms: ['instagram'], accounts: ['instagram-a'] }), medialessReview = await requestFor(medialess);
   let result = await f.invoke(`posts/${medialess.id}/review`, 'blair', { reviewId: medialessReview, decision: 'approved' });
   assert.equal(result.status, 422); assert.equal(result.data.error.code, 'APPROVAL_POST_RESTRICTIONS'); assert.match(result.data.error.message, /^instagram: Instagram requires media\./);
+  assert.deepEqual(result.data.error.details, [{ platform: 'instagram', field: 'mediaItems', message: 'Instagram requires media.' }]);
   result = await f.invoke('bulk', 'blair', { decision: 'approved', items: [{ postId: medialess.id, reviewId: medialessReview }] });
-  assert.equal(result.data.results[0].status, 'failed'); assert.equal(result.data.results[0].error.code, 'APPROVAL_POST_RESTRICTIONS');
+  assert.equal(result.data.results[0].status, 'failed'); assert.equal(result.data.results[0].error.code, 'APPROVAL_POST_RESTRICTIONS'); assert.equal(result.data.results[0].error.details[0].field, 'mediaItems');
   assert.deepEqual(await f.stored(medialessReview), { status: 'pending', self_approved: false }); assert.equal(await decisions(), 0);
   assert.equal((await f.invoke(`posts/${medialess.id}/review`, 'blair', { reviewId: medialessReview, decision: 'rejected' })).status, 200, 'An unpublishable post can still be rejected.');
   // A customised account is checked with its own copy; the base variant is checked on platforms without a customised account.
   const tooLong = await create({ content: 'Shared caption', mediaItems: [image], platforms: ['facebook', 'instagram'], accounts: ['facebook-a', 'instagram-a'], accountOverrides: { 'instagram-a': { platform: 'instagram', content: 'x'.repeat(2201) } } }), tooLongReview = await requestFor(tooLong);
   result = await f.invoke(`posts/${tooLong.id}/review`, 'blair', { reviewId: tooLongReview, decision: 'approved' });
   assert.equal(result.status, 422); assert.match(result.data.error.message, /^instagram: Caption has 2,201 characters; Instagram allows 2,200\./);
+  assert.deepEqual(result.data.error.details, [{ platform: 'instagram', field: 'content', message: 'Caption has 2,201 characters; Instagram allows 2,200.', accountId: 'instagram-a' }]);
   const customised = await create({ content: 'x'.repeat(2201), mediaItems: [image], platforms: ['facebook', 'instagram'], accounts: ['facebook-a', 'instagram-a'], accountOverrides: { 'instagram-a': { platform: 'instagram', content: 'Short Instagram copy' } } });
   assert.equal((await f.invoke(`posts/${customised.id}/review`, 'blair', { reviewId: await requestFor(customised), decision: 'approved' })).status, 200);
 });
