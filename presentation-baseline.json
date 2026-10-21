@@ -30,9 +30,7 @@
     "styling": 1
   },
   "src/UnifiedInbox.tsx": {
-    "stylesheet": 1,
-    "element": 531,
-    "styling": 250
+    "element": 1
   },
   "src/ZernioAdEvents.tsx": {
     "element": 48,

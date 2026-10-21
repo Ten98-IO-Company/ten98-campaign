@@ -231,8 +231,9 @@ test('native integration and empty-state copy keeps light colors and readable da
   for (const selector of ['.legend-dot.purple', '.legend-dot.pale', '.mix-dot-0', '.mix-dot-1', '.mix-dot-2', '.mix-dot-3', '.chart-track>span', '.chart-row:nth-child(2) .chart-track>span', '.chart-row:nth-child(3) .chart-track>span', '.chart-row:nth-child(4) .chart-track>span', '.progress', '.progress>span']) pairedRole(paint(selector, 'background'), selector);
   assert.equal(paint('.chart-track', 'background'), 'repeating-linear-gradient(90deg,light-dark(#f3effa,var(--color-border-control)) 0,light-dark(#f3effa,var(--color-border-control)) calc(25% - 1px),light-dark(#fff,var(--color-surface)) calc(25% - 1px),light-dark(#fff,var(--color-surface)) 25%)');
   for (const [selector, property] of [['.sample-banner', 'border'], ['.chart-footer', 'border-top'], ['.upcoming-row', 'border-top'], ['.date-tile', 'border']]) pairedRole(paint(selector, property).replace(/^1px solid /, ''), selector + ' border');
+  // The unified inbox renders only @ten98/ui components, so it no longer ships a stylesheet of its own.
+  await assert.rejects(source('inbox.css'), { code: 'ENOENT' });
   for (const [file, lightHash, selectors] of [
-    ['inbox.css', 'dad771b504b2ee08bd03dab216771fa6b656091e466dbdde7e704700719b19c8', ['.inbox-conversation', '.inbox-conversation:hover,.inbox-conversation.selected', '.inbox-contact', '.inbox-message', '.inbox-message.outgoing', '.inbox-review blockquote']],
     ['direct-campaigns.css', 'ff69defeea5a8b4411dd1cb767f8710a4894c696970cb3766065752a152176f7', ['.direct-message-preview', '.direct-counts>span', '.direct-confirmation', '.direct-import-results']],
   ]) {
     const sheet = await source(file), light = sheet.replace(/light-dark\((#[\da-f]{3,8}|white),var\(--[\w-]+\)\)/gi, '$1').replace(/\r\n/g, '\n');
@@ -240,11 +241,6 @@ test('native integration and empty-state copy keeps light colors and readable da
     for (const selector of selectors) {
       const surface = pairedRole(paint(selector, 'background', sheet), file + ' ' + selector);
       for (const foreground of ['--color-text', '--color-text-muted']) assert.ok(contrast(foreground, surface) >= 4.5, selector + ' keeps inherited message and helper text readable');
-    }
-    if (file === 'inbox.css') {
-      for (const selector of ['.inbox-notice,.inbox-provider-note', '.inbox-provider-note', '.inbox-avatar']) assert.ok(contrast(pairedRole(paint(selector, 'color', sheet), selector), pairedRole(paint(selector, 'background', sheet), selector)) >= 4.5, selector + ' owns a readable feedback pair');
-      const author = pairedRole(paint('.inbox-message>strong', 'color', sheet), 'message author');
-      for (const selector of ['.inbox-message', '.inbox-message.outgoing']) assert.ok(contrast(author, pairedRole(paint(selector, 'background', sheet), selector)) >= 4.5, 'message author stays readable');
     }
     if (file === 'direct-campaigns.css') {
       for (const selector of ['.direct-audience legend,.direct-consent-fields legend', '.direct-consented', '.direct-suppressed']) assert.ok(contrast(pairedRole(paint(selector, 'color', sheet), selector), '--color-surface') >= 4.5, selector + ' stays readable');

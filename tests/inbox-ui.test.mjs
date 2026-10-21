@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
-import { AppliedFilters } from '@ten98/ui';
+import * as ui from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 
@@ -11,6 +11,7 @@ const source = await readFile(new URL('../src/UnifiedInbox.tsx', import.meta.url
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 function compile(code, context = {}) { return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context)); }
 const event = { preventDefault() {} }, path = '/projects/project-a/integrations/inbox';
+const { AppliedFilters } = ui, uiNames = Object.keys(ui), uiValues = Object.values(ui);
 const merge = (before, after) => [...new Map([...before, ...after].map(row => [row.id, row])).values()];
 
 const linkedInReactions = { LIKE: 'Like', PRAISE: 'Celebrate', EMPATHY: 'Love', INTEREST: 'Insightful', APPRECIATION: 'Support', ENTERTAINMENT: 'Funny' };
@@ -32,20 +33,28 @@ function whatsappButtonContext() {
 
 test('native WhatsApp reply controls preview and send exactly reviewed generated-ID buttons', async () => {
   const { context, calls } = whatsappButtonContext(); context.replyButtons = []; context.commit();
-  const start = source.indexOf('{retainedButtonReply && <p'), end = source.indexOf("{account?.platform === 'whatsapp' && <label", start); assert.ok(end > start);
+  const start = source.indexOf('{retainedButtonReply && <Alert'), end = source.indexOf("{account?.platform === 'whatsapp' && <Field label=\"Reply type\"", start); assert.ok(end > start);
   const { code } = await transformWithOxc(`function Buttons(props) { const { retainedButtonReply, reply, account, capabilities, replyButtons, templateMode, attachmentUrl, setReplyButtons, buttonReview, buttonScopeKey, buttonReviewKey, setButtonReview, message, selected } = props; return <>${source.slice(start, end)}</>; }`, 'WhatsAppButtons.tsx', { jsx: { runtime: 'classic' } });
-  const Buttons = new Function('React', 'accountLabel', code + '; return Buttons;')(React, account => account.name);
+  const Buttons = new Function('React', ...uiNames, 'accountLabel', code + '; return Buttons;')(React, ...uiValues, account => account.name);
   const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children)] : [];
   const render = () => { context.commit(); return Buttons({ ...context, reply: context.handler() }); };
-  const add = () => elements(render()).find(node => node.type === 'button' && node.props.children === 'Add reply button');
-  for (let index = 0; index < 3; index++) { assert.equal(add().props.disabled, false); add().props.onClick(); }
-  assert.equal(add().props.disabled, true); assert.equal(context.replyButtons.length, 3);
-  const remove = elements(render()).filter(node => node.type === 'button' && Array.isArray(node.props.children) && node.props.children.join('') === 'Remove reply button 3')[0]; remove.props.onClick(); assert.equal(context.buttonReview, '');
-  for (const [index, title] of ['<Yes>', 'No'].entries()) elements(render()).filter(node => node.type === 'input' && node.props.maxLength === 20)[index].props.onChange({ target: { value: title } });
-  const html = renderToStaticMarkup(render()); assert.match(html, /Reply buttons \(optional\)/); assert.match(html, /WhatsApp reply button preview/); assert.match(html, /QA WhatsApp.*QA customer/); assert.match(html, /&lt;Yes&gt;/); assert.doesNotMatch(html, /payload|reply_1|type="url"/);
-  elements(render()).find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange({ target: { checked: true } });
+  const list = () => elements(render()).find(node => node.type === ui.FieldList);
+  for (let index = 0; index < 3; index++) { const field = list(); assert.equal(field.props.addLabel, 'Add reply button'); assert.ok(field.props.items.length < field.props.max); field.props.onAdd(); }
+  assert.equal(list().props.items.length, list().props.max, 'A fourth reply button cannot be added.'); assert.equal(context.replyButtons.length, 3);
+  assert.equal(list().props.removeLabel(2), 'Remove reply button 3'); list().props.onRemove(2); assert.equal(context.buttonReview, '');
+  for (const [index, title] of ['<Yes>', 'No'].entries()) { const field = list(); elements(field.props.renderItem(field.props.items[index], index)).find(node => node.type === ui.Input && node.props.maxLength === 20).props.onChange({ target: { value: title } }); }
+  const html = renderToStaticMarkup(render()); assert.match(html, /Reply buttons \(optional\)/); assert.match(html, /WhatsApp reply button preview/); assert.match(html, /QA customer/); assert.match(html, /From QA WhatsApp/); assert.match(html, /&lt;Yes&gt;/); assert.doesNotMatch(html, /payload|reply_1|type="url"/);
+  elements(render()).find(node => node.type === ui.Checkbox).props.onChange({ target: { checked: true } });
   await context.handler()(event); assert.deepEqual(calls[0][2], { accountId: 'wa', message: 'Choose one', buttons: [{ type: 'postback', title: '<Yes>', payload: 'reply_1' }, { type: 'postback', title: 'No', payload: 'reply_2' }] }); assert.deepEqual(context.replyButtons, []); assert.equal(context.message, '');
-  assert.match(source, /!readOnly && canReply && selected\.folder !== 'requests' && <form className="inbox-reply"/);
+  assert.match(source, /!readOnly && canReply && selected\.folder !== 'requests' && <Form /);
+});
+
+test('WhatsApp replies point to approved templates once the loaded history shows the 24-hour window has closed', () => {
+  const expression = source.match(/lastInbound = (\(detail\?\.messages \|\| \[\]\)\.reduce\(.*?, 0\));$/m)?.[1]; assert.ok(expression);
+  const latest = messages => compile(expression, { detail: { messages } });
+  assert.equal(latest([{ direction: 'incoming', createdAt: '2026-10-01T09:00:00Z' }, { direction: 'incoming', createdAt: '2026-10-02T09:00:00Z' }, { direction: 'outgoing', createdAt: '2026-10-03T09:00:00Z' }]), Date.parse('2026-10-02T09:00:00Z'), 'Only the latest received message opens the window.');
+  assert.equal(latest([{ direction: 'outgoing', createdAt: '2026-10-03T09:00:00Z' }, { direction: 'incoming', createdAt: 'not a date' }]), 0, 'Without a dated received message no window is inferred.');
+  assert.match(source, /account\?\.platform === 'whatsapp' && !templateMode && lastInbound > 0 && Date\.now\(\) - lastInbound > 86400000 && <Alert tone="info">It has been more than 24 hours/);
 });
 
 test('WhatsApp button drafts reject invalid, mixed, unreviewed and stale callbacks without sending', async () => {
@@ -112,14 +121,14 @@ test('Reddit edit handler retains failed and newer drafts and rejects stale comm
 });
 
 test('Reddit inline edit exposes before and after review only for owned comments', async () => {
-  const markup = section("{tab === 'comments' && selected && <section", '\n      {privateReplyTarget'), { code } = await transformWithOxc('function Comments() { return (' + markup.trim().slice(1, -1) + '); }', 'Comments.tsx', { jsx: { runtime: 'classic' } });
+  const helper = section('  function commentMessage(', '  const noun = '), { code } = await transformWithOxc('function Comments() {' + helper + ' return <ConversationThread label="Post comments" messages={threadRows.map(row => commentMessage(row, selected))}/>; }', 'Comments.tsx', { jsx: { runtime: 'classic' } });
   const row = { id: 'comment', message: 'Original', from: { isOwner: true }, editVersion: 'review', depth: 0 }, commentEdit = { ...row, accountId: 'rd', postId: 'post', content: 'Corrected', confirmed: '' };
   const render = changes => {
-    const context = { React, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'rd', account: { platform: 'reddit', name: 'Reddit account' }, capabilities: { commentEdit: true }, canReply: false, threadRows: [row], detail: {}, commentEdit, when: () => '', link: () => '', ...changes };
+    const context = { React, ...ui, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'rd', account: { platform: 'reddit', name: 'Reddit account' }, capabilities: { commentEdit: true }, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [row], detail: {}, commentEdit, when: () => '', link: () => '', ...changes };
     return renderToStaticMarkup(new Function(...Object.keys(context), code + '; return Comments;')(...Object.values(context))());
   };
-  const html = render(); assert.match(html, /Edit comment/); assert.match(html, /<strong>Before/); assert.match(html, /<span>After/); assert.match(html, /Original/); assert.match(html, /Corrected/); assert.match(html, /I reviewed this account and the before and after text/); assert.match(html, /disabled="">Save comment edit/); assert.match(html, /after this review can be overwritten/);
-  assert.match(render({ commentEdit: { ...commentEdit, blocked: true, pendingBody: {} } }), /type="button">Check this edit/);
+  const html = render(); assert.match(html, /Edit comment/); assert.match(html, /<figcaption[^>]*>Before</); assert.match(html, /<label[^>]*>After</); assert.match(html, /Original/); assert.match(html, /Corrected/); assert.match(html, /I reviewed this account and the before and after text/); assert.match(html, /disabled="">Save comment edit/); assert.match(html, /after this review can be overwritten/);
+  assert.match(render({ commentEdit: { ...commentEdit, blocked: true, pendingBody: {} } }), /<button type="button"[^>]*>Check this edit/);
   for (const changes of [{ readOnly: true, commentEdit: null }, { threadRows: [{ ...row, from: { isOwner: false } }], commentEdit: null }, { account: { platform: 'facebook' }, commentEdit: null }]) assert.doesNotMatch(render(changes), />Edit comment</);
 });
 
@@ -146,15 +155,15 @@ test('lost Reddit edit acknowledgments can check the exact retained request with
 
 test('LinkedIn comment controls require one of six explicit reactions and never infer a live reaction type', async () => {
   const component = section('function LinkedInCommentReaction(', 'function ZernioInbox('), { code } = await transformWithOxc(component, 'LinkedInCommentReaction.tsx', { jsx: { runtime: 'classic' } });
-  const Component = new Function('React', 'useState', 'linkedInReactions', `${code}; return LinkedInCommentReaction;`)(React, React.useState, linkedInReactions);
+  const Component = new Function('React', ...uiNames, 'useState', 'linkedInReactions', `${code}; return LinkedInCommentReaction;`)(React, ...uiValues, React.useState, linkedInReactions);
   const html = renderToStaticMarkup(React.createElement(Component, { comment: { id: 'comment', isLiked: true, reactionType: 'PRAISE' }, busy: false, onChange() {} }));
-  assert.equal((html.match(/<option value="[A-Z]+"/g) || []).length, 6); assert.match(html, /Choose a reaction/); assert.match(html, /required=""/); assert.match(html, /Current reaction type is unknown/); assert.match(html, /Remove reaction/); assert.match(html, /<button class="button" disabled="">Add reaction/);
+  assert.equal((html.match(/<option value="[A-Z]+"/g) || []).length, 6); assert.match(html, /Choose a reaction/); assert.match(html, /required=""/); assert.match(html, /Current reaction type is unknown/); assert.match(html, /Remove reaction/); assert.match(html, /<button type="submit"[^>]*disabled="">Add reaction/);
   for (const reactionType of Object.keys(linkedInReactions)) {
-    const calls = [], render = new Function('React', 'useState', 'linkedInReactions', `${code}; return LinkedInCommentReaction;`)(React, () => [reactionType, () => {}], linkedInReactions);
+    const calls = [], render = new Function('React', ...uiNames, 'useState', 'linkedInReactions', `${code}; return LinkedInCommentReaction;`)(React, ...uiValues, () => [reactionType, () => {}], linkedInReactions);
     render({ comment: { id: 'comment' }, busy: false, onChange: (...args) => calls.push(args) }).props.onSubmit(event);
     assert.deepEqual(calls, [['like', { id: 'comment' }, reactionType]]);
   }
-  assert.match(renderToStaticMarkup(React.createElement(Component, { comment: { id: 'comment', isLiked: true }, busy: true, onChange() {} })), /<select required="" disabled=""/);
+  assert.match(renderToStaticMarkup(React.createElement(Component, { comment: { id: 'comment', isLiked: true }, busy: true, onChange() {} })), /<select[^>]* required="" disabled=""/);
   assert.match(source, /!readOnly && capabilities\.commentLike && item\.canLike && \(account\?\.platform === 'linkedin' \? <LinkedInCommentReaction/);
 });
 
@@ -214,13 +223,13 @@ test('mention cards expand locally for readers and expose only returned safe Lin
   assert.equal(safeLink(accepted, true), accepted); assert.equal(safeLink('https://linkedin.com/posts/example', true), 'https://linkedin.com/posts/example');
   for (const unsafe of [null, '', '/posts/123', 'javascript:alert(1)', 'http://www.linkedin.com/post', 'https://user:secret@www.linkedin.com/post', 'https://linkedin.com.evil.test/post', 'https://evil.test/linkedin.com/post']) assert.equal(safeLink(unsafe, true), undefined, String(unsafe));
   assert.equal(safeLink('https://example.test/attachment'), 'https://example.test/attachment', 'Other inbox links retain their existing HTTPS behavior.');
-  const start = source.indexOf('<div className="inbox-public-list">'), markup = source.slice(start, source.indexOf("\n      {tab === 'comments' && selected", start));
+  const start = source.indexOf("<Stack as=\"section\" gap={3} aria-label={tab === 'mentions'"), markup = source.slice(start, source.indexOf('\n      {loaded && !visibleRows.length && listEmpty}', start)); assert.ok(start > 0);
   const code = await transformWithOxc('function MentionCards() { return (' + markup + '); }', 'MentionCards.tsx', { jsx: { runtime: 'classic' } });
   const rows = [{ id: 'mention-document', content: '<Campaign update>', authorName: null, authorUsername: null, publishedAt: null, permalink: accepted }, { id: 'another-document', content: 'More content', authorName: 'Sam', permalink: null }, { id: 'unsafe-document', permalink: 'https://evil.test/post' }];
-  const component = new Function('React', 'visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', code.code + '; return MentionCards;')(React, rows, 'mentions', { name: 'Connected account' }, () => 'Time unavailable', safeLink, true);
+  const component = new Function('React', ...uiNames, 'visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', code.code + '; return MentionCards;')(React, ...uiValues, rows, 'mentions', { name: 'Connected account' }, () => 'Time unavailable', safeLink, true);
   const html = renderToStaticMarkup(React.createElement(component));
-  assert.equal((html.match(/<details/g) || []).length, 3); assert.match(html, /<summary>Read mention/); assert.match(html, /LinkedIn author/); assert.match(html, /Time unavailable/); assert.match(html, /&lt;Campaign update&gt;/); assert.match(html, /Connected account/); assert.match(html, /Open post on LinkedIn/); assert.match(html, /target="_blank" rel="noreferrer"/); assert.equal((html.match(/href=/g) || []).length, 1); assert.equal((html.match(/Post link unavailable/g) || []).length, 2); assert.doesNotMatch(html, /<button|<textarea|<form|evil\.test/);
-  const mentions = markup.slice(markup.indexOf("tab === 'mentions' ?"), markup.indexOf(" : tab === 'comments' ?"));
+  assert.equal((html.match(/<details/g) || []).length, 3); assert.match(html, /<summary[^>]*><span[^>]*>Read mention/); assert.match(html, /LinkedIn author/); assert.match(html, /Time unavailable/); assert.match(html, /&lt;Campaign update&gt;/); assert.match(html, /Connected account/); assert.match(html, /Open post on LinkedIn/); assert.match(html, /target="_blank" rel="noopener noreferrer"/); assert.equal((html.match(/href=/g) || []).length, 1); assert.equal((html.match(/Post link unavailable/g) || []).length, 2); assert.doesNotMatch(html, /<button|<textarea|<form|evil\.test/);
+  const mentions = markup.slice(markup.indexOf("tab === 'mentions' ?"), markup.indexOf(' : <Card as="article"')); assert.ok(mentions.length > 0);
   assert.doesNotMatch(mentions, /onClick|onToggle|openItem|fetchThread|prepareReply|authorUrn|organizationalEntity/, 'Expansion is native and cannot turn a mention document or author URN into a thread or fabricated URL.');
   assert.ok(source.includes("const canReply = tab === 'mentions' ? false")); assert.ok(source.includes('An account listed here is not confirmation that it is an organization.'));
 });
@@ -236,7 +245,7 @@ test('private comment replies keep the exact operation key until the scoped plat
 });
 
 test('private comment composer submits only its exact reviewed recipient, comment, message and interactive options', async () => {
-  const component = section('function PrivateCommentReply(', 'function ZernioInbox('), handler = component.slice(component.indexOf('async function submit('), component.indexOf('  return <form'));
+  const component = section('function PrivateCommentReply(', 'function ZernioInbox('), handler = component.slice(component.indexOf('async function submit('), component.indexOf('  const optionNoun ='));
   const target = { id: 'comment', accountId: 'ig', postId: 'post', privateReplyVersion: 'reviewed-version' }, elements = [{ type: 'url', title: 'View details', url: 'https://example.com/details' }], sent = [], context = { target, busy: false, eligible: true, confirmed: 'review', review: 'review', message: 'Thanks for your question.', limit: 1000, mode: 'buttons', elements, onSend: async body => sent.push(body) };
   for (const changes of [{ busy: true }, { eligible: false }, { confirmed: 'earlier-review' }, { message: ' ' }, { message: 'x'.repeat(1001) }, { elements: [] }]) await compile(handler, { ...context, ...changes })(event);
   assert.deepEqual(sent, []);
@@ -244,7 +253,7 @@ test('private comment composer submits only its exact reviewed recipient, commen
   await compile(handler, { ...context, mode: 'text', elements: [] })(event); assert.equal(Object.hasOwn(sent[1], 'buttons'), false); assert.equal(Object.hasOwn(sent[1], 'quickReplies'), false);
   const { code } = await transformWithOxc(component, 'PrivateCommentReply.tsx', { jsx: { runtime: 'classic' } });
   let values = ['Preview message', 'buttons', elements, ''];
-  const render = new Function('React', 'useEffect', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, () => {}, () => [values.shift(), () => {}], value => value);
+  const render = new Function('React', ...uiNames, 'useEffect', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, ...uiValues, () => {}, () => [values.shift(), () => {}], value => value);
   const html = renderToStaticMarkup(render({ target: { ...target, platform: 'instagram', from: { name: 'Alex' }, message: 'Public question' }, current: { privateReplyEligible: true, privateReplyVersion: target.privateReplyVersion }, busy: false, onSend() {}, onCancel() {} }));
   assert.match(html, /Private message preview/); assert.match(html, /Preview message/); assert.match(html, /View details/); assert.match(html, /https:\/\/example.com\/details/); assert.match(html, /does not grant marketing permission/); assert.match(html, /Send private reply<\/button>/); assert.doesNotMatch(html, /Call a phone number/); assert.equal(sent.length, 2, 'Rendering a preview must never send.');
   assert.match(component, /JSON\.stringify\(\[target\.accountId, target\.postId, target\.id, target\.privateReplyVersion, message, mode, elements\]\)/, 'Review must be invalidated by a changed recipient, comment, caption, mode or button.');
@@ -270,7 +279,7 @@ test('consumed and unknown private reply failures immediately disable the compos
     await assert.rejects(send(body), error => error === failure); const current = detail.comments[0].replies[0];
     assert.equal(current.privateReplyEligible, false); assert.equal(detail.parent.privateReplyEligible, false); assert.equal(current.privateReplyStatus, failure.code === 'PRIVATE_REPLY_CONSUMED' ? 'consumed' : 'uncertain'); assert.deepEqual(cleared, []);
     const review = JSON.stringify([target.accountId, target.postId, target.id, target.privateReplyVersion, body.message, 'text', []]); let states = [body.message, 'text', [], review];
-    const render = new Function('React', 'useEffect', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, () => {}, () => [states.shift(), () => {}], value => value);
+    const render = new Function('React', ...uiNames, 'useEffect', 'useState', 'title', `${code}; return PrivateCommentReply;`)(React, ...uiValues, () => {}, () => [states.shift(), () => {}], value => value);
     const html = renderToStaticMarkup(render({ target, current, busy: false, onSend() {}, onCancel() {} })); assert.match(html, /Keep this private reply draft/); assert.match(html, /disabled="">Send private reply/); assert.match(html, /already has a private reply recorded/);
   }
   for (const failure of [Object.assign(new Error('Known input rejection.'), { status: 400, code: 'PROVIDER_REJECTED', operation: { status: 'failed' } }), Object.assign(new Error('Known preflight failure.'), { status: 502, operation: { status: 'failed' } })]) {
@@ -283,7 +292,7 @@ test('consumed and unknown private reply failures immediately disable the compos
 test('stored-copy deletion preserves review on failure, rejects changed messages and clears only the confirmed target', async () => {
   const selected = { id: 'thread/opaque', deleteVersion: 'latest-message-v1' }, target = { ...selected, accountId: 'account-a' }, calls = [], cleared = [], rows = [], notices = [], version = { current: 1 };
   const context = { readOnly: false, selected, deleteTarget: target, confirmStoredDelete: true, accountId: 'account-a', action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { deletedMessages: 3 }; }, version, resetSelection: () => cleared.push(true), setRows: update => rows.push(update([selected, { id: 'other' }])), setNotice: value => notices.push(value) };
-  const submit = changes => compile(section('async function submitStoredDelete(', '  function prepareMessageAction('), { ...context, ...changes })(event);
+  const submit = changes => { const active = { ...context, ...changes }; return compile(section('async function submitStoredDelete(', '  function prepareMessageAction('), active)(active.confirmStoredDelete); };
   for (const change of [{ readOnly: true }, { confirmStoredDelete: false }, { selected: { ...selected, deleteVersion: 'new-message' } }, { accountId: 'other' }]) await submit(change);
   assert.equal(calls.length, 0); await assert.rejects(submit({ write: async () => { throw new Error('Unknown'); } }), /Unknown/); assert.equal(cleared.length, 0);
   await submit(); assert.deepEqual(calls[0], ['conversations/thread%2Fopaque/delete', { accountId: 'account-a', expectedDeleteVersion: selected.deleteVersion, confirmConversationId: selected.id }]); assert.deepEqual(rows[0], [{ id: 'other' }]); assert.equal(cleared.length, 1); assert.match(notices[0], /platform thread and local contact remain/);
@@ -298,11 +307,11 @@ test('typing uses an inline WhatsApp review, binds its current thread and report
   await send({ typingReview: reviewed }, true); assert.deepEqual(calls[0], ['conversations/thread/typing', { accountId: 'wa', confirmTyping: true }]); assert.match(notices[0], /No typing indicator was sent/);
   await send({ account: { platform: 'telegram' }, write: async () => ({ delivered: true }) }); assert.match(notices.at(-1), /Typing indicator sent to the platform/);
   const count = calls.length; await send({ readOnly: true }); assert.equal(calls.length, count);
-  assert.doesNotMatch(section('async function sendTyping(', '  function prepareStoredDelete('), /window\.confirm/); assert.match(source, /onClick=\{\(\) => sendTyping\(true\)\}/);
+  assert.doesNotMatch(section('async function sendTyping(', '  function prepareStoredDelete('), /window\.confirm/); assert.match(source, /onConfirm=\{\(\) => sendTyping\(true\)\}/);
 });
 
 test('attachment loading validates returned URLs and ignores a late completion after the target changes', async () => {
-  const component = section('function InboxAttachment(', 'function MessageActions('), handler = component.slice(component.indexOf('async function load('), component.indexOf('\n  return <div'));
+  const component = section('function InboxAttachment(', 'function MessageActions('), handler = component.slice(component.indexOf('async function load('), component.indexOf('\n  return <Stack'));
   const calls = [], saved = [], errors = [], generation = { current: 1 }, target = path + '/conversations/thread/messages/message/attachments/0', item = { type: 'image' };
   const context = { loading: false, busy: false, generation, target, accountId: 'wa', item, request: async (...args) => { calls.push(args); return { attachment: { type: 'image', downloadUrl: `/api${target}?accountId=wa&download=1`, refreshed: false } }; }, link: value => value?.startsWith('https:') ? value : undefined, setLoading() {}, setError: value => errors.push(value), setResolved: value => saved.push(value) };
   const load = changes => compile(handler, { ...context, ...changes })();
@@ -321,9 +330,9 @@ test('a refreshed message attachment remounts its resolver at the same message a
 });
 
 test('WhatsApp selected-button history renders escaped selection facts without guessing labels or exposing deleted responses', async () => {
-  const history = source.match(/<div className="inbox-message-history" aria-label="Message history">.*?<\/div>/s)[0];
+  const historyStart = source.indexOf('<ConversationThread label="Message history"'), history = source.slice(historyStart, source.indexOf("\n        {!readOnly && canReply && selected.folder !== 'requests'", historyStart)); assert.ok(historyStart > 0);
   const { code } = await transformWithOxc(`function History({ items, platform = 'whatsapp' }) { const detail = { messages: items }, account = { platform }, selected = { id: 'thread', participantName: 'Customer' }; return ${history}; }`, 'SelectedButtonHistory.tsx', { jsx: { runtime: 'classic' } });
-  const History = new Function('React', 'when', 'InboxAttachment', 'MessageActions', 'path', 'accountId', 'requester', 'busy', 'readOnly', 'prepareMessageAction', `${code}; return History;`)(React, () => 'Now', () => null, () => null, path, 'wa', { current() {} }, false, true, () => {});
+  const History = new Function('React', ...uiNames, 'when', 'InboxAttachment', 'MessageActions', 'path', 'accountId', 'requester', 'busy', 'readOnly', 'prepareMessageAction', 'openItem', `${code}; return History;`)(React, ...uiValues, () => 'Now', () => null, () => null, path, 'wa', { current() {} }, false, true, () => {}, () => {});
   const response = { id: 'button-response', direction: 'incoming', message: '', metadata: { interactiveType: 'button_reply', interactiveId: 'reply_2' } }, render = (items, platform) => renderToStaticMarkup(React.createElement(History, { items, platform }));
   const empty = render([response]); assert.match(empty, /Reply button selected/); assert.match(empty, /ID: reply_2/); assert.doesNotMatch(empty, /<button|href=|<img/);
   const escaped = render([{ ...response, message: '<b>Yes & please</b>', metadata: { interactiveType: 'button_reply', interactiveId: '<script>reply_1</script>' } }]); assert.match(escaped, /&lt;b&gt;Yes &amp; please&lt;\/b&gt;/); assert.match(escaped, /&lt;script&gt;reply_1&lt;\/script&gt;/); assert.doesNotMatch(escaped, /<script|<b>/);
@@ -344,7 +353,7 @@ test('typing and conversation deletion receipts retain keys until their exact re
 test('message action handlers submit the reviewed snapshot, retain failures and reject a stale or read-only target', async () => {
   const calls = [], cleared = [], notices = [], version = { current: 1 }, item = { id: 'message/opaque', version: 'message-version', message: 'Original', actions: { canEdit: true, canDelete: true } }, target = { kind: 'edit', item, conversationId: 'thread/opaque', accountId: 'account-a' };
   const context = { readOnly: false, selected: { id: 'thread/opaque' }, accountId: 'account-a', messageActionTarget: target, actionText: 'Edited message', actionEmoji: '👍', confirmMessageAction: true, action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { observed: true }; }, version, setMessageActionTarget: value => cleared.push(value), setNotice: value => notices.push(value), refreshAfterWrite: async () => {} };
-  const submit = changes => compile(section('async function submitMessageAction(', '  async function submitControl('), { ...context, ...changes })(event);
+  const submit = changes => { const active = { ...context, ...changes }; return compile(section('async function submitMessageAction(', '  async function submitControl('), active)(active.confirmMessageAction); };
   for (const changes of [{ readOnly: true }, { selected: { id: 'other' } }, { accountId: 'other' }, { messageActionTarget: { ...target, kind: 'delete' }, confirmMessageAction: false }]) await submit(changes); assert.equal(calls.length, 0);
   await assert.rejects(submit({ write: async () => { throw new Error('Unknown outcome'); } }), /Unknown/); assert.deepEqual(cleared, []);
   await submit(); assert.deepEqual(calls[0], ['conversations/thread%2Fopaque/messages/message%2Fopaque/edit', { accountId: 'account-a', expectedMessageVersion: 'message-version', text: 'Edited message' }]); assert.deepEqual(cleared, [null]); assert.match(notices[0], /confirmed in message history/);
@@ -355,12 +364,12 @@ test('message action handlers submit the reviewed snapshot, retain failures and 
 test('handover and request-acceptance handlers require review and retain drafts until confirmed', async () => {
   const calls = [], controls = [], notices = [], cleared = [], threads = [], selected = { id: 'thread', version: 'conversation-version', folder: 'requests', controlActions: ['pass', 'request'] }, version = { current: 1 };
   const context = { readOnly: false, selected, accountId: 'account-a', controlAction: 'pass', targetAppId: '263902037430900', controlNote: 'Customer asked for support', confirmControl: selected.version, confirmAccept: selected.version, capabilities: { acceptRequest: true }, message: 'Thanks for your request', action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { conversation: { ...selected, threadControl: 'other' }, requested: false }; }, version, setSelected: update => controls.push(update(selected)), setConfirmControl: value => cleared.push(value), setControlAction() {}, setNotice: value => notices.push(value), refreshAfterWrite: async () => {}, setMessage: value => cleared.push(value), setConfirmAccept: value => cleared.push(value), setRows: update => cleared.push(update([selected])), fetchThread: async item => threads.push(item), setError() {} };
-  const control = changes => compile(section('async function submitControl(', '  async function submitAccept('), { ...context, ...changes })(event);
+  const control = changes => { const active = { ...context, ...changes }; return compile(section('async function submitControl(', '  async function submitAccept('), active)(active.confirmControl); };
   await control({ confirmControl: false }); await control({ readOnly: true }); assert.equal(calls.length, 0);
   await assert.rejects(control({ write: async () => { throw new Error('Outcome uncertain'); } }), /uncertain/); assert.deepEqual(cleared, []);
   await control(); assert.deepEqual(calls[0], ['conversations/thread/thread-control', { accountId: 'account-a', action: 'pass', expectedConversationVersion: 'conversation-version', confirmControl: true, targetAppId: '263902037430900', metadata: 'Customer asked for support' }]); assert.equal(controls[0].threadControl, 'other');
   await control({ controlAction: 'request', write: async () => ({ requested: true, conversation: selected }) }); assert.match(notices.at(-1), /must still transfer/);
-  const accept = changes => compile(section('async function submitAccept(', '  async function editComment('), { ...context, ...changes })(event);
+  const accept = changes => { const active = { ...context, ...changes }; return compile(section('async function submitAccept(', '  async function editComment('), active)(active.confirmAccept); };
   const count = calls.length; await accept({ confirmAccept: false }); await accept({ selected: { ...selected, folder: undefined } }); assert.equal(calls.length, count);
   await accept(); assert.deepEqual(calls.at(-1), ['conversations/thread/accept', { accountId: 'account-a', message: 'Thanks for your request', expectedConversationVersion: 'conversation-version', confirmSend: true }]); assert.equal(threads[0].folder, undefined, 'Accepted requests cannot regain their old request-folder flag during refresh.'); assert.equal(controls.at(-1).folder, undefined); assert.ok(cleared.some(value => Array.isArray(value) && value.length === 0));
 });
@@ -368,13 +377,15 @@ test('handover and request-acceptance handlers require review and retain drafts 
 test('conversation confirmations retain the reviewed version across refreshes and uncertain retries', async () => {
   let selected = { id: 'thread', version: 'reviewed-version', folder: 'requests', controlActions: ['pass'] }, confirmControl = false, confirmAccept = false, uncertain = true;
   const calls = [], keys = { current: new Map() }, version = { current: 1 };
-  const confirm = (kind, checked) => {
-    const marker = `onChange={event => setConfirm${kind}(`, start = source.indexOf(marker) + 'onChange={'.length;
-    assert.ok(start > 'onChange={'.length);
-    const handler = source.slice(start, source.indexOf('}', start));
-    compile(handler, { selected, setConfirmControl: value => { confirmControl = value; }, setConfirmAccept: value => { confirmAccept = value; } })({ target: { checked } });
+  // The review panels confirm the conversation version shown when they were acknowledged; a new version clears their checks.
+  assert.ok(source.includes('reviewKey={JSON.stringify([selected.id, selected.version, controlAction, targetAppId, controlNote])}')); assert.ok(source.includes('reviewKey={JSON.stringify([selected.id, selected.version, message])}'));
+  const confirm = kind => {
+    const marker = `onConfirm={() => submit${kind}(`, start = source.indexOf(marker) + 'onConfirm={'.length;
+    assert.ok(start > 'onConfirm={'.length);
+    const reviewed = compile(source.slice(start, source.indexOf('}', start)).replace(`submit${kind}`, 'confirmed'), { selected, confirmed: value => value })();
+    if (kind === 'Control') confirmControl = reviewed; else confirmAccept = reviewed;
   };
-  confirm('Control', true); confirm('Accept', true);
+  confirm('Control'); confirm('Accept');
   assert.equal(confirmControl, selected.version); assert.equal(confirmAccept, selected.version);
   const fetchThread = compile(section('async function fetchThread(', '  async function openItem('), {
     tab: 'messages', accountId: 'account', path, version, merge,
@@ -393,10 +404,10 @@ test('conversation confirmations retain the reviewed version across refreshes an
     capabilities: { acceptRequest: true }, message: 'Acceptance reply', action: async (_, run) => run(1), write, version,
     setSelected() {}, setConfirmControl: value => { confirmControl = value; }, setControlAction() {}, setNotice() {}, refreshAfterWrite() {},
     setMessage() {}, setConfirmAccept() {}, setRows() {}, fetchThread() {}, setError() {},
-  })(event);
+  })(kind === 'Control' ? confirmControl : confirmAccept);
   await submit('Control'); await submit('Accept');
   assert.equal(calls.length, 0, 'A refreshed conversation cannot inherit either earlier review confirmation.');
-  confirm('Control', true);
+  confirm('Control');
   await assert.rejects(submit('Control'), /uncertain/);
   assert.equal(confirmControl, 'refreshed-version'); assert.equal(keys.current.size, 1);
   uncertain = false; await submit('Control');
@@ -414,7 +425,7 @@ test('new action receipts are validated before their operation keys are released
 
 test('rendered message controls preserve deletion scope, reactions, history and reader permissions', async () => {
   const { code } = await transformWithOxc(section('function MessageActions(', 'function ZernioInbox('), 'MessageActions.tsx', { jsx: { runtime: 'classic' } });
-  const Component = new Function('React', 'when', `${code}; return MessageActions;`)(React, value => value || 'Unknown');
+  const Component = new Function('React', ...uiNames, 'when', `${code}; return MessageActions;`)(React, ...uiValues, value => value || 'Unknown');
   const props = { item: { id: 'message', message: 'Text', direction: 'outgoing', reactions: [{ emoji: '👍', fromMe: true }, { emoji: '❤️', fromMe: false }], editHistory: [{ text: '<previous>', editedAt: '2026-10-18' }], actions: { canEdit: true, canDelete: true, canReact: true, canUnreact: true, deleteScope: 'self' } }, platform: 'reddit', busy: false, readOnly: false, onAction() {} };
   const rendered = renderToStaticMarkup(React.createElement(Component, props)); assert.match(rendered, /Remove from my view/); assert.match(rendered, /Your reaction/); assert.match(rendered, /Contact reaction/); assert.match(rendered, /Previous message versions/); assert.match(rendered, /&lt;previous&gt;/);
   const reader = renderToStaticMarkup(React.createElement(Component, { ...props, readOnly: true })); assert.doesNotMatch(reader, /<button/); assert.match(reader, /Your reaction/);
@@ -475,9 +486,9 @@ test('partial Meta sends keep only the unsent text and an explicit follow-up can
 });
 
 test('attachment fields expose supported audio, account limits and an explicit preview without sending', async () => {
-  const markup = source.match(/<details className="inbox-attachment-fields">.*?<\/details>/)[0], attachment = section('function Attachment(', 'function InboxAttachment(');
+  const markup = source.match(/<Disclosure summary="Attach a public file">.*?<\/Disclosure>/)[0], attachment = section('function Attachment(', 'function InboxAttachment(');
   const { code } = await transformWithOxc(`${attachment}\nfunction Fields(props) { const { capabilities, account, attachmentType, attachmentUrl, attachmentName, attachmentPreview, message, setAttachmentType, setAttachmentUrl, setAttachmentName, setAttachmentPreview } = props; return ${markup}; }`, 'ReplyAttachment.tsx', { jsx: { runtime: 'classic' } });
-  const Fields = new Function('React', 'useState', 'link', 'title', `${code}; return Fields;`)(React, React.useState, value => value?.startsWith('https:') ? value : undefined, value => value);
+  const Fields = new Function('React', ...uiNames, 'useState', 'link', 'title', `${code}; return Fields;`)(React, ...uiValues, React.useState, value => value?.startsWith('https:') ? value : undefined, value => value);
   const props = { capabilities: { attachmentTypes: ['image', 'video', 'audio', 'file'], attachmentRules: { audio: { maxMB: 25, formats: 'AAC, M4A, WAV or MP4; no MP3 or OGG/Opus' } } }, account: { platform: 'instagram' }, attachmentType: 'audio', attachmentUrl: 'https://cdn.example.com/audio.m4a', attachmentName: 'audio.m4a', attachmentPreview: '', message: 'Follow-up text', setAttachmentType() {}, setAttachmentUrl() {}, setAttachmentName() {}, setAttachmentPreview() {} };
   const before = renderToStaticMarkup(React.createElement(Fields, props)); assert.match(before, /value="audio" selected=""/); assert.match(before, /Maximum 25 MB/); assert.match(before, /no MP3 or OGG\/Opus/); assert.match(before, /two separate messages/); assert.doesNotMatch(before, /<audio/);
   const preview = renderToStaticMarkup(React.createElement(Fields, { ...props, attachmentPreview: props.attachmentUrl })); assert.match(preview, /<audio/); assert.match(preview, /preload="none"/);
@@ -488,13 +499,13 @@ test('attachment fields expose supported audio, account limits and an explicit p
 });
 
 test('optional history search keeps conversation actions, active results and provider limits outside its native disclosure', async () => {
-  const start = source.lastIndexOf("    {tab === 'messages' &&", source.indexOf('<form onSubmit={searchHistory}>')), end = source.indexOf('\n    {starting &&', start);
+  const start = source.lastIndexOf("    {tab === 'messages' &&", source.indexOf('<Form aria-label="Search message history"')), end = source.indexOf('\n    {starting &&', start);
   assert.ok(start > 0 && end > start);
   const { code } = await transformWithOxc(`function HistorySearch(props) { const { tab, historyQuery, historyDirection, busy, accountId, connected, historyFilter, readOnly, capabilities, starting, setHistoryQuery, setHistoryDirection, searchHistory, loadList, prepareConversation } = props; return <>${source.slice(start, end)}</>; }`, 'HistorySearch.tsx', { jsx: { runtime: 'classic' } });
-  const HistorySearch = new Function('React', code + '; return HistorySearch;')(React), props = { tab: 'messages', historyQuery: 'kept search draft', historyDirection: 'incoming', busy: '', accountId: 'account/one', connected: true, historyFilter: { query: 'invoice', direction: 'incoming' }, readOnly: false, capabilities: { start: true }, starting: false, setHistoryQuery() {}, setHistoryDirection() {}, searchHistory() {}, loadList() {}, prepareConversation() {} };
+  const HistorySearch = new Function('React', ...uiNames, code + '; return HistorySearch;')(React, ...uiValues), props = { tab: 'messages', historyQuery: 'kept search draft', historyDirection: 'incoming', busy: '', accountId: 'account/one', connected: true, historyFilter: { query: 'invoice', direction: 'incoming' }, readOnly: false, capabilities: { start: true }, starting: false, setHistoryQuery() {}, setHistoryDirection() {}, searchHistory() {}, loadList() {}, prepareConversation() {} };
   const render = changes => renderToStaticMarkup(React.createElement(HistorySearch, { ...props, ...changes }));
   const html = render(), disclosure = html.match(/<details[\s\S]*?<\/details>/)?.[0]; assert.ok(disclosure, 'Search fields must stay mounted inside a native disclosure.');
-  assert.match(disclosure, /<summary>Search message history<\/summary>/); assert.doesNotMatch(disclosure.match(/^<details[^>]*>/)[0], /\bopen=/);
+  assert.match(disclosure, /<summary[^>]*><span[^>]*>Search message history<\/span>/); assert.doesNotMatch(disclosure.match(/^<details[^>]*>/)[0], /\bopen=/);
   assert.match(disclosure, /value="kept search draft"/); assert.match(disclosure, /value="incoming" selected=""/); assert.match(disclosure, />Search history<\/button>/); assert.match(disclosure, /whole tokens/);
   const outside = html.replace(disclosure, ''); for (const text of ['Return to conversations', 'New conversation', 'History results for', 'up to three recent matching messages', 'Live-only accounts may be skipped', 'history stored by Zernio']) assert.ok(outside.includes(text), text);
   assert.doesNotMatch(disclosure, /Return to conversations|New conversation|History results for|Live-only accounts|up to three/);
@@ -522,7 +533,7 @@ test('new-conversation preparation rejects stale results and does not overwrite 
 
 test('opening-message sends require review, retain failed drafts and separate accepted sends from a failed thread refresh', async () => {
   const calls = [], changed = [], notices = [], errors = [], version = { current: 1 }, context = { readOnly: false, capabilities: { start: true, messageLimit: 10000 }, accountId: 'x-account', account: { platform: 'twitter' }, recipient: '@alex', openingMessage: 'Hello Alex', confirmSend: true, openingTemplate: null, openingTemplateComponents: [], templateRestriction: () => '', action: async (_, run) => run(1), write: async (...args) => { calls.push(args); return { conversationId: 'existing-or-new', platform: 'twitter' }; }, version, setStarting: value => changed.push(value), setRecipient: value => changed.push(value), setOpeningMessage: value => changed.push(value), setConfirmSend() {}, setOpeningTemplateKey() {}, setOpeningTemplateComponents() {}, setNotice: value => notices.push(value), fetchThread: async () => { throw new Error('Temporary read failure'); }, setError: value => errors.push(value) };
-  const send = changes => compile(section('async function startConversation(', '  async function fetchList('), { replyDraft: false, ...context, ...changes })(event);
+  const send = changes => { const active = { replyDraft: false, ...context, ...changes }; return compile(section('async function startConversation(', '  async function fetchList('), active)(active.confirmSend); };
   for (const changes of [{ confirmSend: false }, { readOnly: true }, { recipient: '' }, { openingMessage: '' }]) await send(changes); assert.equal(calls.length, 0);
   await assert.rejects(send({ write: async () => { throw new Error('Outcome uncertain'); } }), /uncertain/); assert.deepEqual(changed, [], 'An uncertain write retains recipient, text and reviewed state for recovery.');
   await send(); assert.deepEqual(calls[0], ['conversations/start', { accountId: 'x-account', participantUsername: '@alex', message: 'Hello Alex', confirmSend: true }]); assert.deepEqual(changed, [false, '', '']); assert.match(notices[0], /accepted/); assert.match(errors.at(-1), /was accepted/);
@@ -619,10 +630,15 @@ test('read/archive are explicit writes and destructive public changes require co
   const reopened = [], archiveContext = { ...context, selected: { ...selected, status: 'archived' }, setRows: update => reopened.push(update([])) };
   await compile(section('async function conversationAction(', '  async function sendTyping('), archiveContext)('status'); assert.equal(reopened[0][0].id, selected.id); assert.equal(reopened[0][0].status, 'active');
   const readArchived = []; await compile(section('async function conversationAction(', '  async function sendTyping('), { ...archiveContext, setRows: update => readArchived.push(update([])) })('read'); assert.deepEqual(readArchived[0], [], 'Marking the archived selected thread read must not insert it into the active list.');
-  let confirmed = false; const comment = compile(section('async function commentAction(', '  async function deleteReviewReply('), { ...context, commentScope: { current: { generation: 1, rows: [{ id: 'comment' }], readOnly: false } }, commentGeneration: 1, window: { confirm: () => confirmed }, refreshAfterWrite: async () => {} });
-  await comment('delete', { id: 'comment' }); assert.equal(calls.length, 4); confirmed = true; await comment('delete', { id: 'comment' }); assert.deepEqual(calls[4], ['comments/delete', { accountId: 'account', postId: selected.id, commentId: 'comment' }]);
-  const remove = compile(section('async function deleteReviewReply(', '  return <div className="unified-inbox">'), { ...context, window: { confirm: () => confirmed }, setReplyTarget() {}, setMessage() {}, refreshAfterWrite: async () => {} });
-  await remove({ id: 'review', replyVersion: 'version' }); assert.deepEqual(calls[5], ['reviews/delete-reply', { accountId: 'account', reviewId: 'review', expectedReplyVersion: 'version', confirmReplace: true }]);
+  const comment = compile(section('async function commentAction(', '  async function deleteReviewReply('), { ...context, commentScope: { current: { generation: 1, rows: [{ id: 'comment' }], readOnly: false } }, commentGeneration: 1, refreshAfterWrite: async () => {} });
+  const remove = compile(section('async function deleteReviewReply(', '  function commentMessage('), { ...context, setReplyTarget() {}, setMessage() {}, refreshAfterWrite: async () => {} });
+  // Delete, hide and review-reply removal buttons only open the confirmation dialog; its confirm action performs the write.
+  assert.doesNotMatch(source, /onClick=\{\(\) => (commentAction\('(delete|hide)'|deleteReviewReply\()/); assert.match(source, /onClick=\{\(\) => setConfirming\(\{ kind: 'delete', comment: item \}\)\}/); assert.match(source, /: setConfirming\(\{ kind: 'hide', comment: item \}\)/); assert.match(source, /onClick=\{\(\) => setConfirming\(\{ kind: 'review', review: item \}\)\}/);
+  const dialogStart = source.indexOf('onConfirm={() => confirming?.kind') + 'onConfirm={'.length, dialogConfirm = source.slice(dialogStart, source.indexOf('}/>', dialogStart));
+  const confirmWith = confirming => compile(dialogConfirm, { confirming, commentAction: comment, deleteReviewReply: remove })();
+  await confirmWith(null); assert.equal(calls.length, 4, 'Nothing is written until the confirmation is accepted.');
+  await confirmWith({ kind: 'delete', comment: { id: 'comment' } }); assert.deepEqual(calls[4], ['comments/delete', { accountId: 'account', postId: selected.id, commentId: 'comment' }]);
+  await confirmWith({ kind: 'review', review: { id: 'review', replyVersion: 'version' } }); assert.deepEqual(calls[5], ['reviews/delete-reply', { accountId: 'account', reviewId: 'review', expectedReplyVersion: 'version', confirmReplace: true }]);
 });
 
 test('history search retains matching conversations after mark-read, archive and reopen', async () => {
@@ -671,7 +687,7 @@ test('the actual action lock rejects double clicks and stale operation results d
 });
 
 test('SMS replies bind the selected conversation, block opted-out/viewer sends and reuse uncertain operation keys', async () => {
-  const handler = section('async function sendSms(', '  return <div className="unified-inbox inbox-sms">'), calls = [], messages = [], notices = [], keys = { current: new Map() }, selected = { id: 'sms-thread', participantId: '+971501234567', sender: '+12025550123' };
+  const handler = section('async function sendSms(', '  return <Stack gap={4}>'), calls = [], messages = [], notices = [], keys = { current: new Map() }, selected = { id: 'sms-thread', participantId: '+971501234567', sender: '+12025550123' };
   const context = { readOnly: false, selected, blocked: false, status: { configured: true }, message: 'Your order is ready', setError() {}, path: '/projects/a/sms-inbox', smsAction: async (_, run) => run(1), keys, crypto, requester: { current: async (...args) => { calls.push(args); return { sent: true, conversation: selected, message: { id: 'outgoing', message: 'Your order is ready', direction: 'outgoing' } }; } }, version: { current: 1 }, setMessage: value => messages.push(value), setSelected() {}, setDetail() {}, setRows() {}, setNotice: value => notices.push(value), merge };
   for (const changes of [{ readOnly: true }, { blocked: true }, { status: { configured: false } }, { message: '' }, { selected: null }]) await compile(handler, { ...context, ...changes })(event);
   assert.equal(calls.length, 0);
@@ -777,14 +793,14 @@ test('actual account and feed handlers preserve their current selection until ex
   const guard = selectionGuard(), changes = [], version = { current: 1 }, pending = { current: false };
   const context = { accountId: 'account-a', version, pending, onSwitch: guard.requestSwitch, resetList: () => { changes.push('reset'); version.current++; }, setAccountId: value => changes.push(value) };
   context.switchSelection = change => compile(section('function switchSelection(', '  function resetTemplate('), context)(change);
-  const start = source.indexOf('<span>Connected account</span>'), handlerStart = source.indexOf('onChange={', start) + 'onChange={'.length;
-  const change = compile(source.slice(handlerStart, source.indexOf('}><option', handlerStart)), context), selectionEvent = { target: { value: 'account-b' } };
+  const start = source.indexOf('<Field label="Connected account">'), handlerStart = source.indexOf('onChange={', start) + 'onChange={'.length;
+  const change = compile(source.slice(handlerStart, source.indexOf('}><Option', handlerStart)), context), selectionEvent = { target: { value: 'account-b' } };
   change(selectionEvent); selectionEvent.target.value = 'account-c'; assert.deepEqual(changes, []);
   guard.keepEditing(); await guard.discardAndSwitch(); assert.deepEqual(changes, []);
   change({ target: { value: 'account-b' } }); await guard.discardAndSwitch(); assert.deepEqual(changes, ['reset', 'account-b'], 'Deferred selection captures the chosen account, never a later event value.');
-  const feedStart = source.indexOf('onClick={() => { if (tab !== item)'), feedHandler = source.slice(feedStart + 'onClick={'.length, source.indexOf('}>{item', feedStart));
-  const feed = compile(feedHandler, { tab: 'messages', item: 'sms', requestSwitch: guard.requestSwitch, reportDraft: guard.reportDraft, setTab: value => changes.push(value) });
-  feed(); assert.deepEqual(changes, ['reset', 'account-b']); await guard.discardAndSwitch(); assert.deepEqual(changes, ['reset', 'account-b', 'sms']); assert.equal(guard.draft.current, '');
+  const feedStart = source.indexOf('onValueChange={item => { if (tab !== item)'), feedHandler = source.slice(feedStart + 'onValueChange={'.length, source.indexOf('} items={', feedStart));
+  const feed = compile(feedHandler, { tab: 'messages', requestSwitch: guard.requestSwitch, reportDraft: guard.reportDraft, setTab: value => changes.push(value) });
+  feed('sms'); assert.deepEqual(changes, ['reset', 'account-b']); await guard.discardAndSwitch(); assert.deepEqual(changes, ['reset', 'account-b', 'sms']); assert.equal(guard.draft.current, '');
 });
 
 test('native review filters capture deferred choices and preserve pending replies until the current draft is discarded', async () => {
@@ -801,9 +817,9 @@ test('native review filters capture deferred choices and preserve pending replie
   assert.deepEqual(changes, ['reset', { minRating: '2', maxRating: '4', hasReply: 'false' }]);
   changes.length = 0; pending.current = true; change('sortBy', 'rating'); assert.deepEqual(changes, []); pending.current = false;
   guard.reportDraft(''); await change('minRating', ''); assert.deepEqual(context.reviewFilters, { maxRating: '4', hasReply: 'false' });
-  const controlsStart = source.indexOf('<section className="panel inbox-filters" aria-label="Review filters">'), controls = source.slice(controlsStart, source.indexOf('</section>', controlsStart) + '</section>'.length);
+  const controlsStart = source.indexOf('<Stack as="section" aria-label="Review filters"'), controls = source.slice(controlsStart, source.indexOf('</Stack>', controlsStart) + '</Stack>'.length);
   const { code } = await transformWithOxc('function ReviewFilters() { return (' + controls + '); }', 'ReviewFilters.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', 'reviewFilters', 'busy', 'changeReviewFilter', code + '; return ReviewFilters;')(React, { minRating: '2', maxRating: '4', hasReply: 'false' }, '', () => {}), html = renderToStaticMarkup(React.createElement(render));
+  const render = new Function('React', ...uiNames, 'reviewFilters', 'busy', 'changeReviewFilter', code + '; return ReviewFilters;')(React, ...uiValues, { minRating: '2', maxRating: '4', hasReply: 'false' }, '', () => {}), html = renderToStaticMarkup(React.createElement(render));
   assert.equal((html.match(/<select/g) || []).length, 5); assert.match(html, /value="false" selected="">Without a reply/); assert.match(html, /value="5" disabled=""/); assert.match(html, /value="1" disabled=""/);
   const summaryLine = source.split('\n').find(line => line.includes('<AppliedFilters filters={appliedReviewFilters}')), summaryDeclaration = section('  const appliedReviewFilters =', '  const replyDraft =');
   const summaryCode = await transformWithOxc('function ReviewSummary() {' + summaryDeclaration + 'return (' + summaryLine.trim().slice(1, -1) + '); }', 'ReviewSummary.tsx', { jsx: { runtime: 'classic' } });
@@ -834,7 +850,8 @@ test('the actual draft snapshot protects attachment-only and option-only drafts 
   const snapshot = changes => compile('function snapshot() {' + code + ' return draftSnapshot; }', { ...context, ...changes })();
   assert.equal(snapshot(), '');
   for (const changes of [{ message: ' ' }, { attachmentUrl: 'https://example.test/file' }, { attachmentType: 'audio' }, { attachmentName: 'report.pdf' }, { messageTag: 'HUMAN_AGENT' }, { templateMode: true }, { templateKey: 'template' }, { templateComponents: [{}] }, { replyButtons: ['Yes'] }, { buttonReview: 'reviewed' }, { retainedButtonReply: { message: 'Unknown reply', buttons: [] } }]) assert.notEqual(snapshot(changes), '', JSON.stringify(changes));
-  assert.notEqual(snapshot({ message: 'draft', confirmAccept: false }), snapshot({ message: 'draft', confirmAccept: 'version' }));
+  const acceptKey = compile('function acceptKey(selected, message) { return ' + source.match(/title="Review the acceptance reply" reviewKey=\{(JSON\.stringify\(\[selected\.id, selected\.version, message\]\))\}/)[1] + '; }');
+  assert.notEqual(acceptKey({ id: 'thread', version: 'v1' }, 'draft'), acceptKey({ id: 'thread', version: 'v1' }, 'edited draft'), 'Editing a reviewed acceptance reply clears its acknowledgement.'); assert.notEqual(acceptKey({ id: 'thread', version: 'v1' }, 'draft'), acceptKey({ id: 'thread', version: 'v2' }, 'draft'), 'A refreshed conversation clears its acknowledgement.');
   assert.notEqual(snapshot({ privateReplyTarget: { id: 'comment' }, privateDraft: 'before' }), snapshot({ privateReplyTarget: { id: 'comment' }, privateDraft: 'after' }));
   assert.notEqual(snapshot({ commentEdit: { id: 'comment', content: 'before' } }), snapshot({ commentEdit: { id: 'comment', content: 'after' } }));
   for (const [field, setter, value] of [['historyQuery', 'setHistoryQuery', 'new invoice'], ['historyDirection', 'setHistoryDirection', 'outgoing']]) {
