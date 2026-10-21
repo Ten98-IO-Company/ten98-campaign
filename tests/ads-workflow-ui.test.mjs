@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { AuthErrorBoundary } from '@ten98/ui';
+import { AuthErrorBoundary, Option, Select } from '@ten98/ui';
 import { transformWithOxc } from 'vite';
 
 test('campaign rows open the matching native advertising view and manual records retain their editor', async () => {
@@ -90,10 +90,10 @@ test('Shopping disconnection remains available when credentials are absent while
 });
 
 test('Demand Gen exposes target CPC while Performance Max retains conversion-only bidding options', async () => {
-  const source = await readFile(new URL('../src/GoogleAdsTools.tsx', import.meta.url), 'utf8'), start = source.indexOf('<select name="bidStrategy"'), end = source.indexOf('</select>', start) + '</select>'.length;
+  const source = await readFile(new URL('../src/GoogleAdsTools.tsx', import.meta.url), 'utf8'), start = source.indexOf('<Select name="bidStrategy"'), end = source.indexOf('</Select>', start) + '</Select>'.length;
   assert.ok(start > 0 && end > start);
   const { code } = await transformWithOxc(`const render = (campaign,bidding) => (${source.slice(start,end)});`, 'CampaignBidding.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', code + '; return render;')(React);
+  const render = new Function('React', 'Select', 'Option', code + '; return render;')(React, Select, Option);
   for (const channel of ['SEARCH','DEMAND_GEN','PERFORMANCE_MAX']) {
     const options = [render({ advertisingChannelType: channel }, {}).props.children].flat(Infinity).filter(React.isValidElement);
     const cap = options.find(option => option.props.value === 'LOWEST_COST_WITH_BID_CAP');

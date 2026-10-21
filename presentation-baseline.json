@@ -1,8 +1,4 @@
 {
-  "src/AdCampaignDiscovery.tsx": {
-    "element": 41,
-    "styling": 13
-  },
   "src/AdComposer.tsx": {
     "element": 174,
     "styling": 66
@@ -28,10 +24,6 @@
     "stylesheet": 1,
     "element": 301,
     "styling": 124
-  },
-  "src/GoogleAdsTools.tsx": {
-    "element": 227,
-    "styling": 71
   },
   "src/GoogleCalendar.tsx": {
     "element": 83,
@@ -163,10 +155,6 @@
   "src/ZernioRecycling.tsx": {
     "element": 91,
     "styling": 28
-  },
-  "src/ZernioTeam.tsx": {
-    "element": 35,
-    "styling": 11
   },
   "src/ZernioWebhooks.tsx": {
     "element": 66,

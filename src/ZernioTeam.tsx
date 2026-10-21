@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Alert, Button, Card, DataTable, Disclosure, Inline, Stack, StatusLine, Text, type DataColumn } from '@ten98/ui';
 
 type Member = { _id: string; name: string; email: string; role: string; isRoot: boolean | null; profileAccess: string[] | null; createdAt: string | null; lastLoginAt: string | null };
 type Team = { currentUserId: string; users: Member[] };
@@ -26,19 +27,20 @@ export default function ZernioTeam({ projectId, request }: Props) {
     } catch (error) { if (current() && read === reads.current) setFailure({ view, message: (error as Error).message || 'The provider team could not be read.' }); }
     finally { if (current() && read === reads.current) { busyRef.current = false; setBusy(false); } }
   }
-  return <section className="panel settings-panel">
-    <div className="panel-heading"><div><h2>Zernio team members</h2><p>Read the provider team connected through the configured credential. Workspace membership is managed separately.</p></div><button type="button" className="button" disabled={busy} onClick={load}>{busy ? 'Reading provider team…' : team ? 'Refresh provider team' : 'Read provider team'}</button></div>
-    <p className="field-help">Zernio documents this read for a full-access key. Other credentials may be rejected. This view does not verify credential scope or change access.</p>
-    {error && <p className="alert" role="alert">{error}</p>}
-    {busy && <p role="status">Reading provider team members…</p>}
+  const columns: DataColumn<Member>[] = [
+    { key: 'member', header: 'Member', render: row => <Stack gap={1}><Text as="strong">{row.name}</Text>{row._id === team?.currentUserId && <Text tone="muted">Configured credential’s provider caller</Text>}<Text>{row.email}</Text><Disclosure variant="plain" summary={<>Provider details for {row.name}</>}><Text>Member ID: {row._id}</Text><Text>Provider root flag: {row.isRoot === null ? 'Not provided' : row.isRoot ? 'Yes' : 'No'}</Text><Text>Joined: {row.createdAt ?? 'Not provided'}</Text><Text>Last sign-in: {row.lastLoginAt ?? 'Not provided'}</Text></Disclosure></Stack> },
+    { key: 'role', header: 'Provider role', render: row => row.role },
+    { key: 'access', header: 'Profile access', render: row => row.profileAccess === null ? 'Not provided' : row.profileAccess.length ? row.profileAccess.join(', ') : 'No profile IDs returned' }
+  ];
+  return <Card as="section" headingLevel={2} title="Zernio team members" description="Read the provider team connected through the configured credential. Workspace membership is managed separately." actions={<Button variant="secondary" disabled={busy} onClick={load}>{busy ? 'Reading provider team…' : team ? 'Refresh provider team' : 'Read provider team'}</Button>}><Stack gap={3}>
+    <Text tone="muted">Zernio documents this read for a full-access key. Other credentials may be rejected. This view does not verify credential scope or change access.</Text>
+    {error && <Alert tone="danger" title={error}/>}
+    {busy && <StatusLine busy>Reading provider team members…</StatusLine>}
     {team && <>
-      <p role="status">Showing {page * 25 + 1}–{Math.min((page + 1) * 25, team.users.length)} of {team.users.length} returned members.</p>
-      <p className="field-help">Provider roles and profile access are shown as returned. An omitted last sign-in is unavailable, and recorded times may be approximate.</p>
-      <div className="table-scroll"><table><thead><tr><th scope="col">Member</th><th scope="col">Provider role</th><th scope="col">Profile access</th></tr></thead><tbody>{team.users.slice(page * 25, (page + 1) * 25).map(row => <tr key={row._id}>
-        <td><strong>{row.name}</strong>{row._id === team.currentUserId && <p className="field-help">Configured credential’s provider caller</p>}<p>{row.email}</p><details><summary>Provider details for {row.name}</summary><p>Member ID: {row._id}</p><p>Provider root flag: {row.isRoot === null ? 'Not provided' : row.isRoot ? 'Yes' : 'No'}</p><p>Joined: {row.createdAt ?? 'Not provided'}</p><p>Last sign-in: {row.lastLoginAt ?? 'Not provided'}</p></details></td>
-        <td>{row.role}</td><td>{row.profileAccess === null ? 'Not provided' : row.profileAccess.length ? row.profileAccess.join(', ') : 'No profile IDs returned'}</td>
-      </tr>)}</tbody></table></div>
-      {team.users.length > 25 && <div className="button-wrap"><button type="button" className="button" disabled={page === 0} onClick={() => setPage(value => value - 1)}>Previous members</button><button type="button" className="button" disabled={(page + 1) * 25 >= team.users.length} onClick={() => setPage(value => value + 1)}>Next members</button></div>}
+      <StatusLine>Showing {page * 25 + 1}–{Math.min((page + 1) * 25, team.users.length)} of {team.users.length} returned members.</StatusLine>
+      <Text tone="muted">Provider roles and profile access are shown as returned. An omitted last sign-in is unavailable, and recorded times may be approximate.</Text>
+      <DataTable ariaLabel="Zernio team members" searchable={false} sortable={false} pagination={false} columns={columns} rows={team.users.slice(page * 25, (page + 1) * 25)} rowKey={row => row._id}/>
+      {team.users.length > 25 && <Inline gap={2}><Button variant="secondary" disabled={page === 0} onClick={() => setPage(value => value - 1)}>Previous members</Button><Button variant="secondary" disabled={(page + 1) * 25 >= team.users.length} onClick={() => setPage(value => value + 1)}>Next members</Button></Inline>}
     </>}
-  </section>;
+  </Stack></Card>;
 }

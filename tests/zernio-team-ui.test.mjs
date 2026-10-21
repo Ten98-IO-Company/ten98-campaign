@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import * as ui from '@ten98/ui';
 
 test('provider team UI reads explicitly, pages only returned members, renders literal content and withdraws stale data', async () => {
   const source = await readFile(new URL('../src/ZernioTeam.tsx', import.meta.url), 'utf8');
@@ -13,11 +14,12 @@ test('provider team UI reads explicitly, pages only returned members, renders li
   const ref = initial => { const index = cursor++; return hooks[index] ||= { current: initial }; };
   const effect = (run, dependencies) => { const index = cursor++, previous = hooks[index]; if (!previous || dependencies.some((value, key) => !Object.is(value, previous.dependencies[key]))) { hooks[index] = { dependencies, close: previous?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = (...args) => { calls.push(args); return new Promise((resolve, reject) => pending.push({ resolve, reject })); };
-  const Component = new Function('React', 'useState', 'useRef', 'useEffect', `${code}; return ZernioTeam;`)(React, state, ref, effect);
+  const names = ['Alert', 'Button', 'Card', 'DataTable', 'Disclosure', 'Inline', 'Stack', 'StatusLine', 'Text'];
+  const Component = new Function('React', 'useState', 'useRef', 'useEffect', ...names, `${code}; return ZernioTeam;`)(React, state, ref, effect, ...names.map(name => ui[name]));
   function paint() { for (let pass = 0; dirty; pass++) { assert.ok(pass < 20); dirty = false; cursor = 0; tree = Component({ ...props, request }); while (queued.length) queued.shift()(); } }
-  const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
+  const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...[node.props?.actions, node.props?.children].flatMap(value => React.Children.toArray(value)).flatMap(nodes)];
   const html = () => renderToStaticMarkup(tree), tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
-  const click = text => { const button = nodes(tree).find(node => node.type === 'button' && node.props.children === text); assert.ok(button, text); assert.equal(!!button.props.disabled, false); const result = button.props.onClick(); paint(); return result; };
+  const click = text => { const button = nodes(tree).find(node => node.type === ui.Button && node.props.children === text); assert.ok(button, text); assert.equal(!!button.props.disabled, false); const result = button.props.onClick(); paint(); return result; };
   const changeProject = projectId => { props = { projectId }; dirty = true; paint(); };
   const member = (id, name = id) => ({ _id: id, name, email: `${id}@example.test`, role: '<provider-role>', isRoot: null, profileAccess: null, createdAt: null, lastLoginAt: null });
   const team = (name, count = 1) => ({ currentUserId: 'caller', users: [member('caller', name), ...Array.from({ length: count - 1 }, (_, index) => member(`member-${index}`))] });

@@ -5,6 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { AppField } from '@ten98/ui/app';
+import * as designSystem from '@ten98/ui';
 import { transformWithOxc } from 'vite';
 
 const composer = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8'), details = await readFile(new URL('../src/AdDetails.tsx', import.meta.url), 'utf8'), analytics = await readFile(new URL('../src/SocialAnalytics.tsx', import.meta.url), 'utf8');
@@ -600,12 +601,14 @@ async function discoveryUi(respond) {
   const memo = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) hooks[index] = { value: run(), dependencies }; return hooks[index].value; };
   const effect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = async (...args) => { assert.equal(args.length, 1, 'Discovery only makes reads.'); const path = args[0]; calls.push(path); if (respond) { const result = await respond(path); if (result !== undefined) return result; } if (path === 'accounts') return { accounts: [{ _id: 'meta/a', platform: 'metaads', isActive: true }, { _id: 'meta/b', platform: 'facebook', isActive: true }, { _id: 'google', platform: 'googleads', isActive: true }] }; if (path.startsWith('ads/accounts?')) return { accounts: [{ id: 'act_123', name: 'Scoped advertiser', selectable: true }, { id: 'act_456', name: 'Second advertiser', selectable: true }] }; const query = new URL(path, 'https://example.test').searchParams; return discoveryResult(query.get('accountId'), query.get('adAccountId')); };
-  const Component = new Function('React', 'accountLabel', 'useState', 'useRef', 'useMemo', 'useEffect', 'useLayoutEffect', discoveryCode + ';return AdCampaignDiscovery;')(React, row => 'Connection ' + row._id, state, ref, memo, effect, effect);
+  const names = ['Alert', 'Button', 'Card', 'DataTable', 'Field', 'FormGrid', 'Inline', 'Option', 'Select', 'Stack', 'StatusLine', 'Text'];
+  const Component = new Function('React', 'accountLabel', 'useState', 'useRef', 'useMemo', 'useEffect', 'useLayoutEffect', ...names, discoveryCode + ';return AdCampaignDiscovery;')(React, row => 'Connection ' + row._id, state, ref, memo, effect, effect, ...names.map(name => designSystem[name]));
+  const nodes = node => !React.isValidElement(node) ? [] : [node, ...[node.props.actions, node.props.children].flatMap(value => React.Children.toArray(value)).flatMap(nodes)];
   function paint() { if (unmounted) return; for (let pass = 0; dirty; pass++) { assert.ok(pass < 25); dirty = false; cursor = 0; tree = Component({ request }); while (queued.length) queued.shift()(); } }
   const tick = async () => { for (let turn = 0; turn < 3; turn++) { await new Promise(resolve => setImmediate(resolve)); paint(); } };
-  const button = label => detailNodes(tree).find(node => node.type === 'button' && detailText(node) === label);
+  const button = label => nodes(tree).find(node => node.type === designSystem.Button && detailText(node) === label);
   const click = label => { const node = button(label); assert.ok(node, label); assert.equal(!!node.props.disabled, false, label); const promise = node.props.onClick(); paint(); return promise; };
-  const change = async (label, value) => { const field = detailNodes(tree).find(node => node.type === 'label' && detailText(node).startsWith(label)), select = detailNodes(field).find(node => node.type === 'select'); assert.ok(select, label); select.props.onChange({ target: { value } }); paint(); await tick(); };
+  const change = async (label, value) => { const field = nodes(tree).find(node => node.type === designSystem.Field && node.props.label === label), select = nodes(field).find(node => node.type === designSystem.Select); assert.ok(select, label); select.props.onChange({ target: { value } }); paint(); await tick(); };
   paint(); await tick();
   return { calls, click, button, change, tick, html: () => renderToStaticMarkup(tree), unmount() { hooks.forEach(hook => hook.close?.()); unmounted = true; } };
 }
@@ -614,7 +617,7 @@ async function openDiscovery(ui) { await ui.click('Load Meta connections'); awai
 test('actual Meta discovery controls use explicit connection/advertiser reads and display zero-ad rows without mutation controls', async () => {
   const ui = await discoveryUi(); assert.equal(ui.calls.length, 0); await openDiscovery(ui); assert.doesNotMatch(ui.html(), /value="google"/); await ui.click('Discover campaigns'); await ui.tick();
   for (const name of ['accountId', 'adAccountId']) assert.match(ui.html(), new RegExp('<select[^>]*name="' + name + '"[^>]*autocomplete="off"', 'i'));
-  assert.match(ui.html(), /<p class="helper-note" role="status">Connection meta\/a.*1 campaign returned<\/p>/); assert.doesNotMatch(ui.html(), /<table[^>]*(?:role="status"|aria-live=)/);
+  assert.match(ui.html(), /<p[^>]*role="status"[^>]*><span>Connection meta\/a.*1 campaign returned<\/span><\/p>/); assert.doesNotMatch(ui.html(), /<table[^>]*(?:role="status"|aria-live=)/);
   assert.equal(ui.calls.at(-1), 'ads/campaign-discovery?accountId=meta%2Fa&adAccountId=act_123'); assert.match(ui.html(), /&lt;b&gt;Empty campaign&lt;\/b&gt;/); assert.match(ui.html(), /empty-campaign/); assert.match(ui.html(), /<td>0<\/td>/); assert.match(ui.html(), /read-only/); assert.match(ui.html(), /last stored.*not a live/); assert.doesNotMatch(ui.html(), /Manage ads|Pause|Activate|Enable|budget|<b>/);
   const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'); assert.match(main, /connected && <AdCampaignDiscovery key=\{state.projectId\} request=\{integrate\}/); assert.match(main, /Synced provider data/);
 });
