@@ -68,6 +68,7 @@ export const records = pgTable('records', {
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('records_project').on(t.project_id, t.collection, t.seq),
+  index('records_external_id').on(t.project_id, t.collection, sql`(${t.data}->>'externalId')`).where(sql`${t.data}->>'externalId' IS NOT NULL`),
 ]);
 export const activity = pgTable('activity', {
   id: text('id').primaryKey(),
@@ -380,6 +381,7 @@ export const directCampaigns = pgTable('direct_campaigns', {
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('direct_campaigns_project').on(t.project_id),
+  index('direct_campaigns_active').on(t.seq).where(sql`${t.data}->>'status' IN ('scheduled', 'sending')`),
 ]);
 export const directDeliveries = pgTable('direct_deliveries', {
   id: text('id').primaryKey(),
@@ -389,6 +391,7 @@ export const directDeliveries = pgTable('direct_deliveries', {
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   unique('direct_deliveries_campaign_id_contact_id_key').on(t.campaign_id, t.contact_id),
+  index('direct_deliveries_pending').on(t.campaign_id, t.seq).where(sql`${t.data}->>'status' = 'pending'`),
 ]);
 export const smsConversations = pgTable('sms_conversations', {
   id: text('id').primaryKey(),
