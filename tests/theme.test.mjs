@@ -19,16 +19,19 @@ function start(saved, blocked = false) {
 }
 function accountUi(document, blocked = false) {
   const values = [], writes = []; let cursor = 0;
+  const account = { user: { email: 'member@example.test', name: 'Member' }, localPassword: true, activeSessions: 1 };
   const storage = { setItem(name, value) { assert.equal(document.documentElement.dataset.theme, value, 'theme applies before persistence'); if (blocked) throw new Error('Storage blocked'); writes.push([name, value]); } };
   const Component = new Function('useEffect', 'useState', 'React', 'document', 'localStorage', ...Object.keys(ui), code + '; return AccountSettings;')(() => {}, initial => {
     const index = cursor++; if (!(index in values)) values[index] = typeof initial === 'function' ? initial() : initial;
     return [values[index], value => { values[index] = typeof value === 'function' ? value(values[index]) : value; }];
   }, React, document, storage, ...Object.values(ui));
+  const request = async (path, method) => { assert.equal(method, undefined, 'Appearance alone does not write the account'); assert.equal(path, '/account'); return account; };
   let tree;
-  function paint() { cursor = 0; tree = Component({ request() { assert.fail('Appearance does not require an account request'); }, onChanged() { assert.fail('Appearance does not change account data'); } }); return tree; }
+  function paint() { cursor = 0; tree = Component({ request, onChanged() { assert.fail('Appearance does not change account data'); } }); return tree; }
   function nodes(node = tree) { return !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(child => nodes(child))]; }
-  paint();
-  return { writes, paint, radio: () => nodes().find(node => node.type === ui.RadioGroup), html: () => renderToStaticMarkup(tree) };
+  paint(); values[0] = account; paint();
+  const profile = () => nodes().find(node => node.type === ui.AccountProfileFlow);
+  return { writes, paint, profile, choose: async theme => { await profile().props.onSubmit({ name: 'Member', theme }); paint(); }, html: () => renderToStaticMarkup(tree) };
 }
 
 test('blocking theme boot accepts only saved modes and defaults to System without resolving the device preference', () => {
@@ -44,28 +47,29 @@ test('blocking theme boot tolerates unavailable storage and still applies System
   assert.equal(document.documentElement.dataset.theme, 'system');
 });
 
-test('actual AccountSettings Appearance choice is labelled and persists each mode for the next load', () => {
+test('actual AccountSettings profile flow offers the theme and persists each mode for the next load', async () => {
   const document = start(null), ui = accountUi(document);
-  assert.equal(ui.radio().props.value, 'system');
-  assert.match(ui.html(), /<legend[^>]*>Appearance<\/legend>[^]*name="appearance"/);
-  assert.deepEqual(ui.radio().props.options.map(option => [option.value, option.label]), [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']]);
+  assert.equal(ui.profile().props.defaultValues.theme, 'system');
+  assert.equal(ui.profile().props.localeOptions, undefined); assert.equal(ui.profile().props.timeZones, undefined);
+  const html = ui.html();
+  assert.match(html, /name="theme"[^>]*value="system"|value="system"[^>]*name="theme"/); assert.doesNotMatch(html, /name="locale"|name="timeZone"/);
   for (const mode of ['dark', 'light', 'system']) {
-    ui.radio().props.onValueChange(mode); ui.paint();
+    await ui.choose(mode);
     assert.equal(document.documentElement.dataset.theme, mode);
-    assert.equal(ui.radio().props.value, mode);
+    assert.equal(ui.profile().props.defaultValues.theme, mode);
     assert.deepEqual(ui.writes.at(-1), [key, mode]);
     assert.equal(start(ui.writes.at(-1)[1]).documentElement.dataset.theme, mode);
   }
-  assert.match(ui.html(), /role="status"[^>]*><span>Appearance saved for this browser/);
+  assert.match(ui.html(), /Appearance saved for this browser/);
 });
 
-test('actual Appearance change rejects unknown modes and applies a tab-only choice when storage is blocked', () => {
+test('actual Appearance change rejects unknown modes and applies a tab-only choice when storage is blocked', async () => {
   const document = start('light'), ui = accountUi(document, true);
-  ui.radio().props.onValueChange('dark'); ui.paint();
+  await ui.choose('dark');
   assert.equal(document.documentElement.dataset.theme, 'dark');
-  assert.equal(ui.radio().props.value, 'dark');
-  assert.match(ui.html(), /role="status"[^>]*><span>Appearance changed for this tab. Your browser could not save this preference/);
-  ui.radio().props.onValueChange('unknown'); ui.paint();
+  assert.equal(ui.profile().props.defaultValues.theme, 'dark');
+  assert.match(ui.html(), /Appearance changed for this tab. Your browser could not save this preference/);
+  await ui.choose('unknown');
   assert.equal(document.documentElement.dataset.theme, 'dark');
   assert.deepEqual(ui.writes, []);
 });
