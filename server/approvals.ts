@@ -16,12 +16,13 @@ async function policy(db: Executor, projectId: string) {
   const row = await first(db.execute(sql`SELECT require_approval AS "requireApproval",updated_by AS "updatedBy",updated_at AS "updatedAt" FROM project_approval_policy WHERE project_id=${projectId}`));
   return row ? { ...row, requireApproval: Boolean(row.requireApproval) } : { requireApproval: false, updatedBy: null, updatedAt: null };
 }
-async function assetRecords(context: ApprovalContext, post: ProviderRecord) {
+// `loaded` serves a caller that already read the project's assets, so many snapshots cost no further queries.
+async function assetRecords(context: ApprovalContext, post: ProviderRecord, loaded?: Map<string, ProviderRecord>) {
   const ids = [...new Set([post.assetId, ...Object.values(post.platformOverrides || {}).map((item: any) => item?.assetId), ...Object.values(normalizeAccountVariants(post)).map(item => item?.assetId)].filter(Boolean))];
-  return { ids, records: await Promise.all(ids.map(id => context.store.get(context.project.id, 'assets', id))) };
+  return { ids, records: await Promise.all(ids.map(id => loaded ? loaded.get(id) ?? null : context.store.get(context.project.id, 'assets', id))) };
 }
-async function postSnapshot(context: ApprovalContext, post: ProviderRecord) {
-  const accountOverrides = normalizeAccountVariants(post), { ids, records } = await assetRecords(context, post);
+async function postSnapshot(context: ApprovalContext, post: ProviderRecord, loaded?: Map<string, ProviderRecord>) {
+  const accountOverrides = normalizeAccountVariants(post), { ids, records } = await assetRecords(context, post, loaded);
   const assets = ids.map((id, index) => {
     const asset = records[index];
     return asset ? { id: asset.id, url: asset.url || '', deliveryUrl: asset.deliveryUrl || '', approval: asset.approval || 'pending', kind: asset.kind || '', size: asset.size ?? null, mimeType: asset.mimeType || '', width: asset.width ?? null, height: asset.height ?? null, duration: asset.duration ?? null, modifiedTime: asset.modifiedTime || '', md5Checksum: asset.md5Checksum || '', ...(asset.deliverySource === 'zernio' ? Object.fromEntries(['deliverySource', 'deliveryUploadedAt', 'deliveryExpiresAt', 'deliveryKey', 'deliveryAttemptId', 'deliveryKind', 'deliveryMimeType', 'deliverySize', 'deliveryFilename'].map(key => [key, asset[key] ?? null])) : {}) } : { id, missing: true };
@@ -86,9 +87,11 @@ async function publicReview(db: Executor, row: ProviderRecord | undefined) {
 function fields(body: any, allowed: string[]) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_APPROVAL_FIELDS', 'Use only the fields shown in the approval form.');
 }
+// A post's review state as the queue shows it; only 'approved' passes assertPublishingApproval's review check.
+const approvalStatus = (post: ProviderRecord, review: ProviderRecord | undefined, snapshot: ProviderRecord) => submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
 async function queueItem(context: ApprovalContext, post: ProviderRecord, queue: ProviderRecord | null = null) {
   const snapshot = await postSnapshot(context, post), review = await latest(context.db, context.project.id, post.id);
-  const status = submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
+  const status = approvalStatus(post, review, snapshot);
   return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: snapshot.queueId || '', queueVersion: snapshot.queueVersion || '', content: snapshot.content, tags: snapshot.tags, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, ...(snapshot.accountOverrides ? { accountOverrides: snapshot.accountOverrides } : {}), providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: await publicReview(context.db, review) };
 }
 async function publishingQueues(context: ApprovalContext) {
@@ -243,10 +246,12 @@ export async function handleApprovals(context: ApprovalContext) {
       }
       send(200, { ...await policy(db, project.id), posts: await Promise.all(posts.map((post: ProviderRecord) => queueItem(context, post, queueSummary(post, queues, unavailable)))) }); return true;
     }
-    // The navigation badge: posts in this project whose newest review still awaits a decision.
-    if (req.method === 'GET' && path === 'pending-count') {
-      const row = await first(db.execute(sql`SELECT count(*)::int AS pending FROM (SELECT DISTINCT ON (r.post_id) r.status FROM post_approval_reviews r JOIN records p ON p.id=r.post_id AND p.project_id=r.project_id AND p.collection='posts' WHERE r.project_id=${project.id} ORDER BY r.post_id, r.seq DESC) latest WHERE status='pending'`));
-      send(200, { pending: Number(row?.pending || 0) }); return true;
+    // Badge and Publish gating: each post's queue status, read in a fixed number of queries and without provider calls.
+    if (req.method === 'GET' && path === 'summary') {
+      const [posts, assets, reviews, current] = await Promise.all([store.list(project.id, 'posts'), store.list(project.id, 'assets'), db.execute(sql`SELECT DISTINCT ON (post_id) * FROM post_approval_reviews WHERE project_id=${project.id} ORDER BY post_id, seq DESC`), policy(db, project.id)]);
+      const loaded = new Map<string, ProviderRecord>(assets.map((asset: ProviderRecord) => [asset.id, asset])), latestReview = new Map((reviews.rows as ProviderRecord[]).map(row => [row.post_id, row]));
+      const statuses = Object.fromEntries(await Promise.all(posts.map(async (post: ProviderRecord) => [post.id, approvalStatus(post, latestReview.get(post.id), await postSnapshot(context, post, loaded))])));
+      send(200, { requireApproval: current.requireApproval, pending: Object.values(statuses).filter(status => status === 'pending').length, statuses }); return true;
     }
     // Each item is its own decision through the single-review path, so one failure leaves the others decided.
     if (req.method === 'POST' && path === 'bulk') {

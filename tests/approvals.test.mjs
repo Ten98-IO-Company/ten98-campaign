@@ -364,24 +364,60 @@ test('a bulk decision racing a single decision on the same review records exactl
   }
 });
 
-test('the pending-review count covers posts whose newest review awaits a decision, for any project member', { skip: postgresSkip }, async t => {
-  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]);
+// The summary drives the navigation badge and hides Publish; it must agree with the queue and with publishing's gate.
+async function summaryFixture(t) {
+  const f = await selfReviewFixture(t, [['blair', 'owner'], ['casey', 'editor']]), originalFetch = globalThis.fetch, provider = [];
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async target => { provider.push(String(target)); throw new Error('Synthetic provider unavailable'); };
+  const project = { id: f.project.id, zernioProfileId: 'profile-a' }, context = role => ({ db: f.db, store: f.store, project, role, user: { id: role, name: role }, config: { env: {}, ZERNIO_API_KEY: 'sk_test_stub' }, assertProjectMapping: async () => {} });
+  const get = async (path, role = 'viewer') => { let result; await handleApprovals({ ...context(role), req: { method: 'GET' }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), send(status, data) { result = { status, data }; } }); return result; };
+  const create = (content, fields = {}) => f.store.create(project.id, 'posts', { content, platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [], ...fields });
+  const requestFor = async post => { const result = await f.invoke(`posts/${post.id}/request`, 'casey'); assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data.item.review.id; };
+  const decide = async (post, decision) => assert.equal((await f.invoke(`posts/${post.id}/review`, 'blair', { reviewId: await requestFor(post), decision })).status, 200);
+  return { ...f, provider, context, get, create, requestFor, decide };
+}
+
+test('the approvals summary reports every post’s queue status for any member, with no provider calls and a fixed number of queries', { skip: postgresSkip }, async t => {
+  const f = await summaryFixture(t);
   await f.pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-b','w','B')");
-  const count = async (role = 'viewer') => { let result; await handleApprovals({ db: f.db, store: f.store, project: f.project, role, user: { id: role, name: role }, req: { method: 'GET' }, url: new URL(`http://localhost/api/projects/${f.project.id}/approvals/pending-count`), send(status, data) { result = { status, data }; } }); return result; };
-  assert.deepEqual(await count(), { status: 200, data: { pending: 0 } });
-  const second = await f.store.create(f.project.id, 'posts', { content: 'Second pending fixture', platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [] });
-  await f.request('casey'); assert.equal((await f.invoke(`posts/${second.id}/request`, 'casey')).status, 200);
+  assert.deepEqual(await f.get('summary'), { status: 200, data: { requireApproval: false, pending: 0, statuses: { [f.post.id]: 'not_requested' } } });
+  const approved = await f.create('Approved'), rejected = await f.create('Rejected'), stale = await f.create('Stale'), queued = await f.create('Queued', { queueId: 'queue-a', queueVersion: 'a'.repeat(64) });
+  const submittedPost = await f.store.create(f.project.id, 'posts', { content: 'Submitted', platforms: ['facebook'], status: 'scheduled', externalId: 'remote-a' });
+  await f.requestFor(f.post); await f.decide(approved, 'approved'); await f.decide(rejected, 'rejected');
+  await f.requestFor(stale); await f.store.update(f.project.id, 'posts', stale.id, { content: 'Edited while pending' });
   const foreign = await f.store.create('project-b', 'posts', { content: 'Foreign', platforms: ['facebook'], status: 'draft' });
   await f.pool.query("INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES ('foreign-review','project-b',$1,'x','{}','pending','casey','2026-10-22T00:00:00Z')", [foreign.id]);
-  assert.deepEqual((await count()).data, { pending: 2 }); assert.deepEqual((await count('editor')).data, { pending: 2 });
-  // An edited post's newer request leaves its older row pending; the post still counts once.
-  await f.store.update(f.project.id, 'posts', f.post.id, { content: 'Edited while pending' }); const newest = await f.request('casey');
-  assert.equal(Number((await f.sql.get("SELECT count(*) AS count FROM post_approval_reviews WHERE post_id = ? AND status = 'pending'", f.post.id)).count), 2);
-  assert.deepEqual((await count()).data, { pending: 2 });
-  assert.equal((await f.review('blair', newest)).status, 200);
-  assert.deepEqual((await count()).data, { pending: 1 }, 'A decided newest review no longer counts, even with an older pending row.');
-  await f.store.remove(f.project.id, 'posts', second.id);
-  assert.deepEqual((await count()).data, { pending: 0 }, 'Reviews of deleted posts are not counted.');
+  const expected = { [f.post.id]: 'pending', [approved.id]: 'approved', [rejected.id]: 'rejected', [stale.id]: 'stale', [queued.id]: 'not_requested', [submittedPost.id]: 'submitted' };
+  // Count statements on the pool: the summary reads posts, assets, latest reviews and policy whatever the number of posts.
+  const query = f.pool.query.bind(f.pool); let queries = 0; f.pool.query = (...args) => { queries++; return query(...args); };
+  for (const role of ['viewer', 'editor', 'admin', 'owner']) assert.deepEqual((await f.get('summary', role)).data, { requireApproval: false, pending: 1, statuses: expected });
+  const perRead = queries / 4; assert.ok(perRead >= 1 && perRead <= 4,`The summary used ${perRead} queries.`);
+  for (let index = 0; index < 5; index++) await f.requestFor(await f.create(`More ${index}`, { assetId: 'missing-asset' }));
+  queries = 0; const larger = (await f.get('summary')).data; assert.equal(queries, perRead, 'More posts and reviews add no queries.'); f.pool.query = query;
+  assert.equal(larger.pending, 6); assert.equal(Object.keys(larger.statuses).length, 11); assert.equal(f.provider.length, 0, 'The summary sends no provider request, even with queued posts.');
+  // The queue (which may read the provider) reports the same status for every post.
+  const queue = (await f.get('posts')).data.posts; assert.ok(f.provider.length > 0, 'The queue, by contrast, reads the provider for queued posts.');
+  assert.deepEqual(Object.fromEntries(queue.map(row => [row.post.id, row.status])), larger.statuses);
+  await f.store.remove(f.project.id, 'posts', queued.id);
+  assert.equal((await f.get('summary')).data.statuses[queued.id], undefined, 'Deleted posts are not reported.');
+});
+
+test('the summary marks a post approved exactly when publishing’s approval gate passes it', { skip: postgresSkip }, async t => {
+  const f = await summaryFixture(t);
+  await f.setPolicy('blair', true);
+  const asset = await f.store.create(f.project.id, 'assets', { name: 'Creative', kind: 'image', url: 'https://cdn.example.test/c.jpg', deliveryUrl: 'https://cdn.example.test/d.jpg', approval: 'approved' });
+  const approved = await f.create('Approved'), approvedThenEdited = await f.create('Approved then edited'), assetChanged = await f.create('Asset changed', { assetId: asset.id }), rejected = await f.create('Rejected'), pendingThenEdited = await f.create('Pending then edited'); await f.create('Never requested');
+  for (const post of [approved, approvedThenEdited, assetChanged]) await f.decide(post, 'approved');
+  await f.decide(rejected, 'rejected'); await f.requestFor(f.post); await f.requestFor(pendingThenEdited);
+  await f.store.update(f.project.id, 'posts', approvedThenEdited.id, { content: 'Edited after approval' }); await f.store.update(f.project.id, 'posts', pendingThenEdited.id, { content: 'Edited while pending' });
+  await f.store.update(f.project.id, 'assets', asset.id, { deliveryUrl: 'https://cdn.example.test/changed.jpg' });
+  const { statuses, requireApproval } = (await f.get('summary')).data; assert.equal(requireApproval, true);
+  assert.deepEqual(new Set(Object.values(statuses)), new Set(['approved', 'stale', 'rejected', 'pending', 'not_requested']));
+  for (const post of await f.store.list(f.project.id, 'posts')) {
+    const gate = await assertPublishingApproval(f.context('owner'), post).then(() => 'passed', error => error.code);
+    assert.equal(gate, statuses[post.id] === 'approved' ? 'passed' : statuses[post.id] === 'stale' && (await f.sql.get('SELECT status FROM post_approval_reviews WHERE post_id = ? ORDER BY seq DESC LIMIT 1', post.id))?.status === 'approved' ? 'PUBLISHING_APPROVAL_STALE' : 'PUBLISHING_APPROVAL_REQUIRED', `${statuses[post.id]} post ${post.content}`);
+  }
+  assert.equal(statuses[approvedThenEdited.id], 'stale'); assert.equal(statuses[assetChanged.id], 'stale'); assert.equal(statuses[approved.id], 'approved');
 });
 
 // Approval runs publishing's per-platform restriction check, so a post that would fail to publish cannot be approved.
