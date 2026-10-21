@@ -42,7 +42,27 @@ async function providerJson(response: Response, signal: AbortSignal, allowEmpty 
   const body = await readResponseText(response, { maxBytes: 8 * 1024 * 1024, signal, preserveBOM: true });
   return allowEmpty && body.length === 0 ? {} : JSON.parse(body);
 }
+// A provider path is built from IDs, and the allowed hosts carry Campaign's credentials, so an ID must not change which
+// endpoint is called (ten98-campaign#33). URL parsing resolves dot segments even when encoded as %2e, turns a raw
+// backslash into a slash, and '#' (or '?' in a Zernio path) truncates the path. Callers encode their values
+// (pathSegment), so an encoded slash stays inside one segment (Zernio product IDs are encoded Shopify GIDs); this
+// refuses what encoding cannot fix and what slipped through unencoded, before anything is sent.
+const INVALID_PATH = () => fail(400, 'INVALID_PROVIDER_PATH', 'This provider resource ID is invalid.');
+export function assertProviderPath(path: string, query = true) {
+  const route = path.replace(/^https:\/\/[^/?#]*/i, ''), pathPart = query ? route.split('?')[0] : route;
+  // Each segment is also checked as the provider sees it after one decoding, so '..%2Fx' cannot become '../x' there.
+  const decoded = (segment: string) => { try { return decodeURIComponent(segment); } catch { return segment; } };
+  if (route.includes('#') || !query && route.includes('?') || pathPart.includes('\\') || pathPart.split('/').some(segment => decoded(segment).split(/[/\\]/).some(part => part === '.' || part === '..'))) INVALID_PATH();
+}
+/** One provider path segment: encoded, and never '.' or '..', which URL parsing would resolve even when encoded. */
+export function pathSegment(value: unknown): string {
+  const text = String(value ?? '');
+  if (!text || text === '.' || text === '..') INVALID_PATH();
+  return encodeURIComponent(text);
+}
 export async function providerRequest(url: string | URL, options: RequestInit = {}, provider = 'Zernio', assertMapping?: MappingCheck, observeReceipt?: (result: ProviderRecord) => void): Promise<ProviderRecord> {
+  // A URL object is already resolved; its builder must use pathSegment. A string is checked as written.
+  assertProviderPath(typeof url === 'string' ? url : url.href);
   const target = new URL(url);
   if (target.protocol !== 'https:' || !['zernio.com', 'www.googleapis.com', 'oauth2.googleapis.com', 'googleads.googleapis.com', 'login.microsoftonline.com', 'clientcenter.api.bingads.microsoft.com', 'campaign.api.bingads.microsoft.com', 'reporting.api.bingads.microsoft.com', 'api.twilio.com', 'api.cloudflare.com'].includes(target.hostname)) fail(500, 'INVALID_PROVIDER', 'The provider endpoint is invalid.');
   await checkMapping(assertMapping);
@@ -81,6 +101,7 @@ export async function providerRequest(url: string | URL, options: RequestInit = 
 }
 export function zernioClient(key: string, assertMapping?: MappingCheck): ZernioApi {
   return async (path, query = {}, body, idempotencyKey, method, observeReceipt) => {
+    assertProviderPath(path, false);
     const url = new URL(`${ZERNIO}${path}`);
     for (const [name, value] of Object.entries(query)) if (value !== undefined && value !== '') url.searchParams.set(name, String(value));
     return providerRequest(url, {

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
 import type { Database } from './database.ts';
-import { googleToken, providerRequest, operation, IntegrationError, type OperationContext, type ProviderRecord } from './provider-core.ts';
+import { googleToken, pathSegment, providerRequest, operation, IntegrationError, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
 
 function fail(status: number, message: string): never { throw new IntegrationError(status, 'CALENDAR_ERROR', message); }
@@ -82,7 +82,7 @@ export async function handleCalendar(context: OperationContext & { user: Provide
     if (path === 'connection' && req.method === 'POST') {
       if (!user.isOperator || !['owner', 'admin'].includes(role)) fail(403, 'Only an instance operator with workspace administration can map a calendar.');
       const calendarId = typeof body.calendarId === 'string' ? body.calendarId.trim() : '';
-      if (calendarId && (calendarId.length > 500 || !/^[\w.@+%-]+$/.test(calendarId) || calendarId === 'primary')) fail(400, 'Use the ID of the calendar shared with your Google service account.');
+      if (calendarId && (calendarId.length > 500 || !/^[\w.@+%-]+$/.test(calendarId) || /^\.{1,2}$/.test(calendarId) || calendarId === 'primary')) fail(400, 'Use the ID of the calendar shared with your Google service account.');
       if (!calendarId) await db.execute(sql`DELETE FROM calendar_connections WHERE project_id=${project.id}`);
       // The calendar lock serialises parallel mappings of one calendar, so the conflict check sees the other project.
       else await db.transaction(async tx => {
@@ -95,7 +95,7 @@ export async function handleCalendar(context: OperationContext & { user: Provide
     if (!configured || !connection) fail(409, 'Configure Google credentials and map a shared calendar for this project.');
     if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(req.method!)) fail(405, 'This calendar action is not available.');
     if (req.method !== 'GET' && !['owner', 'admin', 'editor'].includes(role)) fail(403, 'Editing permission is required.');
-    const token = await googleToken(env, scope), base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(connection.calendarId)}/events`;
+    const token = await googleToken(env, scope), base = `https://www.googleapis.com/calendar/v3/calendars/${pathSegment(connection.calendarId)}/events`;
     const currentMapping = async () => { try { await context.assertIntegrationSettings?.(); return await mapped() === connection!.calendarId; } catch { return false; } };
     const rememberGeneration = async (identity: ReturnType<typeof planIdentity>, retired = false) => {
       // Google keeps deleted IDs. Reserve the next one before DELETE, including an unconfirmed deletion.
