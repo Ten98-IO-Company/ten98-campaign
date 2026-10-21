@@ -38,7 +38,7 @@ export function getDatabase(connectionString = process.env.DATABASE_URL): Connec
 export async function closeDatabase() { if (shared) { const { pool } = shared; shared = undefined; await pool.end(); } }
 
 // Versioned SQL with a checksum ledger: the shared @ten98/runtime implementation (ported from ten98-discover).
-const ledger = createMigrationLedger({ directory: new URL('../migrations/', import.meta.url), files: ['0001_baseline.sql', '0002_insertion_order.sql', '0003_self_approval.sql', '0004_zernio_profile_unique.sql', '0005_lookup_indexes.sql', '0006_inbox_item_state.sql', '0006_ad_spend_approval.sql'], lockKey: [109858, 1] });
+const ledger = createMigrationLedger({ directory: new URL('../migrations/', import.meta.url), files: ['0001_baseline.sql', '0002_insertion_order.sql', '0003_self_approval.sql', '0004_zernio_profile_unique.sql', '0005_lookup_indexes.sql', '0006_inbox_item_state.sql', '0007_ad_spend_approval.sql'], lockKey: [109858, 1] });
 export const migrationSources = ledger.sources, pendingMigrations = ledger.pending;
 
 export async function assertSchema(pool = getDatabase().pool) {
