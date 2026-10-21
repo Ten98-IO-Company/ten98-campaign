@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AppField } from '@ten98/ui/app';
+import { Card, Image, Link, MetricCard, MetricGrid, Stack, Text } from '@ten98/ui';
+import { adCreativeView, adMetricCells, readHideAmounts } from './ads-view';
 
 type Props = { request: (path: string, body?: any, validate?: (result: any) => void) => Promise<any>; campaign: any; canWrite: boolean; onChanged?: () => void; onClose?: () => void };
 const lines = (value = '') => value.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
@@ -46,6 +48,14 @@ function RsaAssets({ name, rows = [] }: { name: 'headlines' | 'descriptions'; ro
 }
 function Field({ label, name, value, multiline = false, type = 'text', required = false }: { label: string; name: string; value?: any; multiline?: boolean; type?: string; required?: boolean }) {
   return <AppField label={label} name={name} multiline={multiline} type={type} defaultValue={multiline ? value || '' : value ?? ''} required={required} {...(!multiline && type === 'number' ? { step: 'any', min: 0 } : {})}/>;
+}
+// Ported from zernio-dev/ads-dashboard@4386edd components/dashboard/ad-detail-sheet.tsx (MIT): date-scoped list metrics win over the ad's stored ones.
+function AdInsight({ ad, listed, currency }: { ad: any; listed?: any; currency?: string }) {
+  const metrics = adMetricCells(listed && Object.keys(listed).length ? listed : ad.metrics, currency, readHideAmounts()), view = adCreativeView(ad.creative);
+  return <Stack gap={3}>
+    {metrics.length > 0 && <MetricGrid list label="Ad metrics" minItemWidth="sm">{metrics.map(cell => <MetricCard key={cell.label} label={cell.label} value={cell.value}/>)}</MetricGrid>}
+    <Card title="Creative" headingLevel={4}>{view ? <Stack gap={2}>{view.image && <Image src={view.image} alt="Ad creative" fit="contain" rounded referrerPolicy="no-referrer"/>}{view.headline && <Text weight="semibold">{view.headline}</Text>}{view.body && <Text>{view.body}</Text>}{view.link && <Link href={view.link} target="_blank" rel="noopener noreferrer">{view.link}</Link>}</Stack> : <Text tone="muted">No creative data.</Text>}</Card>
+  </Stack>;
 }
 export default function AdDetails({ request, campaign, canWrite, onChanged, onClose }: Props) {
   const requester = useRef(request); requester.current = request;
@@ -336,6 +346,7 @@ export default function AdDetails({ request, campaign, canWrite, onChanged, onCl
       <h3>{live.name || 'Ad details'}</h3><p className="field-help">Delivery: {live.status || 'Unknown'} · Ad switch: {live.configuredStatus || 'Not reported'} · Review: {live.reviewStatus || 'Not reported'}</p>
       {live.rejectionReason && <div className="alert">{live.rejectionReason}</div>}
       {!selected.statusReadAt && <p className="field-help">The live status read was unavailable. These are the provider’s last stored values.</p>}
+      <AdInsight ad={live} listed={data?.ads?.find((ad: any) => ad._id === live._id)?.metrics} currency={data?.campaign?.currency}/>
       {['facebook', 'instagram', 'google', 'tiktok'].includes(platform) && <section aria-label="Ad review diagnostics"><h4>Ad review</h4><p className="field-help">Provider review diagnostics are separate from delivery and the ad’s switches.</p><button type="button" className="button" disabled={!!reviewState?.busy} onClick={loadAdReview}>{adReview ? 'Refresh ad review' : 'Load ad review'}</button>{reviewState?.busy && <p role="status">Loading ad review…</p>}{reviewState?.error && <p role="alert">{reviewState.error}</p>}{adReview && <>
         <p>Approval: {adReview.approved === null ? 'Not reported' : adReview.approved ? 'Approved' : 'Not approved'} · Review status: {adReview.reviewStatus ?? 'Not reported'} · Approval status: {adReview.approvalStatus ?? 'Not reported'}</p><p>Provider review read time: {adReview.readAt ?? 'Not reported'}</p>
         {(['forbiddenPlacements', 'forbiddenAges', 'forbiddenLocations', 'forbiddenOperatingSystems'] as const).map((key, index) => adReview[key].length > 0 && <p key={key}>{['Restricted placements', 'Restricted ages', 'Restricted locations', 'Restricted operating systems'][index]}: {adReview[key].join(', ')}</p>)}
