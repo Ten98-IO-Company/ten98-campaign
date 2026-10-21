@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Alert, AppliedFilters, Avatar, Blockquote, Button, Card, Checkbox, Combobox, ConfirmDialog, ContentPreview, ConversationThread, DescriptionList, DetailWorkspace, Disclosure, EmptyState, FeatureControls, Field, FieldList, Form, FormActions, FormGrid, Heading, Image, Inline, Input, Link, LoadMore, MediaPlayer, Option, ReviewConfirm, Select, SelectableList, Stack, StatusLine, Tabs, Text, Textarea } from '@ten98/ui';
 import type { ConversationMessage } from '@ten98/ui';
 import WhatsAppTemplate, { templateRestriction } from './WhatsAppTemplate';
+import { validPostInstant } from '../shared/social-posts.ts';
 
 type Row = Record<string, any>;
 type Tab = 'messages' | 'comments' | 'reviews' | 'mentions';
@@ -93,6 +94,60 @@ function SmsInbox({ projectId, request, readOnly = false, initialSearch, onDraft
         <ConversationThread label="SMS message history" readOnly={readOnly} hasOlder={!!detail?.pagination?.hasMore} olderLoading={busy === 'Loading SMS conversation'} olderUnavailableReason={detail?.pagination?.nextCursor ? undefined : 'Twilio has older messages but supplied no earlier page.'} onLoadOlder={() => { if (detail?.pagination?.nextCursor) openSms(selected, detail.pagination.nextCursor); }} messages={[...(detail?.messages || [])].sort((a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0)).map((item: Row): ConversationMessage => ({ id: item.id, author: item.direction === 'outgoing' ? 'Your SMS sender' : conversation?.participantName || conversation?.participantId || 'Contact', time: when(item.createdAt), dateTime: item.createdAt, visibility: 'private', direction: item.direction === 'outgoing' ? 'outbound' : 'inbound', content: <Text preserveWhitespace>{item.message || 'Media message'}</Text>, attachments: item.attachments?.length ? <Stack gap={2}>{item.attachments.map((attachment: Row, index: number) => <Attachment key={index} item={attachment} downloadUrl={`/api${path}/media/${encodeURIComponent(item.id)}/${index}`}/>)}</Stack> : undefined, status: item.deliveryStatus || item.status || undefined }))}/>
         {!readOnly && <Form aria-label="SMS reply" busy={!!busy} onSubmit={(_, event) => sendSms(event)}><Stack as="fieldset" gap={3} disabled={blocked || !status?.configured}><Field label="SMS reply" count={{ value: message, max: 1600, measure: value => value.length }}><Textarea required rows={3} maxLength={1600} value={message} onChange={event => setMessage(event.target.value)}/></Field><Text tone="muted">The reply uses this conversation’s original sender. Twilio may charge for multiple SMS segments; encoding affects the segment count.</Text><FormActions><Button variant="primary" type="submit">Send SMS reply</Button></FormActions></Stack></Form>}
       </Stack>}/>
+  </Stack>;
+}
+
+// Team triage overlay (server/inbox.ts item-states): Campaign's own status, waiting time and assignee per conversation.
+// Neither call reaches the provider; reads take at most 100 IDs each.
+const triageFilters = [['active', 'Open and pending'], ['open', 'Open'], ['pending', 'Pending'], ['snoozed', 'Snoozed'], ['resolved', 'Resolved'], ['all', 'All']];
+const triageNames: Record<string, string> = { open: 'Open', pending: 'Pending', snoozed: 'Snoozed', resolved: 'Resolved' };
+// The webhook drain's key (server/webhooks.ts): the platform thread ID when the provider reports one.
+const triageKey = (item: Row) => String(item.platformConversationId || item.id);
+// A conversation whose state has not loaded stays visible, so a failed read never hides it.
+const triageVisible = (state: Row | undefined, filter: string) => !state || filter === 'all' || (filter === 'active' ? state.status === 'open' || state.status === 'pending' : state.status === filter);
+function waitingFor(since?: string | null, now = Date.now()) {
+  const at = Date.parse(since || ''); if (!Number.isFinite(at)) return '';
+  const minutes = Math.max(0, Math.floor((now - at) / 60000));
+  return 'waiting ' + (minutes < 1 ? 'under 1m' : minutes < 60 ? minutes + 'm' : minutes < 2880 ? Math.floor(minutes / 60) + 'h' : Math.floor(minutes / 1440) + 'd');
+}
+const triageLabel = (state: Row | undefined, userId = '') => state ? [triageNames[state.status] || 'Open', state.assigneeId ? state.assigneeId === userId ? 'Assigned to you' : 'Assigned' : ''].filter(Boolean).join(' · ') : '';
+// Local wall-clock time with its UTC offset, so the server stores the instant the user chose.
+function localInstant(date: Date) {
+  const pad = (value: number) => String(Math.abs(value)).padStart(2, '0'), offset = -date.getTimezoneOffset();
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${offset < 0 ? '-' : '+'}${pad(Math.trunc(offset / 60))}:${pad(offset % 60)}`;
+}
+function snoozeUntil(preset: string, now = new Date()) {
+  const day = (days: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate() + days, 9, 0, 0);
+  return localInstant(preset === 'tomorrow' ? day(1) : preset === 'week' ? day((8 - now.getDay()) % 7 || 7) : new Date(Math.floor(now.getTime() / 1000) * 1000 + 3600000));
+}
+// The server's rule: a time with a zone, in the future and at most 366 days ahead.
+const validSnooze = (value: unknown, now = Date.now()) => validPostInstant(value) && Date.parse(value as string) > now && Date.parse(value as string) <= now + 366 * 86400000;
+// A read that started before a change must not replace the newer state that change returned.
+const mergeTriage = (states: Record<string, Row>, incoming: Record<string, Row>) => ({ ...states, ...Object.fromEntries(Object.entries(incoming).filter(([id, state]) => !(states[id]?.updatedAt && (!state.updatedAt || states[id].updatedAt > state.updatedAt)))) });
+async function loadItemStates(request: Props['request'], path: string, accountId: string, kind: string, ids: string[]) {
+  const unique = [...new Set(ids)], batches: string[][] = [];
+  for (let index = 0; index < unique.length; index += 100) batches.push(unique.slice(index, index + 100));
+  const results = await Promise.all(batches.map(batch => request(path + '/item-states?' + new URLSearchParams([['accountId', accountId], ['kind', kind], ...batch.map(id => ['id', id])]))));
+  const states: Record<string, Row> = {};
+  for (const result of results) for (const state of result?.states || []) if (state?.accountId === accountId && state.kind === kind && unique.includes(state.resourceId)) states[state.resourceId] = state;
+  return states;
+}
+
+const snoozePresets = [['hour', '1 hour from now'], ['tomorrow', 'Tomorrow, 9 AM'], ['week', 'Next week, Monday 9 AM']];
+function TriageControls({ state, error, readOnly, busy, userId, onChange }: { state?: Row; error?: string; readOnly: boolean; busy: boolean; userId: string; onChange: (change: Row) => void }) {
+  const [preset, setPreset] = useState('hour'), status = state?.status;
+  const assignee = !state?.assigneeId ? 'Unassigned' : state.assigneeId === userId ? 'Assigned to you' : 'Assigned to a teammate';
+  return <Stack as="section" aria-label="Team triage" gap={2}>
+    <Text>{state ? [`Triage: ${triageNames[status] || 'Open'}${status === 'snoozed' && state.snoozedUntil ? ' until ' + when(state.snoozedUntil) : ''}`, waitingFor(state.waitingSince), assignee].filter(Boolean).join(' · ') : error ? 'Triage status is unavailable. Refresh the conversations to try again.' : 'Loading triage status…'}</Text>
+    {state && !readOnly && <Inline gap={2} align="end">
+      {status !== 'open' && <Button variant="secondary" size="sm" disabled={busy} onClick={() => onChange({ status: 'open' })}>{status === 'pending' ? 'Mark open' : 'Reopen'}</Button>}
+      {status !== 'pending' && <Button variant="secondary" size="sm" disabled={busy} onClick={() => onChange({ status: 'pending' })}>Mark pending</Button>}
+      {status !== 'resolved' && <Button variant="secondary" size="sm" disabled={busy} onClick={() => onChange({ status: 'resolved' })}>Resolve</Button>}
+      <Field label="Snooze until"><Select disabled={busy} value={preset} onChange={event => setPreset(event.target.value)}>{snoozePresets.map(([value, label]) => <Option key={value} value={value}>{label}</Option>)}</Select></Field>
+      <Button variant="secondary" size="sm" disabled={busy} onClick={() => onChange({ status: 'snoozed', snoozedUntil: snoozeUntil(preset) })}>Snooze</Button>
+      {userId && state.assigneeId !== userId && <Button variant="secondary" size="sm" disabled={busy} onClick={() => onChange({ assigneeId: userId })}>Assign to me</Button>}
+      {state.assigneeId && <Button variant="secondary" size="sm" disabled={busy} onClick={() => onChange({ assigneeId: null })}>Unassign</Button>}
+    </Inline>}
   </Stack>;
 }
 
@@ -206,13 +261,16 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
   const [deleteTarget, setDeleteTarget] = useState<Row | null>(null), [confirming, setConfirming] = useState<Row | null>(null);
   const [privateReplyTarget, setPrivateReplyTarget] = useState<Row | null>(null), [privateDraft, setPrivateDraft] = useState('');
   const [commentEdit, setCommentEdit] = useState<Row | null>(null);
+  const [triage, setTriage] = useState<{ accountId: string; states: Record<string, Row>; error: string }>({ accountId: '', states: {}, error: '' }), [triageFilter, setTriageFilter] = useState('active'), [userId, setUserId] = useState('');
+  const states = triage.accountId === accountId ? triage.states : {}, triageError = triage.accountId === accountId ? triage.error : '';
   const access = useRef(readOnly);
   const openingTemplate = openingTemplates.find(item => JSON.stringify([item.name, item.language || item.languageCode]) === openingTemplateKey);
   const canReply = tab === 'mentions' ? false : tab === 'messages' ? capabilities.reply : tab === 'comments' ? capabilities.commentReply : capabilities.reviewReply;
   const messageLimit = privateMessageLimit(capabilities, account?.platform || '', attachmentUrl);
   const selectedTemplate = templates.find(item => JSON.stringify([item.name, item.language || item.languageCode]) === templateKey);
   const supported = accounts.filter(item => !!item.capabilities?.[tab] && (!platform || item.platform === platform));
-  const visibleRows = historyFilter ? rows : rows.filter(row => conversationMatches(row, search));
+  const visibleRows = historyFilter ? rows : rows.filter(row => conversationMatches(row, search) && (tab !== 'messages' || triageVisible(states[triageKey(row)], triageFilter)));
+  const triageHidden = tab === 'messages' && !historyFilter && !visibleRows.length && rows.some(row => conversationMatches(row, search));
   const threadRows = detail?.parent && focusedComment ? [{ ...detail.parent, depth: 0 }, ...commentsWithDepth(detail.comments || [], 1)] : commentsWithDepth(detail?.comments || []);
   const retainedButtonReply = account?.platform === 'whatsapp' && selected ? [...keys.current.keys()].map(signature => JSON.parse(signature)).find(([scope, suffix, body]) => scope === path && suffix === 'conversations/' + encodeURIComponent(selected.id) + '/reply' && body.accountId === accountId && Array.isArray(body.buttons))?.[2] : undefined;
   const buttonScope = useRef({ key: '', generation: 0 });
@@ -262,6 +320,15 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
   }, [projectId]);
   useEffect(() => { if (access.current === readOnly) return; access.current = readOnly; version.current++; pending.current = false; setBusy(''); setMessageActionTarget(null); setDeleteTarget(null); }, [readOnly]);
   useEffect(() => { setDeleteTarget(null); }, [selected?.id, accountId]);
+  // The signed-in user, for Assign to me. Without it only Unassign is offered.
+  useEffect(() => { let closed = false; requester.current('/session').then(session => { if (!closed && typeof session?.user?.id === 'string') setUserId(session.user.id); }, () => {}); return () => { closed = true; }; }, []);
+  useEffect(() => {
+    if (tab !== 'messages' || !accountId || !rows.length) return;
+    const generation = version.current, scope = accountId; let closed = false;
+    const store = (change: (previous: Record<string, Row>) => Record<string, Row>, error = '') => setTriage(previous => ({ accountId: scope, states: change(previous.accountId === scope ? previous.states : {}), error }));
+    loadItemStates(requester.current, path, scope, 'conversation', rows.map(triageKey)).then(found => { if (!closed && generation === version.current) store(previous => mergeTriage(previous, found)); }, failure => { if (!closed && generation === version.current) store(previous => previous, failure.message || 'The local triage service did not respond.'); });
+    return () => { closed = true; };
+  }, [rows, accountId, tab]);
   useEffect(() => {
     if (!accountId || tab === 'mentions') return;
     const generation = version.current; let closed = false, checking = false, cursor: number | undefined;
@@ -311,6 +378,26 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
   }
   async function loadAccounts() {
     await switchSelection(() => action('Loading connections', async generation => { const result = await requester.current(path + '/accounts'); if (generation !== version.current) return; setStatus(result); setAccounts(result.accounts || []); if (accountId && !result.accounts?.some((item: Row) => item.id === accountId && item.capabilities?.[tab])) { setAccountId(''); setRows([]); resetSelection(); } }));
+  }
+  async function changeTriage(item: Row, change: Row) {
+    const resourceId = triageKey(item), current = states[resourceId], scope = accountId;
+    if (readOnly || tab !== 'messages' || !scope || !current) return;
+    if (change.status === 'snoozed' && !validSnooze(change.snoozedUntil)) { setError('Choose a snooze time in the future and within the next year.'); return; }
+    const store = (found: Record<string, Row>) => setTriage(previous => ({ accountId: scope, states: { ...(previous.accountId === scope ? previous.states : {}), ...found }, error: '' }));
+    await action('Updating triage status', async generation => {
+      let result;
+      try { result = await requester.current(path + '/item-states', 'PATCH', { accountId: scope, kind: 'conversation', resourceId, expectedUpdatedAt: current.updatedAt ?? null, ...change }); }
+      catch (failure) {
+        if ((failure as Row).code !== 'INBOX_STATE_CHANGED') throw failure;
+        const fresh = await loadItemStates(requester.current, path, scope, 'conversation', [resourceId]); if (generation === version.current) store(fresh);
+        throw new Error('This conversation’s triage changed elsewhere. Its latest status is shown; choose again to apply your change.');
+      }
+      if (generation !== version.current) return;
+      const state = result?.state;
+      if (state?.accountId !== scope || state.kind !== 'conversation' || state.resourceId !== resourceId) throw new Error('The triage response could not be read. Refresh the conversations before changing it again.');
+      store({ [resourceId]: state });
+      setNotice(change.assigneeId !== undefined ? change.assigneeId ? 'Conversation assigned to you.' : 'Conversation unassigned.' : change.status === 'snoozed' ? `Conversation snoozed until ${when(state.snoozedUntil)}.` : ({ open: 'Conversation marked open.', pending: 'Conversation marked pending.', resolved: 'Conversation resolved.' } as Record<string, string>)[change.status] || 'Triage status updated.');
+    });
   }
   async function searchHistory(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!accountId || tab !== 'messages' || pending.current) return;
@@ -556,6 +643,7 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
   return <Stack gap={4}>
     <Inline justify="between" align="center"><Stack gap={1}><Heading level={2} size="md">Unified inbox</Heading><Text tone="muted">Manage private messages, public comments, reviews and LinkedIn organization mentions from your connected accounts.</Text></Stack><Button variant="secondary" disabled={!!busy} onClick={loadAccounts}>Refresh connections</Button></Inline>
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
+    {tab === 'messages' && triageError && <Alert tone="warning" title="Triage status could not be loaded.">{triageError} Conversations are listed without a triage status, and the triage filter does not hide them.</Alert>}
     {status && !connected && <Alert tone="warning">Configure Zernio and map this project’s profile in Integrations settings to load its inbox.</Alert>}
     {tab !== 'mentions' && status?.webhookConfigured === false && <Alert tone="info">Configure inbox webhooks in Integrations settings to receive activity updates. You can refresh provider lists manually now.</Alert>}
     {tab === 'reviews' && <Stack as="section" aria-label="Review filters" gap={2}><FeatureControls>
@@ -570,6 +658,7 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
       <Field label="Connected account"><Select value={accountId} disabled={!!busy || !connected} onChange={event => { const value = event.target.value; if (value !== accountId) switchSelection(() => { resetList(); setAccountId(value); }); }}><Option value="">Choose an account</Option>{supported.map(item => <Option key={item.id} value={item.id}>{accountLabel(item)}</Option>)}</Select></Field>
       {tab === 'messages' && capabilities.acceptRequest && <Field label="Conversation folder"><Select value={folder} disabled={!!busy} onChange={event => { const value = event.target.value; if (value !== folder) switchSelection(() => { resetList(); setFolder(value); }); }}><Option value="inbox">Inbox</Option><Option value="requests">Message requests</Option></Select></Field>}
       {tab === 'messages' && <Field label="Conversation status"><Select value={conversationStatus} disabled={!!busy} onChange={event => { const value = event.target.value; if (value !== conversationStatus) switchSelection(() => { resetList(); setConversationStatus(value); }); }}><Option value="active">Active</Option><Option value="archived">Archived</Option></Select></Field>}
+      {tab === 'messages' && <Field label="Triage status" description={historyFilter ? 'History results show every triage status.' : undefined}><Select value={triageFilter} disabled={!!historyFilter} onChange={event => setTriageFilter(event.target.value)}>{triageFilters.map(([value, label]) => <Option key={value} value={value}>{label}</Option>)}</Select></Field>}
       <Field label={`Search loaded ${noun}`}><Input type="search" disabled={!!historyFilter} value={search} onChange={event => setSearch(event.target.value)} placeholder={tab === 'messages' ? 'Name, identity or recent message…' : 'Text, author or location…'}/></Field>
     </FeatureControls>
       <Inline><Button variant="primary" disabled={!!busy || !accountId || !connected} onClick={() => loadList('', true)}>Load {tab}</Button></Inline>
@@ -590,9 +679,10 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
     {initialChannel === 'whatsapp' && initialSearch && tab === 'messages' && <Text tone="muted">Select the conversation you recognise before replying. Some WhatsApp participants use a business-specific identity instead of their phone number. Clear the search to inspect other conversations.</Text>}
     {loaded && accountId && tab === 'reviews' && appliedReviewFilters.length > 0 && <AppliedFilters filters={appliedReviewFilters} label="Loaded review filters"/>}
     {tab === 'messages' ? <DetailWorkspace label="Conversations" listLabel={historyFilter ? 'History results' : 'Conversations'} detailLabel={selected ? selected.participantName || selected.participantId || 'Conversation' : 'Conversation'} selected={!!selected} backLabel="Back to conversations" onBack={() => switchSelection(resetSelection)} emptyMessage={<EmptyState title="Choose a conversation" description="Load an account’s messages, then open a conversation."/>}
-      list={<SelectableList label="Conversations" selectedId={selected?.id} onSelect={id => { const item = visibleRows.find(row => row.id === id); if (item) openItem(item); }} emptyMessage={listEmpty} footer={loadMore} items={visibleRows.map(item => ({ id: item.id, leading: <Avatar size="sm" name={String(item.participantName || item.participantId || '?')}/>, title: item.participantName || item.participantUsername || item.participantId || 'Participant', preview: historyFilter && item.matches?.length ? item.matches.map((match: Row) => `${match.direction === 'outgoing' ? 'Sent' : 'Received'}: ${match.text || 'No text'} · ${when(match.timestamp)}`).join(' / ') : item.lastMessage || 'No text preview', meta: when(item.lastMessageAt || item.updatedTime), status: historyFilter ? item.matchCount ? `${item.matchCount} matching messages` : 'Contact identity match' : undefined, unread: item.unreadCount, disabled: !!busy }))}/>}
+      list={<SelectableList label="Conversations" selectedId={selected?.id} onSelect={id => { const item = visibleRows.find(row => row.id === id); if (item) openItem(item); }} emptyMessage={triageHidden ? <EmptyState title="No conversations with this triage status" description="Choose another triage status, or load more conversations."/> : listEmpty} footer={loadMore} items={visibleRows.map(item => ({ id: item.id, leading: <Avatar size="sm" name={String(item.participantName || item.participantId || '?')}/>, title: item.participantName || item.participantUsername || item.participantId || 'Participant', preview: historyFilter && item.matches?.length ? item.matches.map((match: Row) => `${match.direction === 'outgoing' ? 'Sent' : 'Received'}: ${match.text || 'No text'} · ${when(match.timestamp)}`).join(' / ') : item.lastMessage || 'No text preview', meta: [when(item.lastMessageAt || item.updatedTime), waitingFor(states[triageKey(item)]?.waitingSince)].filter(Boolean).join(' · '), status: [historyFilter ? item.matchCount ? `${item.matchCount} matching messages` : 'Contact identity match' : '', triageLabel(states[triageKey(item)], userId)].filter(Boolean).join(' · ') || undefined, unread: item.unreadCount, disabled: !!busy }))}/>}
       detail={selected && <Stack gap={4}>
         <Stack gap={2}><Text tone="muted">{title(selected.platform || account?.platform)} · {selected.participantId} · {selected.status || 'active'}</Text><Inline gap={2}><Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openItem(selected)}>Refresh thread</Button>{link(selected.url) && <Link href={link(selected.url)!} target="_blank" variant="standalone">Open in platform</Link>}{!readOnly && capabilities.read && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => conversationAction('read')}>Mark read</Button>}{!readOnly && capabilities.archive && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => conversationAction('status')}>{selected.status === 'archived' ? 'Reopen' : 'Archive'}</Button>}{!readOnly && capabilities.typing && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => sendTyping()}>Send typing indicator</Button>}{!readOnly && capabilities.deleteStoredConversation && <Button variant="danger" size="sm" disabled={!!busy || !selected.deleteVersion} onClick={prepareStoredDelete}>Delete stored copy</Button>}</Inline></Stack>
+        <TriageControls key={accountId + ':' + triageKey(selected)} state={states[triageKey(selected)]} error={triageError} readOnly={readOnly} busy={!!busy} userId={userId} onChange={change => changeTriage(selected, change)}/>
         {typingReview && account?.platform === 'whatsapp' && <ReviewConfirm title="Request a typing indicator" reviewKey={typingReview} acknowledgements={[]} confirmLabel="Confirm typing request" cancelLabel="Cancel typing request" busy={!!busy} disabledReason={readOnly ? 'Your role can view this inbox but cannot send.' : undefined} onConfirm={() => sendTyping(true)} onCancel={() => setTypingReview('')}><Text>WhatsApp may also mark the latest inbound message as read. This request is for the currently reviewed conversation; the indicator is temporary and may not be displayed.</Text></ReviewConfirm>}
         {deleteTarget && !readOnly && deleteTarget.id === selected.id && deleteTarget.accountId === accountId && <ReviewConfirm tone="danger" title="Delete Zernio’s stored conversation copy" reviewKey={JSON.stringify([deleteTarget.id, deleteTarget.accountId, deleteTarget.deleteVersion])} acknowledgements={[{ id: 'delete', label: 'I reviewed this account, participant and latest messages and want to delete Zernio’s stored copy.' }]} confirmLabel="Confirm stored-copy deletion" busy={!!busy} disabledReason={deleteTarget.deleteVersion !== selected.deleteVersion ? 'The latest messages changed. Cancel and review the refreshed conversation again.' : undefined} onConfirm={() => submitStoredDelete(true)} onCancel={() => setDeleteTarget(null)}><Stack gap={2}><Text>This permanently deletes Zernio’s stored messages and unlinks its provider contact channel. The native platform thread, provider contact record and this app’s local contact remain. Synchronization can import the thread again.</Text><Text>New messages may arrive after this review and before the provider deletes the stored conversation; those messages may also be removed.</Text></Stack></ReviewConfirm>}
         {!readOnly && selected.controlActions?.length > 0 && <Disclosure summary={`Change who answers · ${selected.threadControl === 'app' ? 'This app' : selected.threadControl === 'ai_agent' ? 'Business agent' : selected.threadControl === 'other' ? 'Another app' : 'Owner not reported'}`}><Stack gap={3}>
