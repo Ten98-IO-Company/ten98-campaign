@@ -244,11 +244,11 @@ async function decide(context: ApprovalContext, { post, review, snapshot, hash, 
 // starts spend (an activation) or raises a budget needs an approved review of exactly that change: subject id,
 // platform, action, amount in minor units and currency. Pauses, ends and budget decreases never need one. The
 // `-status` actions activate; the `-budget` actions raise a budget.
-export const AD_SPEND_ACTIONS = ['ads/status', 'ads/ad-status', 'ads/adset-status', 'ads/adset-budget', 'ads/campaign-budget', 'google-native/campaign-status', 'google-native/campaign-budget', 'microsoft/campaign-status', 'microsoft/campaign-budget'];
+const AD_SPEND_ACTIONS = ['ads/status', 'ads/ad-status', 'ads/adset-status', 'ads/adset-budget', 'ads/campaign-budget', 'google-native/campaign-status', 'google-native/campaign-budget', 'microsoft/campaign-status', 'microsoft/campaign-budget'];
 type AdSpendChange = { subjectId: string; platform: string; action: string; amount: number; currency: string };
 // What a gated route read: `amount` is the budget (major units) that spends once the write applies, and
 // `currentAmount` the budget configured now (null when the route could not read it).
-export type AdSpendAttempt = { subjectId: string; platform: string; action: string; amount: unknown; currency: unknown; currentAmount: unknown; activates: boolean };
+type AdSpendAttempt = { subjectId: string; platform: string; action: string; amount: unknown; currency: unknown; currentAmount: unknown; activates: boolean };
 // Exact minor units for the currency's decimal places, or null when the amount is not exactly representable.
 function minorUnits(amount: unknown, currency: unknown) {
   if (typeof currency !== 'string' || !/^[A-Z]{3}$/.test(currency) || typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) return null;
