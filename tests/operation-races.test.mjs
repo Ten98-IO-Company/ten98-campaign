@@ -97,3 +97,15 @@ test('a provider resource fence admits one holder at a time and stays held while
   assert.equal(await claimFence(db, 'zernio_lead_mutations', 'p', 'p', 'lead-a', 'project_id'), true);
   assert.equal(await claimFence(db, 'zernio_lead_mutations', 'p', 'p', 'lead-b', 'project_id'), false, 'Project-keyed fences behave the same way.');
 });
+
+test('an identical request under a different key, without a resource key, reaches the provider once', pg, async t => {
+  const { pool, context, provider } = await fixture(t);
+  // Both claims find no receipt for this request before either commits; only the request-hash lock lets the second see the first.
+  const gate = await blockWrites(pool, 'integration_operations');
+  const requests = [outcome(operation(context('identical-key-a'), provider.call)), outcome(operation(context('identical-key-b'), provider.call))];
+  await gate.waiting(2); await gate.release();
+  await settleOrDuplicate(requests, provider);
+  const results = await Promise.all(requests);
+  assert.equal(provider.calls, 1);
+  assert.deepEqual(results.map(result => result.code).sort(), ['OPERATION_NOT_SENT', 'sent']);
+});

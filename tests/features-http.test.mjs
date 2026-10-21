@@ -85,11 +85,11 @@ test('HTTP feature wiring preserves signed bytes, project boundaries, protected 
       const req = httpRequest(base + '/api/webhooks/zernio', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': bytes.length, 'X-Zernio-Signature': sign(bytes) } }, res => { const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => resolve({ status: res.statusCode, data: JSON.parse(Buffer.concat(chunks)) })); });
       req.on('error', reject); req.setNoDelay(true); req.write(bytes.subarray(0, split)); setImmediate(() => req.end(bytes.subarray(split)));
     });
-    assert.equal(streamed.status, 202); app.webhooks.processPending();
+    assert.equal(streamed.status, 202); await app.webhooks.processPending();
     const updated = await app.store.get(projectId, 'posts', linkedPost.id);
     assert.equal(updated.status, 'published'); assert.equal(updated.content, content);
     assert.equal(updated.providerEventAt, '2026-10-18T10:02:00.000Z');
-    assert.equal((await webhook(payload)).status, 200); app.webhooks.processPending();
+    assert.equal((await webhook(payload)).status, 200); await app.webhooks.processPending();
     assert.equal((await app.sql.get('SELECT count(*) AS count FROM webhook_events WHERE id=?', payload.id)).count, 1);
     assert.equal((await app.store.list(privateWorkspace.data.projectId, 'posts')).length, 0, 'Webhook client metadata cannot route updates to another workspace.');
     assert.equal(externalRequests, 0, 'Status, mapping, local drafts and webhook processing perform no paid or external provider requests.');

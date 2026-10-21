@@ -4,12 +4,12 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('HTTP platform variants publish, schedule, refresh, edit and retry the exact approved creative with fail-closed provider preflight', async () => {
+test('HTTP platform variants publish, schedule, refresh, edit and retry the exact approved creative with fail-closed provider preflight', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-platform-posts-')), distDir = join(dataDir, 'dist');
   await mkdir(distDir); await writeFile(join(distDir, 'index.html'), '<!doctype html><title>Platform publishing test</title>');
-  const origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, distDir, appUrl: origin, env: { ZERNIO_API_KEY: 'platform-fixture-key' } });
+  const origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir, distDir, appUrl: origin, env: { ZERNIO_API_KEY: 'platform-fixture-key' } });
   const originalFetch = globalThis.fetch, calls = [], writes = [], remotePosts = new Map(), profileId = 'platform-fixture-profile';
   const accounts = ['facebook', 'instagram', 'twitter'].map(platform => ({ _id: `${platform}-fixture`, platform, profileId, isActive: true }));
   accounts.push({ ...accounts[0], _id: 'second-facebook-fixture' });
@@ -25,7 +25,7 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     else if (url.pathname === '/api/v1/tools/validate/media') result = { valid: true, size: 2000, contentType: 'image/jpeg', url: 'https://must-not-trust-a-returned-url.example.test/' };
     else if (url.pathname === '/api/v1/tools/validate/post') {
       assert.ok(payload.platforms.every(copy => accounts.some(account => account._id === copy.accountId && account.platform === copy.platform)), 'Every validation target is first scoped to the current project.');
-      if (validationHook) { const hook = validationHook; validationHook = null; hook(); }
+      if (validationHook) { const hook = validationHook; validationHook = null; await hook(); }
       result = malformedValidation ? { valid: 'yes' } : rejectValidation ? { valid: false, errors: [{ platform: 'instagram', error: 'The connected platform rejected this fixture.' }], warnings: [] } : { valid: true, warnings: [] };
     } else if (url.pathname === '/api/v1/posts' && method === 'POST') {
       writes.push({ url, method, payload });
@@ -61,9 +61,9 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const state = (await request('/api/state')).data, projectId = state.projectId, project = `/api/projects/${projectId}`, integrations = `${project}/integrations/social`;
     assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);
-    const viewerId = randomUUID(), owner = app.db.prepare('SELECT password FROM users WHERE id=?').get(state.user.id);
-    app.db.prepare('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)').run(viewerId, 'Platform viewer', 'platform-viewer@example.test', owner.password);
-    app.db.prepare("INSERT INTO memberships VALUES(?,?,'viewer')").run(state.workspaces[0].id, viewerId);
+    const viewerId = randomUUID(), owner = await app.sql.get('SELECT password FROM users WHERE id=?', state.user.id);
+    await app.sql.run('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)', viewerId, 'Platform viewer', 'platform-viewer@example.test', owner.password);
+    await app.sql.run("INSERT INTO memberships VALUES(?,?,'viewer')", state.workspaces[0].id, viewerId);
     const viewerCookie = (await post('/api/auth/login', { email: 'platform-viewer@example.test', password: 'platform fixture password that is long enough' })).cookie;
     const image = { type: 'image', url: 'https://cdn.example.test/common.jpg', width: 1200, height: 1200, size: 2000, mimeType: 'image/jpeg', altText: 'Common creative' };
     const instagramImage = { ...image, url: 'https://cdn.example.test/instagram.jpg', altText: 'Square Instagram creative' };
@@ -145,22 +145,22 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     assert.equal((await request(`${integrations}/status?postId=${scheduled.id}`)).status, 200); await approve(scheduled);
     result = await post(integrations + '/retry', { postId: scheduled.id, confirmPublish: true }, { key: 'retry-reviewed-variants' }); assert.equal(result.status, 200); assert.equal(result.data.post.status, 'submitted'); assert.equal(writes.at(-1).url.pathname.endsWith('/retry'), true); assert.equal(remote.platforms.find(copy => copy.platform === 'instagram').customContent, 'Unreviewed provider variant');
     assert.equal((await post(`${project}/approvals/policy`, { requireApproval: false })).status, 200);
-    const asset = app.store.create(projectId, 'assets', { name: 'Platform creative', kind: 'image', url: 'https://cdn.example.test/dam.jpg', width: 1080, height: 1080, approval: 'approved', size: 2000 });
+    const asset = await app.store.create(projectId, 'assets', { name: 'Platform creative', kind: 'image', url: 'https://cdn.example.test/dam.jpg', width: 1080, height: 1080, approval: 'approved', size: 2000 });
     const remoteDraft = await draft({ status: 'scheduled', scheduledAt: '2070-06-01T10:00:00Z' }); result = await publish(remoteDraft); assert.equal(result.status, 200);
     assert.equal((await request(`/api/workspaces/${state.workspaces[0].id}/members/${viewerId}`, { method: 'PATCH', body: { role: 'editor' } })).status, 200);
-    validationHook = () => app.db.prepare('UPDATE project_approval_policy SET require_approval=1 WHERE project_id=?').run(projectId); beforeWrites = writes.length;
+    validationHook = () => app.sql.run('UPDATE project_approval_policy SET require_approval=true WHERE project_id=?', projectId); beforeWrites = writes.length;
     result = await post(integrations + '/update', { postId: remoteDraft.id, content: 'Edit racing the approval policy', mode: 'scheduled', scheduledAt: '2070-07-01T10:00:00Z' }, { cookie: viewerCookie, key: 'recheck-edit-policy-after-preflight' });
     assert.equal(result.status, 403); assert.equal(result.data.error.code, 'APPROVED_PROVIDER_EDIT_RESTRICTED'); assert.equal(writes.length, beforeWrites);
     assert.equal((await post(`${project}/approvals/policy`, { requireApproval: false })).status, 200);
     result = await post(integrations + '/update', { postId: remoteDraft.id, content: 'A shared DAM fallback', mediaItems: null, assetId: asset.id, platformOverrides: {}, mode: 'draft' }, { key: 'reset-shared-media-to-dam' }); assert.equal(result.status, 200); assert.equal(writes.at(-1).payload.mediaItems[0].url, asset.url); assert.ok(writes.at(-1).payload.platforms.every(copy => copy.customMedia === undefined));
     const retainedDraft = remotePosts.get(result.data.post.externalId); assert.ok(retainedDraft.scheduledFor, 'The provider fixture retains its historical scheduled time when demoted to draft.');
     result = await request(`${integrations}/status?postId=${remoteDraft.id}`); assert.equal(result.status, 200); assert.equal(result.data.post.status, 'draft'); assert.equal(result.data.post.scheduledAt, '', 'Refreshing an unscheduled provider draft cannot resurrect its historical schedule.');
-    const pendingAsset = app.store.create(projectId, 'assets', { name: 'Unapproved platform creative', kind: 'image', url: 'https://cdn.example.test/pending.jpg', approval: 'pending' });
+    const pendingAsset = await app.store.create(projectId, 'assets', { name: 'Unapproved platform creative', kind: 'image', url: 'https://cdn.example.test/pending.jpg', approval: 'pending' });
     const bothAssets = await draft({ platformOverrides: { facebook: { assetId: pendingAsset.id }, instagram: { assetId: asset.id } } });
     assert.equal((await post(`${project}/approvals/policy`, { requireApproval: true })).status, 200);
     const assetReview = await post(`${project}/approvals/posts/${bothAssets.id}/request`, {}); assert.equal(assetReview.status, 200); assert.equal(assetReview.data.item.assets.length, 2);
     result = await post(`${project}/approvals/posts/${bothAssets.id}/review`, { reviewId: assetReview.data.item.review.id, decision: 'approved', note: 'This must wait for approval of both platform assets.' }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'APPROVAL_ASSET_REQUIRED');
-    app.store.update(projectId, 'assets', pendingAsset.id, { approval: 'approved' }); await approve(bothAssets);
+    await app.store.update(projectId, 'assets', pendingAsset.id, { approval: 'approved' }); await approve(bothAssets);
     await request(`${project}/posts/${bothAssets.id}`, { method: 'PATCH', body: { platformOverrides: { facebook: { assetId: pendingAsset.id }, instagram: { assetId: asset.id, options: { firstComment: 'Changed after review' } } } } });
     beforeWrites = writes.length; result = await publish(bothAssets); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'PUBLISHING_APPROVAL_STALE'); assert.equal(writes.length, beforeWrites);
     assert.equal((await post(`${project}/approvals/policy`, { requireApproval: false })).status, 200);
@@ -168,7 +168,7 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     validationHook = () => app.store.update(projectId, 'assets', asset.id, { url: 'https://cdn.example.test/replaced-during-preflight.jpg' }); beforeWrites = writes.length;
     result = await publish(linked); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'APPROVAL_POST_CHANGED'); assert.equal(writes.length, beforeWrites, 'Even with optional approval, asset changes during preflight cannot publish stale creative.');
     const missing = await post(project + '/posts', { ...draftFields, platformOverrides: { instagram: { assetId: 'not-in-project' } } }); assert.equal(missing.status, 400);
-    const sampleAsset = app.store.create(projectId, 'assets', { name: 'Sample fixture', kind: 'image', url: 'https://cdn.example.test/sample.jpg', sample: true });
+    const sampleAsset = await app.store.create(projectId, 'assets', { name: 'Sample fixture', kind: 'image', url: 'https://cdn.example.test/sample.jpg', sample: true });
     const samplePost = await draft({ platformOverrides: { instagram: { assetId: sampleAsset.id } } }); result = await publish(samplePost); assert.equal(result.status, 400); assert.equal(result.data.error.code, 'SAMPLE_RECORD');
     accounts.push({ _id: 'tiktok-fixture', platform: 'tiktok', profileId, isActive: true });
     result = await request(integrations + '/tiktok-creator-info?accountId=facebook-fixture&mediaType=video'); assert.equal(result.status, 400);
@@ -189,7 +189,7 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     assert.equal(result.data.post.platformOverrides.tiktok.options.expressConsentGiven, true); assert.equal(result.data.post.platformOverrides.tiktok.options.tiktokSettings, undefined);
     assert.equal((await request(`${project}/approvals/posts`)).status, 200, 'A provider-only TikTok draft receipt must not break the approval queue.');
     const unconsentedDraft = await tiktokDraft({ draft: true, expressConsentGiven: false }); beforeWrites = writes.length; result = await publish(unconsentedDraft); assert.equal(result.status, 422); assert.equal(writes.length, beforeWrites);
-    const remapping = await draft(); validationHook = () => app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run('changed-profile', projectId); beforeWrites = writes.length;
+    const remapping = await draft(); validationHook = () => app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'changed-profile', projectId); beforeWrites = writes.length;
     result = await publish(remapping); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'PROJECT_CONNECTION_CHANGED'); assert.equal(writes.length, beforeWrites);
     assert.ok(calls.some(call => call.url.pathname === '/api/v1/tools/validate/post')); assert.ok(originalCopies.length > 1);
   } finally { globalThis.fetch = originalFetch; await app.close(); await rm(dataDir, { recursive: true, force: true }); }

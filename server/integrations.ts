@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { PLATFORM_RULES, buildPlatformEntry, normalizeMediaItems, normalizePostVariants, normalizePostTags, normalizeAccountVariants, assertAccountSchedules, validPostInstant, resolveVariant, wireMediaItems, providerPostMediaUrls } from '../shared/social-posts.ts';
-import { transaction } from './database.ts';
-import { IntegrationError, fail, redact, canonical, checkMapping, providerRequest as request, zernioClient, reportObject, scopedAccounts, requireAccount, campaignTree, adAccounts, operation, mediaUrl, commonMedia, postRestrictions, assertPostRestrictions, providerPostValidation, localStatus, providerMediaItems, assertPostResult, scopedPost, targetConfiguration, remotePostModel, remoteRestrictionPayload, validateRemotePayload, savePostSnapshot, googleToken as driveToken } from './provider-core.ts';
+import { sql } from 'drizzle-orm';
+import { createStore, type Executor } from './database.ts';
+import { advisoryLock } from './auth.ts';
+import { IntegrationError, fail, redact, canonical, checkMapping, claimFence, providerRequest as request, zernioClient, reportObject, scopedAccounts, requireAccount, campaignTree, adAccounts, operation, mediaUrl, commonMedia, postRestrictions, assertPostRestrictions, providerPostValidation, localStatus, providerMediaItems, assertPostResult, scopedPost, targetConfiguration, remotePostModel, remoteRestrictionPayload, validateRemotePayload, savePostSnapshot, googleToken as driveToken } from './provider-core.ts';
 import { handleGoogleAds } from './google-ads.ts';
 import { handleGoogleConversions } from './zernio-google-conversions.ts';
 import { handleZernioContacts } from './zernio-contacts.ts';
@@ -329,9 +331,9 @@ async function scopedAd(api: any, profileId: any, id: any) {
   return ad;
 }
 const campaignKey = (campaign: any) => String(campaign.platformCampaignId || campaign.campaignId || campaign.id || campaign._id);
-function saveCampaignSnapshot(context: any, profileId: any, platform: any, campaignId: any, data: any) {
-  for (const campaign of context.store.list(context.project.id, 'campaigns')) {
-    if (campaign.externalId && !campaign.nativeProvider && campaign.zernioProfileId === profileId && campaign.platform === platform && campaign.platformCampaignId === campaignId) context.store.update(context.project.id, 'campaigns', campaign.id, data);
+async function saveCampaignSnapshot(context: any, profileId: any, platform: any, campaignId: any, data: any) {
+  for (const campaign of await context.store.list(context.project.id, 'campaigns')) {
+    if (campaign.externalId && !campaign.nativeProvider && campaign.zernioProfileId === profileId && campaign.platform === platform && campaign.platformCampaignId === campaignId) await context.store.update(context.project.id, 'campaigns', campaign.id, data);
   }
 }
 async function scopedCampaign(api: any, profileId: any, id: any, platform: any, dates = {}) {
@@ -374,15 +376,11 @@ const budgetReviewSecret = randomUUID(), budgetReviewAge = 5 * 60 * 1000;
 function budgetReviewVersion(snapshot: any, amount: any, expiresAt: any) {
   return createHash('sha256').update(canonical([budgetReviewSecret, snapshot.version, amount, expiresAt])).digest('hex');
 }
-function claimAdSetBudget(context: any, snapshot: any, key: any) {
-  const { db, project } = context, resource = canonical(['meta-adset-budget', copyAdvertiser(snapshot.platform, snapshot.adAccountId), snapshot.adSetId]);
-  db.exec('CREATE TABLE IF NOT EXISTS zernio_adset_budget_claims(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
-  // The native advertiser/set is shared across Meta aliases, profile mappings and process restarts.
-  transaction(db, () => {
-    const previous = db.prepare('SELECT o.status FROM zernio_adset_budget_claims c LEFT JOIN integration_operations o ON o.project_id=c.project_id AND o.request_key=c.request_key WHERE c.resource=?').get(resource);
-    if (previous && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'AD_SET_BUDGET_PREVIOUS_OUTCOME_UNRESOLVED', 'This budget change was not sent. Review the earlier provider budget outcome before changing this ad set again.');
-    db.prepare('INSERT INTO zernio_adset_budget_claims(resource,project_id,request_key) VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, project.id, key);
-  });
+async function claimAdSetBudget(context: any, snapshot: any, key: any) {
+  const resource = canonical(['meta-adset-budget', copyAdvertiser(snapshot.platform, snapshot.adAccountId), snapshot.adSetId]);
+  // The native advertiser/set is shared across Meta aliases, profile mappings and process restarts, so the operation's
+  // project-scoped resource lock is not enough: this fence stops two parallel or unresolved budget changes both sending.
+  if (!await claimFence(context.db, 'zernio_adset_budget_claims', resource, context.project.id, key)) fail(409, 'AD_SET_BUDGET_PREVIOUS_OUTCOME_UNRESOLVED', 'This budget change was not sent. Review the earlier provider budget outcome before changing this ad set again.');
 }
 async function liveMetaBudgets(api: any, before: any) {
   const campaigns: any[] = [], adSets: any[] = [], seen = new Set();
@@ -447,22 +445,14 @@ async function campaignBudgetSnapshot(context: any, api: any, profileId: any, ca
   const version = createHash('sha256').update(canonical([context.project.id, profileId, source, connection, parent.configuredStatus ?? null, parent.platformCampaignStatus ?? null])).digest('hex');
   return { ...source, readAt, version };
 }
-function claimCampaignBudget(context: any, snapshot: any, key: any) {
-  const { db, project } = context, resource = canonical(['meta-campaign-budget', copyAdvertiser(snapshot.platform, snapshot.adAccountId), snapshot.campaignId]);
-  db.exec('CREATE TABLE IF NOT EXISTS zernio_campaign_budget_claims(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL)');
-  transaction(db, () => {
-    const previous = db.prepare('SELECT o.status FROM zernio_campaign_budget_claims c LEFT JOIN integration_operations o ON o.project_id=c.project_id AND o.request_key=c.request_key WHERE c.resource=?').get(resource);
-    if (previous && (!previous.status || ['pending', 'uncertain'].includes(previous.status))) fail(409, 'CAMPAIGN_BUDGET_PREVIOUS_OUTCOME_UNRESOLVED', 'This budget change was not sent. Review the earlier provider campaign budget outcome before changing this campaign again.');
-    db.prepare('INSERT INTO zernio_campaign_budget_claims(resource,project_id,request_key) VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(resource, project.id, key);
-  });
+async function claimCampaignBudget(context: any, snapshot: any, key: any) {
+  const resource = canonical(['meta-campaign-budget', copyAdvertiser(snapshot.platform, snapshot.adAccountId), snapshot.campaignId]);
+  // Same cross-project single flight as ad set budgets, keyed by the native advertiser and campaign.
+  if (!await claimFence(context.db, 'zernio_campaign_budget_claims', resource, context.project.id, key)) fail(409, 'CAMPAIGN_BUDGET_PREVIOUS_OUTCOME_UNRESOLVED', 'This budget change was not sent. Review the earlier provider campaign budget outcome before changing this campaign again.');
 }
 const copyPlatform = (platform: any) => ['facebook', 'instagram'].includes(platform) ? 'meta' : platform;
 const copyId = (value: any) => typeof value === 'string' && value.length > 0 && value.length <= 500 && !['.', '..'].includes(value) && !/[\s\u0000-\u001f\u007f-\u009f/?#]/u.test(value);
 const copyAdvertiser = (platform: any, value: any) => copyPlatform(platform) === 'meta' ? value.replace(/^act_(?=\d+$)/, '') : value;
-function copyTables(db: any) {
-  db.exec(`CREATE TABLE IF NOT EXISTS zernio_campaign_copy_claims(resource TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_key TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS zernio_campaign_copy_receipts(project_id TEXT NOT NULL,request_key TEXT NOT NULL,profile_id TEXT NOT NULL,source_campaign_id TEXT NOT NULL,platform TEXT NOT NULL,account_id TEXT NOT NULL,native_advertiser_id TEXT NOT NULL,resource TEXT NOT NULL,copied_campaign_id TEXT,discovery TEXT,verification TEXT NOT NULL DEFAULT 'pending',status_read_at TEXT,PRIMARY KEY(project_id,request_key))`);
-}
 function copyReference(row: any) {
   const paused = row.operation_status === 'complete' && row.verification === 'paused' && copyId(row.copied_campaign_id) && row.copied_campaign_id !== row.source_campaign_id && validPostInstant(row.status_read_at);
   return { sourceCampaignId: row.source_campaign_id, platform: row.platform, copiedCampaignId: copyId(row.copied_campaign_id) && row.copied_campaign_id !== row.source_campaign_id ? row.copied_campaign_id : null, discovery: ['triggered', 'skipped', 'failed'].includes(row.discovery) ? row.discovery : null, requestedStatus: 'PAUSED', verification: paused ? 'paused' : 'pending', statusReadAt: paused ? row.status_read_at : null };
@@ -487,12 +477,10 @@ async function copySnapshot(context: any, api: any, profileId: any, campaignId: 
   const version = createHash('sha256').update(canonical([context.project.id, profileId, source, connection])).digest('hex');
   return { source, version, resource: canonical([copyPlatform(platform), copyAdvertiser(platform, advertiserId), campaignId]), account };
 }
-function copyState(context: any, snapshot: any, profileId: any) {
-  const { db, project } = context;
-  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='integration_operations'").get()) return { previousCopy: null, unresolved: false, canCopy: true };
-  const claim = db.prepare('SELECT o.status,r.copied_campaign_id FROM zernio_campaign_copy_claims c LEFT JOIN integration_operations o ON o.project_id=c.project_id AND o.request_key=c.request_key LEFT JOIN zernio_campaign_copy_receipts r ON r.project_id=c.project_id AND r.request_key=c.request_key WHERE c.resource=?').get(snapshot.resource);
+async function copyState(db: Executor, projectId: string, snapshot: any, profileId: any) {
+  const claim: any = (await db.execute(sql`SELECT o.status FROM zernio_campaign_copy_claims c LEFT JOIN integration_operations o ON o.project_id = c.project_id AND o.request_key = c.request_key WHERE c.resource = ${snapshot.resource}`)).rows[0];
   const unresolved = Boolean(claim && (!claim.status || ['pending', 'uncertain', 'reviewed-applied'].includes(claim.status)));
-  const previous = db.prepare("SELECT r.*,o.status AS operation_status FROM zernio_campaign_copy_receipts r LEFT JOIN integration_operations o ON o.project_id=r.project_id AND o.request_key=r.request_key WHERE r.project_id=? AND r.profile_id=? AND r.resource=? AND (r.copied_campaign_id IS NOT NULL OR o.status IN ('pending','uncertain','reviewed-applied') OR o.status IS NULL) ORDER BY r.rowid DESC LIMIT 1").get(project.id, profileId, snapshot.resource);
+  const previous = (await db.execute(sql`SELECT r.*, o.status AS operation_status FROM zernio_campaign_copy_receipts r LEFT JOIN integration_operations o ON o.project_id = r.project_id AND o.request_key = r.request_key WHERE r.project_id = ${projectId} AND r.profile_id = ${profileId} AND r.resource = ${snapshot.resource} AND (r.copied_campaign_id IS NOT NULL OR o.status IN ('pending', 'uncertain', 'reviewed-applied') OR o.status IS NULL) ORDER BY r.seq DESC LIMIT 1`)).rows[0];
   return { previousCopy: previous ? copyReference(previous) : null, unresolved, canCopy: !previous && !unresolved };
 }
 async function checkCampaignCopy(context: any, api: any, profileId: any, snapshot: any, row: any) {
@@ -510,9 +498,9 @@ async function checkCampaignCopy(context: any, api: any, profileId: any, snapsho
   }
   const after = await copySnapshot(context, api, profileId, row.source_campaign_id, row.platform);
   if (after.resource !== snapshot.resource || after.version !== snapshot.version) fail(409, 'CAMPAIGN_COPY_SCOPE_CHANGED', 'The source campaign or advertiser changed while checking this copy. Refresh its review.');
-  const operation = context.db.prepare('SELECT status FROM integration_operations WHERE project_id=? AND request_key=?').get(context.project.id, row.request_key);
+  const operation: any = (await context.db.execute(sql`SELECT status FROM integration_operations WHERE project_id = ${context.project.id} AND request_key = ${row.request_key}`)).rows[0];
   const paused = copy && operation?.status === 'complete' && row.platform !== 'linkedin' && validPostInstant(copy.statusReadAt) && copy.platformCampaignStatus === (row.platform === 'tiktok' ? 'DISABLE' : 'PAUSED');
-  context.db.prepare('UPDATE zernio_campaign_copy_receipts SET verification=?,status_read_at=? WHERE project_id=? AND request_key=?').run(paused ? 'paused' : 'pending', paused ? copy.statusReadAt : null, context.project.id, row.request_key);
+  await context.db.execute(sql`UPDATE zernio_campaign_copy_receipts SET verification = ${paused ? 'paused' : 'pending'}, status_read_at = ${paused ? copy.statusReadAt : null} WHERE project_id = ${context.project.id} AND request_key = ${row.request_key}`);
   return copyReference({ ...row, operation_status: operation?.status, verification: paused ? 'paused' : 'pending', status_read_at: paused ? copy.statusReadAt : null });
 }
 const rsaReviewAge = 5 * 60 * 1000;
@@ -602,7 +590,7 @@ async function postAssets(store: any, projectId: any, post: any) {
     if (sample(asset)) fail(400, 'SAMPLE_RECORD', 'Sample assets cannot be sent to live providers. Add your own asset.');
     return asset;
   }));
-  return [...selected, ...store.list(projectId, 'assets').filter((asset: any) => asset.deliverySource === 'zernio' && !ids.includes(asset.id))];
+  return [...selected, ...(await store.list(projectId, 'assets')).filter((asset: any) => asset.deliverySource === 'zernio' && !ids.includes(asset.id))];
 }
 function normalizedVariants(post: any) {
   try {
@@ -684,16 +672,20 @@ function driveAsset(file: any) {
   return { name: file.name, url: link(file.webViewLink, `https://drive.google.com/file/d/${file.id}/view`), thumbnailUrl: link(file.thumbnailLink, ''), kind, mimeType: file.mimeType, size: numeric(file.size), width: numeric(metadata?.width, true), height: numeric(metadata?.height, true), duration: milliseconds === null ? null : milliseconds / 1000, modifiedTime: file.modifiedTime || '', md5Checksum: file.md5Checksum || '', driveId: file.id, source: 'google-drive', tags: [], approval: 'pending' };
 }
 
-function saveDriveFiles(db: any, store: any, projectId: any, files: any, assertMapping: any) {
+function saveDriveFiles(db: any, projectId: any, files: any, assertMapping: any): Promise<any[]> {
   const normalized = [...new Map<any, any>(files.map(driveAsset).filter((asset: any) => asset.mimeType !== 'application/vnd.google-apps.folder').map((asset: any) => [asset.driveId, asset] as [any, any])).values()];
-  return transaction(db, () => {
-    checkMapping(assertMapping);
-    const assets = new Map(); for (const asset of store.list(projectId, 'assets')) if (asset.driveId && !assets.has(asset.driveId)) assets.set(asset.driveId, asset);
-    return normalized.map(data => {
+  return db.transaction(async (tx: Executor) => {
+    // Serializes Drive saves per project: parallel syncs or uploads cannot both miss an existing driveId and create duplicates.
+    await advisoryLock(tx, 'drive-assets:' + projectId);
+    await checkMapping(assertMapping);
+    const store = createStore(tx), assets = new Map(), saved: any[] = [];
+    for (const asset of await store.list(projectId, 'assets')) if (asset.driveId && !assets.has(asset.driveId)) assets.set(asset.driveId, asset);
+    for (const data of normalized) {
       const existing = assets.get(data.driveId), changed = existing && ['url', 'kind', 'size', 'mimeType', 'width', 'height', 'duration', 'modifiedTime', 'md5Checksum'].some(field => (existing[field] ?? null) !== (data[field] ?? null));
-      const saved = existing ? store.update(projectId, 'assets', existing.id, { ...data, tags: existing.tags || [], approval: changed ? 'pending' : existing.approval || 'pending' }) : store.create(projectId, 'assets', data);
-      assets.set(data.driveId, saved); return saved;
-    });
+      const asset = existing ? await store.update(projectId, 'assets', existing.id, { ...data, tags: existing.tags || [], approval: changed ? 'pending' : existing.approval || 'pending' }) : await store.create(projectId, 'assets', data);
+      assets.set(data.driveId, asset); saved.push(asset);
+    }
+    return saved;
   });
 }
 
@@ -727,7 +719,7 @@ export async function handleIntegration(context: any) {
           files.push(...pageFiles);
           if (!result.nextPageToken) {
             if (req.method === 'GET') send(200, { files: [...new Map(files.map(driveAsset).filter(asset => asset.mimeType !== 'application/vnd.google-apps.folder').map(asset => [asset.driveId, asset])).values()], complete: true });
-            else { const assets = saveDriveFiles(context.db, store, project.id, files, assertDrive); store.activity(project.id, `Synced ${assets.length} assets from Google Drive.`); send(200, { assets, synced: assets.length, complete: true }); }
+            else { const assets = await saveDriveFiles(context.db, project.id, files, assertDrive); await store.activity(project.id, `Synced ${assets.length} assets from Google Drive.`); send(200, { assets, synced: assets.length, complete: true }); }
             return true;
           }
           if (result.nextPageToken === pageToken) break;
@@ -750,7 +742,7 @@ export async function handleIntegration(context: any) {
           const file = await driveRequest(`${GOOGLE}/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,webViewLink,thumbnailLink,size,modifiedTime,md5Checksum,imageMediaMetadata(width,height),videoMediaMetadata(width,height,durationMillis)`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart });
           if (!file.id || file.mimeType === 'application/vnd.google-apps.folder') throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Google Drive did not confirm the uploaded file.', true);
           let asset;
-          try { [asset] = saveDriveFiles(context.db, store, project.id, [file], assertDrive); }
+          try { [asset] = await saveDriveFiles(context.db, project.id, [file], assertDrive); }
           catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
           return { asset };
         }); send(outcome.status, outcome.data); return true;
@@ -850,47 +842,49 @@ export async function handleIntegration(context: any) {
       if ([...url.searchParams.keys()].some(field => !allowed.includes(field) || url.searchParams.getAll(field).length !== 1)) fail(400, 'INVALID_CAMPAIGN_COPY_FILTER', 'Choose one campaign and platform for this copy review.');
       const campaignId = identifier(url.searchParams.get('campaignId'), 'campaign ID'), platform = url.searchParams.get('platform');
       if (!copyId(campaignId)) fail(400, 'INVALID_INPUT', 'Choose a valid campaign ID.');
-      copyTables(db);
       const snapshot = await copySnapshot(context, api, profileId, campaignId, platform);
       if (status) {
         const copiedId = url.searchParams.get('copiedCampaignId');
         if (!copyId(copiedId) || copiedId === campaignId) fail(400, 'INVALID_INPUT', 'Choose a reported copied campaign ID.');
-        const row = db.prepare('SELECT r.* FROM zernio_campaign_copy_receipts r WHERE r.project_id=? AND r.profile_id=? AND r.resource=? AND r.source_campaign_id=? AND r.platform=? AND r.copied_campaign_id=? ORDER BY r.rowid DESC LIMIT 1').get(project.id, profileId, snapshot.resource, campaignId, platform, copiedId);
+        const row = (await db.execute(sql`SELECT r.* FROM zernio_campaign_copy_receipts r WHERE r.project_id = ${project.id} AND r.profile_id = ${profileId} AND r.resource = ${snapshot.resource} AND r.source_campaign_id = ${campaignId} AND r.platform = ${platform} AND r.copied_campaign_id = ${copiedId} ORDER BY r.seq DESC LIMIT 1`)).rows[0];
         if (!row) fail(404, 'CAMPAIGN_COPY_NOT_REPORTED', 'This project has no reported copy with that campaign reference.');
         send(200, { campaignCopy: await checkCampaignCopy(context, api, profileId, snapshot, row) }); return true;
       }
       const current = await copySnapshot(context, api, profileId, campaignId, platform);
       if (current.version !== snapshot.version || current.resource !== snapshot.resource) fail(409, 'CAMPAIGN_COPY_REVIEW_CHANGED', 'The campaign changed while preparing its review. Refresh before copying.');
-      send(200, { source: current.source, version: current.version, ...copyState(context, current, profileId) }); return true;
+      send(200, { source: current.source, version: current.version, ...await copyState(db, project.id, current, profileId) }); return true;
     }
     if (req.method === 'POST' && path === 'ads/copy') {
       fields(body, ['campaignId', 'platform', 'version', 'confirmDuplicate'], 'campaign copy');
       if (url.search || body.confirmDuplicate !== true || typeof body.version !== 'string' || !/^[a-f0-9]{64}$/.test(body.version) || !copyId(body.campaignId)) fail(400, 'CAMPAIGN_COPY_REVIEW_REQUIRED', 'Review the current campaign and confirm its paused copy.');
-      copyTables(db);
       const snapshot = await copySnapshot(context, api, profileId, body.campaignId, body.platform), requestKey = req.headers['idempotency-key'];
-      const prior = typeof requestKey === 'string' ? db.prepare('SELECT * FROM zernio_campaign_copy_receipts WHERE project_id=? AND request_key=?').get(project.id, requestKey) : null;
+      const prior: any = typeof requestKey === 'string' ? (await db.execute(sql`SELECT * FROM zernio_campaign_copy_receipts WHERE project_id = ${project.id} AND request_key = ${requestKey}`)).rows[0] : null;
       if (prior && (prior.profile_id !== profileId || prior.resource !== snapshot.resource || prior.platform !== body.platform || prior.source_campaign_id !== body.campaignId)) fail(409, 'CAMPAIGN_COPY_SCOPE_CHANGED', 'This action belongs to an earlier campaign connection. Check its provider outcome.');
       const outcome = await operation(context, async key => {
         const current = await copySnapshot(context, api, profileId, body.campaignId, body.platform);
         if (current.version !== body.version || current.version !== snapshot.version || current.resource !== snapshot.resource) fail(409, 'CAMPAIGN_COPY_REVIEW_CHANGED', 'The campaign or advertising connection changed since your review. Refresh before copying.');
         await checkMapping(() => context.assertProjectMapping?.(profileId));
-        transaction(db, () => {
-          if (!copyState(context, current, profileId).canCopy) fail(409, 'CAMPAIGN_COPY_ALREADY_REPORTED', 'Check the previous copy or resolve its provider outcome before copying again.');
-          db.prepare('INSERT INTO zernio_campaign_copy_claims(resource,project_id,request_key) VALUES(?,?,?) ON CONFLICT(resource) DO UPDATE SET project_id=excluded.project_id,request_key=excluded.request_key').run(current.resource, project.id, key);
-          db.prepare('INSERT INTO zernio_campaign_copy_receipts(project_id,request_key,profile_id,source_campaign_id,platform,account_id,native_advertiser_id,resource) VALUES(?,?,?,?,?,?,?,?)').run(project.id, key, profileId, body.campaignId, body.platform, current.source.accountId, current.source.adAccountId, current.resource);
+        await db.transaction(async (tx: Executor) => {
+          // The native campaign is shared across projects and Meta aliases, beyond the operation's project-scoped resource
+          // lock. This lock makes the previous-copy check and the claim one step, so parallel copies cannot both pass it.
+          await advisoryLock(tx, 'campaign-copy:' + current.resource);
+          if (!(await copyState(tx, project.id, current, profileId)).canCopy || !await claimFence(tx, 'zernio_campaign_copy_claims', current.resource, project.id, key)) fail(409, 'CAMPAIGN_COPY_ALREADY_REPORTED', 'Check the previous copy or resolve its provider outcome before copying again.');
+          await tx.execute(sql`INSERT INTO zernio_campaign_copy_receipts (project_id, request_key, profile_id, source_campaign_id, platform, account_id, native_advertiser_id, resource) VALUES (${project.id}, ${key}, ${profileId}, ${body.campaignId}, ${body.platform}, ${current.source.accountId}, ${current.source.adAccountId}, ${current.resource})`);
         });
         // ponytail: one copy per source/project until an explicit per-copy intent can safely follow verified completion.
+        // The provider transport calls observeReceipt synchronously; the reference write it starts is awaited before any outcome is recorded.
+        let recorded: Promise<unknown> | undefined;
         const observeReceipt = (result: any) => {
-          if (copyId(result?.copiedCampaignId) && result.copiedCampaignId !== body.campaignId) db.prepare('UPDATE zernio_campaign_copy_receipts SET copied_campaign_id=?,discovery=? WHERE project_id=? AND request_key=?').run(result.copiedCampaignId, ['triggered', 'skipped', 'failed'].includes(result.discovery) ? result.discovery : null, project.id, key);
+          if (copyId(result?.copiedCampaignId) && result.copiedCampaignId !== body.campaignId) recorded = db.execute(sql`UPDATE zernio_campaign_copy_receipts SET copied_campaign_id = ${result.copiedCampaignId}, discovery = ${['triggered', 'skipped', 'failed'].includes(result.discovery) ? result.discovery : null} WHERE project_id = ${project.id} AND request_key = ${key}`);
         };
         try {
-          const result = await api(`/ads/campaigns/${encodeURIComponent(body.campaignId)}/duplicate`, {}, { platform: body.platform, deepCopy: true, statusOption: 'PAUSED', syncAfter: true }, key, 'POST', observeReceipt);
-          observeReceipt(result);
+          const result = await api(`/ads/campaigns/${encodeURIComponent(body.campaignId)}/duplicate`, {}, { platform: body.platform, deepCopy: true, statusOption: 'PAUSED', syncAfter: true }, key, 'POST', observeReceipt).finally(() => recorded);
+          observeReceipt(result); await recorded;
           const ref = (value: any) => value?._id || value;
           if (!copyId(result.copiedCampaignId) || result.copiedCampaignId === body.campaignId || !['triggered', 'skipped', 'failed'].includes(result.discovery) || ['sourceCampaignId', 'campaignId', 'profileId', 'accountId', 'platformAdAccountId', 'adAccountId', 'platform'].some(field => Object.hasOwn(result, field) && (field === 'platform' ? copyPlatform(result[field]) !== copyPlatform(body.platform) : ['platformAdAccountId', 'adAccountId'].includes(field) ? typeof ref(result[field]) !== 'string' || copyAdvertiser(body.platform, ref(result[field])) !== copyAdvertiser(body.platform, current.source.adAccountId) : ref(result[field]) !== ({ sourceCampaignId: body.campaignId, campaignId: body.campaignId, profileId, accountId: current.source.accountId })[field]))) throw new IntegrationError(502, 'CAMPAIGN_COPY_NOT_CONFIRMED', 'The provider did not return a safe copy reference.', true);
           const after = await copySnapshot(context, api, profileId, body.campaignId, body.platform);
           if (after.version !== current.version || after.resource !== current.resource) throw new IntegrationError(409, 'CAMPAIGN_COPY_SCOPE_CHANGED', 'The campaign connection changed after the provider received the copy request.', true);
-          return { campaignCopy: copyReference(db.prepare('SELECT * FROM zernio_campaign_copy_receipts WHERE project_id=? AND request_key=?').get(project.id, key)) };
+          return { campaignCopy: copyReference((await db.execute(sql`SELECT * FROM zernio_campaign_copy_receipts WHERE project_id = ${project.id} AND request_key = ${key}`)).rows[0]) };
         } catch (error: any) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
       }, ['ads', body.platform, body.campaignId]);
       send(outcome.status, outcome.data); return true;
@@ -1221,13 +1215,13 @@ export async function handleIntegration(context: any) {
           };
           assertCopy(remote);
           const fresh = await scopedPost(api, profileId, post, true, accountId); assertCopy(fresh); await assertRecyclingSeedEditable(fresh, context); await context.assertProviderPostEdit?.();
-          if (canonical(store.get(project.id, 'posts', post.id)) !== canonical(post)) fail(409, 'POST_CHANGED', 'The local post changed. Refresh and review it before continuing.');
+          if (canonical(await store.get(project.id, 'posts', post.id)) !== canonical(post)) fail(409, 'POST_CHANGED', 'The local post changed. Refresh and review it before continuing.');
           const result = await api(endpoint + '/update-metadata', {}, { platform: 'youtube', accountId, ...metadata }, key);
           if (!reportObject(result) || result.success !== true || !Array.isArray(result.updatedFields) || result.updatedFields.length !== requestedFields.length || new Set(result.updatedFields).size !== requestedFields.length || requestedFields.some(field => !result.updatedFields.includes(field)) || [['platform', 'youtube'], ['accountId', accountId], ['postId', post.externalId], ['videoId', videoId]].some(([field, expected]) => Object.hasOwn(result, field) && result[field] !== expected)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the selected YouTube metadata fields and scope. Review the provider outcome before another attempt.', true);
           let confirmed;
           try { confirmed = await scopedPost(api, profileId, post, true, accountId); assertCopy(confirmed, true); }
           catch { throw new IntegrationError(502, 'POST_RECONCILIATION_REQUIRED', 'Zernio accepted the metadata request, but the stored post identity and status could not be refreshed. Review the provider outcome before another attempt.', true); }
-          if (canonical(store.get(project.id, 'posts', post.id)) !== canonical(post)) throw new IntegrationError(409, 'POST_CHANGED', 'The local post changed after Zernio accepted the request. Review the provider outcome.', true);
+          if (canonical(await store.get(project.id, 'posts', post.id)) !== canonical(post)) throw new IntegrationError(409, 'POST_CHANGED', 'The local post changed after Zernio accepted the request. Review the provider outcome.', true);
           const updated = await store.update(project.id, 'posts', post.id, { status: localStatus(confirmed.status), providerStatus: confirmed.status });
           if (!updated) throw new IntegrationError(409, 'POST_REMOVED', 'The local post was removed after Zernio accepted the request. Review the provider outcome.', true);
           await store.activity(project.id, 'Zernio accepted selected YouTube metadata changes; live values remain unverified.');
@@ -1269,7 +1263,7 @@ export async function handleIntegration(context: any) {
         }
         const actual = String(result.platformCampaignStatus || '').toUpperCase(), expected = body.status === 'active' ? ['ACTIVE', 'ENABLE', 'ENABLED'] : ['PAUSED', 'DISABLE', 'DISABLED', 'DRAFT'];
         if (!result.statusReadAt || !expected.includes(actual)) throw new IntegrationError(502, 'AD_STATUS_NOT_CONFIRMED', 'The campaign switch was not confirmed by the provider.', true);
-        saveCampaignSnapshot(context, profileId, body.platform, campaignId, { status: body.status, providerStatus: body.status });
+        await saveCampaignSnapshot(context, profileId, body.platform, campaignId, { status: body.status, providerStatus: body.status });
         return { result: redact(result), requestedStatus: body.status, verification: 'confirmed' };
       }, ['ads', body.platform, campaignId]);
       send(outcome.status, outcome.data); return true;
@@ -1326,7 +1320,7 @@ export async function handleIntegration(context: any) {
           const snapshot = await adSetBudgetSnapshot(context, api, profileId, campaignId, body.platform, adSetId, current);
           if (snapshot.currency !== body.currency || body.version !== budgetReviewVersion(snapshot, payload.budget.amount, body.reviewExpiresAt)) fail(409, 'BUDGET_REVIEW_CHANGED', 'The proposal, budget or advertising connection changed. Load a fresh review.');
           if (Date.parse(body.reviewExpiresAt) <= Date.now() || Date.now() - Date.parse(snapshot.readAt) > 60000 || Date.parse(snapshot.readAt) > Date.now() + 30000) fail(409, 'BUDGET_REVIEW_EXPIRED', 'The review expired during its final checks. Load a fresh review before confirming.');
-          claimAdSetBudget(context, snapshot, key);
+          await claimAdSetBudget(context, snapshot, key);
           const result = await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}`, {}, payload, key, 'PUT');
           try {
             if (result.budget?.amount !== payload.budget.amount || result.budget?.type !== 'daily' || result.budgetLevel !== 'adset') throw new Error('Unconfirmed budget acknowledgement.');
@@ -1365,13 +1359,13 @@ export async function handleIntegration(context: any) {
           const snapshot = await campaignBudgetSnapshot(context, api, profileId, campaignId, body.platform, initial);
           if (body.currency !== snapshot.currency || body.version !== budgetReviewVersion(snapshot, amount, body.reviewExpiresAt)) fail(409, 'BUDGET_REVIEW_CHANGED', 'The proposal, campaign budget or advertising connection changed. Load a fresh review.');
           if (Date.parse(body.reviewExpiresAt) <= Date.now() || Date.parse(body.reviewExpiresAt) > Date.now() + budgetReviewAge || Date.now() - Date.parse(snapshot.readAt) > 60000 || Date.parse(snapshot.readAt) > Date.now() + 30000) fail(409, 'BUDGET_REVIEW_EXPIRED', 'The campaign review expired during its final checks. Load a fresh review before confirming.');
-          claimCampaignBudget(context, snapshot, key);
+          await claimCampaignBudget(context, snapshot, key);
           const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, { platform: body.platform, budget: { amount, type: 'daily' } }, key, 'PUT');
           try {
             if (!Number.isSafeInteger(result.updated) || result.updated < 0 || result.budgetLevel !== 'campaign' || result.budget?.amount !== amount || result.budget?.type !== 'daily') throw new Error('Unconfirmed campaign budget acknowledgement.');
             const observed = await campaignBudgetSnapshot(context, api, profileId, campaignId, body.platform, initial);
             if (observed.currency !== body.currency || observed.currentAmount !== amount) throw new Error('The live campaign budget differs.');
-            saveCampaignSnapshot(context, profileId, body.platform, campaignId, { budget: observed.currentAmount, budgetType: 'daily' });
+            await saveCampaignSnapshot(context, profileId, body.platform, campaignId, { budget: observed.currentAmount, budgetType: 'daily' });
             return { budgetAcceptance: { campaignId, platform: body.platform, adSetId: null, accountId: observed.accountId, adAccountId: observed.adAccountId, currency: observed.currency, requestedAmount: amount, acknowledgedAmount: result.budget.amount, observedAmount: observed.currentAmount, readAt: observed.readAt } };
           } catch { throw new IntegrationError(502, 'CAMPAIGN_BUDGET_NOT_CONFIRMED', 'The campaign budget request may have applied, but its independent live budget could not be verified. Review the provider outcome before repeating it.', true); }
         }, ['ads', body.platform, campaignId]);
@@ -1392,7 +1386,7 @@ export async function handleIntegration(context: any) {
       const outcome = await operation(context, async key => {
         const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, payload, key, 'PUT');
         if (!Number.isInteger(result.updated) || result.updated < 0 || (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== payload.budget.type)) || (payload.name && result.name !== payload.name)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not acknowledge the campaign changes.', true);
-        saveCampaignSnapshot(context, profileId, body.platform, campaignId, { ...(payload.budget ? { budget: result.budget.amount, budgetType: result.budget.type } : {}), ...(payload.name ? { name: result.name } : {}) });
+        await saveCampaignSnapshot(context, profileId, body.platform, campaignId, { ...(payload.budget ? { budget: result.budget.amount, budgetType: result.budget.type } : {}), ...(payload.name ? { name: result.name } : {}) });
         return { result: redact(result) };
       }, ['ads', body.platform, campaignId]); send(outcome.status, outcome.data); return true;
     }

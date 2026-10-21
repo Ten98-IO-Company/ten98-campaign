@@ -4,12 +4,12 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('HTTP publishing approvals, Drive delivery links and provider outcome reviews are wired end to end', async () => {
+test('HTTP publishing approvals, Drive delivery links and provider outcome reviews are wired end to end', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-workflows-http-')), distDir = join(dataDir, 'dist');
   await mkdir(distDir); await writeFile(join(distDir, 'index.html'), '<!doctype html><title>Campaign</title>');
-  const origin = 'http://127.0.0.1:3000', app = createApp({ dataDir, distDir, appUrl: origin, env: { ZERNIO_API_KEY: 'private-workflows-key' } }), originalFetch = globalThis.fetch;
+  const origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir, distDir, appUrl: origin, env: { ZERNIO_API_KEY: 'private-workflows-key' } }), originalFetch = globalThis.fetch;
   const providerCalls = [], providerWrites = [], remotePosts = new Map(); let ownerCookie, failNextCreate = false, failNextPublish = false, sequence = 0, createdPosts = 0;
   const profileId = 'workflows-profile', accountId = 'workflows-account', account = { _id: accountId, profileId, platform: 'facebook', isActive: true };
   globalThis.fetch = async (target, options = {}) => {
@@ -45,12 +45,12 @@ test('HTTP publishing approvals, Drive delivery links and provider outcome revie
     const state = (await request('/api/state')).data, projectId = state.projectId, workspaceId = state.workspaces[0].id, project = `/api/projects/${projectId}`;
     assert.equal(state.user.isOperator, true);
     assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);
-    const passwordHash = app.db.prepare('SELECT password FROM users WHERE id=?').get(state.user.id).password;
+    const passwordHash = (await app.sql.get('SELECT password FROM users WHERE id=?', state.user.id)).password;
     async function member(name, role) {
       const userId = randomUUID(), email = `${name}@example.test`;
-      app.db.prepare('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)').run(userId, name, email, passwordHash);
+      await app.sql.run('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)', userId, name, email, passwordHash);
       const login = await post('/api/auth/login', { email, password: 'a sufficiently long workflow fixture password' }); assert.equal(login.status, 200);
-      if (role) app.db.prepare('INSERT INTO memberships VALUES(?,?,?)').run(workspaceId, userId, role);
+      if (role) await app.sql.run('INSERT INTO memberships VALUES(?,?,?)', workspaceId, userId, role);
       return { id: userId, cookie: login.cookie, email };
     }
     const viewer = await member('workflow-viewer', 'viewer'), editor = await member('workflow-editor', 'editor'), admin = await member('workflow-admin', 'admin'), outsider = await member('workflow-outsider');
@@ -92,13 +92,13 @@ test('HTTP publishing approvals, Drive delivery links and provider outcome revie
     const staleReview = await draft('Pending original text'), requested = await post(`${project}/approvals/posts/${staleReview.id}/request`, {}, { cookie: editor.cookie });
     await request(`${project}/posts/${staleReview.id}`, { method: 'PATCH', body: { content: 'Edited while review was open' }, cookie: editor.cookie });
     assert.equal((await post(`${project}/approvals/posts/${staleReview.id}/review`, { decision: 'approved', reviewId: requested.data.item.review.id })).status, 409);
-    const driveAsset = app.store.create(projectId, 'assets', { name: 'Drive original', kind: 'image', url: 'https://drive.google.com/file/d/drive-original/view', source: 'google-drive', driveId: 'drive-original', approval: 'approved', size: 1234, modifiedTime: '2026-10-18T10:00:00Z', md5Checksum: 'fixture-checksum' });
+    const driveAsset = await app.store.create(projectId, 'assets', { name: 'Drive original', kind: 'image', url: 'https://drive.google.com/file/d/drive-original/view', source: 'google-drive', driveId: 'drive-original', approval: 'approved', size: 1234, modifiedTime: '2026-10-18T10:00:00Z', md5Checksum: 'fixture-checksum' });
     const assetPath = `${project}/assets/${driveAsset.id}`, deliveryUrl = 'https://cdn.example.com/campaign.jpg';
     result = await request(assetPath, { method: 'PATCH', body: { deliveryUrl }, cookie: editor.cookie }); assert.equal(result.status, 200); assert.equal(result.data.record.url, driveAsset.url); assert.equal(result.data.record.driveId, 'drive-original'); assert.equal(result.data.record.source, 'google-drive'); assert.equal(result.data.record.approval, 'pending');
     assert.equal((await request(assetPath, { method: 'PATCH', body: { approval: 'approved' }, cookie: editor.cookie })).status, 403);
     assert.equal((await request(assetPath, { method: 'PATCH', body: { approval: 'approved' } })).status, 200);
     for (const unsafe of ['http://cdn.example.com/a.jpg', 'javascript:alert(1)', 'https://user:password@cdn.example.com/a.jpg', 'https://127.0.0.1/private', 'https://10.0.0.1/private', 'https://192.168.0.1/private', 'https://drive.google.com/file/d/private/view', 'https://docs.google.com/document/d/private']) assert.equal((await request(assetPath, { method: 'PATCH', body: { deliveryUrl: unsafe } })).status, 400, unsafe);
-    assert.equal(app.store.get(projectId, 'assets', driveAsset.id).deliveryUrl, deliveryUrl, 'Invalid URLs must not replace the last good delivery link.');
+    assert.equal((await app.store.get(projectId, 'assets', driveAsset.id)).deliveryUrl, deliveryUrl, 'Invalid URLs must not replace the last good delivery link.');
     assert.equal((await post(project + '/posts', { content: 'Forged provider evidence', platforms: ['facebook'], deliveryUrl })).status, 400);
     const assetPost = await draft('Campaign with a Drive creative', { assetId: driveAsset.id }); await approve(assetPost);
     result = await publish(assetPost); assert.equal(result.status, 200); assert.deepEqual(providerWrites.at(-1).payload.mediaItems, [{ type: 'image', url: deliveryUrl, size: 1234 }]);

@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { generateKeyPairSync, verify } from 'node:crypto';
 import { handleIntegration } from '../server/integrations.ts';
 import { providerRequest, zernioClient, scopedAccounts, adAccounts, remotePostModel, remoteRestrictionPayload, savePostSnapshot, operation } from '../server/provider-core.ts';
+import { createStore } from '../server/database.ts';
+import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
 
 test('only documented exact product GET absence codes survive and revoked access cannot prove deletion', async () => {
   const originalFetch = globalThis.fetch; let code = 'product_not_found', status = 404, revoked = false, revoke = false;
@@ -21,20 +22,20 @@ test('only documented exact product GET absence codes survive and revoked access
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('receipt-only outcome checks can never become first dispatches and still bind the exact action', async () => {
-  const db = new DatabaseSync(':memory:'); let writes = 0;
+test('receipt-only outcome checks can never become first dispatches and still bind the exact action', { skip: postgresSkip }, async t => {
+  const { db, sql } = await testDatabase(t); let writes = 0;
   const context = { db, project: { id: 'receipt-project' }, req: { method: 'POST', headers: { 'idempotency-key': 'retained-key' } }, url: new URL('https://campaign.example.test/api/projects/receipt-project/integrations/products/store/product/archive?check=1'), body: { version: 'reviewed-version', confirmArchive: true } };
   const send = () => operation(context, async () => { writes++; return { accepted: true }; }, ['native-product']);
-  try {
+  {
     await assert.rejects(send, error => error.code === 'OPERATION_OUTCOME_UNAVAILABLE');
-    assert.equal(writes, 0); assert.equal(db.prepare('SELECT count(*) AS count FROM integration_operations').get().count, 0);
+    assert.equal(writes, 0); assert.equal((await sql.get('SELECT count(*) AS count FROM integration_operations')).count, 0);
     context.url.search = ''; const accepted = await send(); assert.equal(writes, 1);
     context.url.search = '?check=1'; assert.deepEqual(await send(), accepted); assert.equal(writes, 1);
     context.body = { ...context.body, confirmArchive: false }; await assert.rejects(send, error => error.code === 'IDEMPOTENCY_CONFLICT');
     context.req.headers['idempotency-key'] = 'different-key'; await assert.rejects(send, error => error.code === 'OPERATION_OUTCOME_UNAVAILABLE');
     context.url.search = '?check=1&check=1'; await assert.rejects(send, error => error.code === 'INVALID_OUTCOME_CHECK');
-    assert.equal(writes, 1); assert.equal(db.prepare('SELECT count(*) AS count FROM integration_operations').get().count, 1);
-  } finally { db.close(); }
+    assert.equal(writes, 1); assert.equal((await sql.get('SELECT count(*) AS count FROM integration_operations')).count, 1);
+  }
 });
 
 test('successful write references are observed before access rejection while observer and parsing failures remain uncertain', async () => {
@@ -81,8 +82,8 @@ test('advertising membership rejects stale quota fallbacks and malformed freshne
   for (const value of [null, { accounts, stale: 'false' }, { accounts, stale: 0 }, { accounts, cachedAt: '2026-02-30T10:00:00Z' }]) await assert.rejects(adAccounts(async () => value, 'connection'), error => error.status === 502 && error.code === 'INVALID_PROVIDER_RESPONSE');
 });
 
-test('social lifecycle updates, cancellation, failed retry, published-copy edits and removal stay scoped and durable', async () => {
-  const originalFetch = globalThis.fetch, db = new DatabaseSync(':memory:'), writes = [], records = new Map();
+test('social lifecycle updates, cancellation, failed retry, published-copy edits and removal stay scoped and durable', { skip: postgresSkip }, async t => {
+  const { db, sql } = await testDatabase(t), originalFetch = globalThis.fetch, writes = [], records = new Map();
   const project = { id: 'social-project', zernioProfileId: 'profile-social' }, account = { _id: 'facebook-a', profileId: project.zernioProfileId, platform: 'facebook' };
   let remote = { _id: 'remote-social', status: 'scheduled', content: 'Original', scheduledFor: '2070-01-01T10:00:00Z', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] }, mappedProfile = project.zernioProfileId, remapOnWrite = false, failedReadback = false;
   const store = {
@@ -150,26 +151,21 @@ test('social lifecycle updates, cancellation, failed retry, published-copy edits
     remote.status = 'scheduled'; remote.platforms[0].status = 'pending'; remapOnWrite = true;
     result = await invoke('social/update', { postId: local.id, content: 'Old mapping write', mode: 'draft' }); assert.equal(result.data.operation.status, 'uncertain'); assert.notEqual(records.get(local.id).content, 'Old mapping write');
     assert.equal(remote.content, 'Old mapping write');
-    db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?").run(result.data.operation.id);
+    await sql.run("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?", result.data.operation.id);
     mappedProfile = project.zernioProfileId; remapOnWrite = false; remote.status = 'published'; remote.platforms[0].status = 'published';
     const beforeFailedReadback = globalThis.fetch;
     globalThis.fetch = async (target, options) => { const response = await beforeFailedReadback(target, options); if (new URL(target).pathname.endsWith('/edit')) failedReadback = true; return response; };
     result = await invoke('social/edit-published', { postId: local.id, accountId: account._id, content: 'Accepted without readback', confirmEdit: true }); assert.equal(result.data.operation.status, 'uncertain');
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
-test('provider contracts, tenant boundaries, durable retries, and private Drive metadata', async () => {
+test('provider contracts, tenant boundaries, durable retries, and private Drive metadata', { skip: postgresSkip }, async t => {
   const originalFetch = globalThis.fetch;
-  const db = new DatabaseSync(':memory:');
-  const records = new Map(); const calls = [];
-  const store = {
-    get(projectId, collection, id) { const record = records.get(id); return record?.projectId === projectId && record.collection === collection ? { ...record } : null; },
-    list(projectId, collection) { return [...records.values()].filter(record => record.projectId === projectId && record.collection === collection); },
-    create(projectId, collection, data) { const record = { ...data, projectId, collection, id: `local-${records.size}` }; records.set(record.id, record); return record; },
-    update(projectId, collection, id, data) { const previous = this.get(projectId, collection, id); if (!previous) return null; const record = { ...previous, ...data }; records.set(id, record); return record; },
-    activity() {},
-  };
+  // A real store: Drive saves run through createStore(tx) inside one transaction, so a stub store would not observe them.
+  const { db, pool } = await testDatabase(t), store = createStore(db);
+  const calls = [];
   const project = { id: 'project-a', workspaceId: 'workspace-a', zernioProfileId: 'profile-a', driveFolderId: 'folder_a' };
+  await pool.query("INSERT INTO workspaces (id, name) VALUES ('workspace-a', 'Workspace A'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id, drive_folder_id) VALUES ('project-a', 'workspace-a', 'Project A', 'profile-a', 'folder_a')");
   const account = { _id: 'account-a', profileId: 'profile-a', platform: 'instagram', isActive: true };
   let provider = async (url, options) => {
     if (url.pathname.endsWith('/accounts')) return { accounts: [account, { ...account, _id: 'account-b', profileId: 'profile-b', accessToken: 'DO-NOT-EXPOSE' }] };
@@ -198,20 +194,20 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     assert.equal(result.status, 409); assert.equal(calls.length, beforeUnmapped);
     result = await invoke('social/publish', { method: 'POST', role: 'viewer' });
     assert.equal(result.status, 403);
-    const missedSchedule = store.create(project.id, 'posts', { content: 'A scheduled announcement', platforms: ['instagram'], status: 'scheduled', scheduledAt: new Date(Date.now() - 60000).toISOString() });
+    const missedSchedule = await store.create(project.id, 'posts', { content: 'A scheduled announcement', platforms: ['instagram'], status: 'scheduled', scheduledAt: new Date(Date.now() - 60000).toISOString() });
     result = await invoke('social/publish', { method: 'POST', body: { postId: missedSchedule.id }, key: 'missed-time01' });
     assert.equal(result.data.error.code, 'SCHEDULE_PASSED');
     assert.equal(calls.some(call => call.options.method === 'POST'), false, 'A missed schedule must never become immediate publishing.');
 
-    const post = store.create(project.id, 'posts', { content: 'Campaign launch', platforms: ['instagram'], accounts: ['account-b'], status: 'draft' });
+    const post = await store.create(project.id, 'posts', { content: 'Campaign launch', platforms: ['instagram'], accounts: ['account-b'], status: 'draft' });
     result = await invoke('social/publish', { method: 'POST', body: { postId: post.id }, key: 'scope-check' });
     assert.equal(result.status, 403);
     assert.equal(calls.some(call => call.options.method === 'POST'), false);
-    store.update(project.id, 'posts', post.id, { accounts: ['account-a'], sample: true });
+    await store.update(project.id, 'posts', post.id, { accounts: ['account-a'], sample: true });
     result = await invoke('social/publish', { method: 'POST', body: { postId: post.id }, key: 'sample-check' });
     assert.equal(result.data.error.code, 'SAMPLE_RECORD');
-    const creative = store.create(project.id, 'assets', { name: 'Launch', kind: 'image', url: 'https://cdn.example.com/launch.jpg' });
-    store.update(project.id, 'posts', post.id, { sample: false, assetId: creative.id });
+    const creative = await store.create(project.id, 'assets', { name: 'Launch', kind: 'image', url: 'https://cdn.example.com/launch.jpg' });
+    await store.update(project.id, 'posts', post.id, { sample: false, assetId: creative.id });
     let sends = 0;
     provider = async (url, options) => {
       if (url.pathname.endsWith('/accounts')) return { accounts: [account] };
@@ -228,7 +224,7 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     assert.equal(result.status, 200); assert.equal(result.data.post.status, 'submitted');
     const replay = await invoke('social/publish', { method: 'POST', body: { postId: post.id }, key: 'publish-0001' });
     assert.deepEqual(replay, result); assert.equal(sends, 1);
-    const other = store.create(project.id, 'posts', { content: 'Another post', platforms: ['instagram'], assetId: creative.id });
+    const other = await store.create(project.id, 'posts', { content: 'Another post', platforms: ['instagram'], assetId: creative.id });
     result = await invoke('social/publish', { method: 'POST', body: { postId: other.id }, key: 'publish-0001' });
     assert.equal(result.data.error.code, 'IDEMPOTENCY_CONFLICT'); assert.equal(sends, 1);
 
@@ -245,7 +241,7 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     await invoke('social/publish', { method: 'POST', body: { postId: other.id }, key: 'new-key-0001' });
     assert.equal(ambiguousSends, 1, 'A fresh action key must not bypass an uncertain publication.');
 
-    const racePost = store.create(project.id, 'posts', { content: 'Submit exactly once', platforms: ['instagram'], assetId: creative.id });
+    const racePost = await store.create(project.id, 'posts', { content: 'Submit exactly once', platforms: ['instagram'], assetId: creative.id });
     let reads = 0; let raceSends = 0; let releaseSecond;
     const secondReady = new Promise(resolve => { releaseSecond = resolve; });
     provider = async url => {
@@ -395,12 +391,12 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     assert.equal(result.data.synced, 1); assert.equal(result.data.assets[0].source, 'google-drive');
     assert.equal(JSON.stringify(result).includes('GOOGLE_PRIVATE_TOKEN'), false);
     const syncedAsset = result.data.assets[0];
-    store.update(project.id, 'assets', syncedAsset.id, { approval: 'approved', deliveryUrl: 'https://cdn.example.com/delivery.png', tags: ['brand'] });
+    await store.update(project.id, 'assets', syncedAsset.id, { approval: 'approved', deliveryUrl: 'https://cdn.example.com/delivery.png', tags: ['brand'] });
     await invoke('drive/sync', { method: 'POST', config: driveConfig });
-    assert.equal(store.list(project.id, 'assets').filter(asset => asset.source === 'google-drive').length, 1, 'Drive sync upserts metadata.');
-    assert.equal(store.get(project.id, 'assets', syncedAsset.id).approval, 'approved', 'An unchanged Drive file keeps its reviewed approval.');
+    assert.equal((await store.list(project.id, 'assets')).filter(asset => asset.source === 'google-drive').length, 1, 'Drive sync upserts metadata.');
+    assert.equal((await store.get(project.id, 'assets', syncedAsset.id)).approval, 'approved', 'An unchanged Drive file keeps its reviewed approval.');
     driveRevision = '2'.repeat(32); await invoke('drive/sync', { method: 'POST', config: driveConfig });
-    const revisedAsset = store.get(project.id, 'assets', syncedAsset.id);
+    const revisedAsset = await store.get(project.id, 'assets', syncedAsset.id);
     assert.equal(revisedAsset.approval, 'pending', 'A changed Drive file must be reviewed again.');
     assert.equal(revisedAsset.deliveryUrl, 'https://cdn.example.com/delivery.png'); assert.deepEqual(revisedAsset.tags, ['brand']);
 
@@ -419,11 +415,11 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     result = await invoke('drive/upload', { method: 'POST', body: { name: 'notes.txt', mimeType: 'text/plain', contentBase64: Buffer.from('Creative notes').toString('base64') }, key: 'drive-upload01', config: driveConfig });
     assert.equal(result.status, 200); assert.equal(result.data.asset.driveId, 'drive-upload');
     assert.equal(uploaded, 1);
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
-test('advanced ad formats, paused creation, scoped edits, live switches and published-post boosts', async () => {
-  const originalFetch = globalThis.fetch, db = new DatabaseSync(':memory:'), writes = [], records = [];
+test('advanced ad formats, paused creation, scoped edits, live switches and published-post boosts', { skip: postgresSkip }, async t => {
+  const { db, sql } = await testDatabase(t), originalFetch = globalThis.fetch, writes = [], records = [];
   const project = { id: 'project-a', zernioProfileId: 'profile-a' };
   const accounts = ['metaads', 'googleads', 'linkedinads', 'tiktokads', 'xads', 'openaiads', 'redditads', 'pinterestads', 'facebook'].map(platform => ({ _id: platform, platform, profileId: 'profile-a', isActive: true }));
   const store = { create(projectId, collection, data) { const value = { ...data, projectId, collection, id: `local-${records.length}` }; records.push(value); return value; }, get(projectId, collection, id) { return records.find(item => item.id === id && item.projectId === projectId && item.collection === collection); }, list(projectId, collection) { return records.filter(item => item.projectId === projectId && item.collection === collection); }, update(projectId, collection, id, data) { const value = this.get(projectId, collection, id); Object.assign(value, data); return value; }, activity() {} };
@@ -515,9 +511,9 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
       { ...demandCarousel, demandGen: { ...demandCarousel.demandGen, carouselCards: [demandCarousel.demandGen.carouselCards[0]] } },
       { ...clean('openai', 'openaiads'), imageUrl: base.imageUrl, targeting: { ageMin: 18 } },
     ]) {
-      const before = writes.length, localBefore = records.length, operationsBefore = db.prepare('SELECT COUNT(*) AS count FROM integration_operations').get().count;
+      const before = writes.length, localBefore = records.length, operationsBefore = (await sql.get('SELECT COUNT(*) AS count FROM integration_operations')).count;
       const result = await invoke('ads/create', invalid);
-      assert.ok(result.status >= 400, JSON.stringify(invalid)); assert.equal(writes.length, before, 'Invalid format must never call a paid mutation.'); assert.equal(records.length, localBefore); assert.equal(db.prepare('SELECT COUNT(*) AS count FROM integration_operations').get().count, operationsBefore, 'Validation failures must not persist an operation.');
+      assert.ok(result.status >= 400, JSON.stringify(invalid)); assert.equal(writes.length, before, 'Invalid format must never call a paid mutation.'); assert.equal(records.length, localBefore); assert.equal((await sql.get('SELECT COUNT(*) AS count FROM integration_operations')).count, operationsBefore, 'Validation failures must not persist an operation.');
     }
     const once = await invoke('ads/create', metaVideo, 'durable-video-01'); assert.equal(once.status, 200); const sent = writes.length;
     assert.deepEqual(await invoke('ads/create', metaVideo, 'durable-video-01'), once); assert.equal(writes.length, sent);
@@ -563,7 +559,7 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     assert.equal((await invoke('ads/status', { campaignId: 'native-campaign', platform: 'facebook', status: 'paused' }, 'unconfirmed-switch-01')).data.operation.status, 'uncertain');
     const unconfirmed = writes.length;
     assert.equal((await invoke('ads/status', { campaignId: 'native-campaign', platform: 'facebook', status: 'paused' }, 'unconfirmed-switch-02')).data.error.code, 'OPERATION_NOT_SENT'); assert.equal(writes.length, unconfirmed); confirmStatus = true;
-    db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE status='uncertain'").run();
+    await sql.run("UPDATE integration_operations SET status='reviewed-applied' WHERE status='uncertain'");
     assert.equal((await invoke('ads/adset', { campaignId: 'native-campaign', platform: 'facebook', adSetId: 'other-set', name: 'Outside' })).status, 403);
     const beforeMixedBudget = writes.length;
     assert.equal((await invoke('ads/adset', { campaignId: 'native-campaign', platform: 'facebook', adSetId: 'native-set', name: 'New audience name', budget: { amount: 25, type: 'daily' } })).status, 400);
@@ -578,7 +574,8 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     assert.deepEqual(writes.at(-1).payload, { platform: 'google', budget: { amount: 30, type: 'daily' } }); campaign.platform = 'facebook';
     const published = store.create(project.id, 'posts', { content: 'Published launch', status: 'published', externalId: 'remote-published', zernioProfileId: project.zernioProfileId });
     const boost = { platform: 'facebook', accountId: 'facebook', adAccountId: 'native-account', name: 'Boost launch', goal: 'engagement', budgetAmount: 20, countries: ['AE'], postId: published.id };
-    assert.equal((await invoke('ads/boost', boost)).status, 200); assert.equal(writes.at(-1).url.pathname, '/api/v1/ads/boost'); assert.equal(writes.at(-1).payload.postId, 'remote-published');
+    const boosted = await invoke('ads/boost', boost, 'boost-once-01'); assert.equal(boosted.status, 200); assert.equal(writes.at(-1).url.pathname, '/api/v1/ads/boost'); assert.equal(writes.at(-1).payload.postId, 'remote-published');
+    const boostWrites = writes.length; assert.deepEqual(await invoke('ads/boost', boost, 'boost-once-01'), boosted); assert.equal(writes.length, boostWrites, 'A same-key boost retry replays its receipt without a second paid request.');
     const beforeBadBoost = writes.length;
     assert.equal((await invoke('ads/boost', { ...boost, postId: 'outside-project' })).status, 400); assert.equal(writes.length, beforeBadBoost);
     assert.equal((await invoke('ads/targeting?accountId=metaads&adAccountId=native-account&dimension=interest&q=design')).status, 200);
@@ -591,5 +588,109 @@ test('advanced ad formats, paused creation, scoped edits, live switches and publ
     result = await invoke('ads/items?campaignId=native-campaign&platform=facebook');
     assert.equal(result.status, 409); assert.equal(result.data.error.code, 'PROJECT_CONNECTION_CHANGED'); assert.equal(result.data.ads, undefined);
     mappedProfile = 'profile-a'; remapAt = '';
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+// Concurrency fixtures: two projects mapped to different Zernio profiles that reach the same native Meta advertiser,
+// so the operation's project-scoped receipt locks cannot serialise them; only the native resource fences can.
+function metaFixture(t, database) {
+  const counts = { adSetBudget: 0, campaignBudget: 0, copies: 0 }, gates = {};
+  let amount = 20, campaignOwned = false;
+  const campaign = { platform: 'facebook', platformCampaignId: 'shared-campaign', accountId: 'metaads', platformAdAccountId: 'act_123', campaignName: 'Shared campaign', currency: 'AED', status: 'paused', budgetLevel: 'adset', campaignBudget: null, adSets: [{ platformAdSetId: 'shared-set', status: 'paused', configuredStatus: 'PAUSED', adSetBudget: { amount: 20, type: 'daily' } }] };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(target), method = options.method || 'GET', payload = options.body ? JSON.parse(options.body) : undefined, profileId = url.searchParams.get('profileId');
+    let result;
+    if (url.pathname === '/api/v1/accounts') result = { accounts: [{ _id: 'metaads', profileId, platform: 'metaads', isActive: true }] };
+    else if (url.pathname === '/api/v1/ads/accounts') result = { accounts: [{ id: 'act_123', currency: 'AED', selectable: true }] };
+    else if (url.pathname === '/api/v1/ads/tree') result = { campaigns: [{ ...structuredClone(campaign), budgetLevel: campaignOwned ? 'campaign' : 'adset', profileId }], pagination: { pages: 1 } };
+    else if (url.pathname === '/api/v1/ads/accounts/live') {
+      const parent = { platformCampaignId: 'shared-campaign', budget: campaignOwned ? { amount, type: 'daily' } : null, dailyBudget: campaignOwned ? amount : null, lifetimeBudget: null, configuredStatus: 'PAUSED', platformCampaignStatus: 'PAUSED', status: 'paused' };
+      const set = { platformAdSetId: 'shared-set', platformCampaignId: 'shared-campaign', budget: campaignOwned ? null : { amount, type: 'daily' }, dailyBudget: campaignOwned ? null : amount, lifetimeBudget: null, configuredStatus: 'PAUSED', platformAdSetStatus: 'CAMPAIGN_PAUSED', status: 'paused' };
+      result = { accountId: 'metaads', adAccountId: 'act_123', platform: 'facebook', currency: 'AED', readAt: new Date().toISOString(), campaigns: [parent], adSets: [set], paging: {} };
+    } else if (url.pathname === '/api/v1/ads/ad-sets/shared-set' && method === 'PUT') { counts.adSetBudget++; amount = payload.budget.amount; result = { budget: { ...payload.budget }, budgetLevel: 'adset' }; }
+    else if (url.pathname === '/api/v1/ads/campaigns/shared-campaign' && method === 'PUT') { counts.campaignBudget++; amount = payload.budget.amount; result = { updated: 1, budget: { ...payload.budget }, budgetLevel: 'campaign' }; }
+    else if (url.pathname === '/api/v1/ads/campaigns/shared-campaign/duplicate' && method === 'POST') { counts.copies++; await gates.copy; result = { copiedCampaignId: 'copied-campaign-' + counts.copies, discovery: 'triggered' }; }
+    else throw new Error('Unexpected provider request ' + method + ' ' + url.pathname);
+    return Response.json(result);
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const projects = [{ id: 'fence-project-a', zernioProfileId: 'fence-profile-a' }, { id: 'fence-project-b', zernioProfileId: 'fence-profile-b' }];
+  async function invoke(project, path, body, key) {
+    let response;
+    await handleIntegration({ req: { method: body === undefined ? 'GET' : 'POST', headers: key ? { 'idempotency-key': key } : {} }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/${path}`), body: body || {}, project, role: 'editor', db: database.db, store: { list() { return []; }, activity() {} }, config: { ZERNIO_API_KEY: 'fence-fixture-key' }, send(status, data) { response = { status, data }; } });
+    return response;
+  }
+  return { counts, gates, projects, invoke, useCampaignBudget() { campaignOwned = true; } };
+}
+
+test('parallel Meta budget changes on one native ad set or campaign from two projects send one provider update', { skip: postgresSkip }, async t => {
+  for (const level of ['adset', 'campaign']) {
+    const database = await testDatabase(t), f = metaFixture(t, database);
+    if (level === 'campaign') f.useCampaignBudget();
+    const reviewPath = level === 'adset' ? 'ads/adset-budget-review' : 'ads/campaign-budget-review';
+    const bodies = await Promise.all(f.projects.map(async project => {
+      const review = await f.invoke(project, `${reviewPath}?${new URLSearchParams({ campaignId: 'shared-campaign', platform: 'facebook', ...(level === 'adset' ? { adSetId: 'shared-set' } : {}), currency: 'AED', amount: '30' })}`);
+      assert.equal(review.status, 200, JSON.stringify(review.data));
+      return { campaignId: 'shared-campaign', platform: 'facebook', ...(level === 'adset' ? { adSetId: 'shared-set' } : {}), budget: { amount: 30, type: 'daily' }, currency: 'AED', version: review.data.budgetReview.version, reviewExpiresAt: review.data.budgetReview.expiresAt, confirmBudget: true };
+    }));
+    // Both requests read the unclaimed fence before either can write it; only the conditional claim statement decides.
+    const blocked = await blockWrites(database.pool, level === 'adset' ? 'zernio_adset_budget_claims' : 'zernio_campaign_budget_claims');
+    const pending = f.projects.map((project, index) => f.invoke(project, 'ads/' + level, bodies[index], `parallel-${level}-budget-${index}`));
+    await blocked.waiting(2); await blocked.release();
+    const results = await Promise.all(pending), code = level === 'adset' ? 'AD_SET_BUDGET_PREVIOUS_OUTCOME_UNRESOLVED' : 'CAMPAIGN_BUDGET_PREVIOUS_OUTCOME_UNRESOLVED';
+    assert.deepEqual(results.map(result => result.status).sort(), [200, 409], JSON.stringify(results));
+    assert.equal(results.find(result => result.status === 409).data.error.code, code);
+    assert.equal(level === 'adset' ? f.counts.adSetBudget : f.counts.campaignBudget, 1, 'Two parallel budget changes on one native resource must send exactly one provider update.');
+    // A same-key retry of the winner replays its receipt without another provider update.
+    const winner = results.findIndex(result => result.status === 200);
+    assert.deepEqual(await f.invoke(f.projects[winner], 'ads/' + level, bodies[winner], `parallel-${level}-budget-${winner}`), results[winner]);
+    assert.equal(level === 'adset' ? f.counts.adSetBudget : f.counts.campaignBudget, 1);
+  }
+});
+
+test('parallel paused copies of one native campaign from two projects send one provider copy', { skip: postgresSkip }, async t => {
+  const database = await testDatabase(t), f = metaFixture(t, database);
+  let openCopy; f.gates.copy = new Promise(resolve => { openCopy = resolve; });
+  const bodies = await Promise.all(f.projects.map(async project => {
+    const review = await f.invoke(project, 'ads/copy-review?campaignId=shared-campaign&platform=facebook');
+    assert.equal(review.status, 200, JSON.stringify(review.data)); assert.equal(review.data.canCopy, true);
+    return { campaignId: 'shared-campaign', platform: 'facebook', version: review.data.version, confirmDuplicate: true };
+  }));
+  // Holding claim writes lets both requests reach the copy check together; the advisory lock must make check and claim one step.
+  const blocked = await blockWrites(database.pool, 'zernio_campaign_copy_claims');
+  const pending = f.projects.map((project, index) => f.invoke(project, 'ads/copy', bodies[index], `parallel-copy-${index}`));
+  await blocked.waiting(2); await blocked.release();
+  const loser = await Promise.race(pending); // The winner stays inside the provider call until the gate opens.
+  assert.equal(loser.status, 409, JSON.stringify(loser.data)); assert.equal(loser.data.error.code, 'CAMPAIGN_COPY_ALREADY_REPORTED');
+  openCopy(); const results = await Promise.all(pending);
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 409], JSON.stringify(results));
+  assert.equal(f.counts.copies, 1, 'Two parallel copies of one native campaign must send exactly one provider copy.');
+  const winner = results.findIndex(result => result.status === 200);
+  assert.equal(results[winner].data.campaignCopy.copiedCampaignId, 'copied-campaign-1');
+  assert.deepEqual(await f.invoke(f.projects[winner], 'ads/copy', bodies[winner], `parallel-copy-${winner}`), results[winner]); assert.equal(f.counts.copies, 1);
+  assert.equal((await database.sql.get('SELECT count(*) AS n FROM zernio_campaign_copy_receipts')).n, 1);
+});
+
+// Two different action keys for one identical request in one project rely on the receipt's request-hash check. In
+// PostgreSQL that check only excludes a parallel duplicate once operation() serialises claims per request hash.
+test('parallel identical ad creations with different action keys send one paid request', { skip: postgresSkip }, async t => {
+  const database = await testDatabase(t); let creates = 0;
+  const originalFetch = globalThis.fetch; t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async target => {
+    const url = new URL(target); let result;
+    if (url.pathname === '/api/v1/accounts') result = { accounts: [{ _id: 'metaads', profileId: 'hash-profile', platform: 'metaads', isActive: true }] };
+    else if (url.pathname === '/api/v1/ads/accounts') result = { accounts: [{ id: 'act_123', currency: 'AED', selectable: true }] };
+    else if (url.pathname === '/api/v1/ads/create') { creates++; result = { ad: { _id: 'remote-ad-' + creates, platformCampaignId: 'native-' + creates, platform: 'facebook', status: 'paused' } }; }
+    else throw new Error('Unexpected provider request ' + url.pathname);
+    return Response.json(result);
+  };
+  const project = { id: 'hash-project', zernioProfileId: 'hash-profile' }, body = { platform: 'facebook', accountId: 'metaads', adAccountId: 'act_123', name: 'Parallel launch', goal: 'traffic', budgetAmount: 20, headline: 'Launch', body: 'Discover it.', imageUrl: 'https://cdn.example.com/launch.jpg', linkUrl: 'https://example.com/launch', callToAction: 'LEARN_MORE', countries: ['AE'], currency: 'AED' };
+  const invoke = async key => { let response; await handleIntegration({ req: { method: 'POST', headers: { 'idempotency-key': key } }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/ads/create`), body, project, role: 'editor', db: database.db, store: { create(projectId, collection, data) { return { ...data, id: 'local-' + key }; }, activity() {} }, config: { ZERNIO_API_KEY: 'hash-fixture-key' }, send(status, data) { response = { status, data }; } }); return response; };
+  const blocked = await blockWrites(database.pool, 'integration_operations');
+  const pending = [invoke('parallel-create-a'), invoke('parallel-create-b')];
+  await blocked.waiting(2); await blocked.release();
+  const results = await Promise.all(pending);
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 409], JSON.stringify(results));
+  assert.equal(creates, 1, 'Two parallel identical paid creations must send exactly one provider request.');
 });

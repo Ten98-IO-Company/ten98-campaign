@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('HTTP account copies retain separate caption, DAM media, options, approvals and schedules through publication, edit, status and retry', async () => {
+test('HTTP account copies retain separate caption, DAM media, options, approvals and schedules through publication, edit, status and retry', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-account-posts-')), distDir = join(dataDir, 'dist');
   await mkdir(distDir); await writeFile(join(distDir, 'index.html'), '<title>Account publishing check</title>');
-  const origin = 'http://127.0.0.1:3000', profileId = 'account-fixture-profile', app = createApp({ dataDir, distDir, appUrl: origin, env: { ZERNIO_API_KEY: 'account-fixture-key' } });
+  const origin = 'http://127.0.0.1:3000', profileId = 'account-fixture-profile', app = await testApp(t, { dataDir, distDir, appUrl: origin, env: { ZERNIO_API_KEY: 'account-fixture-key' } });
   const originalFetch = globalThis.fetch, writes = [], remotePosts = new Map(), groups = [], accounts = ['first', 'second'].map(id => ({ _id: id, platform: 'facebook', displayName: `Brand ${id}`, profileId, isActive: true }));
   let sequence = 0, ownerCookie, loseReceipt = false, validationHook, omitTagReadback = false, omitCreateTags = false, readbackTags;
   globalThis.fetch = async (target, options = {}) => {
@@ -50,17 +50,17 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
       const asked = await request(`${project}/approvals/posts/${record.id}/request`, 'POST', {}); assert.equal(asked.status, 200, JSON.stringify(asked.data));
       const approved = await request(`${project}/approvals/posts/${record.id}/review`, 'POST', { reviewId: asked.data.item.review.id, decision: 'approved', note: 'Reviewed each distinct account copy and fixed time.' }); assert.equal(approved.status, 200, JSON.stringify(approved.data)); return approved.data.item;
     }
-    function reviewSyntheticReceipt(key) {
+    async function reviewSyntheticReceipt(key) {
       // These fixture writes were accepted by the mock; close only their exact receipts between independent scenarios.
-      const receipt = app.db.prepare('SELECT id,response FROM integration_operations WHERE project_id=? AND request_key=? AND status=?').get(state.projectId, key, 'uncertain'); assert.ok(receipt, key);
-      assert.equal(app.db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=? AND status='uncertain'").run(receipt.id).changes, 1); assert.equal(app.db.prepare('SELECT response FROM integration_operations WHERE id=?').get(receipt.id).response, receipt.response);
+      const receipt = await app.sql.get('SELECT id,response FROM integration_operations WHERE project_id=? AND request_key=? AND status=?', state.projectId, key, 'uncertain'); assert.ok(receipt, key);
+      assert.equal((await app.sql.run("UPDATE integration_operations SET status='reviewed-applied' WHERE id=? AND status='uncertain'", receipt.id)).changes, 1); assert.equal((await app.sql.get('SELECT response FROM integration_operations WHERE id=?', receipt.id)).response, receipt.response);
     }
     assert.equal((await request(project + '/approvals/policy', 'POST', { requireApproval: true })).status, 200);
     const immediate = await draft(), reviewed = await approve(immediate);
     assert.equal(reviewed.post.accountOverrides.first.content, fields.accountOverrides.first.content); assert.equal(reviewed.post.accountOverrides.second.content, ''); assert.equal(reviewed.post.accountOverrides.second.mediaItems[0].url, asset.deliveryUrl); assert.deepEqual(reviewed.post.accountOverrides.second.options, {});
     assert.equal((await request(project + '/assets/' + asset.id, 'DELETE')).status, 409, 'An account-only DAM reference prevents deleting the creative.');
-    app.store.update(state.projectId, 'assets', asset.id, { deliveryUrl: 'https://cdn.example.test/changed.jpg' });
-    let result = await request(social + '/publish', 'POST', { postId: immediate.id }, 'account-stale-asset'); assert.equal(result.status, 409); assert.equal(writes.length, 0, 'Changing account-only creative invalidates its approved publication.'); app.store.update(state.projectId, 'assets', asset.id, asset);
+    await app.store.update(state.projectId, 'assets', asset.id, { deliveryUrl: 'https://cdn.example.test/changed.jpg' });
+    let result = await request(social + '/publish', 'POST', { postId: immediate.id }, 'account-stale-asset'); assert.equal(result.status, 409); assert.equal(writes.length, 0, 'Changing account-only creative invalidates its approved publication.'); await app.store.update(state.projectId, 'assets', asset.id, asset);
     result = await request(social + '/publish', 'POST', { postId: immediate.id }, 'account-immediate'); assert.equal(result.status, 200, JSON.stringify(result.data));
     let sent = writes.at(-1).payload; assert.equal(sent.publishNow, true); assert.equal(sent.platforms.length, 2);
     assert.equal(sent.platforms[0].customContent, fields.accountOverrides.first.content); assert.deepEqual(sent.platforms[0].customMedia, []); assert.deepEqual(sent.platforms[0].platformSpecificData, { firstComment: 'First brand comment' });
@@ -78,7 +78,7 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     try { result = await request(social + '/publish', 'POST', { postId: expiring.id }, 'account-expiring-time'); } finally { Date.now = realNow; }
     assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(writes.length, beforeExpired, 'An account schedule that expires during preflight must not reach the provider write.');
     const singleRemote = { _id: 'single-own-time', profileId, status: 'scheduled', content: 'Single-target upstream post', mediaItems: [], scheduledFor: '2070-03-01T09:00:00Z', platforms: [{ platform: 'facebook', accountId: 'first', status: 'scheduled', scheduledFor: '2070-03-02T09:00:00Z' }] }; remotePosts.set(singleRemote._id, singleRemote);
-    const single = app.store.create(state.projectId, 'posts', { content: singleRemote.content, platforms: ['facebook'], accounts: ['first'], status: 'scheduled', scheduledAt: singleRemote.scheduledFor, mediaItems: [], externalId: singleRemote._id, zernioProfileId: profileId });
+    const single = await app.store.create(state.projectId, 'posts', { content: singleRemote.content, platforms: ['facebook'], accounts: ['first'], status: 'scheduled', scheduledAt: singleRemote.scheduledFor, mediaItems: [], externalId: singleRemote._id, zernioProfileId: profileId });
     result = await request(social + '/status?postId=' + single.id); assert.equal(result.status, 200); assert.equal(result.data.post.accountOverrides.first.scheduledAt, singleRemote.platforms[0].scheduledFor, 'A platform with one account still exposes its separate upstream time.');
     const recurrence = project + '/integrations/recycling/posts/' + single.id, detail = await request(recurrence); assert.equal(detail.status, 200); assert.equal(detail.data.canEnable, false); assert.match(detail.data.unavailable, /Separate account times/);
     result = await request(recurrence + '/review', 'POST', { expectedFingerprint: detail.data.fingerprint, confirmReview: true, configuration: { enabled: true, gap: 1, gapFreq: 'week', startDate: '2070-04-01T09:00:00Z', expireDate: null, expireCount: 3, contentVariations: [] } }); assert.equal(result.status, 422); assert.equal(writes.length, beforeExpired, 'Unsupported recurring account offsets are rejected before writes.');
@@ -128,7 +128,7 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     const bulk = Array.from({ length: 25 }, (_, index) => ({ ...accounts[0], _id: `bulk-${index}`, displayName: `Campaign page ${index}` })); accounts.push(...bulk); groups.push({ _id: 'bulk-group', name: 'Twenty-five campaign pages', accountIds: bulk.map(row => row._id) });
     const overview = await request(project + '/integrations/admin/overview'); assert.equal(overview.status, 200, JSON.stringify(overview.data)); assert.equal(overview.data.groups[0].accountIds.length, 25);
     const groupDraft = await draft({ accounts: [...overview.data.groups[0].accountIds], accountOverrides: {} }); assert.equal(groupDraft.accounts.length, 25, 'A reviewed group larger than twenty accounts can be saved.'); groups[0].accountIds.pop();
-    assert.equal(app.store.get(state.projectId, 'posts', groupDraft.id).accounts.length, 25, 'Later provider group edits do not alter saved explicit recipient IDs.');
+    assert.equal((await app.store.get(state.projectId, 'posts', groupDraft.id)).accounts.length, 25, 'Later provider group edits do not alter saved explicit recipient IDs.');
     assert.equal((await request(project + '/posts', 'POST', { ...fields, accountOverrides: {}, accounts: Array.from({ length: 51 }, (_, index) => 'account-' + index) })).status, 400, 'Fifty-one recipients are rejected before publication.');
     accounts.push(...['youtube-one', 'youtube-two'].map(_id => ({ _id, platform: 'youtube', profileId, isActive: true })));
     const youtubeFields = { content: 'Video tutorial', platforms: ['youtube'], accounts: ['youtube-one', 'youtube-two'], platformOverrides: {}, accountOverrides: {}, mediaItems: [{ type: 'video', url: 'https://cdn.example.test/tutorial.mp4', width: 1920, height: 1080, duration: 60, size: 1000000 }], tags: ['#launch, product', 'launch'] };
@@ -137,7 +137,7 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     result = await request(project + '/posts/' + tagged.id, 'PATCH', { tags: ['review changed'] }); assert.equal(result.status, 200);
     const beforeTags = writes.length;
     result = await request(social + '/publish', 'POST', { postId: tagged.id }, 'tags-stale-review'); assert.equal(result.status, 409); assert.equal(writes.length, beforeTags, 'Changing keyword tags invalidates the review before any provider write.');
-    await approve(app.store.get(state.projectId, 'posts', tagged.id));
+    await approve(await app.store.get(state.projectId, 'posts', tagged.id));
     omitCreateTags = true;
     result = await request(social + '/publish', 'POST', { postId: tagged.id }, 'tags-immediate'); omitCreateTags = false;
     assert.equal(result.status, 200, JSON.stringify(result.data)); assert.deepEqual(writes.at(-1).payload.tags, ['review changed']); assert.deepEqual(result.data.post.tags, ['review changed'], 'A minimal create receipt must read back keywords before confirming success.');
@@ -157,12 +157,12 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     tagRemote.tags = ['upstream keyword'];
     result = await request(social + '/status?postId=' + tagScheduled.id); assert.equal(result.status, 200); assert.deepEqual(result.data.post.tags, tagRemote.tags); await approve(result.data.post);
     const beforeTagRetry = writes.length; let tagPreflighted = false; validationHook = () => { tagPreflighted = true; }; omitTagReadback = true;
-    result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry-missing'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'POST_TAGS_CHANGED'); assert.equal(tagPreflighted, false); assert.equal(writes.length, beforeTagRetry); assert.deepEqual(app.store.get(state.projectId, 'posts', tagScheduled.id).tags, ['upstream keyword']); omitTagReadback = false;
+    result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry-missing'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'POST_TAGS_CHANGED'); assert.equal(tagPreflighted, false); assert.equal(writes.length, beforeTagRetry); assert.deepEqual((await app.store.get(state.projectId, 'posts', tagScheduled.id)).tags, ['upstream keyword']); omitTagReadback = false;
     result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry-missing'); assert.equal(result.status, 409); assert.equal(tagPreflighted, false); assert.equal(writes.length, beforeTagRetry, 'Replaying a failed operation retains its no-write result.');
-    tagRemote.tags = ['changed upstream']; result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry-mismatch'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'POST_TAGS_CHANGED'); assert.equal(tagPreflighted, false); assert.equal(writes.length, beforeTagRetry); assert.deepEqual(app.store.get(state.projectId, 'posts', tagScheduled.id).tags, ['upstream keyword']);
+    tagRemote.tags = ['changed upstream']; result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry-mismatch'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'POST_TAGS_CHANGED'); assert.equal(tagPreflighted, false); assert.equal(writes.length, beforeTagRetry); assert.deepEqual((await app.store.get(state.projectId, 'posts', tagScheduled.id)).tags, ['upstream keyword']);
     tagRemote.tags = ['upstream keyword']; validationHook = () => { tagRemote.tags = ['changed during preflight']; };
-    result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry-changed-preflight'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'POST_TAGS_CHANGED'); assert.equal(writes.length, beforeTagRetry); assert.deepEqual(app.store.get(state.projectId, 'posts', tagScheduled.id).tags, ['upstream keyword']); tagRemote.tags = ['upstream keyword'];
-    validationHook = () => { omitTagReadback = true; }; result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry-missing-preflight'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'POST_TAGS_CHANGED'); assert.equal(writes.length, beforeTagRetry); assert.deepEqual(app.store.get(state.projectId, 'posts', tagScheduled.id).tags, ['upstream keyword']); omitTagReadback = false;
+    result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry-changed-preflight'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'POST_TAGS_CHANGED'); assert.equal(writes.length, beforeTagRetry); assert.deepEqual((await app.store.get(state.projectId, 'posts', tagScheduled.id)).tags, ['upstream keyword']); tagRemote.tags = ['upstream keyword'];
+    validationHook = () => { omitTagReadback = true; }; result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry-missing-preflight'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'POST_TAGS_CHANGED'); assert.equal(writes.length, beforeTagRetry); assert.deepEqual((await app.store.get(state.projectId, 'posts', tagScheduled.id)).tags, ['upstream keyword']); omitTagReadback = false;
     result = await request(social + '/retry', 'POST', { postId: tagScheduled.id, confirmPublish: true }, 'tags-retry'); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.deepEqual(result.data.post.tags, ['upstream keyword']); assert.deepEqual(writes.at(-1).payload, {}, 'Retry uses stored provider metadata and cannot submit replacement keywords.');
     tagRemote.status = 'failed'; tagRemote.platforms = tagRemote.platforms.map(copy => ({ ...copy, status: 'failed' }));
     const beforeBadTag = writes.length;
@@ -171,14 +171,14 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     result = await request(social + '/status?postId=' + tagScheduled.id); assert.equal(result.status, 200);
     omitTagReadback = true;
     result = await request(social + '/update', 'POST', { postId: tagScheduled.id, tags: ['unverified change'], mode: 'draft' }, 'tags-missing-update-readback'); assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN');
-    const afterMissingTag = writes.length; result = await request(social + '/update', 'POST', { postId: tagScheduled.id, tags: ['unverified change'], mode: 'draft' }, 'tags-missing-update-readback'); assert.ok(result.status >= 400); assert.equal(writes.length, afterMissingTag); assert.deepEqual(app.store.get(state.projectId, 'posts', tagScheduled.id).tags, ['upstream keyword'], 'Unverified keywords must not replace the last confirmed local state.');
-    reviewSyntheticReceipt('tags-missing-update-readback');
+    const afterMissingTag = writes.length; result = await request(social + '/update', 'POST', { postId: tagScheduled.id, tags: ['unverified change'], mode: 'draft' }, 'tags-missing-update-readback'); assert.ok(result.status >= 400); assert.equal(writes.length, afterMissingTag); assert.deepEqual((await app.store.get(state.projectId, 'posts', tagScheduled.id)).tags, ['upstream keyword'], 'Unverified keywords must not replace the last confirmed local state.');
+    await reviewSyntheticReceipt('tags-missing-update-readback');
     omitTagReadback = false;
-    tagRemote.tags = null; result = await request(social + '/status?postId=' + tagScheduled.id); assert.equal(result.status, 502); assert.deepEqual(app.store.get(state.projectId, 'posts', tagScheduled.id).tags, ['upstream keyword']); tagRemote.tags = ['upstream keyword'];
+    tagRemote.tags = null; result = await request(social + '/status?postId=' + tagScheduled.id); assert.equal(result.status, 502); assert.deepEqual((await app.store.get(state.projectId, 'posts', tagScheduled.id)).tags, ['upstream keyword']); tagRemote.tags = ['upstream keyword'];
     const unverifiedTags = await draft(youtubeFields); await approve(unverifiedTags); omitCreateTags = true; omitTagReadback = true;
     result = await request(social + '/publish', 'POST', { postId: unverifiedTags.id }, 'tags-unverified-create'); assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN');
-    const afterUnverifiedCreate = writes.length; result = await request(social + '/publish', 'POST', { postId: unverifiedTags.id }, 'tags-unverified-create'); assert.ok(result.status >= 400); assert.equal(writes.length, afterUnverifiedCreate); assert.equal(app.store.get(state.projectId, 'posts', unverifiedTags.id).externalId, undefined);
-    reviewSyntheticReceipt('tags-unverified-create');
+    const afterUnverifiedCreate = writes.length; result = await request(social + '/publish', 'POST', { postId: unverifiedTags.id }, 'tags-unverified-create'); assert.ok(result.status >= 400); assert.equal(writes.length, afterUnverifiedCreate); assert.equal((await app.store.get(state.projectId, 'posts', unverifiedTags.id)).externalId, undefined);
+    await reviewSyntheticReceipt('tags-unverified-create');
     omitCreateTags = false; omitTagReadback = false;
     for (const action of ['create', 'update']) {
       const alteredTags = await draft({ ...youtubeFields, ...(action === 'update' ? { status: 'scheduled', scheduledAt: '2070-01-01T09:00:00Z' } : {}) }); await approve(alteredTags);
@@ -186,9 +186,9 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
       omitCreateTags = true; readbackTags = ['launch, product'];
       const path = action === 'create' ? '/publish' : '/update', body = { postId: alteredTags.id, ...(action === 'update' ? { tags: ['launch', 'product'], mode: 'draft' } : {}) }, key = `tags-altered-${action}`;
       const beforeAlteredTags = writes.length; result = await request(social + path, 'POST', body, key); assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN'); assert.equal(writes.length, beforeAlteredTags + 1, 'The altered receipt is rejected after exactly one provider write.');
-      const afterAlteredTags = writes.length; result = await request(social + path, 'POST', body, key); assert.ok(result.status >= 400); assert.equal(writes.length, afterAlteredTags); assert.deepEqual(app.store.get(state.projectId, 'posts', alteredTags.id).tags, ['launch', 'product'], 'Altered keyword receipts must preserve the approved local copy.');
-      if (action === 'create') assert.equal(app.store.get(state.projectId, 'posts', alteredTags.id).externalId, undefined);
-      reviewSyntheticReceipt(key);
+      const afterAlteredTags = writes.length; result = await request(social + path, 'POST', body, key); assert.ok(result.status >= 400); assert.equal(writes.length, afterAlteredTags); assert.deepEqual((await app.store.get(state.projectId, 'posts', alteredTags.id)).tags, ['launch', 'product'], 'Altered keyword receipts must preserve the approved local copy.');
+      if (action === 'create') assert.equal((await app.store.get(state.projectId, 'posts', alteredTags.id)).externalId, undefined);
+      await reviewSyntheticReceipt(key);
       omitCreateTags = false; readbackTags = undefined;
     }
     assert.equal((await request(project + '/approvals/policy', 'POST', { requireApproval: false })).status, 200);
@@ -214,5 +214,5 @@ test('HTTP account copies retain separate caption, DAM media, options, approvals
     const uncertain = await draft(); await approve(uncertain); loseReceipt = true;
     result = await request(social + '/publish', 'POST', { postId: uncertain.id }, 'account-uncertain'); assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.error.code, 'OPERATION_UNCERTAIN'); const writesAfterLostReceipt = writes.length;
     result = await request(social + '/publish', 'POST', { postId: uncertain.id }, 'account-uncertain'); assert.ok(result.status >= 400); assert.equal(writes.length, writesAfterLostReceipt, 'Replaying an uncertain logical publication must not create another provider post.');
-  } finally { globalThis.fetch = originalFetch; await new Promise(resolve => app.server.close(resolve)); app.db.close(); await rm(dataDir, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); }
 });

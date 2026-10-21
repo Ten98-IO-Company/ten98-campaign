@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
 import { handleIntegration } from '../server/integrations.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
-test('late social refreshes cannot overwrite newer edits or cancellation receipts, even with identical update timestamps', async () => {
+test('late social refreshes cannot overwrite newer edits or cancellation receipts, even with identical update timestamps', { skip: postgresSkip }, async t => {
   for (const action of ['update', 'cancel']) {
-    const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'refresh-race-project', zernioProfileId: 'refresh-race-profile' };
+    const { db } = await testDatabase(t), originalFetch = globalThis.fetch, project = { id: 'refresh-race-project', zernioProfileId: 'refresh-race-profile' };
     const account = { _id: 'refresh-race-account', platform: 'facebook', profileId: project.zernioProfileId };
     let post = { id: 'refresh-race-local', externalId: 'refresh-race-remote', zernioProfileId: project.zernioProfileId, content: 'Original caption', status: 'scheduled', updatedAt: 'same-timestamp' };
     let remote = { _id: post.externalId, status: 'scheduled', content: post.content, scheduledFor: '2070-01-01T10:00:00Z', platforms: [{ platform: account.platform, accountId: account._id, status: 'pending' }] };
@@ -37,12 +37,12 @@ test('late social refreshes cannot overwrite newer edits or cancellation receipt
       assert.equal(stale.status, 409); assert.equal(stale.data.error.code, 'POST_CHANGED');
       assert.deepEqual(post, latest, 'An older provider response cannot replace the newer local receipt.');
       assert.equal((await invoke('status')).status, 200, 'A fresh status read remains available.');
-    } finally { release(); await refresh?.catch(() => {}); globalThis.fetch = originalFetch; db.close(); }
+    } finally { release(); await refresh?.catch(() => {}); globalThis.fetch = originalFetch; }
   }
 });
 
-test('a social write accepted during a newer local status update remains uncertain and cannot be repeated', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'write-race-project', zernioProfileId: 'write-race-profile' };
+test('a social write accepted during a newer local status update remains uncertain and cannot be repeated', { skip: postgresSkip }, async t => {
+  const { db } = await testDatabase(t), originalFetch = globalThis.fetch, project = { id: 'write-race-project', zernioProfileId: 'write-race-profile' };
   const account = { _id: 'write-race-account', platform: 'facebook', profileId: project.zernioProfileId };
   let post = { id: 'write-race-local', externalId: 'write-race-remote', zernioProfileId: project.zernioProfileId, content: 'Original caption', status: 'draft' }, writes = 0;
   let remote = { _id: post.externalId, status: 'draft', content: post.content, platforms: [{ platform: account.platform, accountId: account._id }] };
@@ -62,11 +62,11 @@ test('a social write accepted during a newer local status update remains uncerta
     assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
     assert.equal(post.status, 'published'); assert.equal(post.content, 'Original caption');
     assert.equal((await invoke('write-race-new-key')).status, 409); assert.equal(writes, 1);
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
-test('a first publication cannot mark a newer local caption as published after the provider accepted the earlier caption', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'publish-race-project', zernioProfileId: 'publish-race-profile' };
+test('a first publication cannot mark a newer local caption as published after the provider accepted the earlier caption', { skip: postgresSkip }, async t => {
+  const { db } = await testDatabase(t), originalFetch = globalThis.fetch, project = { id: 'publish-race-project', zernioProfileId: 'publish-race-profile' };
   const account = { _id: 'publish-race-account', platform: 'facebook', profileId: project.zernioProfileId };
   let post = { id: 'publish-race-local', content: 'Original caption', platforms: ['facebook'], accounts: [account._id], status: 'draft', updatedAt: 'same-timestamp' }, writes = 0;
   const store = { list() { return []; }, get(_project, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(_project, _collection, _id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
@@ -90,11 +90,11 @@ test('a first publication cannot mark a newer local caption as published after t
     assert.equal(post.content, 'New unsent caption'); assert.equal(post.status, 'draft'); assert.equal(post.externalId, undefined);
     assert.equal((await invoke('publish-race-original')).status, 409);
     assert.equal((await invoke('publish-race-new-key')).status, 409); assert.equal(writes, 1);
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
-test('a minimal first publication receipt preserves the submitted schedule and platform variants', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'minimal-publish-project', zernioProfileId: 'minimal-publish-profile' };
+test('a minimal first publication receipt preserves the submitted schedule and platform variants', { skip: postgresSkip }, async t => {
+  const { db } = await testDatabase(t), originalFetch = globalThis.fetch, project = { id: 'minimal-publish-project', zernioProfileId: 'minimal-publish-profile' };
   const account = { _id: 'minimal-publish-account', platform: 'facebook', profileId: project.zernioProfileId };
   const original = { id: 'minimal-publish-local', content: 'Shared caption', platforms: ['facebook'], accounts: [account._id], status: 'scheduled', scheduledAt: '2070-01-01T10:00:00Z', platformOverrides: { facebook: { content: 'Facebook caption', options: { firstComment: 'First comment' } } } };
   let post = structuredClone(original);
@@ -111,11 +111,11 @@ test('a minimal first publication receipt preserves the submitted schedule and p
     await handleIntegration({ req: { method: 'POST', headers: { 'idempotency-key': 'minimal-publish-original' } }, url: new URL(`http://localhost/api/projects/${project.id}/integrations/social/publish`), body: { postId: post.id }, project, db, store, role: 'editor', config: { env: { ZERNIO_API_KEY: 'fixture-key' } }, send(status, data) { response = { status, data }; } });
     assert.equal(response.status, 200, JSON.stringify(response.data)); assert.equal(post.externalId, 'minimal-publish-remote');
     for (const field of ['content', 'scheduledAt', 'platforms', 'accounts', 'platformOverrides']) assert.deepEqual(post[field], original[field]);
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
-test('an empty Drive collection is readable and syncable without erasing existing assets', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+test('an empty Drive collection is readable and syncable without erasing existing assets', { skip: postgresSkip }, async t => {
+  const { db } = await testDatabase(t), originalFetch = globalThis.fetch, { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const project = { id: 'empty-drive-project', driveFolderId: 'empty-drive-folder' }, assets = [{ id: 'existing-asset', name: 'Retained creative' }];
   let page = { kind: 'drive#fileList' }, fields;
   globalThis.fetch = async target => {
@@ -142,11 +142,11 @@ test('an empty Drive collection is readable and syncable without erasing existin
       page = malformed; assert.equal((await invoke('POST')).status, 502);
     }
     assert.deepEqual(assets, [{ id: 'existing-asset', name: 'Retained creative' }]);
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
-test('editing the shared post schedule preserves each independently scheduled account time', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'schedule-project', zernioProfileId: 'schedule-profile' }, writes = [];
+test('editing the shared post schedule preserves each independently scheduled account time', { skip: postgresSkip }, async t => {
+  const { db } = await testDatabase(t), originalFetch = globalThis.fetch, project = { id: 'schedule-project', zernioProfileId: 'schedule-profile' }, writes = [];
   const copies = [{ platform: 'facebook', accountId: 'facebook-copy', status: 'pending', scheduledFor: '2070-01-01T10:00:00Z', customContent: 'Facebook caption' }, { platform: 'linkedin', accountId: 'linkedin-copy', status: 'pending', scheduledFor: '2070-01-01T11:00:00Z', customContent: 'LinkedIn caption' }];
   let remote = { _id: 'schedule-remote', status: 'scheduled', content: 'Shared caption', scheduledFor: '2070-01-01T09:00:00Z', platforms: copies }, post = { id: 'schedule-local', externalId: remote._id, zernioProfileId: project.zernioProfileId, content: remote.content, status: 'scheduled' };
   const store = { list() { return []; }, get(projectId, collection) { return collection === 'posts' ? structuredClone(post) : undefined; }, update(projectId, collection, id, patch) { post = { ...post, ...patch }; return post; }, activity() {} };
@@ -172,11 +172,11 @@ test('editing the shared post schedule preserves each independently scheduled ac
       for (const target of payload.platforms) assert.equal(target.scheduledFor, copies.find(copy => copy.accountId === target.accountId).scheduledFor, 'Only an explicit account-time edit replaces its separate time.');
       assert.deepEqual(payload.platforms.map(copy => copy.customContent), index === 0 ? copies.map(copy => copy.customContent) : ['New Facebook caption', 'New LinkedIn caption']);
     }
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });
 
-test('a documented minimal update receipt retains the newly saved platform draft locally', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, project = { id: 'minimal-edit-project', zernioProfileId: 'minimal-edit-profile' }, account = { _id: 'minimal-edit-account', platform: 'facebook', profileId: 'minimal-edit-profile' };
+test('a documented minimal update receipt retains the newly saved platform draft locally', { skip: postgresSkip }, async t => {
+  const { db } = await testDatabase(t), originalFetch = globalThis.fetch, project = { id: 'minimal-edit-project', zernioProfileId: 'minimal-edit-profile' }, account = { _id: 'minimal-edit-account', platform: 'facebook', profileId: 'minimal-edit-profile' };
   let post = { id: 'minimal-edit-local', externalId: 'minimal-edit-remote', zernioProfileId: project.zernioProfileId, content: 'Shared caption', status: 'draft', mediaItems: [], platformOverrides: { facebook: { content: 'Old Facebook caption' } } };
   let remote = { _id: post.externalId, status: 'draft', content: post.content, mediaItems: [], platforms: [{ platform: account.platform, accountId: account._id, customContent: 'Old Facebook caption' }] }, failReadback = false, unreadable = false, writes = 0;
   const overrides = { facebook: { content: 'New Facebook caption', mediaItems: [{ type: 'image', url: 'https://cdn.example.test/new.png' }], options: { firstComment: 'New first comment' } } };
@@ -207,5 +207,5 @@ test('a documented minimal update receipt retains the newly saved platform draft
     assert.equal((await repeat('minimal-edit-unconfirmed')).status, 409);
     assert.equal(response.data.operation.status, 'uncertain'); assert.deepEqual(post, saved);
     assert.equal((await repeat('minimal-edit-fresh-key')).status, 409); assert.equal(writes, 3, 'A fresh key cannot repeat an accepted update with unreadable state.');
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });

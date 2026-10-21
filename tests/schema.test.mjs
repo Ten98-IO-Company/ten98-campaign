@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import pg from 'pg';
 import * as schema from '../server/schema.ts';
@@ -18,29 +16,6 @@ test('every Drizzle table and column is created by the SQL migrations', async ()
   assert.equal(tables.length, 81);
   assert.deepEqual(tables.map(table => table.name).sort(), [...created.keys()].sort());
   for (const table of tables) assert.deepEqual(table.columns.map(column => column.name), created.get(table.name), table.name);
-});
-
-// Until cutover, dev still creates SQLite tables lazily; a table or column added there must reach the PostgreSQL schema too.
-test('the PostgreSQL schema covers every table and column the SQLite modules still create', async () => {
-  const sqlite = new DatabaseSync(':memory:'), statements = [];
-  for (const file of (await readdir(new URL('../server/', import.meta.url))).filter(name => name.endsWith('.ts'))) {
-    const source = await readFile(new URL(`../server/${file}`, import.meta.url), 'utf8');
-    for (const match of source.matchAll(/CREATE TABLE IF NOT EXISTS/g)) {
-      let index = source.indexOf('(', match.index), depth = 0;
-      for (; index < source.length; index++) { if (source[index] === '(') depth++; else if (source[index] === ')' && --depth === 0) break; }
-      statements.push(source.slice(match.index, index + 1));
-    }
-    for (const match of source.matchAll(/ALTER TABLE (\w+) ADD COLUMN (?:\$\{name\}|(\w+))/g)) statements.push({ table: match[1], column: match[2] });
-  }
-  for (const statement of statements) if (typeof statement === 'string') sqlite.exec(statement);
-  const pgColumns = new Map(tables.map(table => [table.name, table.columns.map(column => column.name)]));
-  const names = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('sqlite_sequence','schema_version')").all().map(row => row.name);
-  assert.ok(names.length >= 1);
-  for (const name of names) {
-    assert.ok(pgColumns.has(name), `${name} is missing from server/schema.ts`);
-    for (const { name: column } of sqlite.prepare(`PRAGMA table_info(${name})`).all()) assert.ok(pgColumns.get(name).includes(column), `${name}.${column} is missing from server/schema.ts`);
-  }
-  for (const { table, column } of statements.filter(statement => typeof statement === 'object' && statement.column)) assert.ok(pgColumns.get(table).includes(column), `${table}.${column} is missing from server/schema.ts`);
 });
 
 test('the migration ledger accepts only an unmodified prefix of the shipped migrations', async () => {

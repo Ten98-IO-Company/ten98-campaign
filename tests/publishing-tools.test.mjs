@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-async function fixture() {
+async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'publishing-tools-')), originalFetch = globalThis.fetch, calls = [], origin = 'https://tools.example.test';
-  const app = createApp({ dataDir, env: { ZERNIO_API_KEY: 'synthetic-tools-key' }, appUrl: origin, directScheduler: false });
+  const app = await testApp(t, { dataDir, env: { ZERNIO_API_KEY: 'synthetic-tools-key' }, appUrl: origin, directScheduler: false });
   const accounts = [{ _id: 'gmb', profileId: 'tools-profile', platform: 'googlebusiness', platformUserId: 'google-source', isActive: true }, { _id: 'instagram', profileId: 'tools-profile', platform: 'instagram', platformUserId: '17800001', isActive: true, metadata: { loginMethod: 'facebook_login' } }, { _id: 'outside', profileId: 'another-profile', platform: 'googlebusiness', isActive: true }];
   const audio = { audioId: '123', title: 'Sample music', audioType: 'music', durationInMs: 12000, displayArtist: 'Artist', downloadUrl: 'https://cdn.example.test/preview.mp3', isAdsEligible: false, onPlatformAudioPreviewLink: 'https://www.instagram.com/reels/audio/123/', accessToken: 'must-not-escape' };
   let hook;
@@ -29,11 +29,11 @@ async function fixture() {
   }
   const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Tools owner', email: 'tools@example.test', password: 'synthetic tools passphrase long enough', sample: false }); cookie = setup.cookie; const projectId = setup.data.projectId;
   assert.equal((await request('/api/projects/' + projectId, 'PATCH', { zernioProfileId: 'tools-profile' })).status, 200);
-  return { app, accounts, calls, audio, request, projectId, read: (route, method = 'GET') => request(`/api/projects/${projectId}/integrations/publishing/accounts/${route}`, method), setHook(value) { hook = value; }, async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
+  return { app, accounts, calls, audio, request, projectId, read: (route, method = 'GET') => request(`/api/projects/${projectId}/integrations/publishing/accounts/${route}`, method), setHook(value) { hook = value; }, async close() { globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
 }
 
-test('composer accounts expose only the Instagram login capability needed by audio tools', async () => {
-  const f = await fixture();
+test('composer accounts expose only the Instagram login capability needed by audio tools', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     f.accounts[1].metadata.privateCredential = 'must-not-escape';
     let result = await f.request(`/api/projects/${f.projectId}/integrations/accounts`);
@@ -46,8 +46,8 @@ test('composer accounts expose only the Instagram login capability needed by aud
   } finally { await f.close(); }
 });
 
-test('publishing tools bind scoped accounts, keep native location IDs and expose only usable read metadata', async () => {
-  const f = await fixture();
+test('publishing tools bind scoped accounts, keep native location IDs and expose only usable read metadata', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     const locations = await f.read('gmb/gmb-locations?search=Shop'); assert.equal(locations.status, 200, JSON.stringify(locations.data));
     assert.equal(locations.data.accountId, 'gmb'); assert.equal(locations.data.platform, 'googlebusiness'); assert.equal(locations.data.locations[0].accountId, 'accounts/999');
@@ -57,13 +57,13 @@ test('publishing tools bind scoped accounts, keep native location IDs and expose
     const music = await f.read('instagram/instagram-audio?audioType=music&q=Sample'); assert.equal(music.status, 200); assert.equal(music.data.loginMethod, 'facebook_login'); assert.equal(music.data.audio[0].igUsername, null); assert.equal(music.data.audio[0].isAdsEligible, false);
     const lookup = await f.read('instagram/instagram-audio-lookup?audioId=123'); assert.equal(lookup.status, 200); assert.deepEqual(lookup.data.audio, music.data.audio[0]);
     assert.equal(JSON.stringify([locations, quota, music, lookup]).includes('must-not-escape'), false);
-    assert.equal(f.app.db.prepare("SELECT count(*) AS total FROM sqlite_master WHERE name='integration_operations'").get().total, 0);
+    assert.equal((await f.app.sql.get('SELECT count(*) AS total FROM integration_operations')).total, 0);
     assert.equal(f.calls.filter(call => call.url.pathname.endsWith('/accounts')).length, 8, 'Each read verifies the connected account again after fetching provider data.');
   } finally { await f.close(); }
 });
 
-test('publishing tools reject writes, duplicate scalars, extra filters and fabricated pagination without provider calls', async () => {
-  const f = await fixture();
+test('publishing tools reject writes, duplicate scalars, extra filters and fabricated pagination without provider calls', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     for (const route of ['gmb/gmb-locations', 'instagram/instagram-publishing-limit', 'instagram/instagram-audio?audioType=music', 'instagram/instagram-audio-lookup?audioId=123']) assert.equal((await f.read(route, 'POST')).status, 405);
     for (const route of ['gmb/gmb-locations?filter=title%3DShop', 'gmb/gmb-locations?limit=500', 'gmb/gmb-locations?page=2', 'gmb/gmb-locations?cursor=next', 'gmb/gmb-locations?search=a&search=b', 'gmb/gmb-locations?search=', 'gmb/gmb-locations?search=' + 'a'.repeat(201), 'instagram/instagram-publishing-limit?profileId=another', 'instagram/instagram-audio', 'instagram/instagram-audio?audioType=invalid', 'instagram/instagram-audio?audioType=music&audioType=music', 'instagram/instagram-audio?audioType=music&q=', 'instagram/instagram-audio?audioType=music&q=' + 'a'.repeat(201), 'instagram/instagram-audio?audioType=music&page=2', 'instagram/instagram-audio-lookup?audioId=123&audioId=456', 'instagram/instagram-audio-lookup?audioId=abc', 'instagram/instagram-audio-lookup?audioId=' + '1'.repeat(31)]) assert.equal((await f.read(route)).status, 400, route);
@@ -73,8 +73,8 @@ test('publishing tools reject writes, duplicate scalars, extra filters and fabri
   } finally { await f.close(); }
 });
 
-test('publishing tools gate foreign, wrong-platform, inactive, reconnection and Instagram Login accounts', async () => {
-  const f = await fixture();
+test('publishing tools gate foreign, wrong-platform, inactive, reconnection and Instagram Login accounts', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     assert.equal((await f.read('outside/gmb-locations')).status, 403); assert.equal((await f.read('instagram/gmb-locations')).status, 422);
     f.accounts[0].isActive = false; assert.equal((await f.read('gmb/gmb-locations')).status, 422); f.accounts[0].isActive = true;
@@ -85,8 +85,8 @@ test('publishing tools gate foreign, wrong-platform, inactive, reconnection and 
   } finally { await f.close(); }
 });
 
-test('publishing tools preserve partial and unknown location lists and reject malformed, duplicate or mismatched provider data', async () => {
-  const f = await fixture();
+test('publishing tools preserve partial and unknown location lists and reject malformed, duplicate or mismatched provider data', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     f.setHook(url => url.pathname.endsWith('/gmb-locations') ? { locations: [] } : undefined);
     const unknown = await f.read('gmb/gmb-locations'); assert.equal(unknown.status, 200); assert.deepEqual(unknown.data, { accountId: 'gmb', platform: 'googlebusiness', locations: [], selectedLocationId: null, hasMore: null, cached: null });
@@ -99,8 +99,8 @@ test('publishing tools preserve partial and unknown location lists and reject ma
   } finally { await f.close(); }
 });
 
-test('publishing tools withhold stale reads after connected identity, login or grant scope changes', async () => {
-  const f = await fixture();
+test('publishing tools withhold stale reads after connected identity, login or grant scope changes', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
   try {
     for (const change of [row => { row.platformUserId = 'changed'; }, row => { row.username = 'changed'; }, row => { row.metadata.loginMethod = 'instagram_login'; }, row => { row.needsReconnection = true; }, row => { row.profileId = 'another'; }]) {
       f.accounts[1] = { _id: 'instagram', profileId: 'tools-profile', platform: 'instagram', platformUserId: '17800001', isActive: true, metadata: { loginMethod: 'facebook_login' } };
@@ -110,16 +110,16 @@ test('publishing tools withhold stale reads after connected identity, login or g
   } finally { await f.close(); }
 });
 
-test('in-flight publishing reads stop after session, membership, mapping or credential revocation', async () => {
+test('in-flight publishing reads stop after session, membership, mapping or credential revocation', { skip: postgresSkip }, async t => {
   for (const change of ['session', 'membership', 'role', 'mapping', 'credentials']) {
-    const f = await fixture();
+    const f = await fixture(t);
     try {
       f.setHook(async url => {
         if (!url.pathname.endsWith('/publishing-limit')) return;
-        if (change === 'session') f.app.db.prepare('DELETE FROM sessions').run();
-        if (change === 'membership') f.app.db.prepare('DELETE FROM memberships').run();
-        if (change === 'role') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
-        if (change === 'mapping') f.app.db.prepare("UPDATE projects SET zernio_profile_id='another'").run();
+        if (change === 'session') await f.app.sql.run('DELETE FROM sessions');
+        if (change === 'membership') await f.app.sql.run('DELETE FROM memberships');
+        if (change === 'role') await f.app.sql.run("UPDATE memberships SET role='viewer'");
+        if (change === 'mapping') await f.app.sql.run("UPDATE projects SET zernio_profile_id='another'");
         if (change === 'credentials') assert.equal((await f.request('/api/settings/integrations/zernio', 'PUT', { fields: { apiKey: 'changed-synthetic-key' } })).status, 200);
         return { quotaUsage: 3, quotaTotal: 50, quotaDurationSeconds: 86400 };
       });

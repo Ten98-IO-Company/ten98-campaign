@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
@@ -144,7 +144,9 @@ test('integration settings HTTP routes enforce operators, retain encrypted secre
     for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey, 'saved-webhook-fixture-secret']) assert.equal(serialized.includes(secret), false, 'Global settings metadata never returns raw credentials.');
     const encrypted = await sql.all('SELECT nonce,ciphertext,tag FROM integration_settings'); assert.equal(encrypted.length, 4);
     for (const row of encrypted) { assert.equal(row.nonce.length, 12); assert.equal(row.tag.length, 16); for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey]) assert.equal(Buffer.from(row.ciphertext).includes(Buffer.from(secret)), false); }
-    for (const file of ['campaign.sqlite', 'campaign.sqlite-wal']) { const bytes = await readFile(join(dataDir, file)); for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey]) assert.equal(bytes.includes(Buffer.from(secret)), false, 'Persisted database bytes do not contain plaintext provider credentials.'); }
+    // PostgreSQL replaces the SQLite file and WAL: scan every persisted row of every table, then every file the app keeps in its data directory.
+    for (const { name: table } of await sql.all("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")) { const { dump } = await sql.get(`SELECT coalesce(string_agg(row_to_json(t)::text, ''), '') AS dump FROM "${table}" t`); for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey]) assert.equal(dump.includes(JSON.stringify(secret).slice(1, -1)), false, `Persisted ${table} rows do not contain plaintext provider credentials.`); }
+    for (const file of await readdir(dataDir, { recursive: true })) { const bytes = await readFile(join(dataDir, file)).catch(error => { if (error.code === 'EISDIR') return Buffer.alloc(0); throw error; }); for (const secret of [zernioSecret, routerSecret, mapsKey, privateKey]) assert.equal(bytes.includes(Buffer.from(secret)), false, 'Persisted data directory bytes do not contain plaintext provider credentials.'); }
 
     assert.equal((await request(`${route}/googleDrive/test`, { method: 'POST', body: { projectId, driveFolderId: 'arbitrary-client-folder' } })).status, 400);
     assert.equal((await request(`${route}/googleCalendar/test`, { method: 'POST', body: { projectId, calendarId: 'arbitrary-calendar@example.test' } })).status, 400);
