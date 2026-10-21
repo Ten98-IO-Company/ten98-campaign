@@ -194,7 +194,7 @@ test('template write helper retains uncertain keys, validates receipts and ignor
 test('template editor renders ordinary fields, reviewer examples and escaped previews', async () => {
   const source = await readFile(new URL('../src/ZernioWhatsAppTemplates.tsx', import.meta.url), 'utf8'), preview = source.slice(source.indexOf('const positions ='), source.indexOf('\nexport default function'));
   const { code } = await transformWithOxc(preview.replace('export function TemplateContentEditor', 'function TemplateContentEditor'), 'TemplateEditor.tsx', { jsx: { runtime: 'classic' } });
-  const editor = new Function('React', 'WhatsAppTemplate', `${code}; return TemplateContentEditor;`)(React, ({ template }) => React.createElement('p', {}, template.components.find(row => row.type === 'BODY').text));
+  const ui = await import('@ten98/ui'), editor = new Function('React', 'WhatsAppTemplate', ...Object.keys(ui), `${code}; return TemplateContentEditor;`)(React, ({ template }) => React.createElement('p', {}, template.components.find(row => row.type === 'BODY').text), ...Object.values(ui));
   const value = form(); value.bodyText = '<script>alert(1)</script> {{1}}'; const html = renderToStaticMarkup(React.createElement(editor, { form: value, onChange() {} })); assert.match(html, /Reviewer examples and preview/); assert.match(html, /Header text/); assert.match(html, /Website URL/); assert.match(html, /&lt;script&gt;/); assert.doesNotMatch(html, /<script>|JSON|API payload/);
 });
 

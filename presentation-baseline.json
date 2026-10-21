@@ -27,10 +27,6 @@
     "element": 91,
     "styling": 28
   },
-  "src/ZernioWhatsAppTemplates.tsx": {
-    "element": 160,
-    "styling": 47
-  },
   "src/main.tsx": {
     "stylesheet": 1
   }
