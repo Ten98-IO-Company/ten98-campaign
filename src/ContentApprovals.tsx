@@ -64,13 +64,13 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
   async function review(item: any, decision: string) {
     await action(item.post.id, async () => { const result = await request(`${path}/posts/${encodeURIComponent(item.post.id)}/review`, 'POST', { decision, note: notes[item.post.id] || '', reviewId: item.review.id }); if (!active.current) return; acceptItem(result.item); setNotes(previous => ({ ...previous, [item.post.id]: '' })); setNotice(decision === 'approved' ? 'Post approved. Publishing remains a separate action.' : 'Changes requested. The author can update this draft and request another review.'); await onChanged?.(); await load(); });
   }
-  const posts = (data?.posts || []).map(reviewItem).filter((item: any) => !item.post.sample && inPlatform(item) && (filter === 'all' || item.status === filter)).sort(byReviewOrder);
+  const posts = (data?.posts || []).map((item: any) => reviewItem(item)).filter((item: any) => !item.post.sample && inPlatform(item) && (filter === 'all' || item.status === filter)).sort(byReviewOrder);
   // Counts, sort and platform filter follow pendpost/pendpost@42ac77b29f7720a912bdce1507b16a2a56fca74f app/src/components/Freigaben.jsx:54-60, 807-833 and 896-920 (MIT):
   // each status count uses the list's own platform filter, so a count never promises posts the list hides. Only loaded data is used.
   function inPlatform(item: any) { return !platform || (item.post.platforms || []).includes(platform); }
   function reviewTime(item: any) { const value = Date.parse(sort === 'planned' ? item.post.scheduledAt : item.review?.requestedAt); return Number.isFinite(value) ? value : null; }
   function byReviewOrder(a: any, b: any) { const left = reviewTime(a), right = reviewTime(b); return left === null ? right === null ? 0 : 1 : right === null ? -1 : sort === 'planned' ? left - right : right - left; }
-  const statusValues = ['all', 'pending', 'stale', 'approved', 'rejected', 'not_requested'], loaded = (data?.posts || []).map(reviewItem).filter((item: any) => !item.post.sample);
+  const statusValues = ['all', 'pending', 'stale', 'approved', 'rejected', 'not_requested'], loaded = (data?.posts || []).map((item: any) => reviewItem(item)).filter((item: any) => !item.post.sample);
   const counts: Record<string, number> = Object.fromEntries(statusValues.map(value => [value, loaded.filter((item: any) => inPlatform(item) && (value === 'all' || item.status === value)).length]));
   const platformChoices: string[] = [...new Set([...loaded.flatMap((item: any) => item.post.platforms || []), ...(platform ? [platform] : [])])];
   // A hidden or no-longer-pending post can stay in the selection, so every count and the loop use this intersection.

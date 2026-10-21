@@ -17,6 +17,8 @@ async function view(file, names, request, initial = {}) {
     useRef(value) { const ref = { current: value }; refs.push(ref); return ref; }, useEffect(run) { effects.push(run); },
     FormData: FormValues, window: { confirm: () => true, location: { reload: () => reloads.push(file) } }, crypto, DOMException,
     lines: value => String(value || '').split('\n').map(line => line.trim()).filter(Boolean),
+    // Pure module-level helpers the component body calls (ContentApprovals), taken from the real source.
+    ...Object.fromEntries(['approveBlocked', 'postName', 'reviewItem'].flatMap(name => { const line = source.match(new RegExp(`^const ${name} = (.+);$`, 'm')); return line ? [[name, new Function('return ' + stripTypeScriptTypes(line[1]))()]] : []; })),
   };
   const component = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(start, end).replace('export default ', '') + `return { ${names.join(', ')} };\n}`)});`)(...Object.values(context));
   const handlers = component({ projectId: 'project', workspaceId: 'workspace', role: 'owner', isOperator: true, currentUserId: 'self', request });
