@@ -6,8 +6,8 @@ ten98 Campaign's original application code is available under the [MIT license](
 
 The following projects inform the advertising and unified inbox (messages, comments and reviews) workflows. The inbox was removed in version 0.4.0 and later restored, so both credits are current:
 
-- [zernio-dev/ads-dashboard](https://github.com/zernio-dev/ads-dashboard), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/ads-dashboard/blob/main/LICENSE).
-- [zernio-dev/unified-inbox](https://github.com/zernio-dev/unified-inbox), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/unified-inbox/blob/main/LICENSE).
+- [zernio-dev/ads-dashboard](https://github.com/zernio-dev/ads-dashboard) at commit [4386edd](https://github.com/zernio-dev/ads-dashboard/tree/4386eddc9a35c2b93c392d8523d148b0f95a62eb), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/ads-dashboard/blob/4386eddc9a35c2b93c392d8523d148b0f95a62eb/LICENSE).
+- [zernio-dev/unified-inbox](https://github.com/zernio-dev/unified-inbox) at commit [3d62be1](https://github.com/zernio-dev/unified-inbox/tree/3d62be18923df6fa22fa01037a2057254553206d), copyright (c) 2026 Zernio — [MIT license](https://github.com/zernio-dev/unified-inbox/blob/3d62be18923df6fa22fa01037a2057254553206d/LICENSE).
 
 Their source files are not copied into this application. Zernio calls are implemented independently with Node.js built-ins and `fetch`. The workspace/project hierarchy and purple visual palette also follow the local ten98-monitor project (MIT, copyright 2026 ten98-monitor contributors), inspected as reference rather than copied source.
 
