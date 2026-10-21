@@ -19,6 +19,8 @@ export type ImportSummary = {
   tables: { name: string; rows: number }[];
   absent: string[];
   ephemeral: { name: string; rows: number }[];
+  /** Empty source tables that no schema version uses (left behind by older releases); nothing to carry over. */
+  ignored: string[];
   defaulted: string[];
   sequences: { column: string; value: number }[];
   claimed: boolean;
@@ -216,10 +218,12 @@ export async function importSqlite(pool: pg.Pool, file: string): Promise<ImportS
         if ((await client.query(`SELECT 1 FROM ${quote(name)} LIMIT 1`)).rowCount) throw new ImportError(`The target database already has data (table ${name}). Import only into a freshly migrated, empty database.`);
       }
       const present = new Set(source.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").all().map(row => String(row.name)));
-      const unknown = [...present].filter(name => !tables.has(name) || name === ledgerTable).sort();
-      if (unknown.length) throw new ImportError(`The source has tables the PostgreSQL schema does not: ${unknown.join(', ')}. Nothing was imported.`);
       const count = (name: string) => Number(source.prepare(`SELECT count(*) AS count FROM ${quote(name)}`).get()!.count);
-      const summary: ImportSummary = { tables: [], absent: [], ephemeral: [], defaulted: [], sequences: [], claimed: false };
+      // Older releases left some tables behind unused; an empty one carries nothing, but rows in an unknown table would be lost.
+      const unknown = [...present].filter(name => !tables.has(name) || name === ledgerTable).sort();
+      const kept = unknown.filter(name => name === ledgerTable || count(name) > 0);
+      if (kept.length) throw new ImportError(`The source has tables with rows the PostgreSQL schema does not: ${kept.join(', ')}. Nothing was imported.`);
+      const summary: ImportSummary = { tables: [], absent: [], ephemeral: [], ignored: unknown, defaulted: [], sequences: [], claimed: false };
       const candidates = [...tables.keys()].filter(name => name !== 'installation' && name !== ledgerTable && !ephemeralTables.includes(name));
       summary.absent = candidates.filter(name => !present.has(name)).sort();
       summary.ephemeral = ephemeralTables.filter(name => present.has(name)).map(name => ({ name, rows: count(name) }));
