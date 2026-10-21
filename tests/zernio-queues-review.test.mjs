@@ -14,11 +14,15 @@ test('queue deletion and rescheduling confirm in dialogs that call the unchanged
   assert.ok(source.includes('if (target) await removeConfirmed(target);'));
 });
 
-test('the queue timezone is picked from the browser IANA list and an unknown zone blocks saving', () => {
-  assert.ok(source.includes('<Combobox label="Timezone" required allowCustom={false} options={timeZones}'));
-  assert.ok(source.includes('<Button type="submit" variant="primary" disabled={!timeZones.includes(draft.timezone)}>'));
-  const zones = new Function(source.match(/^const timeZones = .+;$/m)[0] + '; return timeZones;')();
-  assert.ok(zones.includes('UTC') && zones.includes('Asia/Dubai')); assert.equal(new Set(zones).size, zones.length);
+test('the queue timezone is validated like the server, so saved zones the browser list omits stay usable', () => {
+  assert.ok(source.includes('<Combobox label="Timezone" required allowCustom={false} options={zoneOptions(draft.timezone)}'));
+  assert.ok(source.includes('<Button type="submit" variant="primary" disabled={!validZone(draft.timezone)}>'));
+  const helpers = ['timeZones', 'validZone', 'zoneOptions'].map(name => source.match(new RegExp(`^const ${name} = .+;$`, 'm'))[0]).join('\n');
+  const { timeZones, validZone, zoneOptions } = new Function(stripTypeScriptTypes(helpers) + '; return { timeZones, validZone, zoneOptions };')();
+  assert.ok(timeZones.includes('UTC') && timeZones.includes('Asia/Dubai')); assert.equal(new Set(timeZones).size, timeZones.length);
+  // Intl.supportedValuesOf omits aliases such as Asia/Kolkata; the server accepts any zone Intl.DateTimeFormat accepts.
+  for (const zone of ['Asia/Kolkata', 'Europe/Kyiv', 'Etc/UTC']) { assert.equal(validZone(zone), true, zone); assert.ok(zoneOptions(zone).includes(zone), zone + ' is offered while it is the saved zone'); }
+  for (const zone of ['Not/AZone', 'Asia/Ko', '', 'x'.repeat(101)]) { assert.equal(validZone(zone), false, zone); assert.equal(zoneOptions(zone), timeZones, 'An invalid draft is never offered as a choice.'); }
 });
 
 test('a saved post enters its queue only through the reviewed confirmation', () => {
