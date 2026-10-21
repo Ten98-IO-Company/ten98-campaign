@@ -65,6 +65,9 @@ test('post lifecycle changes are profile scoped, reject ambiguous mappings and t
   assert.equal((await f.one('SELECT last_error FROM webhook_events WHERE id=$1', [unknown.id])).last_error, 'PROFILE_NOT_MAPPED');
   const unlinked = await send('post.published', '2026-10-10T12:11:00Z', { post: { id: 'unlinked-provider-post' } });
   assert.equal((await f.one('SELECT last_error FROM webhook_events WHERE id=$1', [unlinked.id])).last_error, 'POST_NOT_LINKED');
+  // A profile mapped to two projects is now refused by the projects_zernio_profile index; drop it here to keep
+  // checking that legacy duplicate mappings still fail closed.
+  await f.pool.query('DROP INDEX projects_zernio_profile');
   await f.pool.query("UPDATE projects SET zernio_profile_id='profile-a' WHERE id='project-b'");
   const ambiguous = await send('post.published', '2026-10-10T12:12:00Z');
   assert.equal((await f.one('SELECT last_error FROM webhook_events WHERE id=$1', [ambiguous.id])).last_error, 'PROFILE_MAPPING_AMBIGUOUS');

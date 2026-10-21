@@ -82,6 +82,9 @@ test('unknown and ambiguous profile mappings defer all effects and recover witho
   await signed(f.service, unknown); assert.deepEqual(await f.service.processPending(), { processed: 0, pending: 1 }); assert.equal(await count(f, 'direct_contacts'), 0); assert.equal(await count(f, 'webhook_inbox_updates'), 0);
   assert.equal((await f.sql.get('SELECT last_error FROM webhook_events WHERE id=?', unknown.id)).last_error, 'PROFILE_NOT_MAPPED');
   await f.sql.run("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES (?, 'workspace-a', 'C', ?)", 'project-c', 'profile-c'); assert.deepEqual(await f.service.processPending({ now: Date.now() + 61000 }), { processed: 1, pending: 0 }); assert.equal((await f.contacts.list('project-c')).length, 1);
+  // A profile mapped to two projects is now refused by the projects_zernio_profile index; drop it here to keep
+  // checking that legacy duplicate mappings still fail closed.
+  await f.pool.query('DROP INDEX projects_zernio_profile');
   await f.sql.run("UPDATE projects SET zernio_profile_id='profile-a' WHERE id='project-b'");
   const ambiguous = event(); await signed(f.service, ambiguous); assert.deepEqual(await f.service.processPending(), { processed: 0, pending: 1 }); assert.equal((await f.contacts.list('project-a')).length, 0);
   assert.equal((await f.sql.get('SELECT last_error FROM webhook_events WHERE id=?', ambiguous.id)).last_error, 'PROFILE_MAPPING_AMBIGUOUS');

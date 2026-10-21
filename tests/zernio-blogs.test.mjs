@@ -212,7 +212,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     assert.equal(url.origin, 'https://zernio.com');
     const method = options.method || 'GET', payload = options.body === undefined ? undefined : JSON.parse(options.body), call = { url, method, payload, headers: options.headers }; calls.push(call);
     let result;
-    if (url.pathname === '/api/v1/accounts') { assert.ok([profileId, 'alias-profile'].includes(url.searchParams.get('profileId'))); result = { accounts }; }
+    if (url.pathname === '/api/v1/accounts') { assert.ok(url.searchParams.get('profileId') === profileId || url.searchParams.get('profileId').endsWith('alias-profile')); result = { accounts }; }
     else {
       const match = url.pathname.match(/^\/api\/v1\/accounts\/([^/]+)\/blogs\/(\d+)(?:\/articles\/(\d+))?$/);
       assert.ok(match, 'Unexpected provider path: ' + url.pathname);
@@ -537,8 +537,8 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     const lostScheduleKey = 'schedule-restart-lost-ack'; assert.equal((await request(route(scheduleRace, scheduleAlias._id) + '/schedule', { body: scheduleAliasBody, key: lostScheduleKey })).data.operation.status, 'uncertain'); releaseScheduleRead();
     assert.equal((await waitingSchedule).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforeScheduleRace + 1); providerHook = undefined;
     const scheduleOriginalProject = projectId, scheduleWorkspaceId = (await sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
-    await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'schedule-alias-project', scheduleWorkspaceId, 'Schedule alias site', 'alias-profile');
-    const scheduleProjectAlias = { ...scheduleAlias, _id: 'schedule-cross-project-alias', profileId: 'alias-profile' }; accounts.push(scheduleProjectAlias); projectId = 'schedule-alias-project';
+    await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'schedule-alias-project', scheduleWorkspaceId, 'Schedule alias site', 'schedule-alias-profile');
+    const scheduleProjectAlias = { ...scheduleAlias, _id: 'schedule-cross-project-alias', profileId: 'schedule-alias-profile' }; accounts.push(scheduleProjectAlias); projectId = 'schedule-alias-project';
     assert.equal((await request(route(scheduleRace, scheduleProjectAlias._id) + '/cancel-schedule', { body: await publicationReview(scheduleRace, 'cancel-schedule', scheduleProjectAlias._id) })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforeScheduleRace + 1); projectId = scheduleOriginalProject;
     await app.close(); app = await createApp({ ...appOptions, database }); await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
     assert.equal((await request(route(scheduleRace, scheduleAlias._id) + '/schedule', { body: scheduleAliasBody, key: lostScheduleKey })).data.error.code, 'OPERATION_UNCERTAIN');
@@ -552,8 +552,8 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     assert.equal((await request(route(racePublication, publicationAlias._id) + '/publish', { body: aliasBody, key: lostPublicationKey })).data.operation.status, 'uncertain'); releasePublicationRead();
     assert.equal((await waitingPublication).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforePublicationRace + 1); providerHook = undefined;
     const originalProject = projectId, workspaceId = (await sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
-    await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'publication-alias-project', workspaceId, 'Publication alias site', 'alias-profile');
-    const projectAlias = { ...publicationAlias, _id: 'publication-cross-project-alias', profileId: 'alias-profile' }; accounts.push(projectAlias); projectId = 'publication-alias-project';
+    await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'publication-alias-project', workspaceId, 'Publication alias site', 'publication-alias-profile');
+    const projectAlias = { ...publicationAlias, _id: 'publication-cross-project-alias', profileId: 'publication-alias-profile' }; accounts.push(projectAlias); projectId = 'publication-alias-project';
     const crossProjectBody = await publicationReview(racePublication, 'unpublish', projectAlias._id);
     assert.equal((await request(route(racePublication, projectAlias._id) + '/unpublish', { body: crossProjectBody })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, countBeforePublicationRace + 1); projectId = originalProject;
     await app.close(); app = await createApp({ ...appOptions, database }); await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
@@ -577,8 +577,8 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
     }
     Object.assign(publicRace, publicState);
     const publicOriginalProject = projectId;
-    await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'public-content-alias-project', workspaceId, 'Public content alias site', 'alias-profile');
-    const publicProjectAlias = { ...publicAlias, _id: 'public-content-cross-project-alias', profileId: 'alias-profile' }; accounts.push(publicProjectAlias); projectId = 'public-content-alias-project';
+    await sql.run('INSERT INTO projects(id,workspace_id,name,zernio_profile_id) VALUES(?,?,?,?)', 'public-content-alias-project', workspaceId, 'Public content alias site', 'public-content-alias-profile');
+    const publicProjectAlias = { ...publicAlias, _id: 'public-content-cross-project-alias', profileId: 'public-content-alias-profile' }; accounts.push(publicProjectAlias); projectId = 'public-content-alias-project';
     assert.equal((await request(route(publicRace, publicProjectAlias._id) + '/unpublish', { body: await publicationReview(publicRace, 'unpublish', publicProjectAlias._id) })).data.error.code, 'BLOG_PREVIOUS_OUTCOME_UNRESOLVED'); assert.equal(writes().length, publicRaceCount + 1); projectId = publicOriginalProject;
     await app.close(); app = await createApp({ ...appOptions, database }); await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); }); base = `http://127.0.0.1:${app.server.address().port}`;
     assert.equal((await request(route(publicRace, publicAlias._id) + '/update', { body: publicAliasBody, key: publicLostKey })).data.error.code, 'OPERATION_UNCERTAIN');

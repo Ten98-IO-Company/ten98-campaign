@@ -282,7 +282,7 @@ export async function createApp(options: AppOptions = {}) {
           const workspaceId = text(body.workspaceId, 'Workspace', 100), role = await workspaceAccess(workspaceId, user.id, true);
           if ((Object.hasOwn(body, 'zernioProfileId') || Object.hasOwn(body, 'driveFolderId')) && (!user.isOperator || !['owner', 'admin'].includes(role))) throw new HttpError(403, 'Only an instance operator with workspace administration access can map provider connections.');
           const project = projectInput(body) as ProjectInput & { id: string; workspaceId: string }; await checkProfileMapping(db, project.zernioProfileId); project.id = randomUUID(); project.workspaceId = workspaceId;
-          await db.execute(sql`INSERT INTO projects (id, workspace_id, name, color, zernio_profile_id, drive_folder_id) VALUES (${project.id}, ${workspaceId}, ${project.name}, ${project.color}, ${project.zernioProfileId}, ${project.driveFolderId})`);
+          await profileWrite(db.execute(sql`INSERT INTO projects (id, workspace_id, name, color, zernio_profile_id, drive_folder_id) VALUES (${project.id}, ${workspaceId}, ${project.name}, ${project.color}, ${project.zernioProfileId}, ${project.driveFolderId})`));
           await store.activity(project.id, 'Project created.'); return send(201, { project });
         }
         const projectRoute = path.match(/^\/api\/projects\/([^/]+)(?:\/(.*))?$/);
@@ -341,7 +341,7 @@ export async function createApp(options: AppOptions = {}) {
           if (!projectRoute[2] && req.method === 'PATCH') {
             if ((Object.hasOwn(body, 'zernioProfileId') || Object.hasOwn(body, 'driveFolderId')) && (!user.isOperator || !['owner', 'admin'].includes(role))) throw new HttpError(403, 'Only an instance operator with workspace administration access can map provider connections.');
             const updated = projectInput({ ...project, ...body }); await checkProfileMapping(db, updated.zernioProfileId, project.id);
-            await db.execute(sql`UPDATE projects SET name=${updated.name},color=${updated.color},zernio_profile_id=${updated.zernioProfileId},drive_folder_id=${updated.driveFolderId} WHERE id=${project.id}`);
+            await profileWrite(db.execute(sql`UPDATE projects SET name=${updated.name},color=${updated.color},zernio_profile_id=${updated.zernioProfileId},drive_folder_id=${updated.driveFolderId} WHERE id=${project.id}`));
             await store.activity(project.id, 'Project settings updated.'); return send(200, { project: { ...project, ...updated } });
           }
           const [collection, id, extra] = (projectRoute[2] || '').split('/');
@@ -392,7 +392,12 @@ export async function createApp(options: AppOptions = {}) {
     await release();
   } };
 }
-async function checkProfileMapping(db: Database, profileId: string | null, projectId = ''): Promise<void> { if (profileId && (await db.execute(sql`SELECT id FROM projects WHERE zernio_profile_id=${profileId} AND id<>${projectId}`)).rowCount) throw new HttpError(409, 'This Zernio profile is already mapped to another project. Use one profile per project for publishing and analytics.'); }
+const PROFILE_MAPPED = 'This Zernio profile is already mapped to another project. Use one profile per project for publishing and analytics.';
+async function checkProfileMapping(db: Database, profileId: string | null, projectId = ''): Promise<void> { if (profileId && (await db.execute(sql`SELECT id FROM projects WHERE zernio_profile_id=${profileId} AND id<>${projectId}`)).rowCount) throw new HttpError(409, PROFILE_MAPPED); }
+// A parallel mapping can pass checkProfileMapping too; the projects_zernio_profile unique index then refuses the write.
+async function profileWrite(write: Promise<unknown>): Promise<void> {
+  try { await write; } catch (error: any) { const cause = error?.cause ?? error; if (cause?.code === '23505' && cause?.constraint === 'projects_zernio_profile') throw new HttpError(409, PROFILE_MAPPED); throw error; }
+}
 function projectInput(data: ProviderRecord): ProjectInput {
   const color = data.color || '#5943ce'; if (typeof color !== 'string' || !/^#[\da-f]{6}$/i.test(color)) bad('Use a six digit hex color.');
   return { name: text(data.name, 'Project name'), color, zernioProfileId: text(data.zernioProfileId, 'Zernio profile', 200, true), driveFolderId: text(data.driveFolderId, 'Drive folder', 200, true) };

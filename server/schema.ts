@@ -57,7 +57,9 @@ export const projects = pgTable('projects', {
   zernio_profile_id: text('zernio_profile_id').notNull().default(''),
   drive_folder_id: text('drive_folder_id').notNull().default(''),
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
-});
+}, t => [
+  uniqueIndex('projects_zernio_profile').on(t.zernio_profile_id).where(sql`${t.zernio_profile_id} <> ''`),
+]);
 export const records = pgTable('records', {
   id: text('id').primaryKey(),
   project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),

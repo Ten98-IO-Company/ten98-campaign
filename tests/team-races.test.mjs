@@ -47,3 +47,18 @@ test('two owners demoting themselves at once keep one owner', { skip: postgresSk
   assert.deepEqual((await Promise.all(results)).map(result => result.status).sort(), [200, 409]);
   assert.equal(await ownerCount(pool, workspaceId), 1);
 });
+
+test('two projects mapped to one Zernio profile at once leave it mapped to exactly one', { skip: postgresSkip }, async t => {
+  const { pool, request, workspaceId, first } = await owners(t);
+  const created = await Promise.all(['Profile race A', 'Profile race B'].map(name => request('/projects', { method: 'POST', body: { workspaceId, name }, cookie: first.cookie })));
+  assert.deepEqual(created.map(result => result.status), [201, 201]);
+  const map = project => request(`/projects/${project.data.project.id}`, { method: 'PATCH', body: { zernioProfileId: 'profile-raced' }, cookie: first.cookie });
+  // Both mappings pass the one-profile-per-project check before either writes; only the unique index stops the second.
+  const gate = await blockWrites(pool, 'projects');
+  const results = created.map(map);
+  await gate.waiting(2); await gate.release();
+  const settled = await Promise.all(results);
+  assert.deepEqual(settled.map(result => result.status).sort(), [200, 409]);
+  assert.match(settled.find(result => result.status === 409).data.error, /already mapped to another project/);
+  assert.equal((await pool.query("SELECT count(*) AS count FROM projects WHERE zernio_profile_id = 'profile-raced'")).rows[0].count, 1);
+});
