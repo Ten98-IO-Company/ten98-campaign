@@ -38,7 +38,7 @@ export function getDatabase(connectionString = process.env.DATABASE_URL): Connec
 export async function closeDatabase() { if (shared) { const { pool } = shared; shared = undefined; await pool.end(); } }
 
 // Versioned SQL with a checksum ledger: the shared @ten98/runtime implementation (ported from ten98-discover).
-const ledger = createMigrationLedger({ directory: new URL('../migrations/', import.meta.url), files: ['0001_baseline.sql', '0002_insertion_order.sql', '0003_self_approval.sql', '0004_zernio_profile_unique.sql'], lockKey: [109858, 1] });
+const ledger = createMigrationLedger({ directory: new URL('../migrations/', import.meta.url), files: ['0001_baseline.sql', '0002_insertion_order.sql', '0003_self_approval.sql', '0004_zernio_profile_unique.sql', '0005_lookup_indexes.sql'], lockKey: [109858, 1] });
 export const migrationSources = ledger.sources, pendingMigrations = ledger.pending;
 
 export async function assertSchema(pool = getDatabase().pool) {
@@ -66,6 +66,10 @@ export function createStore(db: Executor) {
   return {
     async list(projectId: string, collection: string): Promise<ProjectRecord[]> {
       return (await db.select({ data: records.data }).from(records).where(scope(projectId, collection)).orderBy(desc(records.seq))).map(row => row.data as ProjectRecord);
+    },
+    // Records carrying one provider ID (records_external_id), instead of loading the collection to find them.
+    async byExternalId(projectId: string, collection: string, externalId: string): Promise<ProjectRecord[]> {
+      return (await db.select({ data: records.data }).from(records).where(and(scope(projectId, collection), sql`${records.data}->>'externalId' = ${externalId}`)).orderBy(desc(records.seq))).map(row => row.data as ProjectRecord);
     },
     async get(projectId: string, collection: string, id: string): Promise<ProjectRecord | null> {
       const [row] = await db.select({ data: records.data }).from(records).where(and(scope(projectId, collection), eq(records.id, id)));

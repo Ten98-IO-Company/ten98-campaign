@@ -103,6 +103,25 @@ test('scheduling a campaign re-checks its preview on the queuing transaction, wi
   } finally { await f.close(); }
 });
 
+test('a scheduler tick reads only due campaigns and the next pending delivery, whatever the history size', pg, async t => {
+  const f = await fixture(t);
+  try {
+    await f.person(); const campaign = await f.draft();
+    assert.equal((await f.arm(campaign, 'send')).data.campaign.status, 'scheduled');
+    // The first tick also runs the one-time restart recovery; nothing is due yet, so it sends nothing.
+    await f.app.direct.processPending({ now: 0 }); assert.equal(f.messages.size, 0);
+    // History the tick must not read: finished campaigns in the project and delivered rows of this campaign.
+    const { pool } = f.app.database;
+    await pool.query(`INSERT INTO direct_campaigns (id, project_id, data) SELECT 'done-' || n, $1, json_build_object('status', 'completed', 'scheduledAt', '2026-01-01T00:00:00Z') FROM generate_series(1, 300) n`, [f.projectId]);
+    await pool.query(`INSERT INTO direct_deliveries (id, campaign_id, contact_id, data) SELECT 'sent-' || n, $1, 'contact-' || n, json_build_object('status', 'delivered') FROM generate_series(1, 300) n`, [campaign.id]);
+    let rows = 0; const query = pool.query;
+    pool.query = async (...args) => { const result = await query.apply(pool, args); rows += result?.rows?.length || 0; return result; };
+    try { await f.app.direct.processPending({ now: Date.now() + 7200000 }); } finally { pool.query = query; }
+    assert.equal(f.messages.size, 1, 'The due campaign still sends its pending message.');
+    assert.ok(rows < 60, `One tick read ${rows} rows; loading every campaign or delivery reads more than 600.`);
+  } finally { await f.close(); }
+});
+
 test('Cloudflare email enforces transactional purpose, reports true receipts, appends unsubscribe and preserves bounce suppressions', pg, async t => {
   const f = await fixture(t);
   try {

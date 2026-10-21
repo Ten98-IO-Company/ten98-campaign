@@ -138,10 +138,11 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     return ids;
   }
   async function finish(campaign: any, ex: Executor = db) {
-    const rows = await deliveries(campaign.id, ex);
-    if (!rows.length || ['draft', 'cancelled'].includes(campaign.status)) return save(campaign, ex);
-    if (rows.some((row: any) => row.status === 'uncertain')) campaign.status = 'attention';
-    else if (!rows.some((row: any) => ['pending', 'sending'].includes(row.status))) campaign.status = 'completed';
+    // Counted in SQL: a send finishes after every message, so reading every delivery here made a campaign O(N²).
+    const [counts] = await resultRows(ex.execute(sql`SELECT count(*) AS total, count(*) FILTER (WHERE data->>'status' = 'uncertain') AS uncertain, count(*) FILTER (WHERE data->>'status' IN ('pending', 'sending')) AS open FROM direct_deliveries WHERE campaign_id = ${campaign.id}`));
+    if (!counts.total || ['draft', 'cancelled'].includes(campaign.status)) return save(campaign, ex);
+    if (counts.uncertain) campaign.status = 'attention';
+    else if (!counts.open) campaign.status = 'completed';
     return save(campaign, ex);
   }
   // Row lock: finishing the stored campaign cannot overwrite a worker or schedule write that lands between its read and save.
@@ -167,7 +168,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     } finally { active = false; }
   }
   async function sendDue(now: number, limit: number) {
-    const rows = (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns ORDER BY seq`))).map(row => row.data).filter((campaign: any) => ['scheduled', 'sending'].includes(campaign.status) && Date.parse(campaign.scheduledAt) <= now);
+    const rows = (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns WHERE data->>'status' IN ('scheduled', 'sending') ORDER BY seq`))).map(row => row.data).filter((campaign: any) => ['scheduled', 'sending'].includes(campaign.status) && Date.parse(campaign.scheduledAt) <= now);
     for (const campaign of rows.slice(0, Math.max(1, Math.min(25, limit)))) {
       try {
         const project = await guard(campaign), currentEnv = { ...env }, assertMapping = async () => { await guard(campaign); if (campaign.channel === 'whatsapp') { if ((await find(campaign.projectId, campaign.id)).status === 'cancelled') fail(409, 'CAMPAIGN_CANCELLED', 'This campaign was cancelled while its broadcast was being prepared.'); for (const delivery of (await deliveries(campaign.id)).filter((row: any) => row.status === 'pending')) { const contact: any = await contacts.get(campaign.projectId, delivery.contactId); if (exclusion(contact, 'whatsapp') || contact.phone !== delivery.recipient) fail(409, 'AUDIENCE_CHANGED', 'Recipient permission changed while preparing the broadcast.'); } } };
@@ -196,7 +197,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           for (const delivery of pending) if (selected.some((contact: any) => contact.id === delivery.contactId)) { delivery.status = result.status === 'failed' ? 'failed' : 'accepted'; delivery.providerId = campaign.providerId; await putDelivery(delivery); }
           await finish(campaign);
         } else {
-          const delivery = (await deliveries(campaign.id)).find((row: any) => row.status === 'pending');
+          const [delivery] = (await resultRows(db.execute(sql`SELECT data FROM direct_deliveries WHERE campaign_id = ${campaign.id} AND data->>'status' = 'pending' ORDER BY seq LIMIT 1`))).map(row => row.data);
           if (!delivery) { await finish(campaign); continue; }
           const contact: any = await contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, campaign.channel);
           if (reason || (campaign.channel === 'email' ? contact.email : contact.phone) !== delivery.recipient) { await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; current.status = 'suppressed'; current.error = reason || 'Contact address changed'; }); await finish(campaign); continue; }

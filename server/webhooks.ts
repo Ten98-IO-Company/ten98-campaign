@@ -99,7 +99,7 @@ export function createWebhookService({ db, storeFor = createStore, contacts = cr
     const eventAt = new Date(payload.timestamp).toISOString();
     let found = false;
     for (const project of projects) {
-      const post = (await store.list(project.id, 'posts')).find((item: any) => item.externalId === payload.post.id && item.zernioProfileId === project.zernio_profile_id && !item.sample);
+      const post = (await store.byExternalId(project.id, 'posts', String(payload.post.id))).find((item: any) => item.externalId === payload.post.id && item.zernioProfileId === project.zernio_profile_id && !item.sample);
       if (!post) continue;
       found = true;
       if (post.providerDeletedAt || !newer(eventAt, post.providerEventAt)) continue;
