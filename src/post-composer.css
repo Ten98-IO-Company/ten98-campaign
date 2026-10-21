@@ -1,1 +1,1 @@
-.modal:has(.post-composer){width:min(940px,calc(100% - 32px))}.post-composer .modal-actions{position:sticky;bottom:0;background:var(--color-surface);padding-bottom:10px;margin-bottom:-10px;z-index:1;flex-wrap:wrap}@media(max-width:600px){.modal:has(.post-composer){width:calc(100% - 18px)}}
+.post-composer .modal-actions{position:sticky;bottom:0;background:var(--color-surface);padding-bottom:10px;margin-bottom:-10px;z-index:1;flex-wrap:wrap}

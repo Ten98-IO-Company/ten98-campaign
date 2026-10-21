@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Badge, Button, Checkbox, CheckboxGroup, ContentPreview, DateTimeField, DestinationPicker, Disclosure, Field, Fieldset, Form, FormGrid, Grid, Heading, Image as MediaImage, Inline, Input, List, ListItem, MediaPlayer, MediaStrip, Option, ReviewConfirm, SegmentedControl, Select, Stack, StatusLine, Tabs, Text, Textarea, ValidationSummary, VisuallyHidden, type MediaItem as StripItem, type ValidationMessage } from '@ten98/ui';
 import { PLATFORM_RULES, captionLimitForVariant, countCaption, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms, providerPostMediaUrls } from '../shared/social-posts.ts';
-// The library has no sticky form footer or wide dialog size for this native modal; this sheet keeps only those two rules.
+// The library has no sticky form footer; this sheet keeps only that rule.
 import './post-composer.css';
 import InstagramPublishingTools from './InstagramPublishingTools';
 import TikTokPublishingTools from './TikTokPublishingTools';
