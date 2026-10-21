@@ -47,14 +47,15 @@ export default function CampaignPublishingAgenda({ posts, googleEvents, month, a
   for (const event of googleEvents) {
     const allDay = Boolean(event.start?.date), dateTime = event.start?.date || event.start?.dateTime;
     const date = new Date(allDay ? dateTime + 'T00:00' : dateTime);
-    if (!Number.isFinite(date.getTime()) || !(allDay ? event.start.date < localDate(end) && event.end?.date > localDate(start) : date >= start && date < end)) continue;
+    if (!Number.isFinite(date.getTime()) || !(allDay ? event.start.date < localDate(end) && event.end?.date > localDate(start) : date < end && (Date.parse(event.end?.dateTime) || date.getTime()) > start.getTime())) continue;
     entries.push({ id: `google:${event.id}`, title: `Google · ${event.summary}`, dateTime, order: date.getTime(),
       when: allDay ? `${event.start.date} – ${event.end.date}` : format.format(date),
       status: allDay ? 'All day · End date exclusive' : 'Google Calendar event', actions: googleEventActions?.(event),
     });
     googleCount++;
     // Google entries stay plain text in the grid: their actions live in the list view.
-    if (!allDay) addDay(localDate(date), { id: `google:${event.id}`, label: `Google · ${event.summary}`, time: timeOnly.format(date) });
+    // A timed event that began last month still shows on this month's first day.
+    if (!allDay) addDay(localDate(date < start ? start : date), { id: `google:${event.id}`, label: `Google · ${event.summary}`, time: timeOnly.format(date) });
     else for (let day = new Date(Math.max(date.getTime(), start.getTime())); localDate(day) < event.end.date && day < end; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) addDay(localDate(day), { id: `google:${event.id}:${localDate(day)}`, label: `Google · ${event.summary}`, time: 'All day' });
   }
   entries.sort((left, right) => left.order - right.order);

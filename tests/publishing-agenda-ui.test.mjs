@@ -115,3 +115,12 @@ test('the month view groups posts and Google events by local day, counts the mon
     assert.equal(readOnly.props.onCreateDay, undefined); assert.match(String(readOnly.props.createDisabledReason), /Read only/);
   } finally { if (originalTimezone === undefined) delete process.env.TZ; else process.env.TZ = originalTimezone; }
 });
+
+test('timed Google events that started last month and run into this one stay in the agenda and the grid', () => {
+  const overnight = { id: 'overnight', summary: 'Night shoot', start: { dateTime: new Date(2026, 8, 30, 22).toISOString() }, end: { dateTime: new Date(2026, 9, 1, 2).toISOString() } };
+  const finished = { id: 'finished', summary: 'Done last month', start: { dateTime: new Date(2026, 8, 30, 20).toISOString() }, end: { dateTime: new Date(2026, 8, 30, 21).toISOString() } };
+  const props = { posts: [], googleEvents: [overnight, finished], month: new Date(2026, 9, 1), canWrite: false, postLabel, onSelect() {} };
+  assert.deepEqual(find(Agenda(props), ofType(PublishingAgenda)).props.entries.map(entry => entry.id), ['google:overnight']);
+  const grid = find(Agenda({ ...props, view: 'month', onMonthChange() {} }), ofType(ui.CalendarMonth));
+  assert.deepEqual([...grid.props.days.keys()], ['2026-10-01']);
+});
