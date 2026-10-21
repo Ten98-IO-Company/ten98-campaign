@@ -1,5 +1,5 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, CodeBlock, DescriptionList, Disclosure, EmptyState, Field, FormActions, Heading, Inline, Link, SegmentedControl, StatusLine, Stack, Switch, Text, Textarea } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Disclosure, EmptyState, Field, FormActions, Heading, Inline, Link, List, ListItem, Progress, SegmentedControl, StatusLine, Stack, Switch, Text, Textarea } from '@ten98/ui';
 import { PostVariantPreview } from './PostComposer';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { reviewKeyAction } from './review-keys';
@@ -13,11 +13,15 @@ function link(value?: string) { try { const url = new URL(value || ''); return u
 const lines = (text: unknown) => <Text preserveWhitespace>{String(text ?? '')}</Text>;
 // The Approve button and the A key share one block: an unverified queue or any creative not yet approved.
 const approveBlocked = (item: any) => Boolean(item.post.queueId && !item.queue?.ready) || (item.assets || (item.asset ? [item.asset] : [])).some((asset: any) => asset.missing || asset.approval !== 'approved');
+// Bulk review ported from pendpost/pendpost@42ac77b29f7720a912bdce1507b16a2a56fca74f app/src/components/Freigaben.jsx:1013-1100 and 1213-1276 (MIT):
+// it touches only the visible, actionable, selected posts and sends each one the single-card review request in turn.
+const postName = (item: any) => String(item.post.content || '').trim().slice(0, 60) || item.post.id;
 const options = (platform: string, values: Record<string, unknown>) => Object.entries(values).map(([key, value]) => ({ key, term: PLATFORM_RULES[platform]?.options.find((option: any) => option.key === key)?.label || key, description: value && typeof value === 'object' ? <CodeBlock code={JSON.stringify(value, null, 2)} label={key} wrap/> : <Stack gap={0}>{lines(typeof value === 'boolean' ? value ? 'On' : 'Off' : String(value))}</Stack> }));
 
 export default function ContentApprovals({ projectId, role, request, onChanged }: Props) {
   const [data, setData] = useState<any>(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [filter, setFilter] = useState('all'), [notes, setNotes] = useState<Record<string, string>>({});
   const [focusId, setFocusId] = useState(''), advance = useRef<{ id: string; index: number } | null>(null);
+  const [selected, setSelected] = useState<string[]>([]), [bulk, setBulk] = useState<{ done: number; total: number } | null>(null), [bulkResult, setBulkResult] = useState<{ decision: string; ok: number; skipped: number; failed: { id: string; name: string; message: string }[] } | null>(null);
   const active = useRef(true), readVersion = useRef(0), path = `/projects/${encodeURIComponent(projectId)}/approvals`, canReview = ['owner', 'admin'].includes(role), canRequest = ['owner', 'admin', 'editor'].includes(role);
   function acceptItem(item: any) { if (active.current) setData((previous: any) => previous ? { ...previous, posts: previous.posts.map((entry: any) => entry.post.id === item.post.id ? item : entry) } : previous); }
   async function load() {
@@ -35,6 +39,27 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
     await action(item.post.id, async () => { const result = await request(`${path}/posts/${encodeURIComponent(item.post.id)}/review`, 'POST', { decision, note: notes[item.post.id] || '', reviewId: item.review.id }); if (!active.current) return; acceptItem(result.item); setNotes(previous => ({ ...previous, [item.post.id]: '' })); setNotice(decision === 'approved' ? 'Post approved. Publishing remains a separate action.' : 'Changes requested. The author can update this draft and request another review.'); await onChanged?.(); await load(); });
   }
   const posts = (data?.posts || []).filter((item: any) => !item.post.sample && (filter === 'all' || item.status === filter));
+  // A hidden or no-longer-pending post can stay in the selection, so every count and the loop use this intersection.
+  const actionable = canReview ? posts.filter((item: any) => item.status === 'pending') : [], chosen = actionable.filter((item: any) => selected.includes(item.post.id)), blockedChosen = chosen.filter((item: any) => approveBlocked(item)).length;
+  async function bulkReview(decision: string) {
+    const targets = decision === 'approved' ? chosen.filter((item: any) => !approveBlocked(item)) : chosen;
+    if (!targets.length) return;
+    await action('bulk', async () => {
+      const succeeded: string[] = [], failed: { id: string; name: string; message: string }[] = [];
+      setBulkResult(null); setBulk({ done: 0, total: targets.length });
+      try {
+        for (const item of targets) {
+          try { const result = await request(`${path}/posts/${encodeURIComponent(item.post.id)}/review`, 'POST', { decision, note: notes[item.post.id] || '', reviewId: item.review.id }); if (!active.current) return; acceptItem(result.item); succeeded.push(item.post.id); }
+          catch (err) { if (!active.current) return; failed.push({ id: item.post.id, name: postName(item), message: (err as Error).message || 'This review could not be saved.' }); }
+          setBulk({ done: succeeded.length + failed.length, total: targets.length });
+        }
+      } finally { if (active.current) setBulk(null); }
+      // Failed posts stay selected so they can be retried; skipped (blocked) posts were never sent.
+      setSelected(previous => previous.filter(id => !succeeded.includes(id))); setNotes(previous => ({ ...previous, ...Object.fromEntries(succeeded.map(id => [id, ''])) }));
+      setBulkResult({ decision, ok: succeeded.length, skipped: chosen.length - targets.length, failed });
+      await onChanged?.(); await load();
+    });
+  }
   function focusCard(index: number) { const target = posts[Math.max(0, Math.min(posts.length - 1, index))]; if (!target) return; setFocusId(target.post.id); document.getElementById('review-' + target.post.id)?.focus(); }
   // After a keyboard review settles, move to the next card: the acted card leaves a filtered view, or stays in "All posts".
   useEffect(() => { const acted = advance.current; if (!acted) return; advance.current = null; const item = posts.find((entry: any) => entry.post.id === acted.id); if (item?.status === 'pending') return; focusCard(item ? acted.index + 1 : acted.index); }, [data]);
@@ -54,8 +79,16 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
     </Stack></Card>
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}
     <SegmentedControl label="Review status" value={filter} onValueChange={setFilter} options={['all', 'pending', 'stale', 'approved', 'rejected', 'not_requested'].map(value => ({ value, label: value === 'all' ? 'All posts' : label(value) }))}/>
+    {canReview && actionable.length > 0 && <Stack as="section" gap={3} aria-label="Bulk review">
+      <Checkbox label={`Select all visible posts awaiting review (${actionable.length})`} disabled={Boolean(busy)} checked={chosen.length === actionable.length} onChange={event => setSelected(event.target.checked ? actionable.map((item: any) => item.post.id) : [])}/>
+      {chosen.length > 0 && <><StatusLine>{chosen.length} post{chosen.length === 1 ? '' : 's'} selected.{blockedChosen ? ` Approve will skip ${blockedChosen} whose approval is blocked by an unverified queue or a creative not yet approved.` : ''}</StatusLine>
+        <Inline gap={2}><Button disabled={Boolean(busy) || chosen.length === blockedChosen} onClick={() => bulkReview('approved')}>Approve {chosen.length - blockedChosen}</Button><Button variant="secondary" disabled={Boolean(busy)} onClick={() => bulkReview('rejected')}>Request changes on {chosen.length}</Button><Button variant="ghost" disabled={Boolean(busy)} onClick={() => setSelected([])}>Clear selection</Button></Inline>
+        <Text tone="muted" size="sm">Each post is reviewed separately, in order, with its own note. Approving never publishes.</Text></>}
+      {bulk && <Progress value={bulk.total ? bulk.done / bulk.total * 100 : 0} label={`Reviewed ${bulk.done} of ${bulk.total}`}/>}
+    </Stack>}
+    {bulkResult && <Alert tone={bulkResult.failed.length ? 'danger' : 'success'} title={`${bulkResult.decision === 'approved' ? 'Approved' : 'Requested changes on'} ${bulkResult.ok} post${bulkResult.ok === 1 ? '' : 's'}${bulkResult.failed.length ? `; ${bulkResult.failed.length} failed` : ''}${bulkResult.skipped ? `; ${bulkResult.skipped} skipped` : ''}`} onDismiss={() => setBulkResult(null)}>{bulkResult.failed.length > 0 ? <Stack gap={1}><Text>These posts were not reviewed and stay selected:</Text><List>{bulkResult.failed.map(row => <ListItem key={row.id}>{row.name} ({row.id}): {row.message}</ListItem>)}</List></Stack> : <Text>{bulkResult.decision === 'approved' ? 'Publishing remains a separate action.' : 'The authors can update these drafts and request another review.'}</Text>}</Alert>}
     {!data && !error && <StatusLine busy>Loading the review queue…</StatusLine>}
-    {posts.map((item: any, index: number) => { const post = item.post, reviewData = item.review, creative = link(item.asset?.deliveryUrl || item.asset?.url), submitted = item.status === 'submitted'; return <Card as="section" key={post.id} id={'review-' + post.id} tabIndex={post.id === (posts.some((entry: any) => entry.post.id === focusId) ? focusId : posts[0].post.id) ? 0 : -1} aria-keyshortcuts={canReview && item.status === 'pending' ? 'A R' : undefined} onFocus={event => { if (event.target === event.currentTarget) setFocusId(post.id); }} onKeyDown={event => onCardKey(event, item, index)} headingLevel={2} title={post.platforms?.length ? post.platforms.join(', ') : 'Social post draft'} description={`${post.queueId && !submitted ? 'Provider queue · next free slot assigned on submission' : post.scheduledAt ? `Planned for ${when(post.scheduledAt)}` : 'No planned publishing time'}${post.accounts?.length ? ` · ${post.accounts.length} selected account${post.accounts.length === 1 ? '' : 's'}` : ''}`} actions={<Badge tone={item.status === 'approved' ? 'success' : item.status === 'rejected' ? 'danger' : 'warning'}>{label(item.status)}</Badge>}><Stack gap={3}>
+    {posts.map((item: any, index: number) => { const post = item.post, reviewData = item.review, creative = link(item.asset?.deliveryUrl || item.asset?.url), submitted = item.status === 'submitted'; return <Card as="section" key={post.id} id={'review-' + post.id} tabIndex={post.id === (posts.some((entry: any) => entry.post.id === focusId) ? focusId : posts[0].post.id) ? 0 : -1} aria-keyshortcuts={canReview && item.status === 'pending' ? 'A R' : undefined} onFocus={event => { if (event.target === event.currentTarget) setFocusId(post.id); }} onKeyDown={event => onCardKey(event, item, index)} headingLevel={2} title={post.platforms?.length ? post.platforms.join(', ') : 'Social post draft'} description={`${post.queueId && !submitted ? 'Provider queue · next free slot assigned on submission' : post.scheduledAt ? `Planned for ${when(post.scheduledAt)}` : 'No planned publishing time'}${post.accounts?.length ? ` · ${post.accounts.length} selected account${post.accounts.length === 1 ? '' : 's'}` : ''}`} actions={<Inline gap={2} align="center">{canReview && item.status === 'pending' && <Checkbox label="Select" aria-label={`Select ${postName(item)} for bulk review`} disabled={Boolean(busy)} checked={selected.includes(post.id)} onChange={event => setSelected(previous => event.target.checked ? [...previous.filter(id => id !== post.id), post.id] : previous.filter(id => id !== post.id))}/>}<Badge tone={item.status === 'approved' ? 'success' : item.status === 'rejected' ? 'danger' : 'warning'}>{label(item.status)}</Badge></Inline>}><Stack gap={3}>
       {!!post.accounts?.length && <Text tone="muted" size="sm"><Text as="strong">Selected account IDs:</Text> {post.accounts.join(', ')}</Text>}
       {post.queueId && !submitted && <Stack gap={1}><Text as="strong">{item.queue?.name || 'Publishing queue unavailable'}</Text>{item.queue?.timezone && <Text tone="muted" size="sm">{item.queue.timezone} · {(item.queue.slots || []).map((slot: any) => `${days[slot.dayOfWeek]} ${slot.time}`).join(', ') || 'No weekly slots'}</Text>}<Text tone="muted" size="sm">{item.queue?.ready ? 'These queue settings match the saved post. Zernio reserves the next free slot only when it is submitted.' : item.queue?.message || 'Refresh to verify this queue before approving the post.'}</Text>{!item.queue?.ready && <Text tone="muted" size="sm">Edit the saved post, load its current queue settings and save them before requesting a new review.</Text>}</Stack>}
       <Stack gap={0}>{lines(post.content)}</Stack>
