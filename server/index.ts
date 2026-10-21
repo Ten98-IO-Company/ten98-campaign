@@ -1,12 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import type { DatabaseSync } from 'node:sqlite';
+import { sql } from 'drizzle-orm';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, relative, extname, sep, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { oidcEndpoint, workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
-import { openDatabase, createStore, collections, transaction, type Store } from './database.ts';
-import { createAuth, sessionSecret, bootstrapToken, hashPassword, HttpError, publicUser, type AuthConfig, type PublicUser } from './auth.ts';
+import { assertSchema, closeDatabase, createStore, collections, getDatabase, type Connection, type Database, type Executor, type Store } from './database.ts';
+import { createAuth, sessionSecret, bootstrapToken, hashPassword, HttpError, lockWorkspace, memberRole, publicUser, type AuthConfig, type PublicUser } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
 import { seedSample } from './seed.ts';
 import { handleIntegration } from './integrations.ts';
@@ -34,11 +34,14 @@ type Send = (status: number, data: unknown) => void;
 type ProjectRow = { id: string; workspaceId: string; name: string; color: string; zernioProfileId: string | null; driveFolderId: string | null };
 type ProjectAccessRow = ProjectRow & { role: string };
 type ProjectInput = { name: string; color: string; zernioProfileId: string; driveFolderId: string };
-export interface AppOptions { env?: Env; dataDir?: string; appUrl?: string; sessionSecret?: string; distDir?: string; directScheduler?: boolean }
+export interface AppOptions { env?: Env; dataDir?: string; appUrl?: string; sessionSecret?: string; distDir?: string; directScheduler?: boolean; database?: Connection }
 type AppConfig = AppOptions & AuthConfig & { env: Env; dataDir: string; oidcClientSecret: string };
 type RequestContext = OperationContext & { req: IncomingMessage; res: ServerResponse; body: ProviderRecord; user: PublicUser; project: ProjectAccessRow; role: string; send: Send; store: Store };
 
-const projectFields = 'p.id,p.workspace_id AS workspaceId,p.name,p.color,p.zernio_profile_id AS zernioProfileId,p.drive_folder_id AS driveFolderId';
+// PostgreSQL folds unquoted aliases to lowercase, so camelCase aliases are quoted.
+const projectFields = sql.raw('p.id,p.workspace_id AS "workspaceId",p.name,p.color,p.zernio_profile_id AS "zernioProfileId",p.drive_folder_id AS "driveFolderId"');
+const first = async <T>(query: Promise<{ rows: unknown[] }>): Promise<T | undefined> => (await query).rows[0] as T | undefined;
+const claimed = async (db: Executor) => Boolean((await first<{ claimed: boolean }>(db.execute(sql`SELECT claimed FROM installation WHERE id = 1`)))?.claimed);
 const bad: (message?: string) => never = message => { throw new HttpError(400, message || 'Check the submitted fields.'); };
 function object(value: unknown): ProviderRecord { if (!value || typeof value !== 'object' || Array.isArray(value)) bad('A JSON object is required.'); return value as ProviderRecord; }
 function text(value: unknown, label: string, max = 120, optional = false): string {
@@ -116,33 +119,36 @@ async function readBody(req: IncomingMessage, maximum = 65536): Promise<Provider
   try { return object(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw))); } catch (error) { if (error instanceof HttpError) throw error; bad('Send valid UTF-8 JSON.'); }
 }
 
-export function createApp(options: AppOptions = {}) {
+export async function createApp(options: AppOptions = {}) {
   const env = options.env || { ...process.env }, dataDir = resolve(options.dataDir || env.DATA_DIR || 'data');
   const appUrl = (options.appUrl || env.APP_URL || 'http://127.0.0.1:3018').replace(/\/$/, '');
   const parsed = new URL(appUrl);
   if (!['https:', 'http:'].includes(parsed.protocol) || parsed.origin !== appUrl || parsed.username || parsed.password || (parsed.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname))) throw new Error('APP_URL must be an HTTPS origin, or HTTP loopback for local use.');
   if (env.OIDC_ISSUER && env.OIDC_CLIENT_ID) oidcEndpoint(env.OIDC_ISSUER, { issuer: true });
-  const db = openDatabase(dataDir), store = createStore(db);
+  const { pool, db } = options.database || getDatabase(env.DATABASE_URL), store = createStore(db);
+  await assertSchema(pool);
   const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean) };
   config.oidcEnabled = Boolean(config.oidcIssuer && config.oidcClientId);
-  if (!(db.prepare('SELECT claimed FROM installation WHERE id=1').get() as { claimed: number }).claimed) config.bootstrapToken = bootstrapToken(dataDir, env.BOOTSTRAP_TOKEN);
+  if (!await claimed(db)) config.bootstrapToken = bootstrapToken(dataDir, env.BOOTSTRAP_TOKEN);
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
-  const integrationSettings = createIntegrationSettings({ db, env, secret: config.sessionSecret });
+  const integrationSettings = await createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
   const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts });
   direct.attachSmsInbox(smsInbox);
   const links = createLinks({ db, appUrl });
   const directTimer = options.directScheduler === false ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
   const webhooks = createWebhookService({ db, store, contacts: direct.contacts, env });
-  const drainWebhooks = () => { try { webhooks.processPending(); } catch { console.error('Webhook processing deferred.'); } };
+  // One drain at a time; close() waits for the one in flight before the pool ends.
+  let draining: Promise<void> | undefined;
+  const drainWebhooks = () => { draining ??= webhooks.processPending().catch(() => { console.error('Webhook processing deferred.'); }).finally(() => { draining = undefined; }); };
   drainWebhooks(); const webhookTimer = setInterval(drainWebhooks, 1000); webhookTimer.unref();
-  function workspaceAccess(workspaceId: string, userId: string, write = false): string {
-    const membership = db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(workspaceId, userId) as { role: string } | undefined;
-    if (!membership || (write && membership.role === 'viewer')) throw new HttpError(404, 'Workspace not found or unavailable.');
-    return membership.role;
+  async function workspaceAccess(workspaceId: string, userId: string, write = false, executor: Executor = db): Promise<string> {
+    const role = await memberRole(executor, workspaceId, userId);
+    if (!role || (write && role === 'viewer')) throw new HttpError(404, 'Workspace not found or unavailable.');
+    return role;
   }
-  function projectAccess(projectId: string, userId: string): ProjectAccessRow {
-    const project = db.prepare(`SELECT ${projectFields},m.role FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id WHERE p.id=? AND m.user_id=?`).get(projectId, userId) as ProjectAccessRow | undefined;
+  async function projectAccess(projectId: string, userId: string): Promise<ProjectAccessRow> {
+    const project = await first<ProjectAccessRow>(db.execute(sql`SELECT ${projectFields},m.role FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id WHERE p.id=${projectId} AND m.user_id=${userId}`));
     if (!project) throw new HttpError(404, 'Project not found or unavailable.');
     return project;
   }
@@ -162,62 +168,65 @@ export function createApp(options: AppOptions = {}) {
       if (await links.publicHandle({ req, res, url })) return;
       if (path.startsWith('/api/')) {
         res.setHeader('Cache-Control', 'no-store');
-        if (path === '/api/webhooks/zernio' && req.method === 'POST') { const result = webhooks.receive(await readRawBody(req, WEBHOOK_MAX_BYTES), req.headers); return send(result.status, result.body); }
-        if (/^\/api\/webhooks\/twilio\/(?:inbound(?:\/[\w-]+)?|status\/[\w-]+)$/.test(path) && req.method === 'POST') { direct.receiveTwilio({ rawBody: await readRawBody(req, 65536), headers: req.headers, url }); res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' }); return res.end('<Response/>'); }
+        if (path === '/api/webhooks/zernio' && req.method === 'POST') { const result = await webhooks.receive(await readRawBody(req, WEBHOOK_MAX_BYTES), req.headers); return send(result.status, result.body); }
+        if (/^\/api\/webhooks\/twilio\/(?:inbound(?:\/[\w-]+)?|status\/[\w-]+)$/.test(path) && req.method === 'POST') { await direct.receiveTwilio({ rawBody: await readRawBody(req, 65536), headers: req.headers, url }); res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' }); return res.end('<Response/>'); }
         const unsubscribe = path.match(/^\/api\/direct\/unsubscribe\/([A-Za-z0-9_.-]+)$/);
-        if (unsubscribe && ['GET', 'POST'].includes(req.method!)) { if (req.method === 'POST') await readRawBody(req, 4096); const html = direct.handleUnsubscribe(unsubscribe[1], req.method!); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Email preferences</title><main>' + html + '</main></html>'); }
+        if (unsubscribe && ['GET', 'POST'].includes(req.method!)) { if (req.method === 'POST') await readRawBody(req, 4096); const html = await direct.handleUnsubscribe(unsubscribe[1], req.method!); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Email preferences</title><main>' + html + '</main></html>'); }
         if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
         if (mutating && req.headers.origin !== appUrl) throw new HttpError(403, 'A matching Origin header is required.');
         const body = mutating && req.method !== 'DELETE' && !rawMediaContent ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : /^\/api\/projects\/[^/]+\/(?:posts(?:\/[^/]+)?|integrations\/social\/(?:validate|update)|direct\/(?:contacts\/import|campaigns(?:\/[^/]+)?))$/.test(path) ? 2 * 1024 * 1024 : 65536) : {};
-        if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(auth.user(req, res)), setupRequired: !(db.prepare('SELECT claimed FROM installation WHERE id=1').get() as { claimed: number }).claimed, oidcEnabled: config.oidcEnabled });
+        if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(await auth.user(req, res)), setupRequired: !await claimed(db), oidcEnabled: config.oidcEnabled });
         if (path === '/api/auth/setup' && req.method === 'POST') {
-          auth.limit('setup:' + req.socket.remoteAddress, 10);
-          if ((db.prepare('SELECT claimed FROM installation WHERE id=1').get() as { claimed: number }).claimed) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
+          await auth.limit('setup:' + req.socket.remoteAddress, 10);
+          if (await claimed(db)) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
           auth.requireSetupProof(body.token);
           const name = text(body.name, 'Name'), mail = email(body.email), hash = await hashPassword(password(body.password));
           if (body.sample !== undefined && typeof body.sample !== 'boolean') bad('Sample must be true or false.');
           const id = randomUUID(), workspaceId = randomUUID(), projectId = randomUUID();
-          transaction(db, () => {
-            if ((db.prepare('SELECT claimed FROM installation WHERE id=1').get() as { claimed: number }).claimed) throw new HttpError(409, 'Setup is already complete.');
-            db.prepare('INSERT INTO users VALUES(?,?,?,?)').run(id, name, mail, hash);
-            setInstanceOperator(db, id, true, 'bootstrap');
-            db.prepare('INSERT INTO workspaces VALUES(?,?)').run(workspaceId, 'ten98 studio'); db.prepare("INSERT INTO memberships VALUES(?,?,'owner')").run(workspaceId, id);
-            db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run(projectId, workspaceId, 'Brand launch');
-            if (body.sample) seedSample(store, projectId);
-            db.prepare('UPDATE installation SET claimed=1 WHERE id=1').run();
+          // The installation row lock makes setup single use under parallel requests.
+          await db.transaction(async tx => {
+            if ((await first<{ claimed: boolean }>(tx.execute(sql`SELECT claimed FROM installation WHERE id = 1 FOR UPDATE`)))?.claimed) throw new HttpError(409, 'Setup is already complete.');
+            await tx.execute(sql`INSERT INTO users VALUES (${id}, ${name}, ${mail}, ${hash})`);
+            await setInstanceOperator(tx, id, true, 'bootstrap');
+            await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspaceId}, 'ten98 studio')`); await tx.execute(sql`INSERT INTO memberships VALUES (${workspaceId}, ${id}, 'owner')`);
+            await tx.execute(sql`INSERT INTO projects (id, workspace_id, name) VALUES (${projectId}, ${workspaceId}, 'Brand launch')`);
+            if (body.sample) await seedSample(createStore(tx), projectId);
+            await tx.execute(sql`UPDATE installation SET claimed = true WHERE id = 1`);
+            await auth.establish(res, id, req, tx);
           });
-          auth.establish(res, id, req); return send(201, { user: { id, name, email: mail, isOperator: true }, projectId });
+          return send(201, { user: { id, name, email: mail, isOperator: true }, projectId });
         }
         if (path === '/api/auth/login' && req.method === 'POST') return send(200, { user: await auth.login(req, res, { email: email(body.email), password: loginPassword(body.password) }) });
-        if (path === '/api/auth/logout' && req.method === 'POST') { auth.logout(req, res); return send(200, { ok: true }); }
+        if (path === '/api/auth/logout' && req.method === 'POST') { await auth.logout(req, res); return send(200, { ok: true }); }
         if (path === '/api/auth/oidc/start' && req.method === 'GET') return await auth.oidcStart(req, res);
         if (path === '/api/auth/oidc/callback' && req.method === 'GET') return await auth.oidcCallback(req, res, url);
-        if (await handleInvitations({ req, url, body, user: auth.user(req, res), db, auth, config, send, workspaceAccess, establish: (id: string) => auth.establish(res, id, req) })) return;
-        const user = auth.user(req, res); if (!user) throw new HttpError(401, 'Sign in to continue.');
-        if (path === '/api/account' && req.method === 'GET') return send(200, { user, ...auth.account(user.id) });
-        if (path === '/api/account' && req.method === 'PATCH') { if (Object.keys(body).some(key => key !== 'name')) bad('Only your display name can be changed here.'); db.prepare('UPDATE users SET name=? WHERE id=?').run(text(body.name, 'Name'), user.id); return send(200, { user: auth.user(req, res) }); }
+        const signedIn = await auth.user(req, res);
+        if (await handleInvitations({ req, url, body, user: signedIn, db, auth, config, send, workspaceAccess, establish: (id: string, tx: Executor) => auth.establish(res, id, req, tx) })) return;
+        const user = signedIn; if (!user) throw new HttpError(401, 'Sign in to continue.');
+        if (path === '/api/account' && req.method === 'GET') return send(200, { user, ...await auth.account(user.id) });
+        if (path === '/api/account' && req.method === 'PATCH') { if (Object.keys(body).some(key => key !== 'name')) bad('Only your display name can be changed here.'); await db.execute(sql`UPDATE users SET name = ${text(body.name, 'Name')} WHERE id = ${user.id}`); return send(200, { user: await auth.user(req, res) }); }
         if (path === '/api/account/password' && req.method === 'POST') { if (Object.keys(body).some(key => !['currentPassword', 'newPassword'].includes(key))) bad('Use the password fields.'); await auth.changePassword(req, res, user.id, loginPassword(body.currentPassword), password(body.newPassword)); return send(200, { changed: true }); }
-        if (path === '/api/account/sessions/revoke' && req.method === 'POST') return send(200, { revoked: auth.revokeOtherSessions(req, user.id) });
+        if (path === '/api/account/sessions/revoke' && req.method === 'POST') return send(200, { revoked: await auth.revokeOtherSessions(req, user.id) });
         const settingsRoute = path.match(/^\/api\/settings\/integrations(?:\/([A-Za-z]+)(?:\/(test))?)?$/);
         if (settingsRoute) {
           if (!user.isOperator) throw new HttpError(403, 'Only instance operators can configure shared integrations.');
           const [, provider, action] = settingsRoute;
-          if (!provider && req.method === 'GET') return send(200, integrationSettings.describe());
-          if (provider && !action && req.method === 'PUT') { if (Object.keys(body).some(key => key !== 'fields')) bad('Use the integration settings fields.'); return send(200, integrationSettings.save(provider, body.fields)); }
-          if (provider && !action && req.method === 'DELETE') return send(200, integrationSettings.reset(provider));
+          if (!provider && req.method === 'GET') return send(200, await integrationSettings.describe());
+          if (provider && !action && req.method === 'PUT') { if (Object.keys(body).some(key => key !== 'fields')) bad('Use the integration settings fields.'); return send(200, await integrationSettings.save(provider, body.fields)); }
+          if (provider && !action && req.method === 'DELETE') return send(200, await integrationSettings.reset(provider));
           if (provider && action === 'test' && req.method === 'POST') {
             if (Object.keys(body).some(key => key !== 'projectId')) bad('Choose a project to test its mapped connection.');
-            auth.limit('integration-tests:' + user.id, 60);
-            const mapped = body.projectId ? projectAccess(text(body.projectId, 'Project', 100), user.id) : null;
-            const calendarTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='calendar_connections'").get();
-            const calendar = mapped && calendarTable ? db.prepare('SELECT calendar_id FROM calendar_connections WHERE project_id=?').get(mapped.id) as { calendar_id: string | null } | undefined : null;
+            await auth.limit('integration-tests:' + user.id, 60);
+            const mapped = body.projectId ? await projectAccess(text(body.projectId, 'Project', 100), user.id) : null;
+            const calendarOf = (projectId: string) => first<{ calendar_id: string | null }>(db.execute(sql`SELECT calendar_id FROM calendar_connections WHERE project_id = ${projectId}`));
+            const calendar = mapped ? await calendarOf(mapped.id) : null;
             const result = await integrationSettings.test(provider, { driveFolderId: mapped?.driveFolderId, calendarId: calendar?.calendar_id });
-            const currentUser = auth.user(req);
+            const currentUser = await auth.user(req);
             if (currentUser?.id !== user.id) throw new HttpError(403, 'Your sign-in session ended. Sign in again.');
             if (!currentUser.isOperator) throw new HttpError(403, 'Your instance operator access changed. Refresh before continuing.');
             if (mapped) {
-              const current = projectAccess(mapped.id, user.id);
-              const currentCalendar = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='calendar_connections'").get() ? db.prepare('SELECT calendar_id FROM calendar_connections WHERE project_id=?').get(mapped.id) as { calendar_id: string | null } | undefined : null;
+              const current = await projectAccess(mapped.id, user.id);
+              const currentCalendar = await calendarOf(mapped.id);
               if ((provider === 'googleDrive' && current.driveFolderId !== mapped.driveFolderId) || (provider === 'googleCalendar' && currentCalendar?.calendar_id !== calendar?.calendar_id)) throw new HttpError(409, 'The project connection changed during this test. Test the current mapping again.');
             }
             return send(200, result);
@@ -225,69 +234,74 @@ export function createApp(options: AppOptions = {}) {
           throw new HttpError(405, 'This integration settings action is not available.');
         }
         if (path === '/api/state' && req.method === 'GET') {
-          const workspaces = db.prepare('SELECT w.id,w.name,m.role FROM workspaces w JOIN memberships m ON m.workspace_id=w.id WHERE m.user_id=? ORDER BY w.rowid').all(user.id);
-          const projects = db.prepare(`SELECT ${projectFields} FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id WHERE m.user_id=? ORDER BY p.rowid`).all(user.id) as ProjectRow[];
+          const { rows: workspaces } = await db.execute(sql`SELECT w.id,w.name,m.role FROM workspaces w JOIN memberships m ON m.workspace_id=w.id WHERE m.user_id=${user.id} ORDER BY w.seq`);
+          const projects = (await db.execute(sql`SELECT ${projectFields} FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id WHERE m.user_id=${user.id} ORDER BY p.seq`)).rows as ProjectRow[];
           const projectId = url.searchParams.get('projectId') || projects[0]?.id || null;
-          if (projectId) projectAccess(projectId, user.id);
-          const data = Object.fromEntries(collections.map(collection => [collection, projectId ? store.list(projectId, collection) : []]));
-          const activity = projectId ? db.prepare('SELECT id,project_id AS projectId,message,created_at AS createdAt,sample FROM activity WHERE project_id=? ORDER BY rowid DESC LIMIT 50').all(projectId) : [];
+          if (projectId) await projectAccess(projectId, user.id);
+          const data = Object.fromEntries(await Promise.all(collections.map(async collection => [collection, projectId ? await store.list(projectId, collection) : []])));
+          const activity = projectId ? (await db.execute(sql`SELECT id,project_id AS "projectId",message,created_at AS "createdAt",sample FROM activity WHERE project_id=${projectId} ORDER BY seq DESC LIMIT 50`)).rows : [];
           return send(200, { user, workspaces, projects, projectId, ...data, activity, connections: { zernio: Boolean(env.ZERNIO_API_KEY), drive: Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) } });
         }
         if (path === '/api/workspaces' && req.method === 'POST') {
           const workspace = { id: randomUUID(), name: text(body.name, 'Workspace name'), role: 'owner' };
           const projectId = randomUUID();
-          transaction(db, () => { db.prepare('INSERT INTO workspaces VALUES(?,?)').run(workspace.id, workspace.name); db.prepare("INSERT INTO memberships VALUES(?,?,'owner')").run(workspace.id, user.id); db.prepare('INSERT INTO projects(id,workspace_id,name) VALUES(?,?,?)').run(projectId, workspace.id, 'My project'); store.activity(projectId, 'Workspace created.'); });
+          await db.transaction(async tx => { await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspace.id}, ${workspace.name})`); await tx.execute(sql`INSERT INTO memberships VALUES (${workspace.id}, ${user.id}, 'owner')`); await tx.execute(sql`INSERT INTO projects (id, workspace_id, name) VALUES (${projectId}, ${workspace.id}, 'My project')`); await createStore(tx).activity(projectId, 'Workspace created.'); });
           return send(201, { workspace, projectId });
         }
         const memberRoute = path.match(/^\/api\/workspaces\/([^/]+)\/members(?:\/([^/]+))?$/);
         if (memberRoute && ['GET', 'PATCH', 'DELETE'].includes(req.method!)) {
-          const role = workspaceAccess(memberRoute[1], user.id);
+          const role = await workspaceAccess(memberRoute[1], user.id);
           if (!['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
-          if (req.method === 'GET' && !memberRoute[2]) return send(200, { members: db.prepare('SELECT u.id,u.id AS userId,u.name,u.email,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=? ORDER BY u.name').all(memberRoute[1]) });
+          if (req.method === 'GET' && !memberRoute[2]) return send(200, { members: (await db.execute(sql`SELECT u.id,u.id AS "userId",u.name,u.email,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=${memberRoute[1]} ORDER BY u.name`)).rows });
           if (!memberRoute[2] || req.method === 'GET') throw new HttpError(404, 'Team route not found.');
           const requested = req.method === 'DELETE' ? null : choice(body.role, roles, 'Role');
-          transaction(db, () => {
-            const target = { id: memberRoute[2] }, previous = db.prepare('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?').get(memberRoute[1], target.id) as { role: string } | undefined;
+          // The workspace row lock serialises team changes, so parallel demotions cannot remove the last owner;
+          // the actor's role is re-read under it because the one read above may be stale.
+          await db.transaction(async tx => {
+            const current = await lockWorkspace(tx, memberRoute[1]) ? await memberRole(tx, memberRoute[1], user.id) : undefined;
+            if (!current) throw new HttpError(404, 'Workspace not found or unavailable.');
+            if (!['owner', 'admin'].includes(current)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
+            const target = { id: memberRoute[2] }, previous = await memberRole(tx, memberRoute[1], target.id);
             if (!previous) throw new HttpError(404, 'Workspace member not found.');
-            if ((requested !== null && !mayGrantWorkspaceRole(role, requested)) || !mayGrantWorkspaceRole(role, previous.role)) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
-            if (previous.role === 'owner' && requested !== 'owner' && (db.prepare("SELECT count(*) AS count FROM memberships WHERE workspace_id=? AND role='owner'").get(memberRoute[1]) as { count: number }).count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
-            if (req.method === 'DELETE') db.prepare('DELETE FROM memberships WHERE workspace_id=? AND user_id=?').run(memberRoute[1], target.id);
-            else db.prepare('UPDATE memberships SET role=? WHERE workspace_id=? AND user_id=?').run(requested, memberRoute[1], target.id);
-            for (const project of db.prepare('SELECT id FROM projects WHERE workspace_id=?').all(memberRoute[1]) as { id: string }[]) store.activity(project.id, 'Workspace team membership updated.');
+            if ((requested !== null && !mayGrantWorkspaceRole(current, requested)) || !mayGrantWorkspaceRole(current, previous)) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
+            if (previous === 'owner' && requested !== 'owner' && (await first<{ count: number }>(tx.execute(sql`SELECT count(*) AS count FROM memberships WHERE workspace_id=${memberRoute[1]} AND role='owner'`)))!.count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
+            if (req.method === 'DELETE') await tx.execute(sql`DELETE FROM memberships WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
+            else await tx.execute(sql`UPDATE memberships SET role=${requested} WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
+            const activityStore = createStore(tx);
+            for (const project of (await tx.execute(sql`SELECT id FROM projects WHERE workspace_id=${memberRoute[1]}`)).rows as { id: string }[]) await activityStore.activity(project.id, 'Workspace team membership updated.');
           });
           return send(200, { ok: true });
         }
         if (path === '/api/projects' && req.method === 'POST') {
-          const workspaceId = text(body.workspaceId, 'Workspace', 100), role = workspaceAccess(workspaceId, user.id, true);
+          const workspaceId = text(body.workspaceId, 'Workspace', 100), role = await workspaceAccess(workspaceId, user.id, true);
           if ((Object.hasOwn(body, 'zernioProfileId') || Object.hasOwn(body, 'driveFolderId')) && (!user.isOperator || !['owner', 'admin'].includes(role))) throw new HttpError(403, 'Only an instance operator with workspace administration access can map provider connections.');
-          const project = projectInput(body) as ProjectInput & { id: string; workspaceId: string }; checkProfileMapping(db, project.zernioProfileId); project.id = randomUUID(); project.workspaceId = workspaceId;
-          db.prepare('INSERT INTO projects VALUES(?,?,?,?,?,?)').run(project.id, workspaceId, project.name, project.color, project.zernioProfileId, project.driveFolderId);
-          store.activity(project.id, 'Project created.'); return send(201, { project });
+          const project = projectInput(body) as ProjectInput & { id: string; workspaceId: string }; await checkProfileMapping(db, project.zernioProfileId); project.id = randomUUID(); project.workspaceId = workspaceId;
+          await db.execute(sql`INSERT INTO projects (id, workspace_id, name, color, zernio_profile_id, drive_folder_id) VALUES (${project.id}, ${workspaceId}, ${project.name}, ${project.color}, ${project.zernioProfileId}, ${project.driveFolderId})`);
+          await store.activity(project.id, 'Project created.'); return send(201, { project });
         }
         const projectRoute = path.match(/^\/api\/projects\/([^/]+)(?:\/(.*))?$/);
         if (projectRoute) {
-          const project = projectAccess(projectRoute[1], user.id), role = project.role;
+          const project = await projectAccess(projectRoute[1], user.id), role = project.role;
           if (/^(?:inbox|engagement|conversations)(?:\/|$)/.test(projectRoute[2] || '')) throw new HttpError(404, 'API route not found.');
           if (mutating && role === 'viewer') throw new HttpError(403, 'Your workspace role is view only.');
           if (projectRoute[2] === 'sample-data' && req.method === 'DELETE') {
             if (!['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only a workspace owner or administrator can remove sample data.');
-            const samples = collections.flatMap(collection => store.list(project.id, collection).filter(record => record.sample).map(record => ({ collection, record })));
-            for (const { collection, record } of samples) checkDependants(store, project.id, collection, record.id, true);
-            let activityRemoved;
-            transaction(db, () => { for (const { collection, record } of samples) store.remove(project.id, collection, record.id); activityRemoved = db.prepare('DELETE FROM activity WHERE project_id=? AND sample=1').run(project.id).changes; store.activity(project.id, 'Sample data removed.'); });
+            const samples = (await Promise.all(collections.map(async collection => (await store.list(project.id, collection)).filter(record => record.sample).map(record => ({ collection, record }))))).flat();
+            for (const { collection, record } of samples) await checkDependants(store, project.id, collection, record.id, true);
+            const activityRemoved = await db.transaction(async tx => { const scoped = createStore(tx); for (const { collection, record } of samples) await scoped.remove(project.id, collection, record.id); const removed = (await tx.execute(sql`DELETE FROM activity WHERE project_id=${project.id} AND sample`)).rowCount; await scoped.activity(project.id, 'Sample data removed.'); return removed; });
             return send(200, { removed: samples.length, activityRemoved });
           }
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
           const requestRevision = integrationSettings.revision;
-          const assertIntegrationSettings = () => { if (auth.user(req)?.id !== user.id) throw new HttpError(403, 'Your sign-in session ended. Sign in again.'); const current = projectAccess(project.id, user.id); if (current.role !== role) throw new HttpError(403, 'Your workspace role changed. Refresh this project before continuing.'); if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.'); };
-          const context: RequestContext = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: (expected: string | null) => { assertIntegrationSettings(); const current = db.prepare('SELECT zernio_profile_id FROM projects WHERE id=?').get(project.id) as { zernio_profile_id: string | null } | undefined; if (current?.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: (expected: string | null) => { assertIntegrationSettings(); const current = db.prepare('SELECT drive_folder_id FROM projects WHERE id=?').get(project.id) as { drive_folder_id: string | null } | undefined; if (current?.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: (collection: string, fields: ProviderRecord) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); checkReferences(store, project.id, data); return data; } };
+          const assertIntegrationSettings = async () => { if ((await auth.user(req))?.id !== user.id) throw new HttpError(403, 'Your sign-in session ended. Sign in again.'); const current = await projectAccess(project.id, user.id); if (current.role !== role) throw new HttpError(403, 'Your workspace role changed. Refresh this project before continuing.'); if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.'); };
+          const context: RequestContext = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: async (expected: string | null) => { await assertIntegrationSettings(); const current = await first<{ zernio_profile_id: string | null }>(db.execute(sql`SELECT zernio_profile_id FROM projects WHERE id=${project.id}`)); if (current?.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: async (expected: string | null) => { await assertIntegrationSettings(); const current = await first<{ drive_folder_id: string | null }>(db.execute(sql`SELECT drive_folder_id FROM projects WHERE id=${project.id}`)); if (current?.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: async (collection: string, fields: ProviderRecord) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); await checkReferences(store, project.id, data); return data; } };
           context.assertPublishingApproval = (post: ProviderRecord) => assertPublishingApproval(context, post);
-          context.persistNativeRefreshToken = (provider: string, expected: string | undefined, next: string) => {
-            assertIntegrationSettings();
+          context.persistNativeRefreshToken = async (provider: string, expected: string | undefined, next: string) => {
+            await assertIntegrationSettings();
             const name = ({ googleAdsNative: 'GOOGLE_ADS_REFRESH_TOKEN', microsoftAds: 'MICROSOFT_ADS_REFRESH_TOKEN' } as Record<string, string | undefined>)[provider];
             if (!name) throw new HttpError(409, 'The native ad authorization changed. Refresh before continuing.');
             // Parallel refreshes retain the first saved token; administrative changes still invalidate the request above.
-            if (env[name] === expected) integrationSettings.save(provider, { refreshToken: next }, { tokenRotation: true });
+            if (env[name] === expected) await integrationSettings.save(provider, { refreshToken: next }, { tokenRotation: true });
           };
           context.assertProviderPostEdit = () => assertProviderPostEdit(context);
           context.contacts = direct.contacts; context.webhooks = webhooks;
@@ -307,32 +321,32 @@ export function createApp(options: AppOptions = {}) {
           }
           if (!projectRoute[2] && req.method === 'PATCH') {
             if ((Object.hasOwn(body, 'zernioProfileId') || Object.hasOwn(body, 'driveFolderId')) && (!user.isOperator || !['owner', 'admin'].includes(role))) throw new HttpError(403, 'Only an instance operator with workspace administration access can map provider connections.');
-            const updated = projectInput({ ...project, ...body }); checkProfileMapping(db, updated.zernioProfileId, project.id);
-            db.prepare('UPDATE projects SET name=?,color=?,zernio_profile_id=?,drive_folder_id=? WHERE id=?').run(updated.name, updated.color, updated.zernioProfileId, updated.driveFolderId, project.id);
-            store.activity(project.id, 'Project settings updated.'); return send(200, { project: { ...project, ...updated } });
+            const updated = projectInput({ ...project, ...body }); await checkProfileMapping(db, updated.zernioProfileId, project.id);
+            await db.execute(sql`UPDATE projects SET name=${updated.name},color=${updated.color},zernio_profile_id=${updated.zernioProfileId},drive_folder_id=${updated.driveFolderId} WHERE id=${project.id}`);
+            await store.activity(project.id, 'Project settings updated.'); return send(200, { project: { ...project, ...updated } });
           }
           const [collection, id, extra] = (projectRoute[2] || '').split('/');
           if (collections.includes(collection) && !extra) {
             if (!id && req.method === 'POST') {
               rejectProviderFields(body, collection);
               if (collection === 'posts' && body.status === 'published') bad('Publish through a connected provider to confirm publication.');
-              const data = validateRecord(collection, collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { ...body, locationSource: 'manual' } : body); checkReferences(store, project.id, data);
+              const data = validateRecord(collection, collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { ...body, locationSource: 'manual' } : body); await checkReferences(store, project.id, data);
               if (collection === 'assets' && data.approval !== 'pending' && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
-              const record = store.create(project.id, collection, data); store.activity(project.id, `${collection.slice(0, -1)} created.`); return send(201, { record });
+              const record = await store.create(project.id, collection, data); await store.activity(project.id, `${collection.slice(0, -1)} created.`); return send(201, { record });
             }
             if (id && ['PATCH', 'DELETE'].includes(req.method!)) {
-              const previous = store.get(project.id, collection, id); if (!previous) throw new HttpError(404, 'Record not found.');
+              const previous = await store.get(project.id, collection, id); if (!previous) throw new HttpError(404, 'Record not found.');
               if ((collection === 'placements' && previous.source === 'broadsign') || (collection === 'campaigns' && (previous.externalId || previous.nativeProvider)) || (collection === 'posts' && (previous.externalId || previous.status === 'published'))) bad('Provider-managed records must be changed through their connected provider controls.');
-              if (req.method === 'DELETE') { checkDependants(store, project.id, collection, id); store.remove(project.id, collection, id); store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
+              if (req.method === 'DELETE') { await checkDependants(store, project.id, collection, id); await store.remove(project.id, collection, id); await store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
               rejectProviderFields(body, collection);
               if (collection === 'posts' && (body.status === 'published' || previous.status === 'published' || previous.externalId)) bad('Provider posts must be managed through their connected provider.');
-              const data = validateRecord(collection, { ...previous, ...body, ...(collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { locationSource: 'manual' } : {}) }); checkReferences(store, project.id, data);
+              const data = validateRecord(collection, { ...previous, ...body, ...(collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { locationSource: 'manual' } : {}) }); await checkReferences(store, project.id, data);
               if (collection === 'assets') {
                 if (body.approval !== undefined && body.approval !== previous.approval && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
                 if (['url', 'deliveryUrl', 'kind'].some(key => data[key] !== previous[key])) data.approval = 'pending';
                 if (Object.hasOwn(body, 'deliveryUrl') && data.deliveryUrl !== previous.deliveryUrl) for (const key of MEDIA_DELIVERY_FIELDS) data[key] = null;
               }
-              const record = store.update(project.id, collection, id, data); store.activity(project.id, `${collection.slice(0, -1)} updated.`); return send(200, { record });
+              const record = await store.update(project.id, collection, id, data); await store.activity(project.id, `${collection.slice(0, -1)} updated.`); return send(200, { record });
             }
           }
         }
@@ -351,28 +365,34 @@ export function createApp(options: AppOptions = {}) {
     finally { clearTimeout(bodyTimer); }
   });
   server.requestTimeout = MEDIA_UPLOAD_TIMEOUT; server.headersTimeout = 10000;
-  return { server, db, store, config, webhooks, direct, smsInbox, links, close: async () => { closeMediaUploads(db); clearInterval(directTimer); direct.close(); await direct.idle(); return new Promise<void>((resolveClose, reject) => { clearInterval(webhookTimer); if (!server.listening) { db.close(); resolveClose(); return; } server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); server.closeIdleConnections(); }); } };
+  // An injected database belongs to the caller; the shared pool closes with the app.
+  const release = async () => { await draining; if (!options.database) await closeDatabase(); };
+  return { server, db, pool, store, config, webhooks, direct, smsInbox, links, close: async () => {
+    closeMediaUploads(db); clearInterval(directTimer); clearInterval(webhookTimer); direct.close(); await direct.idle();
+    if (server.listening) await new Promise<void>((resolveClose, reject) => { server.close(error => error ? reject(error) : resolveClose()); server.closeIdleConnections(); });
+    await release();
+  } };
 }
-function checkProfileMapping(db: DatabaseSync, profileId: string | null, projectId = ''): void { if (profileId && db.prepare('SELECT id FROM projects WHERE zernio_profile_id=? AND id<>?').get(profileId, projectId)) throw new HttpError(409, 'This Zernio profile is already mapped to another project. Use one profile per project for publishing and analytics.'); }
+async function checkProfileMapping(db: Database, profileId: string | null, projectId = ''): Promise<void> { if (profileId && (await db.execute(sql`SELECT id FROM projects WHERE zernio_profile_id=${profileId} AND id<>${projectId}`)).rowCount) throw new HttpError(409, 'This Zernio profile is already mapped to another project. Use one profile per project for publishing and analytics.'); }
 function projectInput(data: ProviderRecord): ProjectInput {
   const color = data.color || '#5943ce'; if (typeof color !== 'string' || !/^#[\da-f]{6}$/i.test(color)) bad('Use a six digit hex color.');
   return { name: text(data.name, 'Project name'), color, zernioProfileId: text(data.zernioProfileId, 'Zernio profile', 200, true), driveFolderId: text(data.driveFolderId, 'Drive folder', 200, true) };
 }
-function checkReferences(store: Store, projectId: string, data: ProviderRecord): void {
-  for (const [key, collection] of [['campaignId', 'campaigns'], ['assetId', 'assets'], ['providerId', 'providers']]) if (data[key] && !store.get(projectId, collection, data[key])) bad(`${key} does not belong to this project.`);
-  for (const variant of [...Object.values((data.platformOverrides || {}) as ProviderRecord), ...Object.values((data.accountOverrides || {}) as ProviderRecord)]) if (variant?.assetId && !store.get(projectId, 'assets', variant.assetId)) bad('A customized creative asset does not belong to this project.');
+async function checkReferences(store: Store, projectId: string, data: ProviderRecord): Promise<void> {
+  for (const [key, collection] of [['campaignId', 'campaigns'], ['assetId', 'assets'], ['providerId', 'providers']]) if (data[key] && !await store.get(projectId, collection, data[key])) bad(`${key} does not belong to this project.`);
+  for (const variant of [...Object.values((data.platformOverrides || {}) as ProviderRecord), ...Object.values((data.accountOverrides || {}) as ProviderRecord)]) if (variant?.assetId && !await store.get(projectId, 'assets', variant.assetId)) bad('A customized creative asset does not belong to this project.');
 }
-function checkDependants(store: Store, projectId: string, collection: string, id: string, realOnly = false): void {
+async function checkDependants(store: Store, projectId: string, collection: string, id: string, realOnly = false): Promise<void> {
   const field = ({ campaigns: 'campaignId', assets: 'assetId', providers: 'providerId' } as Record<string, string | undefined>)[collection];
   // ponytail: scan local project records for references; use indexed relationships if project size makes deletion checks slow.
-  if (field && collections.some(name => store.list(projectId, name).some(record => (record[field] === id || (collection === 'assets' && [...Object.values((record.platformOverrides || {}) as ProviderRecord), ...Object.values((record.accountOverrides || {}) as ProviderRecord)].some(variant => variant?.assetId === id))) && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
+  if (field && (await Promise.all(collections.map(name => store.list(projectId, name)))).some(list => list.some(record => (record[field] === id || (collection === 'assets' && [...Object.values((record.platformOverrides || {}) as ProviderRecord), ...Object.values((record.accountOverrides || {}) as ProviderRecord)].some(variant => variant?.assetId === id))) && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
 }
 function rejectProviderFields(body: ProviderRecord, collection = ''): void {
   if (collection === 'assets' && MEDIA_DELIVERY_FIELDS.some(key => Object.hasOwn(body, key))) bad('Hosted delivery metadata is managed by the upload workflow.');
   if (['nativeProvider', 'nativeCustomerId', 'nativeCampaignResource', 'nativeResources', 'nativeAccountId', 'nativeCampaignId', 'nativeAdGroupId', 'nativeAdId', 'externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'modifiedTime', 'md5Checksum', 'approvalStatus', 'approvedBy', 'reviewedBy', 'providerDeletedAt', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key) && !(collection === 'assets' && key === 'deliveryUrl'))) bad('Provider identifiers and publication evidence are managed by integrations.');
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const app = createApp();
+  const app = await createApp();
   app.server.listen(Number(process.env.PORT || 3018), process.env.HOST || '127.0.0.1', () => console.log(`Campaign manager available at ${app.config.appUrl}`));
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, async () => { await app.close(); process.exit(0); });
 }

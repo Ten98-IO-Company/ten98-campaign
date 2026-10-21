@@ -66,7 +66,8 @@ export async function pendingMigrations(applied: readonly AppliedMigration[]): P
 }
 
 export async function assertSchema(pool = getDatabase().pool) {
-  const { rows } = await pool.query<AppliedMigration>('SELECT version, checksum FROM schema_version ORDER BY version');
+  // A database that was never migrated has no ledger (42P01); report it as the same mismatch.
+  const { rows } = await pool.query<AppliedMigration>('SELECT version, checksum FROM schema_version ORDER BY version').catch(error => { throw error?.code === '42P01' ? schemaMismatch() : error; });
   if ((await pendingMigrations(rows)).length !== 0) throw schemaMismatch();
 }
 
