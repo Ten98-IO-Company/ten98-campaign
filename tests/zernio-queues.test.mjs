@@ -233,3 +233,48 @@ test('queue enqueue requires inline review of the exact saved post and queue sna
   queue = { ...queue, version: 'v2' }; item = { ...item, post: { ...item.post, queueVersion: 'v2' } }; markup = renderToStaticMarkup(render()); assert.doesNotMatch(markup, /checked=""/); await submit(); assert.equal(calls, 1, 'Confirmation must not follow a newly reviewed queue version.');
   assert.doesNotMatch(source.slice(enqueueStart, enqueueEnd), /window\.confirm/);
 });
+
+test('pausing and activating a queue sends one receipted update with only its active state changed', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  try {
+    const queue = (await f.create('Pausable')).data.queue, toggle = (row, body, key) => f.request(`${f.path}/${encodeURIComponent(row._id)}/status`, 'POST', body, key);
+    let before = f.writes().length, key = randomUUID();
+    const paused = await toggle(queue, { active: false, expectedVersion: queue.version }, key);
+    assert.equal(paused.status, 200, JSON.stringify(paused.data)); assert.equal(paused.data.operation.status, 'complete'); assert.equal(paused.data.changed, true);
+    assert.deepEqual({ ...paused.data.queue, version: undefined }, { ...queue, active: false, version: undefined }); assert.equal(paused.data.queues[0].active, false);
+    assert.equal(f.writes().length, before + 1, 'One toggle sends exactly one provider request.');
+    assert.deepEqual(f.writes().at(-1).body, { profileId: 'queue-profile', queueId: queue._id, setAsDefault: true, reshuffleExisting: false, name: queue.name, timezone: queue.timezone, slots: queue.slots, active: false });
+    assert.equal(f.writes().at(-1).key, key);
+    assert.deepEqual((await toggle(queue, { active: false, expectedVersion: queue.version }, key)).data, paused.data); assert.equal(f.writes().length, before + 1, 'A retried idempotency key sends nothing.');
+    const stale = await toggle(queue, { active: false, expectedVersion: queue.version }); assert.equal(stale.status, 409); assert.equal(stale.data.error.code, 'QUEUE_CHANGED'); assert.equal(f.writes().length, before + 1);
+    const activated = await toggle(paused.data.queue, { active: true, expectedVersion: paused.data.queue.version }); assert.equal(activated.status, 200, JSON.stringify(activated.data)); assert.equal(activated.data.queue.active, true); assert.equal(f.writes().length, before + 2);
+    const same = await toggle(activated.data.queue, { active: true, expectedVersion: activated.data.queue.version }); assert.equal(same.status, 200); assert.equal(same.data.changed, false); assert.equal(f.writes().length, before + 2, 'An unchanged state sends nothing.');
+    before = f.writes().length;
+    for (const body of [{ active: 'no', expectedVersion: queue.version }, { active: false, expectedVersion: queue.version, name: 'Renamed' }, { active: false }]) assert.equal((await toggle(activated.data.queue, body)).status, 400);
+    assert.equal((await f.request(`${f.path}/${queue._id}/status`)).status, 405);
+    const list = await f.list(), empty = await f.request(`${f.path}/create`, 'POST', { name: 'Empty', timezone: 'UTC', slots: [], active: false, expectedListVersion: list.version }); assert.equal(empty.status, 200, JSON.stringify(empty.data));
+    const noSlots = await toggle(empty.data.queue, { active: true, expectedVersion: empty.data.queue.version }); assert.equal(noSlots.status, 400); assert.equal(noSlots.data.error.code, 'QUEUE_SLOTS_REQUIRED');
+    assert.equal(f.writes().length, before + 1, 'Invalid toggles send nothing (only the empty queue creation was sent).');
+    await f.app.sql.run("UPDATE memberships SET role='editor'"); const calls = f.calls.length;
+    assert.equal((await toggle(queue, { active: false, expectedVersion: activated.data.queue.version })).status, 403); assert.equal(f.calls.length, calls);
+  } finally { await f.close(); }
+});
+
+test('parallel queue toggles send one provider request and an unconfirmed toggle stays uncertain', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  try {
+    const queue = (await f.create('Contended')).data.queue, toggle = (row, body, key) => f.request(`${f.path}/${row._id}/status`, 'POST', body, key), before = f.writes().length;
+    // The first toggle is held at its provider request; the second, under a new key, arrives while the queue still reads active.
+    let reached, release, holding = true; const held = new Promise(resolve => { reached = resolve; }), gate = new Promise(resolve => { release = resolve; });
+    f.setHook(async (url, options) => { if (holding && url.pathname.endsWith('/queue/slots') && options.method === 'PUT') { holding = false; reached(); await gate; } });
+    const leading = toggle(queue, { active: false, expectedVersion: queue.version }); await held;
+    const second = await toggle(queue, { active: false, expectedVersion: queue.version }); release(); const first = await leading; f.setHook(undefined);
+    assert.equal(first.status, 200, JSON.stringify(first.data)); assert.equal(second.status, 409); assert.equal(second.data.error.code, 'OPERATION_NOT_SENT', JSON.stringify(second.data));
+    assert.equal(f.writes().length, before + 1, 'Parallel toggles of one queue reach the provider once.');
+    const paused = first.data.queue;
+    f.setHook((url, options) => url.pathname.endsWith('/queue/slots') && options.method === 'PUT' ? Response.json({ success: true, schedule: { ...structuredClone(f.queues[0]), active: false } }) : undefined);
+    const uncertain = await toggle(paused, { active: true, expectedVersion: paused.version }); assert.equal(uncertain.status, 409); assert.equal(uncertain.data.operation.status, 'uncertain');
+    f.setHook(undefined); const blocked = await toggle(paused, { active: true, expectedVersion: paused.version }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT');
+    assert.equal(f.writes().length, before + 2, 'The unconfirmed toggle was sent once and blocks further queue changes until reviewed.');
+  } finally { await f.close(); }
+});
