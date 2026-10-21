@@ -22,8 +22,8 @@
   },
   "src/PostComposer.tsx": {
     "stylesheet": 1,
-    "element": 368,
-    "styling": 158
+    "styling": 2,
+    "element": 1
   },
   "src/SocialAnalytics.tsx": {
     "element": 11,
