@@ -175,7 +175,13 @@ export async function createApp(options: AppOptions = {}) {
         if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
         if (mutating && req.headers.origin !== appUrl) throw new HttpError(403, 'A matching Origin header is required.');
         const body = mutating && req.method !== 'DELETE' && !rawMediaContent ? await readBody(req, /^\/api\/projects\/[^/]+\/integrations\/drive\/upload$/.test(path) ? 7 * 1024 * 1024 : /^\/api\/projects\/[^/]+\/(?:posts(?:\/[^/]+)?|integrations\/social\/(?:validate|update)|direct\/(?:contacts\/import|campaigns(?:\/[^/]+)?))$/.test(path) ? 2 * 1024 * 1024 : 65536) : {};
-        if (path === '/api/session' && req.method === 'GET') return send(200, { user: publicUser(await auth.user(req, res)), setupRequired: !await claimed(db), oidcEnabled: config.oidcEnabled });
+        if (path === '/api/session' && req.method === 'GET') {
+          // A session cookie that matches no session (expired, revoked, or from before the PostgreSQL upgrade, which
+          // carries no sessions over) is reported once and cleared, so the sign-in screen can say why.
+          const current = await auth.user(req, res), sessionEnded = !current && Boolean(auth.sessionKey(req));
+          if (sessionEnded) await auth.logout(req, res);
+          return send(200, { user: publicUser(current), setupRequired: !await claimed(db), oidcEnabled: config.oidcEnabled, ...(sessionEnded ? { sessionEnded: true } : {}) });
+        }
         if (path === '/api/auth/setup' && req.method === 'POST') {
           await auth.limit('setup:' + req.socket.remoteAddress, 10);
           if (await claimed(db)) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
