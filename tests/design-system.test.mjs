@@ -233,7 +233,6 @@ test('native integration and empty-state copy keeps light colors and readable da
   for (const [selector, property] of [['.sample-banner', 'border'], ['.chart-footer', 'border-top'], ['.upcoming-row', 'border-top'], ['.date-tile', 'border']]) pairedRole(paint(selector, property).replace(/^1px solid /, ''), selector + ' border');
   for (const [file, lightHash, selectors] of [
     ['inbox.css', 'dad771b504b2ee08bd03dab216771fa6b656091e466dbdde7e704700719b19c8', ['.inbox-conversation', '.inbox-conversation:hover,.inbox-conversation.selected', '.inbox-contact', '.inbox-message', '.inbox-message.outgoing', '.inbox-review blockquote']],
-    ['direct-campaigns.css', 'ff69defeea5a8b4411dd1cb767f8710a4894c696970cb3766065752a152176f7', ['.direct-message-preview', '.direct-counts>span', '.direct-confirmation', '.direct-import-results']],
   ]) {
     const sheet = await source(file), light = sheet.replace(/light-dark\((#[\da-f]{3,8}|white),var\(--[\w-]+\)\)/gi, '$1').replace(/\r\n/g, '\n');
     assert.equal(createHash('sha256').update(light).digest('hex'), lightHash, file + ' preserves every original light color and layout declaration');
@@ -245,10 +244,6 @@ test('native integration and empty-state copy keeps light colors and readable da
       for (const selector of ['.inbox-notice,.inbox-provider-note', '.inbox-provider-note', '.inbox-avatar']) assert.ok(contrast(pairedRole(paint(selector, 'color', sheet), selector), pairedRole(paint(selector, 'background', sheet), selector)) >= 4.5, selector + ' owns a readable feedback pair');
       const author = pairedRole(paint('.inbox-message>strong', 'color', sheet), 'message author');
       for (const selector of ['.inbox-message', '.inbox-message.outgoing']) assert.ok(contrast(author, pairedRole(paint(selector, 'background', sheet), selector)) >= 4.5, 'message author stays readable');
-    }
-    if (file === 'direct-campaigns.css') {
-      for (const selector of ['.direct-audience legend,.direct-consent-fields legend', '.direct-consented', '.direct-suppressed']) assert.ok(contrast(pairedRole(paint(selector, 'color', sheet), selector), '--color-surface') >= 4.5, selector + ' stays readable');
-      for (const selector of ['.direct-notice', '.direct-policy,.direct-provider-note', '.direct-provider-note']) assert.ok(contrast(pairedRole(paint(selector, 'color', sheet), selector), pairedRole(paint(selector, 'background', sheet), selector)) >= 4.5, selector + ' keeps its notice text and surface paired');
     }
   }
 });

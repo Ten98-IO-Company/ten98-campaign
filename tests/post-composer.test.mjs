@@ -5,6 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import * as ui from '@ten98/ui';
 import * as social from '../shared/social-posts.ts';
 import { PLATFORM_RULES, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant } from '../shared/social-posts.ts';
 
@@ -24,7 +25,7 @@ test('provider post updates and lifecycle actions display retained-media warning
 test('late browser and provider media inspections cannot restore removed media or cross platform editors', async () => {
   const compile = (value, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(value)});`)(...Object.values(context));
   const updateSource = source.slice(source.indexOf('function update(index:'), source.indexOf('  async function inspect('));
-  const providerSource = source.slice(source.indexOf('async function inspectWithProvider('), source.indexOf('  return <div className="post-media-editor">'));
+  const providerSource = source.slice(source.indexOf('async function inspectWithProvider('), source.indexOf('\n  return <', source.indexOf('async function inspectWithProvider(')));
   const browserSource = source.slice(source.indexOf('async function inspect(index:'), source.indexOf('  async function inspectWithProvider('));
   const lifecycle = source.match(/useEffect\((\(\) => \{ active.current = true; return \(\) => \{ active.current = false; \}; \}), \[\]\);/)[1];
   assert.match(source, /<MediaEditor key=\{editKey\} items=\{override.mediaItems/, 'Platform and account tabs must mount separate media editors even when the source URL matches.');
@@ -100,7 +101,7 @@ test('actual account composer rendering shows distinct caption, media, options a
   const post = { id: 'post', content: 'Shared caption', platforms: ['facebook'], accounts: ['first', 'second'], scheduledAt: '2070-01-01T09:00:00Z', mediaItems: [], platformOverrides: { facebook: { content: 'Platform caption', options: { firstComment: 'Platform comment' } } }, accountOverrides: { second: { platform: 'facebook', content: 'Second brand caption', mediaItems: [{ type: 'image', url: 'https://cdn.example.test/second.jpg' }], options: {}, scheduledAt: '2070-01-02T09:00:00Z' } } };
   let stateIndex = 0;
   const hooks = { useState: initial => { const index = stateIndex++; return [index === 13 ? 'second' : typeof initial === 'function' ? initial() : initial, () => {}]; }, useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute() };
-  const context = { React, ...hooks, ...social };
+  const context = { React, ...hooks, ...social, ...ui, MediaImage: ui.Image };
   const Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
   const html = renderToStaticMarkup(Composer({ post, accounts, assets: [], campaigns: [], canWrite: true, onSubmit: async () => {} }));
   const stylesheet = await readFile(new URL('../src/post-composer.css', import.meta.url), 'utf8');
@@ -114,7 +115,7 @@ test('actual account composer rendering shows distinct caption, media, options a
 test('group recipient selection copies reviewed IDs, blocks unavailable members and ignores a response after its scope closes', async () => {
   const picker = source.slice(source.indexOf('function AccountGroupPicker('), source.indexOf('function previewUrl(')), compile = (code, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
   const members = [{ _id: 'first', platform: 'facebook', displayName: 'First page' }, { _id: 'second', platform: 'facebook', displayName: 'Second page' }], copied = [], notices = [], group = { _id: 'group', name: 'Launch pages', accountIds: ['first', 'second'] }, data = { groups: [group], accounts: members };
-  const choose = picker.slice(picker.indexOf('function choose()'), picker.indexOf('  return <section'));
+  const choose = picker.slice(picker.indexOf('function choose()'), picker.indexOf('\n  return <', picker.indexOf('function choose()')));
   const context = { disabled: false, busy: false, canChoose: true, members, data, group, onChoose: (...args) => copied.push(args), setNotice: value => notices.push(value) };
   compile(choose, context)(); members[0].displayName = 'Changed group directory'; group.accountIds.push('later-account');
   assert.deepEqual(copied[0][0].map(row => row._id), ['first', 'second']); assert.equal(copied[0][0][0].displayName, 'First page'); assert.match(notices[0], /Later group changes will not change/);
@@ -124,9 +125,9 @@ test('group recipient selection copies reviewed IDs, blocks unavailable members 
   const loading = refresh(); active.current = false; generation.current++; finish(data); await loading; assert.deepEqual(accepted, []); assert.equal(pending.current, false);
   const { code } = await transformWithOxc(picker, 'AccountGroupPicker.tsx', { jsx: { runtime: 'classic' } });
   let index = 0; const badData = { groups: [{ _id: 'blocked', name: 'Mixed channels', accountIds: ['inactive', 'ads', 'missing'] }], accounts: [{ _id: 'inactive', platform: 'facebook', displayName: 'Disconnected page', isActive: false }, { _id: 'ads', platform: 'google', displayName: 'Ads connection' }] };
-  const ui = { React, PLATFORM_RULES, accountId: row => row._id || row.id, accountLabel: row => row.displayName || row._id || row.id, useState: initial => [[badData, 'blocked', false, '', ''][index++] ?? initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
-  const Picker = new Function(...Object.keys(ui), code + ';return AccountGroupPicker;')(...Object.values(ui)), html = renderToStaticMarkup(Picker({ load: async () => badData, onChoose() {}, disabled: false }));
-  assert.match(html, /Reconnection required/); assert.match(html, /Social publishing unavailable/); assert.match(html, /Unavailable in this project/); assert.match(html, /no members will be silently skipped/); assert.match(html, /disabled="">Replace destinations with these accounts/);
+  const scope = { ...ui, React, PLATFORM_RULES, accountId: row => row._id || row.id, accountLabel: row => row.displayName || row._id || row.id, useState: initial => [[badData, 'blocked', false, '', ''][index++] ?? initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {} };
+  const Picker = new Function(...Object.keys(scope), code + ';return AccountGroupPicker;')(...Object.values(scope)), html = renderToStaticMarkup(Picker({ load: async () => badData, onChoose() {}, disabled: false }));
+  assert.match(html, /Reconnection required/); assert.match(html, /Social publishing unavailable/); assert.match(html, /Unavailable in this project/); assert.match(html, /no members will be silently skipped/); assert.match(html, /aria-disabled="true"[^>]*>Replace destinations with these accounts/);
 });
 
 test('an empty custom-media editor and an empty asset selector retain their selected editing mode', () => {
@@ -182,7 +183,7 @@ test('previews show the actual thread sequence and Discord poll choices and reje
   const pollAnswers = new Function('options', `return (${answers});`);
   assert.deepEqual(pollAnswers({ poll: { answers: [{ poll_media: { text: 'Yes' } }, { poll_media: { text: 'No' } }] } }), ['Yes', 'No']);
   assert.deepEqual(pollAnswers({ poll: { options: ['Option one', 'Option two'] } }), ['Option one', 'Option two']);
-  const guard = source.slice(source.indexOf('function previewUrl('), source.indexOf('\nconst bytesLabel')).replace('value: string', 'value');
+  const guard = source.slice(source.indexOf('function previewUrl('), source.indexOf('\nconst destinationFields')).replace('value: string', 'value');
   const url = new Function('publicMediaUrl', `return (${guard});`)(publicMediaUrl);
   assert.equal(url('https://sub.localhost/image.jpg'), ''); assert.equal(url('https://drive.google.com/file/d/private/view'), ''); assert.equal(url('https://cdn.example.com/creative.gif'), 'https://cdn.example.com/creative.gif');
 });
@@ -239,7 +240,7 @@ test('YouTube keywords save and reopen as a shared field and reach unpublished u
   assert.deepEqual(normalizePostTags(values.tags), ['launch', 'video', 'product']);
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview').replace('export const accountLabel', 'const accountLabel'), 'PostComposer.tsx', { jsx: { runtime: 'classic' } });
   const hooks = { useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute() };
-  const context = { React, ...hooks, ...social }, Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
+  const context = { React, ...hooks, ...social, ...ui, MediaImage: ui.Image }, Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
   const post = { content: 'Video', platforms: ['youtube'], tags: ['launch', 'product'], mediaItems: [] };
   const html = renderToStaticMarkup(Composer({ post, assets: [], accounts: [], campaigns: [], canWrite: true, onSubmit: async () => {} }));
   assert.equal((html.match(/>YouTube keyword tags</g) || []).length, 1); assert.match(html, /launch\nproduct/); assert.match(html, /Shared by every selected YouTube channel/);

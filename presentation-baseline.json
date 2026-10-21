@@ -7,11 +7,6 @@
     "element": 186,
     "styling": 64
   },
-  "src/DirectCampaigns.tsx": {
-    "stylesheet": 1,
-    "element": 301,
-    "styling": 124
-  },
   "src/IntegrationSettings.tsx": {
     "element": 1,
     "styling": 2
@@ -22,8 +17,8 @@
   },
   "src/PostComposer.tsx": {
     "stylesheet": 1,
-    "element": 368,
-    "styling": 158
+    "styling": 2,
+    "element": 1
   },
   "src/SocialAnalytics.tsx": {
     "element": 11,
