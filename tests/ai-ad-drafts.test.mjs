@@ -4,11 +4,11 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 
-test('AI ad suggestions stay private, reviewable and unsubmitted until the user completes the ad builder', async () => {
+test('AI ad suggestions stay private, reviewable and unsubmitted until the user completes the ad builder', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-ai-ads-')), origin = 'http://127.0.0.1:3018';
-  const app = createApp({ dataDir, appUrl: origin, env: { OPENROUTER_API_KEY: 'synthetic-ai-key', OPENROUTER_MODEL: 'test/model' }, directScheduler: false }), localFetch = globalThis.fetch;
+  const app = await testApp(t, { dataDir, appUrl: origin, env: { OPENROUTER_API_KEY: 'synthetic-ai-key', OPENROUTER_MODEL: 'test/model' }, directScheduler: false }), localFetch = globalThis.fetch;
   const draft = { name: 'Search launch', platform: 'google', format: 'search', headline: 'A clear next step', body: 'Explore our services today.', linkUrl: 'https://example.test/services', additionalHeadlines: ['Made for your team', 'Start with a conversation'], additionalDescriptions: ['Get the details and choose what works.'], keywords: ['team services'] };
   let calls = 0, cookie;
   globalThis.fetch = async (target, options) => {
@@ -29,14 +29,14 @@ test('AI ad suggestions stay private, reviewable and unsubmitted until the user 
     const generated = await api(path + '/run', 'POST', { message: 'Suggest a Google Search ad for our services.' });
     assert.equal(generated.status, 200, JSON.stringify(generated.data)); assert.equal(calls, 2); assert.equal(generated.data.run.actions.length, 1);
     const action = generated.data.run.actions[0]; assert.equal(action.collection, 'ads'); assert.deepEqual(action.data, draft);
-    assert.deepEqual(app.store.list(projectId, 'campaigns'), []); assert.equal(generated.data.run.usage.cost, 0.002);
+    assert.deepEqual(await app.store.list(projectId, 'campaigns'), []); assert.equal(generated.data.run.usage.cost, 0.002);
     for (let attempt = 0; attempt < 2; attempt++) { const opened = await api(`${path}/actions/${action.id}/apply`, 'POST', {}); assert.equal(opened.status, 200); assert.deepEqual(opened.data.adDraft, draft); }
-    assert.deepEqual(app.store.list(projectId, 'campaigns'), []); assert.equal(calls, 2, 'Opening a saved suggestion cannot bill another model call.');
-    const foreign = app.db.prepare('SELECT id FROM users').get().id;
-    app.db.prepare("UPDATE memberships SET role='viewer' WHERE user_id=?").run(foreign);
+    assert.deepEqual(await app.store.list(projectId, 'campaigns'), []); assert.equal(calls, 2, 'Opening a saved suggestion cannot bill another model call.');
+    const foreign = (await app.sql.get('SELECT id FROM users')).id;
+    await app.sql.run("UPDATE memberships SET role='viewer' WHERE user_id=?", foreign);
     assert.equal((await api(`${path}/actions/${action.id}/apply`, 'POST', {})).status, 403);
     assert.equal(calls, 2);
-  } finally { await app.close(); globalThis.fetch = localFetch; await rm(dataDir, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = localFetch; await rm(dataDir, { recursive: true, force: true }); }
 });
 
 test('the actual AI suggestion handler opens ad review without saving a campaign or applying stale results', async () => {

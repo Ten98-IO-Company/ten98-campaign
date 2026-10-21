@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
 import { stripTypeScriptTypes } from 'node:module';
 
-test('Google Ads tools use real HTTP routes, selected customer scope, durable keyword mutations, planner, negatives, targeting and bidding', async () => {
+test('Google Ads tools use real HTTP routes, selected customer scope, durable keyword mutations, planner, negatives, targeting and bidding', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-google-tools-')), origin = 'http://127.0.0.1:3000';
-  const app = createApp({ dataDir: directory, appUrl: origin, env: { ZERNIO_API_KEY: 'google-tools-test-key' }, directScheduler: false });
+  const app = await testApp(t, { dataDir: directory, appUrl: origin, env: { ZERNIO_API_KEY: 'google-tools-test-key' }, directScheduler: false });
   const originalFetch = globalThis.fetch, calls = [], writes = [], profileId = 'google-profile', accountId = 'google-connection', adAccountId = '1234567890';
   const campaign = { platformCampaignId: '12345', platform: 'google', profileId, accountId, platformAdAccountId: adAccountId, campaignName: 'Search fixture', advertisingChannelType: 'SEARCH', adSets: [{ platformAdSetId: '67890', adSetName: 'Products' }] };
   let rows = [{ id: 'first-keyword', platformCriterionId: '1', profileId, accountId, adAccountId, platform: 'google', campaignId: '12345', adSetId: '67890', keyword: 'campaign tools', matchType: 'exact', status: 'active', negative: false }, { id: 'second-keyword', platformCriterionId: '2', profileId, accountId, adAccountId, platform: 'google', campaignId: '12345', adSetId: '67890', keyword: 'free', matchType: 'phrase', status: 'active', negative: true }];
@@ -52,7 +52,7 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
   try {
     const setup = await request('/api/auth/setup', { token: app.config.bootstrapToken, name: 'Google tools QA', email: 'google-tools@example.test', password: 'Google tools fixture password!', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
     const state = (await request('/api/state')).data, projectId = state.projectId;
-    app.db.prepare('UPDATE projects SET zernio_profile_id=? WHERE id=?').run(profileId, projectId);
+    await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', profileId, projectId);
     const route = `/api/projects/${projectId}/integrations/ads/google/`, selection = { accountId, adAccountId, campaignId: '12345' }, query = new URLSearchParams(selection);
     let result = await request(route + 'campaigns?' + new URLSearchParams({ accountId, adAccountId })); assert.equal(result.status, 200); assert.equal(result.data.campaigns.length, 1);
     result = await request(route + 'keywords?' + query); assert.equal(result.status, 200); assert.equal(result.data.keywords[0].id, 'first-keyword');
@@ -95,7 +95,7 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
       targetingReply = reply; const body = { ...selection, targeting, confirmChange: true }, before = writes.length;
       result = await request(route + 'targeting', body, 'mismatched-targeting-' + before); assert.equal(result.status, 409, JSON.stringify(targeting)); assert.equal(result.data.operation.status, 'uncertain');
       result = await request(route + 'targeting', body, 'fresh-targeting-' + before); assert.equal(result.status, 409); assert.equal(writes.length, before + 1, 'Mismatched readback cannot be retried under another key.');
-      app.db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE status='uncertain'").run();
+      await app.sql.run("UPDATE integration_operations SET status='reviewed-applied' WHERE status='uncertain'");
     }
     const country = { geoTargetId: '2784', type: 'Country', countryCode: 'AE', negative: false }, city = { geoTargetId: '102', type: 'City', countryCode: 'AE', negative: false };
     targetingReply = { locations: [country, city], excludedLocations: [], devices: [{ device: 'MOBILE', included: true, bidModifier: 1 }, { device: 'DESKTOP', included: false, bidModifier: 0 }] };
@@ -105,14 +105,14 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
     targetingReply = { adGroupId: null, locations: [country, excluded], excludedLocations: [] };
     assert.equal((await request(route + 'targeting?' + query)).status, 502, 'Conflicting exclusion lists are unreadable, rather than displayed as no exclusions.');
     result = await request(route + 'targeting', { ...selection, targeting: { excludedLocations: [], languages: ['sv'] }, confirmChange: true }, 'contradictory-exclusion-readback'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain', 'A dedicated empty exclusions array cannot hide negative criteria in the combined locations list.');
-    app.db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?").run(result.data.operation.id);
+    await app.sql.run("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?", result.data.operation.id);
     campaign.advertisingChannelType = 'DEMAND_GEN'; targetingReply = { adGroupId: '67890', locations: [], languages: [] };
     result = await request(route + 'targeting', { ...selection, targeting: { locations: ['SA'], languages: ['es'] }, confirmChange: true }); assert.equal(result.status, 200, 'Demand Gen confirms its scoped ad group while campaign-level geo/language sets stay empty.');
     delete campaign.advertisingChannelType;
     result = await request(route + 'targeting', { ...selection, targeting: { locations: ['SA'], languages: ['nl'] }, confirmChange: true }); assert.equal(result.status, 200, 'A tree without optional channel metadata can still confirm the documented, single scoped ad-group receipt.');
     targetingReply = { adGroupId: 'foreign-group', locations: [], languages: [] };
     result = await request(route + 'targeting', { ...selection, targeting: { locations: ['AE'], languages: ['pt'] }, confirmChange: true }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); campaign.advertisingChannelType = 'SEARCH'; targetingReply = {};
-    app.db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?").run(result.data.operation.id);
+    await app.sql.run("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?", result.data.operation.id);
     assert.equal((await request(route + 'targeting', { ...selection, targeting: { locations: [] }, confirmChange: true })).status, 400);
     assert.equal((await request(route + 'targeting', { ...selection, targeting: { locations: { countries: null } }, confirmChange: true })).status, 400);
     const malformedBidding = [{ portfolio: { id: 'shared', name: {} } }, { bidSpec: [] }, { bidSpec: { bidAmount: -1 } }, { stale: 'false' }, { cachedAt: {} }];
@@ -127,7 +127,7 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
     const unreadableBidding = { ...selection, bidStrategy: 'COST_CAP', bidAmount: 9.5, confirmChange: true };
     result = await request(route + 'bidding', unreadableBidding, 'invalid-bidding-readback'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain');
     const unreadableCount = writes.length; assert.equal((await request(route + 'bidding', unreadableBidding, 'fresh-invalid-bidding-readback')).status, 409); assert.equal(writes.length, unreadableCount);
-    app.db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE status='uncertain'").run();
+    await app.sql.run("UPDATE integration_operations SET status='reviewed-applied' WHERE status='uncertain'");
     biddingReadbackReply = {}; bidWrite = false;
     portfolio = true; const beforePortfolio = writes.length; result = await request(route + 'bidding', { ...selection, bidStrategy: 'COST_CAP', bidAmount: 10, confirmChange: true }); assert.equal(result.status, 409); assert.equal(writes.length, beforePortfolio); portfolio = false;
     result = await request(route + 'bidding', { ...selection, bidStrategy: 'COST_CAP', bidAmount: 10, confirmChange: true }); assert.equal(result.status, 200); assert.equal(result.data.result.bidSpec.bidAmount, 10);
@@ -139,9 +139,9 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
     failBidReadback = true; bidWrite = false; const failedReadback = { ...selection, bidStrategy: 'COST_CAP', bidAmount: 12, confirmChange: true }, readbackCount = writes.length;
     result = await request(route + 'bidding', failedReadback, 'bad-bidding-readback'); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'failed'); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(writes.length, readbackCount, 'The earlier uncertain targeting receipt prevents a bidding dispatch.');
     const blockedBidding = result.data; result = await request(route + 'bidding', failedReadback, 'fresh-bidding-key'); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(writes.length, readbackCount);
-    app.db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE status='uncertain'").run(); failBidReadback = false;
+    await app.sql.run("UPDATE integration_operations SET status='reviewed-applied' WHERE status='uncertain'"); failBidReadback = false;
     assert.deepEqual((await request(route + 'bidding', failedReadback, 'bad-bidding-readback')).data, blockedBidding); assert.equal(writes.length, readbackCount, 'A blocked action key stays unsent after the earlier receipt closes.');
-  } finally { globalThis.fetch = originalFetch; await app.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });
 
 test('actual Google UI formats match types, micros and stale selection guards without treating strings as whole currency', async () => {

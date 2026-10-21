@@ -1,21 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { createStore } from '../server/database.ts';
 import { handleAgent } from '../server/agent.ts';
+import { postgresSkip, testDatabase } from './postgres.mjs';
 
-test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries durable, and user history private', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch, calls = [];
-  db.exec(`PRAGMA foreign_keys=ON;
-    CREATE TABLE users(id TEXT PRIMARY KEY);
-    CREATE TABLE projects(id TEXT PRIMARY KEY);
-    CREATE TABLE records(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,collection TEXT NOT NULL,data TEXT NOT NULL);
-    CREATE TABLE activity(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,message TEXT NOT NULL,created_at TEXT NOT NULL,sample INTEGER NOT NULL DEFAULT 0);
-    INSERT INTO users VALUES('user-a'),('user-b'); INSERT INTO projects VALUES('project-a'),('project-b');`);
+const fixtures = (users, projects) => `INSERT INTO users (id, name, email) VALUES ${users.map(id => `('${id}','${id}','${id}@example.test')`).join(',')}; INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ${projects.map(id => `('${id}','w','${id}')`).join(',')}`;
+
+test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries durable, and user history private', { skip: postgresSkip }, async t => {
+  const { db, pool, sql } = await testDatabase(t), originalFetch = globalThis.fetch, calls = [];
+  await pool.query(fixtures(['user-a', 'user-b'], ['project-a', 'project-b']));
   const store = createStore(db), project = { id: 'project-a', name: 'Current brand' };
-  const campaign = store.create(project.id, 'campaigns', { name: 'Current project campaign', channel: 'paid', status: 'draft', budget: 100, accessToken: 'SECRET_CAMPAIGN_TOKEN' });
-  const foreignCampaign = store.create('project-b', 'campaigns', { name: 'OTHER_PROJECT_PRIVATE_CAMPAIGN', budget: 999 });
-  store.create(project.id, 'assets', { name: 'Approved creative', kind: 'image', approval: 'approved', url: 'https://example.com/SECRET_SIGNED_ASSET_URL', credentials: 'SECRET_ASSET_CREDENTIAL' });
+  const campaign = await store.create(project.id, 'campaigns', { name: 'Current project campaign', channel: 'paid', status: 'draft', budget: 100, accessToken: 'SECRET_CAMPAIGN_TOKEN' });
+  const foreignCampaign = await store.create('project-b', 'campaigns', { name: 'OTHER_PROJECT_PRIVATE_CAMPAIGN', budget: 999 });
+  await store.create(project.id, 'assets', { name: 'Approved creative', kind: 'image', approval: 'approved', url: 'https://example.com/SECRET_SIGNED_ASSET_URL', credentials: 'SECRET_ASSET_CREDENTIAL' });
   const config = { env: { OPENROUTER_API_KEY: 'SECRET_OPENROUTER_KEY', OPENROUTER_MODEL: 'operator/model', OPENROUTER_MAX_STEPS: '4', OPENROUTER_MAX_TOKENS: '500' } };
   let responses = [];
   globalThis.fetch = async (target, options) => {
@@ -29,11 +26,11 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
   };
   const tool = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
   const completion = (message, usage = { prompt_tokens: 12, completion_tokens: 8, cost: 0.001 }) => ({ choices: [{ message }], usage });
-  function prepareDraft(selectedProject, collection, fields) {
+  async function prepareDraft(selectedProject, collection, fields) {
     assert.equal(fields.status, 'draft');
     if (!['campaigns', 'posts', 'placements'].includes(collection)) throw new Error('Unsupported collection');
     if (collection === 'campaigns' && (typeof fields.name !== 'string' || fields.budget < 0)) throw new Error('Invalid draft');
-    for (const [field, target] of [['campaignId', 'campaigns'], ['assetId', 'assets'], ['providerId', 'providers']]) if (fields[field] && !store.get(selectedProject.id, target, fields[field])) throw new Error('Reference outside current project');
+    for (const [field, target] of [['campaignId', 'campaigns'], ['assetId', 'assets'], ['providerId', 'providers']]) if (fields[field] && !await store.get(selectedProject.id, target, fields[field])) throw new Error('Reference outside current project');
     return { ...fields, status: 'draft', ...(collection === 'campaigns' ? { spent: 0 } : {}) };
   }
   async function invoke(path, options = {}) {
@@ -60,7 +57,7 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
     const run = result.data.run, action = run.actions[0];
     assert.equal(run.status, 'complete'); assert.equal(run.actions.length, 1); assert.equal(action.status, 'proposed'); assert.equal(action.data.status, 'draft'); assert.equal(action.data.spent, 0);
     assert.deepEqual(run.usage, { requests: 2, promptTokens: 32, completionTokens: 18, cost: 0.003 });
-    assert.equal(store.list(project.id, 'campaigns').length, 1, 'Model proposals must not create any records before explicit user review.');
+    assert.equal((await store.list(project.id, 'campaigns')).length, 1, 'Model proposals must not create any records before explicit user review.');
     assert.equal(calls.length, 2); assert.equal(calls[0].tools.some(entry => entry.function.name === 'read_inbox'), false);
     const sent = JSON.stringify(calls);
     for (const forbidden of ['SECRET_OPENROUTER_KEY', 'SECRET_CAMPAIGN_TOKEN', 'SECRET_SIGNED_ASSET_URL', 'SECRET_ASSET_CREDENTIAL', 'OTHER_PROJECT_PRIVATE_CAMPAIGN', 'PRIVATE_INBOX_OPT_IN_TEXT', 'OTHER_PROJECT_INBOX']) assert.equal(sent.includes(forbidden), false, `${forbidden} must not enter the model context.`);
@@ -75,8 +72,12 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
     result = await invoke(`actions/${action.id}/apply`, { method: 'POST', userId: 'user-b' }); assert.equal(result.status, 404);
     result = await invoke(`actions/${action.id}/apply`, { method: 'POST', selectedProject: { id: 'project-b', name: 'Other brand' } }); assert.equal(result.status, 404);
     result = await invoke(`actions/${action.id}/apply`, { method: 'POST', role: 'viewer' }); assert.equal(result.status, 403);
-    result = await invoke(`actions/${action.id}/apply`, { method: 'POST' }); assert.equal(result.status, 201); assert.equal(result.data.record.status, 'draft'); assert.equal(result.data.record.projectId, project.id);
-    result = await invoke(`actions/${action.id}/apply`, { method: 'POST' }); assert.equal(result.status, 200); assert.equal(result.data.alreadyApplied, true); assert.equal(store.list(project.id, 'campaigns').length, 2); assert.equal(calls.length, 2);
+    // Parallel applies of one suggestion save exactly one record; the other reports it already applied.
+    const applies = await Promise.all([invoke(`actions/${action.id}/apply`, { method: 'POST' }), invoke(`actions/${action.id}/apply`, { method: 'POST' })]);
+    assert.deepEqual(applies.map(entry => entry.status).sort(), [200, 201]);
+    result = applies.find(entry => entry.status === 201); assert.equal(result.data.record.status, 'draft'); assert.equal(result.data.record.projectId, project.id);
+    assert.equal(applies.find(entry => entry.status === 200).data.record.id, result.data.record.id);
+    result = await invoke(`actions/${action.id}/apply`, { method: 'POST' }); assert.equal(result.status, 200); assert.equal(result.data.alreadyApplied, true); assert.equal((await store.list(project.id, 'campaigns')).length, 2); assert.equal(calls.length, 2);
 
     const beforeInbox = calls.length;
     result = await invoke('run', { method: 'POST', key: 'removed-inbox-opt-in-001', body: { message: 'Review my recent messages.', includeInbox: true } }); assert.equal(result.status, 400);
@@ -92,7 +93,7 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
       result = await invoke('run', { method: 'POST', key: 'uncertain-whitespace-' + index, body: { message } });
       assert.equal(result.status, 409); assert.equal(calls.length, beforeUncertain + 1, 'Changing surrounding whitespace cannot bill again for the same normalized unresolved model message.');
     }
-    for (let index = 0; index < 20; index++) db.prepare('INSERT INTO agent_runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(`later-run-${index}`, project.id, 'user-a', `later-key-${index}`, `later-hash-${index}`, 'complete', 'A later request', config.env.OPENROUTER_MODEL, 'Completed', JSON.stringify({ requests: 1, promptTokens: 1, completionTokens: 1, cost: 0.001 }), null, new Date().toISOString());
+    for (let index = 0; index < 20; index++) await sql.run('INSERT INTO agent_runs (id,project_id,user_id,request_key,input_hash,status,message,model,response,usage,error,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', `later-run-${index}`, project.id, 'user-a', `later-key-${index}`, `later-hash-${index}`, 'complete', 'A later request', config.env.OPENROUTER_MODEL, 'Completed', JSON.stringify({ requests: 1, promptTokens: 1, completionTokens: 1, cost: 0.001 }), null, new Date().toISOString());
     const history = await invoke('history'); assert.equal(history.data.runs.length, 20); assert.equal(history.data.runs[0].id, uncertainId, 'Unresolved billed requests must remain reachable for review after newer runs fill the history.');
     result = await invoke(`runs/${uncertainId}/resolve`, { method: 'POST', body: {} }); assert.equal(result.status, 400);
     result = await invoke(`runs/${uncertainId}/resolve`, { method: 'POST', userId: 'user-b', body: { confirmedReviewed: true } }); assert.equal(result.status, 404);
@@ -102,17 +103,48 @@ test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries d
     assert.equal(responses.length, 0);
     let checks = 0;
     responses = [completion({ role: 'assistant', content: 'PRIVATE_MODEL_RESPONSE', tool_calls: [tool('read-after-revocation', 'read_campaigns', {})] })];
-    const denied = await invoke('run', { method: 'POST', key: 'access-revoked-0001', body: { message: 'Inspect a campaign with pending access.' }, assertIntegrationSettings() { if (++checks > 1) throw Object.assign(new Error('Access revoked'), { status: 403 }); } });
+    const denied = await invoke('run', { method: 'POST', key: 'access-revoked-0001', body: { message: 'Inspect a campaign with pending access.' }, async assertIntegrationSettings() { if (++checks > 1) throw Object.assign(new Error('Access revoked'), { status: 403 }); } });
     assert.equal(denied.status, 403); assert.equal(denied.data.run, undefined); assert.equal(JSON.stringify(denied).includes('PRIVATE_MODEL_RESPONSE'), false);
-    const stopped = db.prepare("SELECT * FROM agent_runs WHERE request_key='access-revoked-0001'").get();
-    assert.equal(stopped.status, 'failed'); assert.equal(JSON.parse(stopped.usage).requests, 1, 'An acknowledged model completion retains its actual usage even when access changes.');
-    assert.equal(db.prepare('SELECT count(*) AS count FROM agent_actions WHERE run_id=?').get(stopped.id).count, 0);
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+    const stopped = await sql.get("SELECT * FROM agent_runs WHERE request_key='access-revoked-0001'");
+    assert.equal(stopped.status, 'failed'); assert.equal(stopped.usage.requests, 1, 'An acknowledged model completion retains its actual usage even when access changes.');
+    assert.equal((await sql.get('SELECT count(*) AS count FROM agent_actions WHERE run_id=?', stopped.id)).count, 0);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
-test('unreadable paid model responses stay uncertain, release streams and cannot be silently retried', async () => {
-  const db = new DatabaseSync(':memory:'), originalFetch = globalThis.fetch;
-  db.exec("CREATE TABLE users(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY); INSERT INTO users VALUES('user'); INSERT INTO projects VALUES('project');");
+test('parallel agent requests with one key, or one message under fresh keys, make exactly one paid model call', { skip: postgresSkip }, async t => {
+  const { db, pool } = await testDatabase(t), originalFetch = globalThis.fetch;
+  await pool.query(fixtures(['user'], ['project']));
+  const store = createStore(db);
+  let calls = 0, called, release;
+  globalThis.fetch = async () => {
+    calls++; called();
+    await new Promise(resolve => { release = resolve; });
+    return Response.json({ choices: [{ message: { role: 'assistant', content: 'One billed answer.' } }], usage: { prompt_tokens: 1, completion_tokens: 1, cost: 0.001 } });
+  };
+  const invoke = async (key, message) => {
+    let result;
+    await handleAgent({ req: { method: 'POST', headers: { 'idempotency-key': key } }, url: new URL('http://localhost/api/projects/project/agent/run'), project: { id: 'project', name: 'Fixture' }, user: { id: 'user' }, role: 'editor', body: { message }, db, store, config: { env: { OPENROUTER_API_KEY: 'fixture', OPENROUTER_MODEL: 'fixture/model' } }, prepareDraft: async (_collection, fields) => fields, send(status, data) { result = { status, data }; } });
+    return result;
+  };
+  try {
+    for (const [keys, message] of [[['parallel-key-0001', 'parallel-key-0001'], 'Same key twice'], [['fresh-key-0001', 'fresh-key-0002'], 'Same message under fresh keys']]) {
+      const before = calls, finished = [], firstCall = new Promise(resolve => { called = resolve; });
+      const requests = keys.map(key => invoke(key, message).then(result => { finished.push(result); return result; }));
+      await firstCall;
+      // Hold the paid call open until the duplicate has answered, so both requests overlap the claimed run.
+      for (const deadline = Date.now() + 5000; finished.length < 1 && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 10));
+      release();
+      const results = await Promise.all(requests);
+      assert.equal(calls - before, 1, 'Parallel duplicates must reach the paid model exactly once.');
+      assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+      assert.equal(results.find(result => result.status === 200).data.run.status, 'complete');
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('unreadable paid model responses stay uncertain, release streams and cannot be silently retried', { skip: postgresSkip }, async t => {
+  const { db, pool } = await testDatabase(t), originalFetch = globalThis.fetch;
+  await pool.query(fixtures(['user'], ['project']));
   let response, calls = 0;
   globalThis.fetch = async (_target, options) => { calls++; assert.equal(options.credentials, 'omit'); assert.equal(options.redirect, 'error'); return response; };
   const invoke = async (key, message) => {
@@ -125,7 +157,7 @@ test('unreadable paid model responses stay uncertain, release streams and cannot
     const malformed = new Response(Buffer.concat([prefix, Buffer.from([0xc3, 0x28]), suffix]));
     let cancelled = false;
     const oversized = new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(2 * 1024 * 1024 + 1)); }, cancel() { cancelled = true; } }));
-    for (const [index, invalid] of [malformed, oversized, new Response('\ufeff{"choices":[{"message":{"role":"assistant","content":"Valid JSON after BOM"}}]}'), Response.json({ choices: [{ message: { role: 'assistant', content: 'Private text' } }], error: { message: 'PRIVATE_PROVIDER_ERROR' } })].entries()) {
+    for (const [index, invalid] of [malformed, oversized, new Response('﻿{"choices":[{"message":{"role":"assistant","content":"Valid JSON after BOM"}}]}'), Response.json({ choices: [{ message: { role: 'assistant', content: 'Private text' } }], error: { message: 'PRIVATE_PROVIDER_ERROR' } })].entries()) {
       response = invalid; const key = 'invalid-paid-response-' + index, message = 'Request ' + index;
       const result = await invoke(key, message);
       assert.equal(result.status, 409); assert.equal(result.data.run.status, 'uncertain'); assert.equal(result.data.run.usage.cost, null); assert.equal(JSON.stringify(result).includes('PRIVATE_PROVIDER_ERROR'), false); assert.equal(invalid.body.locked, false);
@@ -136,5 +168,5 @@ test('unreadable paid model responses stay uncertain, release streams and cannot
     response = new Response(new ReadableStream({ cancel() { rejectedCancelled = true; } }), { status: 503 });
     const rejected = await invoke('invalid-paid-response-503', 'Failed provider');
     assert.equal(rejected.status, 409); assert.equal(rejected.data.run.status, 'uncertain'); assert.equal(rejectedCancelled, true);
-  } finally { globalThis.fetch = originalFetch; db.close(); }
+  } finally { globalThis.fetch = originalFetch; }
 });

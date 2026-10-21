@@ -6,12 +6,15 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { createApp } from '../server/index.ts';
+import { postgresSkip, testApp } from './postgres.mjs';
+
+const pg = { skip: postgresSkip };
 
 const linkedInReactionTypes = ['LIKE', 'PRAISE', 'EMPATHY', 'INTEREST', 'APPRECIATION', 'ENTERTAINMENT'];
 
-async function fixture() {
+async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-inbox-')), originalFetch = globalThis.fetch, calls = [], env = { ZERNIO_API_KEY: 'inbox-fixture-key', ZERNIO_WEBHOOK_SECRET: 'inbox-fixture-signing-secret' };
-  let app = createApp({ dataDir, env, appUrl: 'https://campaign.example.test', directScheduler: false });
+  const config = { dataDir, env, appUrl: 'https://campaign.example.test', directScheduler: false }, first = await testApp(t, config); let app = first;
   const accounts = [['fb', 'facebook'], ['ig', 'instagram'], ['yt', 'youtube'], ['gb', 'googlebusiness'], ['bs', 'bluesky'], ['ads', 'metaads'], ['tt', 'tiktok'], ['sl', 'slack'], ['rc', 'rcs'], ['sm', 'sms'], ['wa', 'whatsapp'], ['xx', 'twitter'], ['rd', 'reddit']].map(([_id, platform]) => ({ _id, platform, profileId: 'inbox-profile', username: `${platform}-account`, isActive: true }));
   const review = { id: 'review-1', accountId: 'gb', platform: 'googlebusiness', rating: 5, reviewer: { name: 'Alex' }, text: 'Good service', hasReply: false, reply: null }, comments = [{ id: 'comment-1', platform: 'facebook', message: 'Question', from: { id: 'participant-a', name: 'Alex', isOwner: false }, canReply: true, canHide: true, canLike: true, canDelete: true, isHidden: false, isLiked: false }];
   let base, cookie, projectId, hook, lastIncoming = Date.now(), sourceForeign = false, malformedHistory = false;
@@ -61,11 +64,11 @@ async function fixture() {
   }
   const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Inbox owner', email: 'inbox-owner@example.test', password: 'inbox fixture passphrase long enough', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie; projectId = setup.data.projectId;
   await request(`/api/projects/${projectId}`, 'PATCH', { zernioProfileId: 'inbox-profile' }); const path = `/api/projects/${projectId}/integrations/inbox`;
-  return { get app() { return app; }, projectId, path, calls, comments, review, accounts, request, writes: () => calls.filter(call => call.options.method !== 'GET' && !call.url.pathname.includes('/tools/validate/')), setHook(value) { hook = value; }, setForeign(value) { sourceForeign = value; }, setMalformedHistory(value) { malformedHistory = value; }, setIncoming(value) { lastIncoming = value; }, async reopen() { await app.close(); app = createApp({ dataDir, env, appUrl: 'https://campaign.example.test', directScheduler: false }); await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`; return app; }, async close() { await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
+  return { get app() { return app; }, projectId, path, calls, comments, review, accounts, request, writes: () => calls.filter(call => call.options.method !== 'GET' && !call.url.pathname.includes('/tools/validate/')), setHook(value) { hook = value; }, setForeign(value) { sourceForeign = value; }, setMalformedHistory(value) { malformedHistory = value; }, setIncoming(value) { lastIncoming = value; }, async reopen() { await app.close(); app = Object.assign(await createApp({ ...config, database: { pool: first.database.pool, db: first.database.db } }), { sql: first.sql }); await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${app.server.address().port}`; return app; }, async close() { if (app !== first) await app.close(); globalThis.fetch = originalFetch; await rm(dataDir, { recursive: true, force: true }); } };
 }
 
-async function actionFixture(platform = 'telegram') {
-  const f = await fixture(), account = f.accounts.find(item => item.platform === platform) || { _id: 'action-account', platform, profileId: 'inbox-profile', isActive: true };
+async function actionFixture(t, platform = 'telegram') {
+  const f = await fixture(t), account = f.accounts.find(item => item.platform === platform) || { _id: 'action-account', platform, profileId: 'inbox-profile', isActive: true };
   if (!f.accounts.includes(account)) f.accounts.push(account);
   const state = { messages: [{ id: 'own-message', message: 'Original sent text', direction: 'outgoing', createdAt: new Date(Date.now() - 60000).toISOString(), attachments: [], reactions: [] }, { id: 'incoming-message', message: 'A recent question', senderId: 'participant-a', direction: 'incoming', createdAt: new Date(Date.now() - 30000).toISOString(), attachments: [], reactions: [] }], control: 'app', pendingRequest: false, malformed: false, unchanged: false, readFailure: false, wrote: false, hold: null };
   f.setHook(async (url, options) => {
@@ -103,8 +106,8 @@ async function actionFixture(platform = 'telegram') {
   return { ...f, state, account, thread, write };
 }
 
-async function commentReactionFixture() {
-  const f = await fixture();
+async function commentReactionFixture(t) {
+  const f = await fixture(t);
   f.accounts.push({ _id: 'li', platform: 'linkedin', profileId: 'inbox-profile', isActive: true });
   f.comments[0].id = 'urn:li:comment:(urn:li:activity:42,7)';
   const body = { accountId: 'li', postId: 'post-1', commentId: f.comments[0].id }, state = { response: null, before: null, alreadyReacted: false };
@@ -119,8 +122,8 @@ async function commentReactionFixture() {
   return { ...f, body, state, react: (extra = {}, key = randomUUID(), kind = 'like') => f.request(f.path + '/comments/' + kind, 'POST', { ...body, ...extra }, key) };
 }
 
-async function commentEditFixture() {
-  const f = await fixture(), account = f.accounts.find(row => row._id === 'rd'); account.platformUserId = 'reddit-native';
+async function commentEditFixture(t) {
+  const f = await fixture(t), account = f.accounts.find(row => row._id === 'rd'); account.platformUserId = 'reddit-native';
   f.comments[0] = { id: 't1_own', message: 'Original comment', from: { id: 'reddit-native', isOwner: true }, canLike: true };
   const state = { before: null, receipt: null, unchanged: false, wrote: false, badReadback: false };
   f.setHook(async (url, options) => {
@@ -136,8 +139,8 @@ async function commentEditFixture() {
   return { ...f, state, account, thread, draft, edit: (body, key = randomUUID(), path = f.path) => f.request(path + '/comments/edit', 'POST', body, key) };
 }
 
-test('Reddit own comment edits PATCH the exact reviewed target and confirm same-ID nested readback', async () => {
-  const f = await commentEditFixture();
+test('Reddit own comment edits PATCH the exact reviewed target and confirm same-ID nested readback', pg, async t => {
+  const f = await commentEditFixture(t);
   try {
     f.comments[0] = { id: 'parent', message: 'Parent', replies: [f.comments[0]] };
     const body = await f.draft(); assert.match(body.expectedCommentVersion || '', /^[a-f0-9]{64}$/);
@@ -148,8 +151,8 @@ test('Reddit own comment edits PATCH the exact reviewed target and confirm same-
   } finally { await f.close(); }
 });
 
-test('Reddit comment edits reject stale reviews, nonowners, foreign scope, empty content and revoked permission', async () => {
-  const f = await commentEditFixture();
+test('Reddit comment edits reject stale reviews, nonowners, foreign scope, empty content and revoked permission', pg, async t => {
+  const f = await commentEditFixture(t);
   try {
     const body = await f.draft();
     for (const changes of [{ content: ' ' }, { content: '' }, { confirmEdit: false }, { expectedCommentVersion: 'stale' }, { accountId: 'fb' }, { extra: true }]) assert.ok((await f.edit({ ...body, ...changes })).status >= 400);
@@ -157,14 +160,14 @@ test('Reddit comment edits reject stale reviews, nonowners, foreign scope, empty
     f.comments[0].from.isOwner = true; f.comments[0].message = 'Externally changed'; assert.equal((await f.edit(body)).status, 409); f.comments[0].message = 'Original comment';
     f.account.platformUserId = 'another-native'; assert.equal((await f.edit(body)).status, 409); f.account.platformUserId = 'reddit-native';
     f.setForeign(true); assert.equal((await f.edit(body)).status, 502); f.setForeign(false);
-    f.state.before = (url, options) => { if (url.pathname.endsWith('/inbox/comments/post-1') && options.method === 'GET') f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); };
+    f.state.before = async (url, options) => { if (url.pathname.endsWith('/inbox/comments/post-1') && options.method === 'GET') await f.app.sql.run("UPDATE memberships SET role='viewer'"); };
     assert.ok((await f.edit(body)).status >= 400); assert.equal(f.writes().length, 0);
   } finally { await f.close(); }
 });
 
-test('unknown Reddit edits retain durable receipts and fence reactions and edits across aliases and reopen', async () => {
+test('unknown Reddit edits retain durable receipts and fence reactions and edits across aliases and reopen', pg, async t => {
   for (const outcome of ['wrong-receipt', 'lost', 'unchanged', 'wrong-readback']) {
-    const f = await commentEditFixture();
+    const f = await commentEditFixture(t);
     try {
       f.accounts.push({ ...f.account, _id: 'reddit-alias' });
       const body = await f.draft();
@@ -180,8 +183,8 @@ test('unknown Reddit edits retain durable receipts and fence reactions and edits
   }
 });
 
-test('the final awaited Reddit edit preflight cannot race a native alias reaction', async () => {
-  const f = await commentEditFixture(); let reads = 0, release, reached;
+test('the final awaited Reddit edit preflight cannot race a native alias reaction', pg, async t => {
+  const f = await commentEditFixture(t); let reads = 0, release, reached;
   const hold = new Promise(resolve => { release = resolve; }), ready = new Promise(resolve => { reached = resolve; });
   try {
     const body = await f.draft(); f.accounts.push({ ...f.account, _id: 'reddit-alias' });
@@ -195,13 +198,13 @@ test('the final awaited Reddit edit preflight cannot race a native alias reactio
   } finally { release?.(); await f.close(); }
 });
 
-test('uncertain Reddit reactions fence comment edits after native-account project handoff', async () => {
-  const f = await commentEditFixture();
+test('uncertain Reddit reactions fence comment edits after native-account project handoff', pg, async t => {
+  const f = await commentEditFixture(t);
   try {
     const body = await f.draft(); f.accounts.push({ ...f.account, _id: 'reddit-alias' });
     f.state.before = (url, options) => { if (url.pathname.endsWith('/like')) throw new TypeError('Lost reaction acknowledgment'); };
     const reaction = await f.request(f.path + '/comments/like', 'POST', { accountId: 'rd', postId: body.postId, commentId: body.commentId }); assert.equal(reaction.data.operation.status, 'uncertain');
-    const reopened = await f.reopen(), workspaceId = reopened.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(f.projectId).workspace_id;
+    const reopened = await f.reopen(), workspaceId = (await reopened.sql.get('SELECT workspace_id FROM projects WHERE id=?', f.projectId)).workspace_id;
     const created = await f.request('/api/projects', 'POST', { name: 'Reddit handoff', workspaceId }); assert.equal(created.status, 201);
     const nextId = created.data.project.id; await f.request('/api/projects/' + f.projectId, 'PATCH', { zernioProfileId: '' }); await f.request('/api/projects/' + nextId, 'PATCH', { zernioProfileId: 'inbox-profile' });
     const nextPath = '/api/projects/' + nextId + '/integrations/inbox', thread = await f.request(nextPath + '/comments/thread?accountId=reddit-alias&postId=post-1'); assert.equal(thread.status, 200);
@@ -209,8 +212,8 @@ test('uncertain Reddit reactions fence comment edits after native-account projec
   } finally { await f.close(); }
 });
 
-test('LinkedIn comment reactions forward all six explicit types and validate already-reacted receipts without inventing GET types', async () => {
-  const f = await commentReactionFixture();
+test('LinkedIn comment reactions forward all six explicit types and validate already-reacted receipts without inventing GET types', pg, async t => {
+  const f = await commentReactionFixture(t);
   try {
     for (const alreadyReacted of [false, true]) for (const reactionType of linkedInReactionTypes) {
       f.state.alreadyReacted = alreadyReacted;
@@ -228,8 +231,8 @@ test('LinkedIn comment reactions forward all six explicit types and validate alr
   } finally { await f.close(); }
 });
 
-test('comment reaction types are rejected outside LinkedIn likes and Bluesky retains its native references', async () => {
-  const f = await fixture();
+test('comment reaction types are rejected outside LinkedIn likes and Bluesky retains its native references', pg, async t => {
+  const f = await fixture(t);
   f.accounts.push({ _id: 'li', platform: 'linkedin', profileId: 'inbox-profile', isActive: true });
   const body = { accountId: 'li', postId: 'post-1', commentId: 'comment-1' };
   try {
@@ -242,8 +245,8 @@ test('comment reaction types are rejected outside LinkedIn likes and Bluesky ret
   } finally { await f.close(); }
 });
 
-test('LinkedIn 403 and 409 rejections never remove or replace an existing reaction', async () => {
-  const f = await commentReactionFixture(); let providerStatus = 403;
+test('LinkedIn 403 and 409 rejections never remove or replace an existing reaction', pg, async t => {
+  const f = await commentReactionFixture(t); let providerStatus = 403;
   f.state.response = () => Response.json({ code: providerStatus === 403 ? 'linkedin_reconnect_required' : 'invalid_resource_state', secret: 'PRIVATE_PROVIDER_BODY' }, { status: providerStatus });
   try {
     for (const status of [403, 409]) {
@@ -257,27 +260,27 @@ test('LinkedIn 403 and 409 rejections never remove or replace an existing reacti
   } finally { await f.close(); }
 });
 
-test('malformed and lost LinkedIn reaction acknowledgments remain durable and block retries and replacement reactions', async () => {
+test('malformed and lost LinkedIn reaction acknowledgments remain durable and block retries and replacement reactions', pg, async t => {
   for (const mutation of [{ commentId: 'foreign' }, { platform: 'facebook' }, { accountId: 'foreign' }, { postId: 'foreign' }, { liked: false }, { reactionType: 'LIKE' }, { reactionType: undefined }, { alreadyReacted: 'yes' }, 'unreadable', 'lost']) {
-    const f = await commentReactionFixture();
+    const f = await commentReactionFixture(t);
     f.state.response = () => { if (mutation === 'lost') throw new TypeError('Lost acknowledgment'); if (mutation === 'unreadable') return new Response('{', { status: 200 }); return Response.json({ status: 'success', platform: 'linkedin', commentId: f.body.commentId, liked: true, reactionType: 'PRAISE', ...mutation }); };
     try {
       const key = randomUUID(), result = await f.react({ reactionType: 'PRAISE' }, key); assert.equal(result.status, 409, JSON.stringify(mutation)); assert.equal(result.data.operation.status, 'uncertain');
-      assert.equal(f.app.db.prepare('SELECT status FROM integration_operations WHERE id=?').get(result.data.operation.id).status, 'uncertain');
+      assert.equal((await f.app.sql.get('SELECT status FROM integration_operations WHERE id=?', result.data.operation.id)).status, 'uncertain');
       for (const [extra, retryKey, kind] of [[{ reactionType: 'PRAISE' }, key, 'like'], [{ reactionType: 'EMPATHY' }, randomUUID(), 'like'], [{}, randomUUID(), 'unlike']]) assert.equal((await f.react(extra, retryKey, kind)).status, 409);
       assert.equal(f.writes().length, 1, 'An unknown outcome cannot dispatch a second reaction or removal.');
     } finally { await f.close(); }
   }
 });
 
-test('LinkedIn reaction boundaries recheck role, account, post and comment identities before dispatch', async () => {
+test('LinkedIn reaction boundaries recheck role, account, post and comment identities before dispatch', pg, async t => {
   for (const mode of ['viewer', 'inactive', 'remapped-account', 'foreign-post', 'missing-comment']) {
-    const f = await commentReactionFixture();
-    f.state.before = (url, options) => {
+    const f = await commentReactionFixture(t);
+    f.state.before = async (url, options) => {
       if (options.method !== 'GET') return;
       if (url.pathname.endsWith('/inbox/comments') && mode === 'foreign-post') return Response.json({ data: [{ id: 'post-1', accountId: 'fb', platform: 'facebook' }], pagination: { hasMore: false, nextCursor: null } });
       if (!url.pathname.endsWith('/inbox/comments/post-1')) return;
-      if (mode === 'viewer') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+      if (mode === 'viewer') await f.app.sql.run("UPDATE memberships SET role='viewer'");
       if (mode === 'inactive') f.accounts.find(row => row._id === 'li').isActive = false;
       if (mode === 'remapped-account') f.accounts.find(row => row._id === 'li').profileId = 'another-profile';
       if (mode === 'missing-comment') return Response.json({ comments: [], meta: { accountId: 'li', platform: 'linkedin', postId: 'post-1' }, pagination: { hasMore: false, nextCursor: null } });
@@ -287,17 +290,17 @@ test('LinkedIn reaction boundaries recheck role, account, post and comment ident
   }
 });
 
-test('native comment uncertainty survives SQLite reopen, project mapping handoff and account aliases until an explicit review', async () => {
+test('native comment uncertainty survives an app reopen, project mapping handoff and account aliases until an explicit review', pg, async t => {
   for (const legacy of [false, true]) {
-    const f = await commentReactionFixture();
+    const f = await commentReactionFixture(t);
     f.accounts.find(row => row._id === 'li').platformUserId = 'native-linkedin-42';
     f.accounts.push({ _id: 'li-alias', platform: 'linkedin', platformUserId: 'native-linkedin-42', profileId: 'inbox-profile', isActive: true });
     f.state.response = () => { throw new TypeError('Provider applied the reaction but its acknowledgment was lost'); };
     try {
       const original = await f.react({ reactionType: 'PRAISE' }); assert.equal(original.data.operation.status, 'uncertain'); assert.equal(f.writes().length, 1);
-      if (legacy) f.app.db.exec('DELETE FROM inbox_comment_reactions');
-      const reopened = await f.reopen(), workspaceId = reopened.db.prepare('SELECT workspace_id FROM projects WHERE id=?').get(f.projectId).workspace_id;
-      assert.equal(reopened.db.prepare('SELECT status FROM integration_operations WHERE id=?').get(original.data.operation.id).status, 'uncertain');
+      if (legacy) await f.app.sql.run('DELETE FROM inbox_comment_reactions');
+      const reopened = await f.reopen(), workspaceId = (await reopened.sql.get('SELECT workspace_id FROM projects WHERE id=?', f.projectId)).workspace_id;
+      assert.equal((await reopened.sql.get('SELECT status FROM integration_operations WHERE id=?', original.data.operation.id)).status, 'uncertain');
       const created = await f.request('/api/projects', 'POST', { name: 'Reaction mapping handoff', workspaceId }); assert.equal(created.status, 201, JSON.stringify(created.data));
       const secondId = created.data.project.id, route = `/api/projects/${secondId}/integrations/inbox/comments/`;
       assert.equal((await f.request(`/api/projects/${f.projectId}`, 'PATCH', { zernioProfileId: '' })).status, 200);
@@ -312,8 +315,8 @@ test('native comment uncertainty survives SQLite reopen, project mapping handoff
   }
 });
 
-test('the final awaited account preflight cannot race a concurrent native-comment dispatch', async () => {
-  const f = await commentReactionFixture();
+test('the final awaited account preflight cannot race a concurrent native-comment dispatch', pg, async t => {
+  const f = await commentReactionFixture(t);
   f.accounts.find(row => row._id === 'li').platformUserId = 'native-linkedin-42';
   f.accounts.push({ _id: 'li-alias', platform: 'linkedin', platformUserId: 'native-linkedin-42', profileId: 'inbox-profile', isActive: true });
   let accountReads = 0, releasePreflight, reachedPreflight;
@@ -327,8 +330,8 @@ test('the final awaited account preflight cannot race a concurrent native-commen
   } finally { releasePreflight(); await f.close(); }
 });
 
-async function privateReplyFixture(accountId = 'fb') {
-  const f = await fixture(), state = { before: null, response: null, onSend: null };
+async function privateReplyFixture(t, accountId = 'fb') {
+  const f = await fixture(t), state = { before: null, response: null, onSend: null };
   f.comments[0].createdTime = new Date(Date.now() - 60000).toISOString();
   f.setHook(async (url, options) => {
     const intercepted = await state.before?.(url, options); if (intercepted !== undefined) return intercepted;
@@ -342,9 +345,9 @@ async function privateReplyFixture(accountId = 'fb') {
   return { ...f, state, thread, draft, send };
 }
 
-test('private comment replies require an explicit reviewed Meta comment, bridge ads correctly and persist one send per comment', async () => {
+test('private comment replies require an explicit reviewed Meta comment, bridge ads correctly and persist one send per comment', pg, async t => {
   for (const accountId of ['fb', 'ig', 'ads']) {
-    const f = await privateReplyFixture(accountId);
+    const f = await privateReplyFixture(t, accountId);
     try {
       const status = await f.request(f.path + '/status'); assert.equal(status.data.accounts.find(row => row.id === accountId).capabilities.commentPrivateReply, true);
       const initial = await f.thread(); assert.equal(initial.data.comments[0].privateReplyEligible, true); assert.equal(f.writes().length, 0, 'Reading and opening the composer never sends.');
@@ -353,13 +356,13 @@ test('private comment replies require an explicit reviewed Meta comment, bridge 
       const sent = f.writes().at(-1); assert.equal(sent.url.pathname, `/api/v1/inbox/comments/${accountId === 'ads' ? 'ad-media-1' : 'post-1'}/comment-1/private-reply`); assert.equal(sent.options.headers['Idempotency-Key'], key); assert.deepEqual(sent.body, { accountId: accountId === 'ads' ? 'ig' : accountId, message: body.message });
       assert.equal((await f.send(body, key)).status, 200); const blocked = await f.send({ ...body, message: 'A different message and action key must still not resend.' }); assert.equal(blocked.data.error.code, 'PRIVATE_REPLY_RECORDED'); assert.equal(f.writes().length, 1);
       const refreshed = await f.thread(); assert.equal(refreshed.data.comments[0].privateReplyEligible, false); assert.equal(refreshed.data.comments[0].privateReplyStatus, 'sent');
-      assert.equal(f.app.db.prepare('SELECT status FROM inbox_private_replies').get().status, 'sent'); assert.equal(f.app.db.prepare('SELECT COUNT(*) AS count FROM direct_contacts').get().count, 0, 'A comment or outbound reply must not manufacture marketing permission.');
+      assert.equal((await f.app.sql.get('SELECT status FROM inbox_private_replies')).status, 'sent'); assert.equal((await f.app.sql.get('SELECT COUNT(*) AS count FROM direct_contacts')).count, 0, 'A comment or outbound reply must not manufacture marketing permission.');
     } finally { await f.close(); }
   }
 });
 
-test('private reply eligibility rejects stale reviews, unsupported platforms, unknown authors and expired or future comment times before sending', async () => {
-  const f = await privateReplyFixture();
+test('private reply eligibility rejects stale reviews, unsupported platforms, unknown authors and expired or future comment times before sending', pg, async t => {
+  const f = await privateReplyFixture(t);
   try {
     const body = await f.draft(), original = structuredClone(f.comments[0]);
     for (const patch of [{ createdTime: new Date(Date.now() - 7 * 86400000).toISOString() }, { createdTime: new Date(Date.now() + 86400000).toISOString() }, { createdTime: undefined }, { from: { ...original.from, isOwner: true } }, { from: { ...original.from, isOwner: undefined } }, { from: { isOwner: false } }, { canReply: false }]) {
@@ -374,12 +377,12 @@ test('private reply eligibility rejects stale reviews, unsupported platforms, un
     assert.equal((await f.send({ ...body, accountId: 'foreign' })).status, 403);
     f.setForeign(true); assert.equal((await f.send(body)).data.error.code, 'INVALID_PROVIDER_SCOPE'); f.setForeign(false);
     assert.equal(f.writes().length, 0);
-    f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const before = f.calls.length; assert.equal((await f.send(body)).status, 403); assert.equal(f.calls.length, before);
+    await f.app.sql.run("UPDATE memberships SET role='viewer'"); const before = f.calls.length; assert.equal((await f.send(body)).status, 403); assert.equal(f.calls.length, before);
   } finally { await f.close(); }
 });
 
-test('private replies validate Meta buttons and quick replies and keep invalid payloads definitely failed and retryable', async () => {
-  const f = await privateReplyFixture();
+test('private replies validate Meta buttons and quick replies and keep invalid payloads definitely failed and retryable', pg, async t => {
+  const f = await privateReplyFixture(t);
   try {
     const body = await f.draft(), invalid = [
       { buttons: [] }, { buttons: Array.from({ length: 4 }, () => ({ type: 'url', title: 'Link', url: 'https://example.com' })) },
@@ -398,9 +401,9 @@ test('private replies validate Meta buttons and quick replies and keep invalid p
   } finally { await f.close(); }
 });
 
-test('private reply consumed and unknown outcomes survive new keys and operator review cannot reopen spent comments', async () => {
+test('private reply consumed and unknown outcomes survive new keys and operator review cannot reopen spent comments', pg, async t => {
   for (const mode of ['consumed', 'unknown', 'malformed400', 'lost', 'bad-receipt']) {
-    const f = await privateReplyFixture('ig');
+    const f = await privateReplyFixture(t, 'ig');
     try {
       const body = await f.draft(), key = randomUUID();
       f.state.response = () => mode === 'consumed' ? Response.json({ error: 'Do not expose provider body or apiKey', apiKey: 'never-return-this', details: { privateReplyConsumed: true } }, { status: 400 }) : mode === 'unknown' ? Response.json({ details: { privateReplyOutcome: 'unknown' } }, { status: 502 }) : mode === 'malformed400' ? new Response('unreadable', { status: 400 }) : mode === 'lost' ? (() => { throw new Error('Lost acknowledgement'); })() : Response.json({ status: 'success', messageId: 'sent-1', commentId: 'different-comment', platform: 'instagram' });
@@ -414,11 +417,11 @@ test('private reply consumed and unknown outcomes survive new keys and operator 
   }
 });
 
-test('known nonconsumed private reply rejection releases the fence and concurrent changed payloads cannot dispatch twice', async () => {
-  const f = await privateReplyFixture(); let release;
+test('known nonconsumed private reply rejection releases the fence and concurrent changed payloads cannot dispatch twice', pg, async t => {
+  const f = await privateReplyFixture(t); let release;
   try {
     const body = await f.draft(); f.state.response = () => Response.json({ error: 'Invalid input', code: 'invalid_field_value' }, { status: 400 });
-    const failed = await f.send(body); assert.equal(failed.status, 400); assert.equal(failed.data.operation.status, 'failed'); assert.equal(f.app.db.prepare('SELECT COUNT(*) AS count FROM inbox_private_replies').get().count, 0); assert.equal((await f.thread()).data.comments[0].privateReplyEligible, true);
+    const failed = await f.send(body); assert.equal(failed.status, 400); assert.equal(failed.data.operation.status, 'failed'); assert.equal((await f.app.sql.get('SELECT COUNT(*) AS count FROM inbox_private_replies')).count, 0); assert.equal((await f.thread()).data.comments[0].privateReplyEligible, true);
     f.state.response = null; const held = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { f.state.onSend = async () => { resolve(); await held; }; });
     const first = f.send(body); await started;
     const competing = await f.send({ ...body, message: 'A concurrent different reply to the same comment.' }); assert.equal(competing.data.error.code, 'PRIVATE_REPLY_RECORDED');
@@ -426,17 +429,17 @@ test('known nonconsumed private reply rejection releases the fence and concurren
   } finally { release?.(); await f.close(); }
 });
 
-test('private reply rechecks account activity, exact platform, project mapping and current role after thread lookup', async () => {
+test('private reply rechecks account activity, exact platform, project mapping and current role after thread lookup', pg, async t => {
   for (const mode of ['inactive', 'platform', 'mapping', 'viewer']) {
-    const f = await privateReplyFixture('ads'); let reads = 0;
+    const f = await privateReplyFixture(t, 'ads'); let reads = 0;
     try {
       const body = await f.draft();
-      f.state.before = (url, options) => {
+      f.state.before = async (url, options) => {
         if (url.pathname.endsWith('/accounts') && options.method === 'GET' && ++reads === 2) {
           if (mode === 'inactive') f.accounts.find(row => row._id === 'ig').isActive = false;
           if (mode === 'platform') f.accounts.find(row => row._id === 'ig').platform = 'facebook';
-          if (mode === 'mapping') f.app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile'").run();
-          if (mode === 'viewer') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+          if (mode === 'mapping') await f.app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile'");
+          if (mode === 'viewer') await f.app.sql.run("UPDATE memberships SET role='viewer'");
         }
       };
       const denied = await f.send(body); assert.ok([400, 403, 409, 422].includes(denied.status), JSON.stringify(denied.data)); assert.equal(f.writes().length, 0);
@@ -444,8 +447,8 @@ test('private reply rechecks account activity, exact platform, project mapping a
   }
 });
 
-test('X and Instagram attachment replies use DM limits, inspect exact URLs and replay accepted sends without duplicates', async () => {
-  const f = await fixture(), route = f.path + '/conversations/thread-1/reply'; let metadata;
+test('X and Instagram attachment replies use DM limits, inspect exact URLs and replay accepted sends without duplicates', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/thread-1/reply'; let metadata;
   f.setHook(url => url.pathname.endsWith('/tools/validate/media') ? Response.json(metadata) : undefined);
   try {
     const status = await f.request(f.path + '/status'), x = status.data.accounts.find(item => item.id === 'xx'), ig = status.data.accounts.find(item => item.id === 'ig');
@@ -473,33 +476,33 @@ test('X and Instagram attachment replies use DM limits, inspect exact URLs and r
   } finally { await f.close(); }
 });
 
-test('attachment preflight cannot outlive current account, recipient, project access, reply window or hosted-file expiry', async () => {
-  const f = await fixture(), route = f.path + '/conversations/thread-1/reply', originalAccount = f.accounts.find(item => item._id === 'ig'); let mode = '', inspected = false;
-  const asset = f.app.store.create(f.projectId, 'assets', { name: 'Hosted inbox PDF', source: 'zernio', url: 'https://media.zernio.com/temp/inbox.pdf', deliveryUrl: 'https://media.zernio.com/temp/inbox.pdf', deliverySource: 'zernio', deliveryUploadedAt: new Date(Date.now() - 86400000).toISOString(), deliveryExpiresAt: new Date(Date.now() + 86400000).toISOString() });
-  f.setHook((url, options) => {
+test('attachment preflight cannot outlive current account, recipient, project access, reply window or hosted-file expiry', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/thread-1/reply', originalAccount = f.accounts.find(item => item._id === 'ig'); let mode = '', inspected = false;
+  const asset = await f.app.store.create(f.projectId, 'assets', { name: 'Hosted inbox PDF', source: 'zernio', url: 'https://media.zernio.com/temp/inbox.pdf', deliveryUrl: 'https://media.zernio.com/temp/inbox.pdf', deliverySource: 'zernio', deliveryUploadedAt: new Date(Date.now() - 86400000).toISOString(), deliveryExpiresAt: new Date(Date.now() + 86400000).toISOString() });
+  f.setHook(async (url, options) => {
     if (url.pathname.endsWith('/tools/validate/media')) {
       inspected = true;
       if (mode === 'inactive') originalAccount.isActive = false;
       if (mode === 'foreign') originalAccount.profileId = 'foreign-profile';
-      if (mode === 'viewer') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
-      if (mode === 'mapping') f.app.db.prepare("UPDATE projects SET zernio_profile_id='different-profile'").run();
+      if (mode === 'viewer') await f.app.sql.run("UPDATE memberships SET role='viewer'");
+      if (mode === 'mapping') await f.app.sql.run("UPDATE projects SET zernio_profile_id='different-profile'");
       if (mode === 'window') f.setIncoming(Date.now() - 25 * 3600000);
-      if (mode === 'expiry') f.app.store.update(f.projectId, 'assets', asset.id, { deliveryExpiresAt: new Date(Date.now() - 1000).toISOString() });
+      if (mode === 'expiry') await f.app.store.update(f.projectId, 'assets', asset.id, { deliveryExpiresAt: new Date(Date.now() - 1000).toISOString() });
       return Response.json({ valid: true, size: 100, contentType: 'application/pdf' });
     }
     if (inspected && mode === 'recipient' && url.pathname.endsWith('/inbox/conversations/thread-1') && options.method === 'GET') return Response.json({ data: { id: 'thread-1', accountId: 'ig', platform: 'instagram', participantId: 'changed-recipient', status: 'active' } });
   });
   try {
     for (const next of ['inactive', 'foreign', 'viewer', 'mapping', 'recipient', 'window', 'expiry']) {
-      mode = next; inspected = false; originalAccount.isActive = true; originalAccount.profileId = 'inbox-profile'; f.setIncoming(Date.now()); f.app.db.prepare("UPDATE memberships SET role='owner'").run(); f.app.db.prepare("UPDATE projects SET zernio_profile_id='inbox-profile'").run();
+      mode = next; inspected = false; originalAccount.isActive = true; originalAccount.profileId = 'inbox-profile'; f.setIncoming(Date.now()); await f.app.sql.run("UPDATE memberships SET role='owner'"); await f.app.sql.run("UPDATE projects SET zernio_profile_id='inbox-profile'");
       const before = f.writes().length, result = await f.request(route, 'POST', { accountId: 'ig', attachmentUrl: mode === 'expiry' ? asset.deliveryUrl : `https://cdn.example.com/${mode}.pdf`, attachmentType: 'file' });
       assert.ok([403, 409, 422].includes(result.status), `${mode}: ${JSON.stringify(result.data)}`); assert.equal(f.writes().length, before, `${mode} must stop before an external send.`);
     }
   } finally { await f.close(); }
 });
 
-test('Meta combined replies validate independent message IDs and partial text failures before completing an operation', async () => {
-  const f = await fixture(), route = f.path + '/conversations/thread-1/reply'; let receipt;
+test('Meta combined replies validate independent message IDs and partial text failures before completing an operation', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/thread-1/reply'; let receipt;
   f.setHook((url, options) => url.pathname.endsWith('/messages') && options.method === 'POST' ? Response.json({ success: true, data: { messageId: 'attachment-sent', conversationId: 'thread-1', ...receipt } }) : undefined);
   try {
     const body = { accountId: 'ig', message: 'Text after attachment', attachmentUrl: 'https://cdn.example.com/details.png', attachmentType: 'image' };
@@ -516,13 +519,13 @@ test('Meta combined replies validate independent message IDs and partial text fa
     ].entries()) {
       receipt = bad; const malformedBody = { ...body, message: `Malformed receipt ${index}` }, malformedKey = randomUUID(), before = f.writes().length, result = await f.request(route, 'POST', malformedBody, malformedKey);
       assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.operation.status, 'uncertain'); assert.equal((await f.request(route, 'POST', malformedBody, malformedKey)).status, 409); assert.equal((await f.request(route, 'POST', malformedBody)).status, 409); assert.equal(f.writes().length, before + 1);
-      f.app.db.prepare("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?").run(result.data.operation.id);
+      await f.app.sql.run("UPDATE integration_operations SET status='reviewed-applied' WHERE id=?", result.data.operation.id);
     }
   } finally { await f.close(); }
 });
 
-test('the actual UI writer retries a definitely failed media inspection without duplicating the accepted message', async () => {
-  const f = await fixture(), suffix = 'conversations/thread-1/reply', body = { accountId: 'ig', attachmentUrl: 'https://cdn.example.com/recover.pdf', attachmentType: 'file' }, keys = { current: new Map() }, sentKeys = []; let inspectionCalls = 0;
+test('the actual UI writer retries a definitely failed media inspection without duplicating the accepted message', pg, async t => {
+  const f = await fixture(t), suffix = 'conversations/thread-1/reply', body = { accountId: 'ig', attachmentUrl: 'https://cdn.example.com/recover.pdf', attachmentType: 'file' }, keys = { current: new Map() }, sentKeys = []; let inspectionCalls = 0;
   f.setHook(url => url.pathname.endsWith('/tools/validate/media') ? ++inspectionCalls === 1 ? Response.json({ error: 'Synthetic inspection outage' }, { status: 502 }) : Response.json({ valid: true, size: 100, contentType: 'application/pdf' }) : undefined);
   try {
     const source = await readFile(new URL('../src/UnifiedInbox.tsx', import.meta.url), 'utf8'), start = source.indexOf('async function write('), handler = source.slice(start, source.indexOf('  async function loadAccounts(', start));
@@ -534,8 +537,8 @@ test('the actual UI writer retries a definitely failed media inspection without 
   } finally { await f.close(); }
 });
 
-test('attachment resolution proves account, conversation, message and index before requesting a fresh public link', async () => {
-  const f = await fixture(); let mode = 'valid';
+test('attachment resolution proves account, conversation, message and index before requesting a fresh public link', pg, async t => {
+  const f = await fixture(t); let mode = 'valid';
   f.setHook((url, options) => {
     if (url.pathname.endsWith('/messages')) return Response.json({ messages: [{ id: 'media/message', conversationId: 'thread-1', accountId: 'ig', platform: 'instagram', direction: 'incoming', createdAt: new Date().toISOString(), attachments: [{ type: 'image', url: 'https://cdn.example.test/expired.jpg', refreshUrl: 'https://evil.example.test/never-follow' }] }], pagination: { hasMore: false, nextCursor: null } });
     if (url.pathname.endsWith('/attachments/0')) {
@@ -557,9 +560,9 @@ test('attachment resolution proves account, conversation, message and index befo
   } finally { await f.close(); }
 });
 
-test('WhatsApp attachment downloads keep credentials server-side and reject unsafe, expired, oversized and changed-access responses', async () => {
-  const f = await fixture(); let mode = 'valid', mediaUrl = 'https://zernio.com/api/v1/whatsapp/media/media-id?accountId=wa';
-  f.setHook((url, options) => {
+test('WhatsApp attachment downloads keep credentials server-side and reject unsafe, expired, oversized and changed-access responses', pg, async t => {
+  const f = await fixture(t); let mode = 'valid', mediaUrl = 'https://zernio.com/api/v1/whatsapp/media/media-id?accountId=wa';
+  f.setHook(async (url, options) => {
     if (url.pathname.endsWith('/messages')) return Response.json({ messages: [{ id: 'media-message', accountId: 'wa', platform: 'whatsapp', conversationId: 'thread-1', direction: 'incoming', createdAt: new Date().toISOString(), attachments: [{ type: 'image', url: mediaUrl, payload: { id: 'media-id' } }] }], pagination: { hasMore: false, nextCursor: null } });
     if (url.pathname.endsWith('/whatsapp/media/media-id')) {
       assert.equal(options.redirect, 'error'); assert.equal(options.headers.Authorization, 'Bearer inbox-fixture-key');
@@ -567,7 +570,7 @@ test('WhatsApp attachment downloads keep credentials server-side and reject unsa
       if (mode === 'expired') return Response.json({}, { status: 400 });
       if (mode === 'redirect') return new Response(null, { status: 302, headers: { Location: 'https://evil.example.test/never-follow' } });
       if (mode === 'stream-oversized') return new Response(Buffer.alloc(6 * 1024 * 1024), { headers: { 'Content-Type': 'image/jpeg' } });
-      if (mode === 'access') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+      if (mode === 'access') await f.app.sql.run("UPDATE memberships SET role='viewer'");
       return new Response(Buffer.from('image bytes'), { headers: { 'Content-Type': mode === 'html' ? 'text/html' : 'image/jpeg', 'Content-Length': mode === 'oversized' ? String(6 * 1024 * 1024) : '11' } });
     }
   });
@@ -584,8 +587,8 @@ test('WhatsApp attachment downloads keep credentials server-side and reject unsa
   } finally { await f.close(); }
 });
 
-test('typing is an explicit scoped action and a provider no-op never becomes delivered', async () => {
-  const f = await fixture(); let delivered = false;
+test('typing is an explicit scoped action and a provider no-op never becomes delivered', pg, async t => {
+  const f = await fixture(t); let delivered = false;
   f.setHook(url => url.pathname.endsWith('/typing') ? Response.json({ success: delivered }) : undefined);
   try {
     const target = `${f.path}/conversations/thread-1/typing`;
@@ -593,13 +596,13 @@ test('typing is an explicit scoped action and a provider no-op never becomes del
     assert.equal((await f.request(target, 'POST', { accountId: 'xx', confirmTyping: true })).status, 422);
     let result = await f.request(target, 'POST', { accountId: 'wa', confirmTyping: true }); assert.equal(result.status, 200); assert.equal(result.data.delivered, false); assert.equal(result.data.mayMarkRead, true);
     delivered = true; result = await f.request(target, 'POST', { accountId: 'wa', confirmTyping: true }); assert.equal(result.data.delivered, true);
-    const count = f.writes().length; f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); assert.equal((await f.request(target, 'POST', { accountId: 'wa', confirmTyping: true })).status, 403); assert.equal(f.writes().length, count);
+    const count = f.writes().length; await f.app.sql.run("UPDATE memberships SET role='viewer'"); assert.equal((await f.request(target, 'POST', { accountId: 'wa', confirmTyping: true })).status, 403); assert.equal(f.writes().length, count);
   } finally { await f.close(); }
 });
 
-test('stored-copy deletion binds the latest message and protects completed or unknown outcomes across fresh keys', async () => {
+test('stored-copy deletion binds the latest message and protects completed or unknown outcomes across fresh keys', pg, async t => {
   for (const outcome of ['success', 'malformed', 'network']) {
-    const f = await fixture(); let latest = 'message-a', retryAllowed = false;
+    const f = await fixture(t); let latest = 'message-a', retryAllowed = false;
     f.setHook((url, options) => {
       if (url.pathname.endsWith('/messages')) return Response.json({ messages: [...new Set(['message-a', latest])].map(id => ({ id, accountId: 'fb', platform: 'facebook', conversationId: 'thread-1', direction: 'incoming', senderId: 'participant-a', message: id, createdAt: '2026-10-18T12:00:00Z', attachments: [] })), pagination: { hasMore: false, nextCursor: null }, sortOrderApplied: 'desc' });
       if (url.pathname.endsWith('/inbox/conversations/thread-1') && options.method === 'DELETE') {
@@ -609,13 +612,13 @@ test('stored-copy deletion binds the latest message and protects completed or un
     });
     try {
       const target = `${f.path}/conversations/thread-1`, detail = await f.request(target + '/messages?accountId=fb');
-      const body = { accountId: 'fb', expectedDeleteVersion: detail.data.conversation.deleteVersion, confirmConversationId: 'thread-1' }, contactCount = f.app.db.prepare('SELECT COUNT(*) AS count FROM direct_contacts').get().count;
+      const body = { accountId: 'fb', expectedDeleteVersion: detail.data.conversation.deleteVersion, confirmConversationId: 'thread-1' }, contactCount = (await f.app.sql.get('SELECT COUNT(*) AS count FROM direct_contacts')).count;
       latest = '0-new-arrival'; assert.equal((await f.request(target + '/delete', 'POST', body)).status, 409); assert.equal(f.writes().length, 0, 'An arrival with the same timestamp invalidates review even when its ID sorts below the old latest message.');
       body.expectedDeleteVersion = (await f.request(target + '/messages?accountId=fb')).data.conversation.deleteVersion;
       const result = await f.request(target + '/delete', 'POST', body, 'stored-delete-key'); assert.equal(result.status, outcome === 'success' ? 200 : 409);
       if (outcome === 'success') { assert.equal(result.data.scope, 'zernio_copy'); assert.equal(result.data.deletedMessages, 2); }
       assert.equal((await f.request(target + '/delete', 'POST', body, 'stored-delete-fresh-key')).status, 409); assert.equal(f.writes().length, 1);
-      assert.equal(f.app.db.prepare('SELECT COUNT(*) AS count FROM direct_contacts').get().count, contactCount);
+      assert.equal((await f.app.sql.get('SELECT COUNT(*) AS count FROM direct_contacts')).count, contactCount);
       assert.equal(f.calls.some(call => /\/contacts\//.test(call.url.pathname)), false);
       if (outcome !== 'success') {
         const review = await f.request(`/api/projects/${f.projectId}/operations/${result.data.operation.id}/review`, 'POST', { resolution: outcome === 'network' ? 'not_applied' : 'applied', confirmChecked: true, note: 'Fixture operator checked the provider outcome.' }); assert.equal(review.status, 200);
@@ -627,8 +630,27 @@ test('stored-copy deletion binds the latest message and protects completed or un
   }
 });
 
-test('own text edits and platform deletions revalidate scoped snapshots and confirm exact message history', async () => {
-  const f = await actionFixture();
+test('a parallel duplicate of an in-flight stored-copy deletion reaches the provider once', pg, async t => {
+  const f = await fixture(t); let release, started;
+  const held = new Promise(resolve => { release = resolve; }), entered = new Promise(resolve => { started = resolve; });
+  f.setHook(async (url, options) => {
+    if (url.pathname.endsWith('/messages')) return Response.json({ messages: [{ id: 'message-a', accountId: 'fb', platform: 'facebook', conversationId: 'thread-1', direction: 'incoming', senderId: 'participant-a', message: 'message-a', createdAt: '2026-10-18T12:00:00Z', attachments: [] }], pagination: { hasMore: false, nextCursor: null }, sortOrderApplied: 'desc' });
+    if (url.pathname.endsWith('/inbox/conversations/thread-1') && options.method === 'DELETE') { started(); await held; return Response.json({ success: true, data: { id: 'thread-1', accountId: 'fb', platform: 'facebook', deletedMessages: 1 } }); }
+  });
+  try {
+    const target = `${f.path}/conversations/thread-1`, detail = await f.request(target + '/messages?accountId=fb');
+    const body = { accountId: 'fb', expectedDeleteVersion: detail.data.conversation.deleteVersion, confirmConversationId: 'thread-1' };
+    const first = f.request(target + '/delete', 'POST', body, 'parallel-delete-key'); await entered;
+    const duplicate = await f.request(target + '/delete', 'POST', body, 'parallel-delete-key'); assert.equal(duplicate.status, 409); assert.equal(duplicate.data.error.code, 'OPERATION_UNCERTAIN');
+    const otherKey = await f.request(target + '/delete', 'POST', body, 'parallel-delete-other-key'); assert.equal(otherKey.status, 409); assert.equal(otherKey.data.error.code, 'OPERATION_NOT_SENT');
+    release(); assert.equal((await first).status, 200);
+    assert.equal(f.writes().filter(call => call.options.method === 'DELETE').length, 1, 'Exactly one provider deletion for the in-flight action, its same-key duplicate and a fresh-key duplicate.');
+    assert.equal((await f.app.sql.get('SELECT status FROM inbox_conversation_deletions')).status, 'deleted');
+  } finally { release?.(); await f.close(); }
+});
+
+test('own text edits and platform deletions revalidate scoped snapshots and confirm exact message history', pg, async t => {
+  const f = await actionFixture(t);
   try {
     let history = await f.thread(), own = history.data.messages.find(item => item.direction === 'outgoing'); assert.equal(own.actions.canEdit, true); assert.match(own.version, /^[a-f0-9]{64}$/); assert.equal(history.data.messages.find(item => item.direction === 'incoming').actions.canDelete, false);
     const key = randomUUID(), accepted = await f.write(own, 'edit', { text: 'Updated sent text' }, key); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.equal(accepted.data.message.message, 'Updated sent text'); assert.equal(accepted.data.message.editHistory[0].text, 'Original sent text'); assert.equal(f.writes().at(-1).options.method, 'PATCH'); assert.deepEqual(f.writes().at(-1).body, { accountId: f.account._id, text: 'Updated sent text' });
@@ -639,15 +661,15 @@ test('own text edits and platform deletions revalidate scoped snapshots and conf
   } finally { await f.close(); }
 });
 
-test('iMessage time windows and self-only deletion stay distinct from unsupported or incoming-message actions', async () => {
-  const apple = await actionFixture('imessage');
+test('iMessage time windows and self-only deletion stay distinct from unsupported or incoming-message actions', pg, async t => {
+  const apple = await actionFixture(t, 'imessage');
   try {
     let own = (await apple.thread()).data.messages[0]; assert.equal(own.actions.canEdit, true); assert.equal(own.actions.canDelete, true); assert.equal(own.actions.deleteScope, 'unsend');
     apple.state.messages[0].createdAt = new Date(Date.now() - 3 * 60000).toISOString(); own = (await apple.thread()).data.messages[0]; assert.equal(own.actions.canEdit, true); assert.equal(own.actions.canDelete, false); assert.equal((await apple.write(own, 'delete', { confirmMessageId: own.id })).status, 409);
     apple.state.messages[0].createdAt = new Date(Date.now() - 16 * 60000).toISOString(); own = (await apple.thread()).data.messages[0]; assert.equal(own.actions.canEdit, false); assert.equal((await apple.write(own, 'edit', { text: 'Late edit' })).status, 409); assert.equal(apple.writes().length, 0);
   } finally { await apple.close(); }
   for (const platform of ['bluesky', 'reddit', 'facebook']) {
-    const f = await actionFixture(platform);
+    const f = await actionFixture(t, platform);
     try {
       const rows = (await f.thread()).data.messages, own = rows[0], incoming = rows[1];
       assert.ok([409, 422].includes((await f.write(incoming, 'delete', { confirmMessageId: incoming.id })).status));
@@ -657,9 +679,9 @@ test('iMessage time windows and self-only deletion stay distinct from unsupporte
   }
 });
 
-test('reactions preserve contact reactions, enforce Meta windows and Slack names, and distinguish acceptance from observation', async () => {
+test('reactions preserve contact reactions, enforce Meta windows and Slack names, and distinguish acceptance from observation', pg, async t => {
   for (const platform of ['telegram', 'facebook', 'slack']) {
-    const f = await actionFixture(platform);
+    const f = await actionFixture(t, platform);
     try {
       let target = (await f.thread()).data.messages[1], emoji = platform === 'slack' ? ':thumbsup:' : '👍';
       f.state.messages[1].reactions = [{ emoji: '❤️', fromMe: false }]; target = (await f.thread()).data.messages[1];
@@ -672,16 +694,16 @@ test('reactions preserve contact reactions, enforce Meta windows and Slack names
   }
 });
 
-test('message actions reject foreign scope and preserve unknown mutation receipts without sending duplicates', async () => {
+test('message actions reject foreign scope and preserve unknown mutation receipts without sending duplicates', pg, async t => {
   for (const mode of ['malformed', 'readFailure', 'unchanged']) {
-    const f = await actionFixture();
+    const f = await actionFixture(t);
     try {
       const own = (await f.thread()).data.messages[0]; f.state[mode] = true;
       const result = await f.write(own, 'edit', { text: 'Unconfirmed edit' }); assert.equal(result.status, 409); assert.equal(result.data.operation.status, 'uncertain'); const writes = f.writes().length;
       assert.equal((await f.write(own, 'edit', { text: 'Unconfirmed edit' })).status, 409); assert.equal(f.writes().length, writes);
     } finally { await f.close(); }
   }
-  const f = await actionFixture();
+  const f = await actionFixture(t);
   try {
     const own = (await f.thread()).data.messages[0], before = f.writes().length;
     assert.equal((await f.request(f.path + '/conversations/thread-1/messages/missing/edit', 'POST', { accountId: f.account._id, expectedMessageVersion: own.version, text: 'Wrong item' })).status, 403);
@@ -690,8 +712,8 @@ test('message actions reject foreign scope and preserve unknown mutation receipt
   } finally { await f.close(); }
 });
 
-test('handover requires fresh deliberate review, gates Instagram Login and confirms actual owner rather than a request', async () => {
-  const f = await actionFixture('facebook'), route = f.path + '/conversations/thread-1/thread-control';
+test('handover requires fresh deliberate review, gates Instagram Login and confirms actual owner rather than a request', pg, async t => {
+  const f = await actionFixture(t, 'facebook'), route = f.path + '/conversations/thread-1/thread-control';
   try {
     let conversation = (await f.thread()).data.conversation;
     assert.deepEqual(conversation.controlActions, ['take', 'request', 'pass', 'release']);
@@ -701,13 +723,13 @@ test('handover requires fresh deliberate review, gates Instagram Login and confi
     conversation = (await f.thread()).data.conversation; const requested = await f.request(route, 'POST', { accountId: f.account._id, action: 'request', expectedConversationVersion: conversation.version, confirmControl: true }); assert.equal(requested.status, 200); assert.equal(requested.data.requested, true); assert.equal(requested.data.control.owner, 'other');
     f.state.malformed = true; const unknown = await f.request(route, 'POST', { accountId: f.account._id, action: 'take', expectedConversationVersion: conversation.version, confirmControl: true }); assert.equal(unknown.status, 409); assert.equal(unknown.data.operation.status, 'uncertain');
   } finally { await f.close(); }
-  const instagram = await actionFixture('instagram');
+  const instagram = await actionFixture(t, 'instagram');
   try { const conversation = (await instagram.thread()).data.conversation; assert.deepEqual(conversation.controlActions, ['pass', 'release']); const result = await instagram.request(instagram.path + '/conversations/thread-1/thread-control', 'POST', { accountId: instagram.account._id, action: 'take', expectedConversationVersion: conversation.version, confirmControl: true }); assert.equal(result.status, 422); assert.equal(instagram.writes().length, 0); }
   finally { await instagram.close(); }
 });
 
-test('request acceptance sends one reviewed reply only for a freshly proven pending Meta request', async () => {
-  const f = await actionFixture('facebook'), route = f.path + '/conversations/thread-1/accept';
+test('request acceptance sends one reviewed reply only for a freshly proven pending Meta request', pg, async t => {
+  const f = await actionFixture(t, 'facebook'), route = f.path + '/conversations/thread-1/accept';
   try {
     const conversation = (await f.thread()).data.conversation, body = { accountId: f.account._id, expectedConversationVersion: conversation.version, message: 'Thanks for your request', confirmSend: true };
     assert.equal((await f.request(route, 'POST', { ...body, confirmSend: false })).status, 409); assert.equal((await f.request(route, 'POST', body)).status, 409); assert.equal(f.writes().length, 0);
@@ -716,21 +738,21 @@ test('request acceptance sends one reviewed reply only for a freshly proven pend
   } finally { await f.close(); }
 });
 
-test('inbox message actions share a conversation lock and viewers cannot dispatch them', async () => {
-  const f = await actionFixture(); let release, entered;
+test('inbox message actions share a conversation lock and viewers cannot dispatch them', pg, async t => {
+  const f = await actionFixture(t); let release, entered;
   try {
     const own = (await f.thread()).data.messages[0]; f.state.hold = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; }); f.state.onWrite = entered;
     const pending = f.write(own, 'edit', { text: 'Held edit' }); await started;
     const simultaneous = await f.write(own, 'delete', { confirmMessageId: own.id }); assert.equal(simultaneous.status, 409); assert.equal(simultaneous.data.error.code, 'OPERATION_NOT_SENT'); assert.equal(simultaneous.data.operation.status, 'failed'); assert.equal(f.writes().some(call => call.options.method === 'DELETE'), false);
     release(); f.state.hold = null; assert.equal((await pending).status, 200);
-    const fresh = (await f.thread()).data.messages[0]; f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const writes = f.writes().length;
+    const fresh = (await f.thread()).data.messages[0]; await f.app.sql.run("UPDATE memberships SET role='viewer'"); const writes = f.writes().length;
     assert.equal((await f.write(fresh, 'delete', { confirmMessageId: fresh.id })).status, 403); assert.equal(f.writes().length, writes);
   } finally { release?.(); await f.close(); }
 });
 
-test('unreadable reactions and accepted request replies remain uncertain without a second provider write', async () => {
+test('unreadable reactions and accepted request replies remain uncertain without a second provider write', pg, async t => {
   for (const action of ['react', 'accept']) {
-    const f = await actionFixture('facebook');
+    const f = await actionFixture(t, 'facebook');
     try {
       const history = await f.thread(), target = history.data.messages[1], conversation = history.data.conversation;
       f.state.malformed = true; f.state.pendingRequest = true;
@@ -741,8 +763,8 @@ test('unreadable reactions and accepted request replies remain uncertain without
   }
 });
 
-test('full-history search forwards the scoped query and opaque pages, validates snippets and reports skipped accounts', async () => {
-  const f = await fixture(); let mode = 'normal';
+test('full-history search forwards the scoped query and opaque pages, validates snippets and reports skipped accounts', pg, async t => {
+  const f = await fixture(t); let mode = 'normal';
   f.setHook(url => {
     if (!url.pathname.endsWith('/inbox/conversations/search')) return;
     const accountId = url.searchParams.get('accountId'), account = f.accounts.find(row => row._id === accountId);
@@ -758,13 +780,13 @@ test('full-history search forwards the scoped query and opaque pages, validates 
     const skipped = await f.request(route + new URLSearchParams({ accountId: 'bs', query: 'old invoice' })); assert.equal(skipped.data.meta.accountsSkipped[0].accountId, 'bs'); assert.deepEqual(skipped.data.conversations, []);
     for (mode of ['foreign', 'bad-text', 'bad-direction', 'bad-meta']) assert.equal((await f.request(route + params)).status, 502, mode);
     const before = f.calls.length; for (const bad of ['accountId=fb&query=x', 'accountId=fb&query=old+invoice&limit=51', 'accountId=fb&query=old+invoice&direction=both']) assert.equal((await f.request(route + bad)).status, 400);
-    assert.equal(f.calls.length, before + 3, 'Invalid search filters make only the scoped account read, never a search call.'); assert.equal(f.writes().length, 0); assert.equal(f.app.direct.contacts.list(f.projectId).length, 0, 'Search snippets are not proof of a new inbound Messenger contact.');
+    assert.equal(f.calls.length, before + 3, 'Invalid search filters make only the scoped account read, never a search call.'); assert.equal(f.writes().length, 0); assert.equal((await f.app.direct.contacts.list(f.projectId)).length, 0, 'Search snippets are not proof of a new inbound Messenger contact.');
     assert.equal((await f.request(route + 'accountId=foreign&query=old+invoice')).status, 403);
   } finally { await f.close(); }
 });
 
-test('new text conversations check platform recipients, keep X eligibility enabled and reuse accepted or uncertain receipts', async () => {
-  const f = await fixture(), route = f.path + '/conversations/start'; let malformed = false;
+test('new text conversations check platform recipients, keep X eligibility enabled and reuse accepted or uncertain receipts', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/start'; let malformed = false;
   f.setHook((url, options) => {
     if (url.pathname.endsWith('/inbox/conversations') && options.method === 'POST') return Response.json({ success: true, data: { messageId: 'opening-1', conversationId: 'thread-1', participantName: malformed ? {} : 'Alex', apiKey: 'private' } });
     if (url.pathname.endsWith('/slack-members')) return Response.json({ members: [{ id: 'U01ABCDEF', name: 'Alex', username: 'alex' }] });
@@ -786,17 +808,17 @@ test('new text conversations check platform recipients, keep X eligibility enabl
     malformed = true; const uncertainBody = { ...body, message: 'A unique ambiguous send' }, uncertainKey = randomUUID(), beforeUncertain = f.writes().length;
     assert.equal((await f.request(route, 'POST', uncertainBody, uncertainKey)).data.operation.status, 'uncertain');
     assert.equal((await f.request(route, 'POST', uncertainBody, uncertainKey)).status, 409); assert.equal((await f.request(route, 'POST', uncertainBody)).status, 409); assert.equal(f.writes().length, beforeUncertain + 1);
-    f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const beforeViewer = f.calls.length; assert.equal((await f.request(route, 'POST', body)).status, 403); assert.equal(f.calls.length, beforeViewer);
+    await f.app.sql.run("UPDATE memberships SET role='viewer'"); const beforeViewer = f.calls.length; assert.equal((await f.request(route, 'POST', body)).status, 403); assert.equal(f.calls.length, beforeViewer);
   } finally { await f.close(); }
 });
 
-test('new WhatsApp and Zernio SMS conversations require current local permission and exact approved template values', async () => {
-  const f = await fixture(), route = f.path + '/conversations/start', contacts = f.app.direct.contacts;
-  const ready = contacts.save(f.projectId, { name: 'Permitted', phone: '+12025550101', consents: { whatsapp: true, sms: true }, consentSource: 'Synthetic opt-in record' });
-  const notPermitted = contacts.save(f.projectId, { name: 'No permission', phone: '+12025550102' }); let revoke = false;
+test('new WhatsApp and Zernio SMS conversations require current local permission and exact approved template values', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/start', contacts = f.app.direct.contacts;
+  const ready = await contacts.save(f.projectId, { name: 'Permitted', phone: '+12025550101', consents: { whatsapp: true, sms: true }, consentSource: 'Synthetic opt-in record' });
+  const notPermitted = await contacts.save(f.projectId, { name: 'No permission', phone: '+12025550102' }); let revoke = false;
   const template = { id: 'approved-template', name: 'appointment_update', language: 'en', status: 'APPROVED', category: 'UTILITY', components: [{ type: 'HEADER', text: 'Appointment {{1}}', format: 'TEXT' }, { type: 'BODY', text: 'Your appointment is {{1}}' }, { type: 'BUTTONS', buttons: [{ type: 'URL', text: 'Details', url: 'https://example.com/{{1}}' }] }] };
-  f.setHook((url, options) => {
-    if (url.pathname.endsWith('/whatsapp/templates')) { if (revoke) contacts.suppress(f.projectId, ready.id, 'whatsapp', 'Recipient opted out during lookup'); return Response.json({ success: true, templates: [template] }); }
+  f.setHook(async (url, options) => {
+    if (url.pathname.endsWith('/whatsapp/templates')) { if (revoke) await contacts.suppress(f.projectId, ready.id, 'whatsapp', 'Recipient opted out during lookup'); return Response.json({ success: true, templates: [template] }); }
     if (url.pathname.endsWith('/inbox/conversations') && options.method === 'POST') return Response.json({ success: true, data: { messageId: 'opening-1', conversationId: 'thread-1' } });
   });
   try {
@@ -806,13 +828,13 @@ test('new WhatsApp and Zernio SMS conversations require current local permission
     assert.equal(f.writes().length, 0);
     const accepted = await f.request(route, 'POST', body); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.deepEqual(f.writes().at(-1).body, { accountId: 'wa', participantId: '12025550101', templateName: 'appointment_update', templateLanguage: 'en', templateParams: ['A1', 'Friday', 'appointment-1'] });
     assert.equal((await f.request(route, 'POST', { accountId: 'sm', contactId: ready.id, message: 'Your appointment is confirmed', confirmSend: true })).status, 200);
-    contacts.suppressSmsGlobally(ready.phone, 'STOP'); const beforeStop = f.writes().length; assert.equal((await f.request(route, 'POST', { accountId: 'sm', contactId: ready.id, message: 'Blocked after STOP', confirmSend: true })).status, 409); assert.equal(f.writes().length, beforeStop);
+    await contacts.suppressSmsGlobally(ready.phone, 'STOP'); const beforeStop = f.writes().length; assert.equal((await f.request(route, 'POST', { accountId: 'sm', contactId: ready.id, message: 'Blocked after STOP', confirmSend: true })).status, 409); assert.equal(f.writes().length, beforeStop);
     revoke = true; const beforeRevoke = f.writes().length; assert.equal((await f.request(route, 'POST', { ...body, templateComponents: body.templateComponents.map(row => row.type === 'body' ? { ...row, parameters: [{ type: 'text', text: 'Saturday' }] } : row) })).status, 409); assert.equal(f.writes().length, beforeRevoke);
   } finally { await f.close(); }
 });
 
-test('inbox reads are scoped, side-effect-free and create identity-only contacts from verified incoming Messenger history', async () => {
-  const f = await fixture();
+test('inbox reads are scoped, side-effect-free and create identity-only contacts from verified incoming Messenger history', pg, async t => {
+  const f = await fixture(t);
   try {
     const before = f.calls.length;
     for (const route of ['/thread/messages?accountId=fb', '/thread/reply', '/reviews/hide']) assert.equal((await f.request(f.path + route)).status, 404);
@@ -820,22 +842,22 @@ test('inbox reads are scoped, side-effect-free and create identity-only contacts
     const updates = await f.request(f.path + '/updates?accountId=fb'); assert.equal(updates.status, 200); assert.equal(f.calls.length, before, 'Local update polling does not make provider calls.');
     const status = await f.request(f.path + '/status'); assert.equal(status.status, 200); assert.equal(status.data.webhookConfigured, true); assert.equal(status.data.accounts.some(row => row.id === 'foreign'), false); assert.equal(status.data.accounts.find(row => row.id === 'yt').capabilities.messages, false); assert.equal(status.data.accounts.find(row => row.id === 'ig').capabilities.commentLike, false);
     const list = await f.request(f.path + '/conversations?accountId=fb'); assert.equal(list.data.conversations.length, 1);
-    assert.equal(f.app.direct.contacts.list(f.projectId).length, 0, 'A list preview does not imply an incoming participant.');
+    assert.equal((await f.app.direct.contacts.list(f.projectId)).length, 0, 'A list preview does not imply an incoming participant.');
     const messages = await f.request(f.path + '/conversations/thread-1/messages?accountId=fb'); assert.equal(messages.status, 200); assert.equal(messages.data.messages[0].message, 'Please help'); assert.ok(messages.data.contact.id); assert.equal(messages.data.contact.email, ''); assert.equal(messages.data.contact.phone, ''); assert.deepEqual(messages.data.contact.consents, { email: false, sms: false, whatsapp: false });
-    await f.request(f.path + '/conversations/thread-1/messages?accountId=fb'); assert.equal(f.app.direct.contacts.list(f.projectId).length, 1);
-    assert.equal(f.writes().length, 0); assert.equal(f.app.db.prepare("SELECT count(*) AS total FROM sqlite_master WHERE name='integration_operations'").get().total, 0);
+    await f.request(f.path + '/conversations/thread-1/messages?accountId=fb'); assert.equal((await f.app.direct.contacts.list(f.projectId)).length, 1);
+    assert.equal(f.writes().length, 0); assert.equal((await f.app.sql.get('SELECT count(*) AS total FROM integration_operations')).total, 0, 'Reads must not create operation receipts.');
     const beforeForeign = f.calls.length; assert.equal((await f.request(f.path + '/conversations?accountId=foreign')).status, 403); assert.equal(f.calls.length, beforeForeign + 1);
     f.setForeign(true); assert.equal((await f.request(f.path + '/conversations?accountId=fb')).status, 502); f.setForeign(false);
     f.setMalformedHistory(true); assert.equal((await f.request(f.path + '/conversations/thread-1/messages?accountId=fb')).status, 502);
   } finally { await f.close(); }
 });
 
-test('WhatsApp selected-button history projects only scoped incoming selection facts and rejects malformed metadata', async () => {
-  const f = await fixture(), route = accountId => `${f.path}/conversations/thread-1/messages?accountId=${accountId}`;
+test('WhatsApp selected-button history projects only scoped incoming selection facts and rejects malformed metadata', pg, async t => {
+  const f = await fixture(t), route = accountId => `${f.path}/conversations/thread-1/messages?accountId=${accountId}`;
   let rows = [{ id: 'button-response', message: '', metadata: { interactiveType: 'button_reply', interactiveId: 'reply_2', access_token: 'never-return-selection-secret', waInteractive: { buttons: ['untrusted'] } } }];
   f.setHook((url, options) => options.method === 'GET' && url.pathname.endsWith('/messages') ? Response.json({ messages: rows.map(row => ({ accountId: url.searchParams.get('accountId'), platform: f.accounts.find(account => account._id === url.searchParams.get('accountId'))?.platform, conversationId: 'thread-1', direction: 'incoming', senderId: 'participant-a', createdAt: new Date().toISOString(), ...row })), pagination: { hasMore: false, nextCursor: null }, sortOrderApplied: 'desc' }) : undefined);
   try {
-    f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+    await f.app.sql.run("UPDATE memberships SET role='viewer'");
     const selected = await f.request(route('wa')); assert.equal(selected.status, 200, JSON.stringify(selected.data)); assert.equal(selected.data.messages[0].message, ''); assert.deepEqual(selected.data.messages[0].metadata, { interactiveType: 'button_reply', interactiveId: 'reply_2' }); assert.equal(JSON.stringify(selected.data).includes('never-return-selection-secret'), false);
     rows = [{ id: 'labelled', message: '<b>Yes & please</b>', metadata: { interactiveType: 'button_reply', interactiveId: '<script>reply_1</script>' } }, { id: 'deleted', message: 'Deleted label', isDeleted: true, metadata: { interactiveType: 'button_reply', interactiveId: 'reply_3' } }];
     const labelled = await f.request(route('wa')); assert.equal(labelled.status, 200); assert.equal(labelled.data.messages[0].message, rows[0].message); assert.equal(labelled.data.messages[0].metadata.interactiveId, rows[0].metadata.interactiveId); assert.equal(labelled.data.messages[1].isDeleted, true);
@@ -849,13 +871,13 @@ test('WhatsApp selected-button history projects only scoped incoming selection f
     }
     rows = [{ id: 'foreign-response', accountId: 'foreign', message: '', metadata: { interactiveType: 'button_reply', interactiveId: 'foreign-secret-id' } }];
     const foreign = await f.request(route('wa')); assert.equal(foreign.status, 502); assert.equal(JSON.stringify(foreign.data).includes('foreign-secret-id'), false); assert.equal(f.writes().length, 0);
-    f.app.db.prepare("UPDATE memberships SET role='owner'").run(); rows = [{ id: 'bad-button-response', message: '', metadata: { interactiveType: 'button_reply', interactiveId: {} } }];
+    await f.app.sql.run("UPDATE memberships SET role='owner'"); rows = [{ id: 'bad-button-response', message: '', metadata: { interactiveType: 'button_reply', interactiveId: {} } }];
     const reply = await f.request(f.path + '/conversations/thread-1/reply', 'POST', { accountId: 'wa', message: 'Do not send against malformed history' }); assert.equal(reply.status, 502); assert.equal(reply.data.operation.status, 'failed'); assert.equal(f.writes().length, 0);
   } finally { await f.close(); }
 });
 
-test('inbox replies, read and archive use durable receipts, platform windows, limits and uncertain retry protection', async () => {
-  const f = await fixture();
+test('inbox replies, read and archive use durable receipts, platform windows, limits and uncertain retry protection', pg, async t => {
+  const f = await fixture(t);
   try {
     const url = f.path + '/conversations/thread-1/reply', body = { accountId: 'fb', message: 'Hello Alex' }, key = randomUUID();
     const first = await f.request(url, 'POST', body, key); assert.equal(first.status, 200, JSON.stringify(first.data)); assert.equal(first.data.sent, true); const writes = f.writes().length;
@@ -874,12 +896,12 @@ test('inbox replies, read and archive use durable receipts, platform windows, li
     f.setHook((target, options) => { if (target.pathname.endsWith('/messages') && options.method === 'POST') throw new Error('Provider acknowledgement lost'); });
     const uncertain = { ...body, message: 'Unique uncertain reply' }, beforeUncertain = f.writes().length, uncertainKey = randomUUID(); const result = await f.request(url, 'POST', uncertain, uncertainKey); assert.equal(result.data.operation.status, 'uncertain');
     assert.equal((await f.request(url, 'POST', uncertain, uncertainKey)).status, 409); assert.equal((await f.request(url, 'POST', uncertain)).status, 409); assert.equal(f.writes().length, beforeUncertain + 1);
-    f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const beforeViewer = f.calls.length; assert.equal((await f.request(f.path + '/conversations/thread-1/read', 'POST', { accountId: 'fb' })).status, 403); assert.equal(f.calls.length, beforeViewer);
+    await f.app.sql.run("UPDATE memberships SET role='viewer'"); const beforeViewer = f.calls.length; assert.equal((await f.request(f.path + '/conversations/thread-1/read', 'POST', { accountId: 'fb' })).status, 403); assert.equal(f.calls.length, beforeViewer);
   } finally { await f.close(); }
 });
 
-test('comments scope posts and individual permissions, route Meta ad moderation correctly and validate acknowledgements', async () => {
-  const f = await fixture();
+test('comments scope posts and individual permissions, route Meta ad moderation correctly and validate acknowledgements', pg, async t => {
+  const f = await fixture(t);
   try {
     const list = await f.request(f.path + '/comments?accountId=fb'); assert.equal(list.data.posts[0].id, 'post-1');
     const thread = await f.request(f.path + '/comments/thread?accountId=fb&postId=post-1'); assert.equal(thread.data.comments[0].canReply, true);
@@ -899,8 +921,8 @@ test('comments scope posts and individual permissions, route Meta ad moderation 
   } finally { await f.close(); }
 });
 
-test('LinkedIn mentions force the project and active account, validate each page and remain read only', async () => {
-  const f = await fixture(), endpoint = f.path + '/mentions', cursor = 'opaque +/first', next = 'opaque +/next';
+test('LinkedIn mentions force the project and active account, validate each page and remain read only', pg, async t => {
+  const f = await fixture(t), endpoint = f.path + '/mentions', cursor = 'opaque +/first', next = 'opaque +/next';
   f.accounts.push({ _id: 'li', platform: 'linkedin', profileId: 'inbox-profile', isActive: true }, { _id: 'li-other', platform: 'linkedin', profileId: 'inbox-profile', isActive: true }, { _id: 'li-inactive', platform: 'linkedin', profileId: 'inbox-profile', isActive: false });
   const mention = { id: 'mention-document-1', accountId: 'li', platform: 'linkedin', organizationalEntity: 'urn:li:organization:42', content: 'Team report', permalink: null, authorName: null, authorUsername: null, authorPicture: null, authorUrn: null, publishedAt: '2026-10-18T12:00:00Z', createdAt: '2026-10-18T12:01:00Z', apiKey: 'never-return-this' };
   const good = { data: [mention], pagination: { hasMore: true, cursor: next }, meta: { total: 2, sortOrder: 'asc' } };
@@ -928,28 +950,28 @@ test('LinkedIn mentions force the project and active account, validate each page
     ];
     for (response of badPages) assert.equal((await f.request(endpoint + '?' + params)).status, 502, JSON.stringify(response));
     response = { data: [], pagination: { hasMore: false, cursor: null } };
-    f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
+    await f.app.sql.run("UPDATE memberships SET role='viewer'");
     assert.deepEqual((await f.request(endpoint + '?accountId=li')).data.mentions, [], 'Viewers can read an empty feed without an organization-type guess.');
     const status = await f.request(f.path + '/status'); assert.equal(status.data.accounts.find(row => row.id === 'li').capabilities.mentions, true); assert.equal(status.data.accounts.find(row => row.id === 'li-inactive').capabilities.mentions, false);
-    assert.equal(f.writes().length, 0); assert.equal(f.app.direct.contacts.list(f.projectId).length, 0); assert.equal(f.app.db.prepare("SELECT count(*) AS total FROM sqlite_master WHERE name='integration_operations'").get().total, 0);
+    assert.equal(f.writes().length, 0); assert.equal((await f.app.direct.contacts.list(f.projectId)).length, 0); assert.equal((await f.app.sql.get('SELECT count(*) AS total FROM integration_operations')).total, 0, 'Reads must not create operation receipts.');
   } finally { await f.close(); }
 });
 
-test('mention access failures stay distinct from empty results and revoked project access returns no content', async () => {
-  const f = await fixture(), endpoint = f.path + '/mentions?accountId=li';
+test('mention access failures stay distinct from empty results and revoked project access returns no content', pg, async t => {
+  const f = await fixture(t), endpoint = f.path + '/mentions?accountId=li';
   f.accounts.push({ _id: 'li', platform: 'linkedin', profileId: 'inbox-profile', isActive: true });
   let status = 403;
   f.setHook(url => url.pathname.endsWith('/inbox/mentions') ? Response.json({ error: 'PRIVATE_PROVIDER_DETAILS' }, { status }) : undefined);
   try {
     const denied = await f.request(endpoint); assert.equal(denied.status, 403); assert.equal(denied.data.error.code, 'MENTIONS_ACCESS_REQUIRED'); assert.match(denied.data.error.message, /Inbox add-on.*access/); assert.equal(JSON.stringify(denied.data).includes('PRIVATE_PROVIDER_DETAILS'), false); assert.equal(denied.data.mentions, undefined);
     for (status of [401, 429, 503]) { const failed = await f.request(endpoint); assert.ok(failed.status >= 400); assert.equal(failed.data.mentions, undefined); }
-    f.setHook(url => { if (url.pathname.endsWith('/inbox/mentions')) { f.app.db.prepare('DELETE FROM memberships').run(); return Response.json({ data: [{ id: 'private-mention', accountId: 'li', platform: 'linkedin', organizationalEntity: 'urn:li:organization:42', content: 'PRIVATE_MENTION_TEXT' }], pagination: { hasMore: false, cursor: null } }); } });
+    f.setHook(async url => { if (url.pathname.endsWith('/inbox/mentions')) { await f.app.sql.run('DELETE FROM memberships'); return Response.json({ data: [{ id: 'private-mention', accountId: 'li', platform: 'linkedin', organizationalEntity: 'urn:li:organization:42', content: 'PRIVATE_MENTION_TEXT' }], pagination: { hasMore: false, cursor: null } }); } });
     const revoked = await f.request(endpoint); assert.equal(revoked.status, 404); assert.equal(JSON.stringify(revoked.data).includes('PRIVATE_MENTION_TEXT'), false); assert.equal(f.writes().length, 0);
   } finally { await f.close(); }
 });
 
-test('review filters forward exact scoped values and reject invalid ratings, reply states and sorts before provider retrieval', async () => {
-  const f = await fixture(), endpoint = f.path + '/reviews', reviewCalls = () => f.calls.filter(call => call.url.pathname.endsWith('/inbox/reviews'));
+test('review filters forward exact scoped values and reject invalid ratings, reply states and sorts before provider retrieval', pg, async t => {
+  const f = await fixture(t), endpoint = f.path + '/reviews', reviewCalls = () => f.calls.filter(call => call.url.pathname.endsWith('/inbox/reviews'));
   try {
     const filters = { minRating: '1', maxRating: '5', hasReply: 'false', sortBy: 'rating', sortOrder: 'asc', limit: '50', cursor: 'opaque +/cursor' };
     const result = await f.request(endpoint + '?' + new URLSearchParams({ accountId: 'gb', ...filters })); assert.equal(result.status, 200); assert.equal(result.data.reviews[0].id, 'review-1');
@@ -975,8 +997,8 @@ test('review filters forward exact scoped values and reject invalid ratings, rep
   } finally { await f.close(); }
 });
 
-test('review replies require current versions and replacement confirmation and preserve uncertain outcomes', async () => {
-  const f = await fixture();
+test('review replies require current versions and replacement confirmation and preserve uncertain outcomes', pg, async t => {
+  const f = await fixture(t);
   try {
     const list = await f.request(f.path + '/reviews?accountId=gb'), first = list.data.reviews[0], route = f.path + '/reviews/reply'; assert.match(first.replyVersion, /^[a-f0-9]{64}$/);
     const payload = { accountId: 'gb', reviewId: first.id, message: 'Thank you', expectedReplyVersion: first.replyVersion };
@@ -991,8 +1013,8 @@ test('review replies require current versions and replacement confirmation and p
   } finally { await f.close(); }
 });
 
-test('visible paged child comments can be replied to and moderated only with exact focused parent and post proof', async () => {
-  const f = await fixture(); let focusMode = 'valid';
+test('visible paged child comments can be replied to and moderated only with exact focused parent and post proof', pg, async t => {
+  const f = await fixture(t); let focusMode = 'valid';
   const parent = { ...f.comments[0], id: 'parent-1', replies: [{ ...f.comments[0], id: 'reply-1', parentId: 'parent-1' }], repliesHasMore: true }, child = { ...f.comments[0], id: 'reply-2', parentId: 'parent-1' };
   f.setHook((url, options) => {
     if (options.method === 'GET' && url.pathname.endsWith('/inbox/comments/post-1')) {
@@ -1014,8 +1036,8 @@ test('visible paged child comments can be replied to and moderated only with exa
   } finally { await f.close(); }
 });
 
-test('ad comment bridges reject another ad or contradictory placement before any moderation write', async () => {
-  const f = await fixture(); let mode = 'ad';
+test('ad comment bridges reject another ad or contradictory placement before any moderation write', pg, async t => {
+  const f = await fixture(t); let mode = 'ad';
   f.setHook((url, options) => options.method === 'GET' && url.pathname.endsWith('/ads/ad-1/comments') ? Response.json({ status: 'success', comments: [{ ...f.comments[0], platform: 'instagram' }], pagination: { hasMore: false, cursor: null }, meta: { platform: 'instagram', accountId: 'ads', adId: mode === 'ad' ? 'different-ad' : 'ad-1', effectiveStoryId: 'different-post', instagramAccountId: 'ig', placement: mode === 'placement' ? 'facebook' : 'instagram' } }) : undefined);
   try {
     for (const value of ['ad', 'placement']) { mode = value; const result = await f.request(f.path + '/comments/reply', 'POST', { accountId: 'ads', postId: 'ad-1:instagram', commentId: 'comment-1', message: `Never send ${mode}` }); assert.equal(result.status, 502); }
@@ -1023,8 +1045,8 @@ test('ad comment bridges reject another ad or contradictory placement before any
   } finally { await f.close(); }
 });
 
-test('inbox rejects malformed rendered names, message text, comment authors and nested review replies before returning data', async () => {
-  const f = await fixture();
+test('inbox rejects malformed rendered names, message text, comment authors and nested review replies before returning data', pg, async t => {
+  const f = await fixture(t);
   const cases = [
     { route: '/conversations?accountId=fb', path: '/inbox/conversations', data: { data: [{ id: 'thread-1', accountId: 'fb', platform: 'facebook', participantName: { unsafe: true } }], pagination: { hasMore: false, nextCursor: null } } },
     { route: '/conversations/thread-1/messages?accountId=fb', path: '/messages', data: { messages: [{ id: 'msg-1', accountId: 'fb', platform: 'facebook', conversationId: 'thread-1', direction: 'incoming', message: { unsafe: true }, senderName: 'Alex' }], pagination: { hasMore: false, nextCursor: null } } },
@@ -1040,17 +1062,17 @@ test('inbox rejects malformed rendered names, message text, comment authors and 
   } finally { await f.close(); }
 });
 
-test('membership changes while a provider read is pending stop writes and prevent returning inbox data', async () => {
-  const f = await fixture(); let revoke = 'viewer';
-  f.setHook(url => { if (url.pathname.endsWith('/accounts')) { if (revoke === 'viewer') f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); else f.app.db.prepare('DELETE FROM memberships').run(); } });
+test('membership changes while a provider read is pending stop writes and prevent returning inbox data', pg, async t => {
+  const f = await fixture(t); let revoke = 'viewer';
+  f.setHook(async url => { if (url.pathname.endsWith('/accounts')) { if (revoke === 'viewer') await f.app.sql.run("UPDATE memberships SET role='viewer'"); else await f.app.sql.run('DELETE FROM memberships'); } });
   try {
     const denied = await f.request(f.path + '/conversations/thread-1/reply', 'POST', { accountId: 'fb', message: 'No permission to send' }); assert.equal(denied.status, 403); assert.equal(f.writes().length, 0); assert.equal(JSON.stringify(denied.data).includes('Alex Messenger'), false);
     revoke = 'removed'; const hidden = await f.request(f.path + '/conversations?accountId=fb'); assert.equal(hidden.status, 404); assert.equal(JSON.stringify(hidden.data).includes('participant-a'), false);
   } finally { await f.close(); }
 });
 
-test('archive receipts must identify the requested or resolved conversation and cannot be replayed after mismatch', async () => {
-  const f = await fixture(), route = f.path + '/conversations/thread-1/status'; let receiptId = 'stored-thread-1';
+test('archive receipts must identify the requested or resolved conversation and cannot be replayed after mismatch', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/thread-1/status'; let receiptId = 'stored-thread-1';
   f.setHook((url, options) => {
     if (!url.pathname.endsWith('/inbox/conversations/thread-1')) return;
     return Response.json({ success: true, data: { id: options.method === 'PUT' ? receiptId : 'stored-thread-1', accountId: 'fb', platform: 'facebook', participantId: 'participant-a', status: options.method === 'PUT' ? JSON.parse(options.body).status : 'active' } });
@@ -1066,8 +1088,8 @@ test('archive receipts must identify the requested or resolved conversation and 
   } finally { await f.close(); }
 });
 
-test('WhatsApp replies round-trip delivery history, enforce the session and use exact approved templates outside it', async () => {
-  const f = await fixture(), route = f.path + '/conversations/thread-1/reply';
+test('WhatsApp replies round-trip delivery history, enforce the session and use exact approved templates outside it', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/thread-1/reply';
   const template = { id: 'appointment-template', name: 'appointment_update', language: 'en', status: 'APPROVED', category: 'UTILITY', components: [{ type: 'BODY', text: 'Your appointment is now on {{1}}.' }] };
   let sent, deliveryStatus = 'sent', mode = 'normal';
   f.setHook((url, options) => {
@@ -1113,13 +1135,13 @@ test('WhatsApp replies round-trip delivery history, enforce the session and use 
 
     sent = undefined; mode = 'timeout'; const lostBody = { accountId: 'wa', message: 'Different message with a lost acknowledgement' }, beforeTimeout = f.writes().length;
     assert.equal((await f.request(route, 'POST', lostBody)).data.operation.status, 'uncertain'); assert.equal((await f.request(route, 'POST', lostBody)).status, 409); assert.equal(f.writes().length, beforeTimeout + 1);
-    f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const beforeViewer = f.calls.length;
+    await f.app.sql.run("UPDATE memberships SET role='viewer'"); const beforeViewer = f.calls.length;
     assert.equal((await f.request(route, 'POST', templateBody)).status, 403); assert.equal(f.calls.length, beforeViewer);
   } finally { await f.close(); }
 });
 
-test('reply-window checks find recent customer messages after paged outgoing history and reject incomplete scans', async () => {
-  const f = await fixture(), route = f.path + '/conversations/thread-1/reply'; let mode = 'open';
+test('reply-window checks find recent customer messages after paged outgoing history and reject incomplete scans', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/thread-1/reply'; let mode = 'open';
   f.setHook((url, options) => {
     if (!url.pathname.endsWith('/messages') || options.method !== 'GET') return;
     const accountId = url.searchParams.get('accountId'), platform = f.accounts.find(row => row._id === accountId).platform, cursor = url.searchParams.get('cursor');
@@ -1145,8 +1167,8 @@ test('reply-window checks find recent customer messages after paged outgoing his
 });
 
 
-test('WhatsApp reply buttons send only the exact text-only generated-ID subset and require an existing operation for checks', async () => {
-  const f = await fixture(), route = f.path + '/conversations/thread-1/reply', buttons = [{ type: 'postback', title: 'Yes', payload: 'reply_1' }, { type: 'postback', title: 'No', payload: 'reply_2' }], body = { accountId: 'wa', message: 'Choose one', buttons }, key = randomUUID();
+test('WhatsApp reply buttons send only the exact text-only generated-ID subset and require an existing operation for checks', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/thread-1/reply', buttons = [{ type: 'postback', title: 'Yes', payload: 'reply_1' }, { type: 'postback', title: 'No', payload: 'reply_2' }], body = { accountId: 'wa', message: 'Choose one', buttons }, key = randomUUID();
   try {
     const state = await f.request(f.path + '/status'); assert.equal(state.data.accounts.find(row => row.id === 'wa').capabilities.replyButtons, true); assert.equal(state.data.accounts.find(row => row.id === 'ig').capabilities.replyButtons, false);
     const absent = await f.request(route + '?check=1', 'POST', body, key); assert.equal(absent.data.error.code, 'OPERATION_OUTCOME_UNAVAILABLE'); assert.equal(f.writes().length, 0);
@@ -1159,34 +1181,34 @@ test('WhatsApp reply buttons send only the exact text-only generated-ID subset a
     assert.equal((await f.request(route + '?check=1', 'POST', body, randomUUID())).data.error.code, 'OPERATION_OUTCOME_UNAVAILABLE'); assert.equal(f.writes().length, 1);
     assert.equal((await f.request(route, 'POST', { ...body, message: '🙂'.repeat(256) })).status, 200); assert.equal(f.writes().length, 2);
     f.setIncoming(Date.now() - 25 * 3600000); assert.equal((await f.request(route, 'POST', body)).data.error.code, 'MESSAGING_WINDOW_CLOSED'); assert.equal(f.writes().length, 2);
-    f.app.db.prepare("UPDATE memberships SET role='viewer'").run(); const before = f.calls.length; assert.equal((await f.request(route, 'POST', body)).status, 403); assert.equal(f.calls.length, before);
+    await f.app.sql.run("UPDATE memberships SET role='viewer'"); const before = f.calls.length; assert.equal((await f.request(route, 'POST', body)).status, 403); assert.equal(f.calls.length, before);
   } finally { await f.close(); }
 });
 
-test('WhatsApp reply-button final history reads cannot dispatch after sender, recipient, handover or access changes', async () => {
-  const f = await fixture(), route = f.path + '/conversations/thread-1/reply', account = f.accounts.find(row => row._id === 'wa'), body = { accountId: 'wa', message: 'Choose one', buttons: [{ type: 'postback', title: 'Yes', payload: 'reply_1' }] };
+test('WhatsApp reply-button final history reads cannot dispatch after sender, recipient, handover or access changes', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/thread-1/reply', account = f.accounts.find(row => row._id === 'wa'), body = { accountId: 'wa', message: 'Choose one', buttons: [{ type: 'postback', title: 'Yes', payload: 'reply_1' }] };
   let mode = '', changed = false;
-  f.setHook((url, options) => {
+  f.setHook(async (url, options) => {
     if (url.pathname.endsWith('/messages') && options.method === 'GET' && !changed) {
       changed = true;
       if (mode === 'inactive') account.isActive = false;
       if (mode === 'reconnect') account.needsReconnection = true;
       if (mode === 'sender') account.username = 'changed-sender';
-      if (mode === 'viewer') f.app.db.prepare("UPDATE memberships SET role='viewer'").run();
-      if (mode === 'mapping') f.app.db.prepare("UPDATE projects SET zernio_profile_id='changed-profile'").run();
+      if (mode === 'viewer') await f.app.sql.run("UPDATE memberships SET role='viewer'");
+      if (mode === 'mapping') await f.app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile'");
     }
     if (changed && url.pathname.endsWith('/inbox/conversations/thread-1') && ['recipient', 'control'].includes(mode)) return Response.json({ data: { id: 'thread-1', accountId: 'wa', platform: 'whatsapp', participantId: mode === 'recipient' ? 'changed-participant' : 'participant-a', status: 'active', ...(mode === 'control' ? { threadControl: 'ai_agent' } : {}) } });
   });
   try {
     for (const value of ['inactive', 'reconnect', 'sender', 'recipient', 'control', 'viewer', 'mapping']) {
-      mode = value; changed = false; account.isActive = true; account.needsReconnection = false; account.username = 'whatsapp-account'; f.app.db.prepare("UPDATE memberships SET role='owner'").run(); f.app.db.prepare("UPDATE projects SET zernio_profile_id='inbox-profile'").run();
+      mode = value; changed = false; account.isActive = true; account.needsReconnection = false; account.username = 'whatsapp-account'; await f.app.sql.run("UPDATE memberships SET role='owner'"); await f.app.sql.run("UPDATE projects SET zernio_profile_id='inbox-profile'");
       const denied = await f.request(route, 'POST', body); assert.ok([403, 409, 422].includes(denied.status), mode + ': ' + JSON.stringify(denied.data)); assert.equal(f.writes().length, 0, mode);
     }
   } finally { await f.close(); }
 });
 
-test('unknown WhatsApp button outcomes retain the durable request fence across exact checks, changed bodies and reopen', async () => {
-  const f = await fixture(), route = f.path + '/conversations/thread-1/reply', body = { accountId: 'wa', message: 'Unknown button outcome', buttons: [{ type: 'postback', title: 'Yes', payload: 'reply_1' }] }, key = randomUUID();
+test('unknown WhatsApp button outcomes retain the durable request fence across exact checks, changed bodies and reopen', pg, async t => {
+  const f = await fixture(t), route = f.path + '/conversations/thread-1/reply', body = { accountId: 'wa', message: 'Unknown button outcome', buttons: [{ type: 'postback', title: 'Yes', payload: 'reply_1' }] }, key = randomUUID();
   f.setHook((url, options) => { if (url.pathname.endsWith('/messages') && options.method === 'POST') throw new TypeError('Synthetic native acknowledgement lost'); });
   try {
     const first = await f.request(route, 'POST', body, key); assert.equal(first.data.operation.status, 'uncertain'); assert.equal(f.writes().length, 1);
