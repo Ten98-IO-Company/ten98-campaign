@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { AuthErrorBoundary } from '@ten98/ui';
 import { transformWithOxc } from 'vite';
 
 test('campaign rows open the matching native advertising view and manual records retain their editor', async () => {
@@ -101,14 +103,16 @@ test('Demand Gen exposes target CPC while Performance Max retains conversion-onl
 });
 
 test('render and lazy-load failures show a reload action without exposing the original error', async () => {
-  const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), start = source.indexOf('class AppBoundary '), end = source.indexOf('\nfunction App()', start);
-  assert.ok(start > 0 && end > start); assert.match(source, /render\(<AppBoundary><App\/><\/AppBoundary>\)/);
-  const { code } = await transformWithOxc(source.slice(start,end), 'AppBoundary.tsx', { jsx: { runtime: 'classic' } });
+  const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  const mount = source.match(/render\(<AuthErrorBoundary fallback=\{\{ brand: <Brand product="Campaign"\/>, title: '([^']+)', message: '([^']+)', retryLabel: '([^']+)' \}\}><App\/><\/AuthErrorBoundary>\)/);
+  assert.ok(mount, 'The app root is wrapped by the shared boundary with Campaign copy.');
+  const [, title, message, retryLabel] = mount;
+  assert.equal(retryLabel, 'Reload app'); assert.doesNotMatch(source, /class AppBoundary /);
   let reloads = 0;
-  const Boundary = new Function('React','window',code + '; return AppBoundary;')(React,{location:{reload:()=>{reloads++}}}), boundary = new Boundary({children:'Ready'});
-  assert.equal(boundary.render(),'Ready'); boundary.state = Boundary.getDerivedStateFromError(new Error('Private request payload'));
-  const all = node => React.isValidElement(node) ? [node, ...[node.props.children].flat(Infinity).flatMap(all)] : [];
-  const nodes = all(boundary.render()), action = nodes.find(node=>node.type==='button');
-  assert.equal(action.props.children,'Reload app'); assert.ok(nodes.some(node=>node.props.role==='alert'));
-  assert.ok(!JSON.stringify(boundary.render()).includes('Private request payload')); action.props.onClick(); assert.equal(reloads,1);
+  const boundary = new AuthErrorBoundary({ children: 'Ready', fallback: { brand: 'Campaign', title, message, retryLabel }, onReload: () => { reloads++; } });
+  assert.equal(boundary.render(), 'Ready');
+  boundary.state = AuthErrorBoundary.getDerivedStateFromError(new Error('Private request payload'));
+  const html = renderToStaticMarkup(boundary.render());
+  assert.match(html, /role="alert"/); assert.match(html, />Reload app</); assert.ok(html.includes(title)); assert.doesNotMatch(html, /Private request payload/);
+  boundary.render().props.onRetry(); assert.equal(reloads, 1);
 });

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppEmpty as Empty, AppStat as Stat, AppSelect } from '@ten98/ui/app';
+import { AppStateScreen, AuthErrorBoundary } from '@ten98/ui';
 import './styles.css';
 import AdComposer from './AdComposer';
 import SocialAnalytics from './SocialAnalytics';
@@ -120,12 +121,6 @@ function AssetPreview({ item }: { item: Row }) {
   return preview ? <img className="real-asset-preview" src={preview} alt={item.description || item.name} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(previous => [...previous, preview])}/> : <div className={'asset-placeholder ' + kind}><Icon name={kind === 'document' ? 'folder' : 'image'} size={42}/><span>{title(kind)}</span></div>;
 }
 function Creative({ item, small = false }: { item: Row; small?: boolean }) { return !item.sample ? <AssetPreview item={item}/> : <div className={'creative ' + (small ? 'small ' : '') + (item.kind === 'video' ? 'creative-video' : item.kind === 'document' ? 'creative-doc' : '')}><div className="creative-orbit"/><span className="creative-label">ten98 / studio</span><strong>{item.kind === 'document' ? 'The brand\nplaybook.' : item.kind === 'video' ? 'Make your\nnext move.' : 'Made to\nstand out.'}</strong><span className="creative-foot">{item.kind === 'video' ? '▶  BRAND FILM' : item.kind === 'document' ? 'BRAND GUIDELINES · 2026' : 'A NEW PERSPECTIVE'}</span></div>; }
-
-class AppBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
-  state = { failed: false };
-  static getDerivedStateFromError() { return { failed: true }; }
-  render() { return this.state.failed ? <main className="auth-shell"><section className="auth-form"><div className="auth-form-inner"><h1>Page unavailable</h1><p role="alert">This screen could not load. Reload the app to try again.</p><button className="button primary" onClick={() => window.location.reload()}>Reload app</button></div></section></main> : this.props.children; }
-}
 
 function App() {
   const [session, setSession] = useState<any>(null), [state, setState] = useState<State | null>(null);
@@ -440,10 +435,10 @@ function App() {
     const csv = rows.map(row => row.map(cell => { let v = String(cell ?? ''); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return '"' + v.replaceAll('"', '""') + '"'; }).join(',')).join('\r\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' })); const a = document.createElement('a'); a.href = url; a.download = 'ten98-campaign-report.csv'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
-  if (!session) return <main className="loading-screen"><span className="brand-mark">98</span><p>{error || 'Loading Campaign…'}</p></main>;
+  if (!session) return <AppStateScreen state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading Campaign…'}/>;
   if (inviteToken && !(inviteSignIn && !session.user)) return <AcceptInvitation key={inviteToken + ':' + (session.user?.id || '')} token={inviteToken} request={api} onAccepted={() => { window.location.assign('/'); }} onSignIn={() => { setInviteSignIn(true); if (session.user) run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); }); }}/>;
   if (!session.user) return <Auth session={session} inviteToken={inviteToken} error={error} busy={busy} onSubmit={async values => { await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
-  if (!state) return <main className="loading-screen"><span className="brand-mark">98</span><p>{error || 'Loading your campaigns…'}</p>{error && <button onClick={() => run(() => reload())}>Try again</button>}</main>;
+  if (!state) return <AppStateScreen state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading your campaigns…'} onRetry={error ? () => run(() => reload()) : undefined}/>;
   if (!state.projectId || !project) return <main className="auth-shell"><section className="auth-form"><div className="auth-form-inner"><Brand product="Campaign" href="/"/><h1>Workspace access</h1><p>Signed in as {state.user.email}.</p><h2>No project access yet.</h2><p>Ask a workspace owner for an invitation, refresh after access is granted, or create your own workspace.</p>{error && <p className="alert" role="alert">{error}</p>}<form onSubmit={createWorkspace}><fieldset disabled={busy}><Field label="Workspace name" name="name" required maxLength={120} placeholder="Your team or organization"/><button className="button primary full">{busy ? 'Creating workspace…' : 'Create workspace'}</button></fieldset></form><div className="button-wrap"><button className="button" disabled={busy} onClick={() => run(() => reload(''))}>Refresh access</button><button className="button" disabled={busy} onClick={() => run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); setState(null); })}>Sign out</button></div><AccountSettings request={api} onChanged={() => { run(() => reload('')); }}/></div></section></main>;
   const campaigns = filtered(state.campaigns).filter(c => tab === 'all' || c.status === tab);
   const currencyCampaigns = state.campaigns.filter(c => (c.currency || 'AED') === currency);
@@ -540,4 +535,4 @@ function Auth({ session, inviteToken = '', error, busy, onSubmit }: { session: a
     <section className="auth-form"><div className="auth-form-inner"><div className="eyebrow">YOUR WORKSPACE</div><h2>{session.setupRequired ? 'Create owner account' : 'Sign in'}</h2><p>{session.setupRequired ? 'Create the owner account for this app.' : 'Use your account to access your workspaces.'}</p><form onSubmit={e => { e.preventDefault(); const values: any = Object.fromEntries(new FormData(e.currentTarget)); values.sample = values.sample === 'on'; onSubmit(values); }}>{session.setupRequired && <><Field label="Your name" name="name" autoComplete="name" required maxLength={120}/><Field label="Setup token" name="token" type="password" autoComplete="off" required minLength={32} maxLength={512}/><p className="field-help">Ask the person running this app for the setup token.</p></>}<Field label="Email address" name="email" type="email" autoComplete="username" required/><Field label="Password" name="password" type="password" autoComplete={session.setupRequired ? 'new-password' : 'current-password'} required minLength={session.setupRequired ? 12 : 1} maxLength={128}/>{session.setupRequired && <><small className="field-help">Use at least 12 characters.</small><label className="checkbox-label"><input type="checkbox" name="sample" defaultChecked/>Include a sample project to explore</label></>}{error && <p className="form-error" role="alert">{error}</p>}<button className="button primary full" disabled={busy}>{busy ? 'Signing in…' : session.setupRequired ? 'Create owner account' : 'Sign in'}<Icon name="arrow" size={16}/></button></form>{session.oidcEnabled && <><div className="or-divider">or continue with</div><a className="button full" href={'/api/auth/oidc/start' + (inviteToken ? '?invite=' + encodeURIComponent(inviteToken) : '')}><Icon name="lock" size={16}/>Organization single sign-on</a></>}</div></section></main>;
 }
 
-createRoot(document.getElementById('root')!).render(<AppBoundary><App/></AppBoundary>);
+createRoot(document.getElementById('root')!).render(<AuthErrorBoundary fallback={{ brand: <Brand product="Campaign"/>, title: 'Page unavailable', message: 'This screen could not load. Reload the app to try again.', retryLabel: 'Reload app' }}><App/></AuthErrorBoundary>);

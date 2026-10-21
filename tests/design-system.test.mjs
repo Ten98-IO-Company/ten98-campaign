@@ -72,7 +72,6 @@ test('native integration and empty-state copy keeps light colors and readable da
     ['.integration-header h2', '#725e7f', '--color-surface', 4.5], ['.integration-header p', '#6f6278', '--color-surface', 4.5],
     ['.empty h3', '#725e81', '--color-canvas', 4.5], ['.empty p', '#6c6075', '--color-canvas', 4.5],
     ['.empty-icon', '#73608a', '--color-accent-subtle', 3],
-    ['.loading-screen', '#746081', '--color-canvas', 4.5],
     ['.post-copy', '#725f7e', '--color-surface', 4.5], ['.post-meta', '#6e6178', '--color-surface', 4.5],
   ]) {
     const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
