@@ -256,7 +256,7 @@ test('saving a campaign or ad set reviews sibling drafts before its full refresh
 });
 
 test('analytics date validation and failed refresh preserve the last successful report', async () => {
-  const handler = javascript(analytics.slice(analytics.indexOf('async function load('), analytics.indexOf('  return <section'))), errors = [], reports = [], requests = [];
+  const handler = javascript(analytics.slice(analytics.indexOf('async function load('), analytics.indexOf('  return <Card'))), errors = [], reports = [], requests = [];
   const base = { busy: false, connected: true, from: '2030-01-01', to: '2030-01-31', setError: error => errors.push(error), setBusy: () => {}, request: async path => { requests.push(path); return { totals: { impressions: 0 }, daily: [] }; }, setReport: value => reports.push(value) };
   async function load(extra = {}) { const context = { ...base, ...extra }; await new Function(...Object.keys(context), `return (${handler});`)(...Object.values(context))({ preventDefault() {} }); }
   await load(); assert.equal(reports.length, 1); assert.equal(reports[0].data.totals.impressions, 0); assert.match(requests[0], /fromDate=2030-01-01&toDate=2030-01-31/);
