@@ -380,6 +380,17 @@ export const directSmsSuppressions = pgTable('direct_sms_suppressions', {
   reason: text('reason').notNull(),
   created_at: text('created_at').notNull(),
 });
+export const directDeliverabilityAlerts = pgTable('direct_deliverability_alerts', {
+  project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  kind: text('kind').notNull(),
+  contact_id: text('contact_id').notNull().references(() => directContacts.id, { onDelete: 'cascade' }),
+  expires_at: text('expires_at'),
+  first_seen_at: text('first_seen_at').notNull(),
+  last_seen_at: text('last_seen_at').notNull(),
+}, t => [
+  primaryKey({ columns: [t.project_id, t.provider, t.kind, t.contact_id] }),
+]);
 export const directCampaigns = pgTable('direct_campaigns', {
   id: text('id').primaryKey(),
   project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
