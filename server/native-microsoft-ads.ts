@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
 import { fail, IntegrationError, operation, providerRequest, mediaUrl, reportObject as plain, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import type { Executor } from './database.ts';
+import { assertAdSpendApproval } from './approvals.ts';
 
 type MicrosoftContext = OperationContext & { project: ProviderRecord; user: ProviderRecord; role: string; store: ProviderRecord; send: (status: number, body: unknown) => void; body?: any };
 type CurrentCheck = (() => void | Promise<void>) | undefined;
@@ -110,7 +111,9 @@ export async function handleMicrosoftAds(context: MicrosoftContext) {
     if (body.status !== undefined && !['Active', 'Paused'].includes(body.status) || body.status === undefined && body.dailyBudget === undefined) fail(400, 'INVALID_MICROSOFT_UPDATE', 'Choose Active, Paused or a daily budget.');
     const campaignId = id(change[1]), current = (await campaigns(api, mapping)).find(row => row.id === campaignId); if (!current) fail(404, 'MICROSOFT_CAMPAIGN_NOT_FOUND', 'This search campaign was not found in the project account.');
     if (!['Active', 'Paused'].includes(current.status) || body.dailyBudget !== undefined && (current.sharedBudget !== false || !['DailyBudgetStandard', 'DailyBudgetAccelerated'].includes(current.budgetType))) fail(422, 'MICROSOFT_CAMPAIGN_UNSUPPORTED', 'Manage terminal campaigns, shared or unconfirmed budgets and unsupported budget types in Microsoft Advertising.');
-    const patch = { Id: campaignId, ...(body.status ? { Status: body.status } : {}), ...(body.dailyBudget !== undefined ? { DailyBudget: amount(body.dailyBudget) } : {}) }, result = await operation(context, async () => {
+    const patch = { Id: campaignId, ...(body.status ? { Status: body.status } : {}), ...(body.dailyBudget !== undefined ? { DailyBudget: amount(body.dailyBudget) } : {}) }, result = await operation(context, async key => {
+      // An activation spends the budget the campaign has after this change; a budget change alone spends the new budget.
+      if (patch.Status === 'Active' || patch.DailyBudget !== undefined) await assertAdSpendApproval(context, { subjectId: campaignId, platform: 'microsoft', action: patch.Status === 'Active' ? 'microsoft/campaign-status' : 'microsoft/campaign-budget', amount: patch.DailyBudget ?? current.dailyBudget, currency: mapping.currency, currentAmount: current.dailyBudget, activates: patch.Status === 'Active' }, key);
       noErrors(await api(campaignApi, '/Campaigns', { AccountId: mapping.accountId, Campaigns: [patch] }, 'PUT'));
       let confirmed: ReturnType<typeof campaignView>;
       try { confirmed = (await campaigns(api, mapping)).find(row => row.id === campaignId)!; if (!confirmed || patch.Status && confirmed.status !== patch.Status || patch.DailyBudget !== undefined && confirmed.dailyBudget !== patch.DailyBudget) throw new Error('Campaign update mismatch.'); }

@@ -23,7 +23,7 @@ test('content approval policy binds current posts and creative to audited review
   const requestReview = () => invoke(`posts/${post.id}/request`, { method: 'POST' });
   const review = (reviewId, decision = 'approved', options = {}) => invoke(`posts/${post.id}/review`, { method: 'POST', role: 'admin', body: { reviewId, decision, note: 'Reviewed against the brief.' }, ...options });
   {
-    assert.deepEqual((await invoke('policy', { role: 'viewer' })).data, { requireApproval: false, updatedBy: null, updatedAt: null });
+    assert.deepEqual((await invoke('policy', { role: 'viewer' })).data, { requireApproval: false, requireAdApproval: false, updatedBy: null, updatedAt: null });
     await assert.doesNotReject(async () => assertPublishingApproval(context(), (await current())));
     assert.equal((await invoke('policy', { method: 'POST', role: 'viewer', body: { requireApproval: true } })).status, 403);
     assert.equal((await invoke('policy', { method: 'POST', body: { requireApproval: true } })).status, 403);
@@ -380,7 +380,7 @@ async function summaryFixture(t) {
 test('the approvals summary reports every post’s queue status for any member, with no provider calls and a fixed number of queries', { skip: postgresSkip }, async t => {
   const f = await summaryFixture(t);
   await f.pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-b','w','B')");
-  assert.deepEqual(await f.get('summary'), { status: 200, data: { requireApproval: false, pending: 0, statuses: { [f.post.id]: 'not_requested' } } });
+  assert.deepEqual(await f.get('summary'), { status: 200, data: { requireApproval: false, pending: 0, statuses: { [f.post.id]: 'not_requested' }, pendingAdSpend: 0 } });
   const approved = await f.create('Approved'), rejected = await f.create('Rejected'), stale = await f.create('Stale'), queued = await f.create('Queued', { queueId: 'queue-a', queueVersion: 'a'.repeat(64) });
   const submittedPost = await f.store.create(f.project.id, 'posts', { content: 'Submitted', platforms: ['facebook'], status: 'scheduled', externalId: 'remote-a' });
   await f.requestFor(f.post); await f.decide(approved, 'approved'); await f.decide(rejected, 'rejected');
@@ -390,7 +390,7 @@ test('the approvals summary reports every post’s queue status for any member, 
   const expected = { [f.post.id]: 'pending', [approved.id]: 'approved', [rejected.id]: 'rejected', [stale.id]: 'stale', [queued.id]: 'not_requested', [submittedPost.id]: 'submitted' };
   // Count statements on the pool: the summary reads posts, assets, latest reviews and policy whatever the number of posts.
   const query = f.pool.query.bind(f.pool); let queries = 0; f.pool.query = (...args) => { queries++; return query(...args); };
-  for (const role of ['viewer', 'editor', 'admin', 'owner']) assert.deepEqual((await f.get('summary', role)).data, { requireApproval: false, pending: 1, statuses: expected });
+  for (const role of ['viewer', 'editor', 'admin', 'owner']) assert.deepEqual((await f.get('summary', role)).data, { requireApproval: false, pending: 1, statuses: expected, pendingAdSpend: 0 });
   const perRead = queries / 4; assert.ok(perRead >= 1 && perRead <= 4,`The summary used ${perRead} queries.`);
   for (let index = 0; index < 5; index++) await f.requestFor(await f.create(`More ${index}`, { assetId: 'missing-asset' }));
   queries = 0; const larger = (await f.get('summary')).data; assert.equal(queries, perRead, 'More posts and reviews add no queries.'); f.pool.query = query;

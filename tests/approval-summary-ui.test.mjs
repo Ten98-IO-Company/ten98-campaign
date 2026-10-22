@@ -42,7 +42,8 @@ test('the summary loader keeps the project guard and treats unreadable or failed
 test('the sidebar, post cards and agenda consume the loaded summary without their own reads', () => {
   assert.match(app, /useEffect\(\(\) => \{ setApprovalSummary\(null\); \}, \[state\?\.projectId\]\);/, 'Switching projects clears the previous project summary.');
   assert.match(app, /useEffect\(\(\) => \{ if \(state\?\.projectId\) void loadApprovalSummary\(state\.projectId\); \}, \[state\]\);/, 'Every reload, including after approval changes, refreshes the summary.');
-  assert.match(app, /p\.label === 'Approvals' && approvalSummary\?\.pending \? \{ badge: approvalSummary\.pending, badgeLabel: /);
+  assert.match(app, /const approvalsBadge = approvalBadge\(approvalSummary\);/, 'The badge counts post and ad spend reviews from the loaded summary.');
+  assert.match(app, /p\.label === 'Approvals' && approvalsBadge \? \{ badge: approvalsBadge\.count, badgeLabel: approvalsBadge\.label \} : \{\}/);
   assert.match(app, /title=\{!connected \? 'Connect Zernio in Settings' : ''\} onClick=\{\(\) => setPublishing\(p\)\}>/, 'An approved post keeps the unchanged publish confirmation.');
   assert.match(app, /approvalGate\(approvalSummary, p\.id\)/); assert.match(app, />Open approvals<\/Button>/);
   assert.match(app, /<CampaignPublishingAgenda posts=\{calendarPosts\} googleEvents=\{calendarOverlay\}[^\r\n]*postApprovals=\{approvalSummary\?\.requireApproval \? Object\.fromEntries\(Object\.keys\(approvalSummary\.statuses\)\.map\(id => \[id, approvalGate\(approvalSummary, id\)!\.label\]\)\) : undefined\}/);
