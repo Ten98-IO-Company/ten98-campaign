@@ -30,9 +30,10 @@ const adSpendActions: Record<string, string> = {
   'ads/status': 'Activate campaign', 'ads/ad-status': 'Activate ad', 'ads/adset-status': 'Activate ad set', 'ads/adset-budget': 'Raise ad set budget', 'ads/campaign-budget': 'Raise campaign budget',
   'google-native/campaign-status': 'Enable Google Shopping campaign', 'google-native/campaign-budget': 'Raise Google Shopping daily budget',
   'microsoft/campaign-status': 'Activate Microsoft search campaign', 'microsoft/campaign-budget': 'Raise Microsoft search daily budget',
+  'ooh/booking': 'Submit OOH booking',
 };
 export const adSpendActionLabel = (action: string) => adSpendActions[action] || action;
-const adPlatforms: Record<string, string> = { facebook: 'Facebook', instagram: 'Instagram', google: 'Google Ads', microsoft: 'Microsoft Advertising', linkedin: 'LinkedIn', tiktok: 'TikTok', pinterest: 'Pinterest', twitter: 'X', reddit: 'Reddit', snapchat: 'Snapchat', openai: 'OpenAI' };
+const adPlatforms: Record<string, string> = { facebook: 'Facebook', instagram: 'Instagram', google: 'Google Ads', microsoft: 'Microsoft Advertising', linkedin: 'LinkedIn', tiktok: 'TikTok', pinterest: 'Pinterest', twitter: 'X', reddit: 'Reddit', snapchat: 'Snapchat', openai: 'OpenAI', broadsign: 'Broadsign' };
 export const adSpendPlatformLabel = (platform: string) => adPlatforms[platform] || platform;
 // Review amounts are minor units of the currency (cents for USD, fils for AED); null is a budget the server could not read.
 export function formatMinorUnits(amount: unknown, currency: unknown) {

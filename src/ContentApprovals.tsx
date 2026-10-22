@@ -70,7 +70,7 @@ function ProposedUpdateComparison({ item }: { item: any }) {
 // Ad spend reviews (council decision ten98-code-system#35, Q1). Each card is one exact change: subject, platform, action,
 // amount in minor units and currency. A blocked activation or budget increase opens its review on the server; approving
 // allows one matching provider write and never sends it.
-const spendSubject = (action: string) => action.includes('ad-status') ? 'Ad' : action.includes('adset') ? 'Ad set' : 'Campaign';
+const spendSubject = (action: string) => action === 'ooh/booking' ? 'OOH booking' : action.includes('ad-status') ? 'Ad' : action.includes('adset') ? 'Ad set' : 'Campaign';
 function AdSpendReviews({ path, required, canReview, request, onChanged }: { path: string; required: boolean; canReview: boolean; request: Props['request']; onChanged?: Props['onChanged'] }) {
   const [data, setData] = useState<any>(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [notes, setNotes] = useState<Record<string, string>>({});
   const active = useRef(true), readVersion = useRef(0);

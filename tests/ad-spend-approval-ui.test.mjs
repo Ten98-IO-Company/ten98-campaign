@@ -130,3 +130,18 @@ test('the Approvals badge counts pending ad spend reviews beside pending posts',
   assert.equal(readableApprovalSummary(summary(1, 2)), true);
   for (const value of [-1, 1.5, '2', null]) assert.equal(readableApprovalSummary(summary(1, value)), false, String(value));
 });
+
+test('an OOH booking held back by ad spend approval explains itself, and a missing account currency points to Integrations', async () => {
+  const failure = code => Object.assign(new Error('Server message'), { status: code === 'AD_SPEND_APPROVAL_REQUIRED' ? 403 : 409, code });
+  const ooh = await read('OohProviders.tsx'), main = await read('main.tsx');
+  const make = () => { const errors = [], blocks = [], reviews = []; return { errors, blocks, reviews, run: compile(ooh.slice(ooh.indexOf('async function action('), ooh.indexOf('  async function saveMapping(')), { busy: false, active: { current: true }, setBusy() {}, setNotice() {}, setError: value => { if (value) errors.push(value); }, setSpendBlock: value => { if (value) blocks.push(value); }, adSpendBlock, onSpendReview: () => { reviews.push(1); } }) }; };
+  const held = make(); await held.run(async () => { throw failure('AD_SPEND_APPROVAL_REQUIRED'); });
+  assert.deepEqual(held.blocks.map(block => block.code), ['AD_SPEND_APPROVAL_REQUIRED']); assert.deepEqual(held.errors, []); assert.equal(held.reviews.length, 1, 'The Approvals badge picks up the opened review.');
+  const currency = make(); await currency.run(async () => { throw failure('AD_SPEND_AMOUNT_UNAVAILABLE'); });
+  assert.deepEqual(currency.blocks.map(block => block.review), [false]); assert.equal(currency.reviews.length, 0);
+  const plain = make(); await plain.run(async () => { throw failure('INVALID_OOH_PRICE'); }); assert.deepEqual(plain.errors, ['Server message']); assert.deepEqual(plain.blocks, []);
+  assert.match(ooh, /spendBlock\.review \? <AdSpendNotice block=\{spendBlock\} onOpenApprovals=\{onOpenApprovals\}/);
+  assert.match(ooh, /title="Set the Broadsign account currency"[^\n]*onClick=\{onOpenIntegrations\}>Open integrations</);
+  assert.match(main, /<OohProviders onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\} onOpenApprovals=\{\(\) => setPage\('Approvals'\)\} onSpendReview=/);
+  assert.equal(adSpendActionLabel('ooh/booking'), 'Submit OOH booking');
+});
