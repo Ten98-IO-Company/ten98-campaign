@@ -57,6 +57,11 @@ export const lockContacts = (tx: Executor, projectId: string) => advisoryLock(tx
 const atomic = <T>(executor: Executor, run: (tx: Transaction) => Promise<T>): Promise<T> => (executor as Database).transaction(run);
 const resultRows = async (query: Promise<{ rows: unknown[] }>) => (await query).rows as ProviderRecord[];
 
+/** The contact's suppression on a channel, unless it is a provider's temporary one that has expired. */
+export function activeSuppression(contact: any, channel: string) {
+  const entry = contact?.suppression?.[channel];
+  return entry && !(entry.expiresAt && Date.parse(entry.expiresAt) <= Date.now()) ? entry : null;
+}
 export function createContacts({ db }: { db: Database }) {
   const hash = (target: string) => createHash('sha256').update(target).digest('hex');
   const ledger = async (ex: Executor, projectId: string, channel: string, target: string) => (await resultRows(ex.execute(sql`SELECT reason, created_at AS at FROM direct_contact_suppressions WHERE project_id = ${projectId} AND channel = ${channel} AND target_hash = ${hash(target)}`)))[0];
@@ -91,8 +96,10 @@ export function createContacts({ db }: { db: Database }) {
     const now = new Date().toISOString();
     for (const channel of channels) {
       const destination = channel === 'email' ? result.email : result.phone, oldDestination = channel === 'email' ? previous?.email : previous?.phone;
+      // A provider's temporary suppression belongs to the old address; it does not follow an edited destination.
+      if (previous && destination !== oldDestination && result.suppression[channel]?.expiresAt) delete result.suppression[channel];
       if (destination) { const suppressed = await ledger(ex, projectId, channel, destination) || channel === 'sms' && await smsSuppression(destination, ex); if (suppressed) result.suppression[channel] = suppressed; }
-      if (!destination || previous && destination !== oldDestination || result.suppression[channel]) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
+      if (!destination || previous && destination !== oldDestination || result.suppression[channel] && !result.suppression[channel].expiresAt) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
       if (result.consents[channel]) {
         const newlyEnabled = previous?.consents?.[channel] !== true;
         if (!source || newlyEnabled && !own(body, 'consentSource')) fail(400, 'Record the source of explicit consent before enabling a channel.');
@@ -116,7 +123,7 @@ export function createContacts({ db }: { db: Database }) {
   }
   async function persist(ex: Executor, record: ProviderRecord) {
     await ex.execute(sql`INSERT INTO direct_contacts (id, project_id, data) VALUES (${record.id}, ${record.projectId}, ${JSON.stringify(record)}) ON CONFLICT (id) DO UPDATE SET data = excluded.data WHERE direct_contacts.project_id = excluded.project_id`);
-    for (const channel of channels) { const target = channel === 'email' ? record.email : record.phone, suppression = record.suppression[channel]; if (target && suppression) await remember(ex, record.projectId, channel, hash(target), suppression.reason, suppression.at); }
+    for (const channel of channels) { const target = channel === 'email' ? record.email : record.phone, suppression = record.suppression[channel]; if (target && suppression && !suppression.expiresAt) await remember(ex, record.projectId, channel, hash(target), suppression.reason, suppression.at); }
     return record;
   }
   async function save(projectId: string, body: any, id?: string) {
@@ -187,7 +194,8 @@ export function createContacts({ db }: { db: Database }) {
     return channel === 'email' && /^hard[-_ ]?bounce$/i.test(reason) ? 'hard-bounce' : reason;
   }
   function suppressRecord(ex: Executor, record: ProviderRecord, channel: string, reason: string, at: string) {
-    record.suppression[channel] ||= { reason, at }; record.consents[channel] = false; delete record.consentEvidence[channel]; record.updatedAt = at;
+    if (!record.suppression[channel] || record.suppression[channel].expiresAt) record.suppression[channel] = { reason, at };
+    record.consents[channel] = false; delete record.consentEvidence[channel]; record.updatedAt = at;
     if (channel === 'email' && reason === 'hard-bounce') record.hardBounceAt ||= at;
     return persist(ex, record);
   }
@@ -197,6 +205,21 @@ export function createContacts({ db }: { db: Database }) {
       await lockContacts(tx, projectId);
       const record = await get(projectId, id, tx); if (!record) fail(404, 'Contact not found in this project.');
       return suppressRecord(tx, record, channel, reason, new Date().toISOString());
+    });
+  }
+  // A provider's temporary suppression (Cloudflare's soft bounce, or a hard bounce it lists with an expiry) holds sends
+  // until it expires. Campaign did not withdraw the recipient's permission, so consent and its evidence stay, and the
+  // entry is not copied to the permanent ledger. A permanent suppression already on the contact wins.
+  async function suppressUntil(projectId: string, id: string, channel: string, reason: any, expiresAt: string) {
+    reason = suppressionReason(channel, reason);
+    if (!Number.isFinite(Date.parse(expiresAt))) fail(400, 'Provide a valid suppression expiry.');
+    return db.transaction(async tx => {
+      await lockContacts(tx, projectId);
+      const record = await get(projectId, id, tx); if (!record) fail(404, 'Contact not found in this project.');
+      const current = record.suppression[channel], at = new Date().toISOString();
+      if (current && !current.expiresAt || current?.reason === reason && current.expiresAt === expiresAt) return record;
+      record.suppression[channel] = { reason, at: current?.reason === reason ? current.at : at, expiresAt }; record.updatedAt = at;
+      return persist(tx, record);
     });
   }
   async function suppressDestination(projectId: string, channel: string, target: any, reason: any) {
@@ -284,5 +307,5 @@ export function createContacts({ db }: { db: Database }) {
       return { checked: outcomes.size, contacts, notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' };
     });
   }
-  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string) { return Boolean((await db.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount); } };
+  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string) { return Boolean((await db.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount); } };
 }

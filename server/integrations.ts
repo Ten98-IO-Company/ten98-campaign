@@ -351,9 +351,12 @@ function budgetOf(row: any): number | null {
   return typeof row?.dailyBudget === 'number' && Number.isFinite(row.dailyBudget) && row.dailyBudget >= 0 ? row.dailyBudget : null;
 }
 // The current budget when it has the same type (daily or lifetime) as the new one; a change of type is never a decrease.
+// A budget the provider reports without a type is not comparable, so it fails safe to needing approval. Only the bare
+// `dailyBudget` field is daily by its name.
 function sameBudgetType(row: any, type: string): number | null {
   const current = [row?.campaignBudget, row?.adSetBudget, row?.budget].find(value => reportObject(value) && typeof value.amount === 'number');
-  return (current?.type ?? 'daily') === type ? budgetOf(row) : null;
+  if (current) return current.type === type ? budgetOf(row) : null;
+  return type === 'daily' ? budgetOf(row) : null;
 }
 // What an activated campaign spends: its own budget or, with ad set budgets, the sum of every ad set's budget.
 function campaignSpend(campaign: any): number | null {

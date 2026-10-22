@@ -1178,7 +1178,9 @@ test('editors add a note with its exact body once, append the returned note and 
   const count = h.find(ui.Field).props.count; assert.equal(count.max, 4000); assert.equal(count.measure(count.value), 22, 'The live count follows the typed text.');
   const post = deferredNote(); h.replies.push(() => post.promise);
   const first = h.submit(), second = h.submit(); h.render(); const third = h.submit();
-  assert.equal(h.calls.length, 2, 'Double clicks send one POST.'); assert.deepEqual(h.calls[1], [path + '/item-notes', 'POST', { accountId: 'tg', kind: 'comment', resourceId: 'comment-1', body: '  Follow up\nby Friday ' }], 'The POST carries the typed body and no action key.');
+  assert.equal(h.calls.length, 2, 'Double clicks send one POST.'); const { id: sentId, ...sent } = h.calls[1][2];
+  assert.deepEqual([h.calls[1][0], h.calls[1][1], sent], [path + '/item-notes', 'POST', { accountId: 'tg', kind: 'comment', resourceId: 'comment-1', body: '  Follow up\nby Friday ' }], 'The POST carries the typed body.');
+  assert.match(sentId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, 'A client note id lets a retried add return the saved note.');
   post.resolve({ note: { ...note('n-2', 'me'), body: 'Follow up\nby Friday' } }); await Promise.all([first, second, third]);
   assert.equal(h.context.pending.current, false); assert.equal(h.find(ui.Textarea).props.value, ''); assert.equal(h.notices.at(-1), 'Note added.');
   const html = h.html(); assert.match(html, /\(2\)/); assert.ok(html.indexOf('Note n-1') < html.indexOf('Follow up\nby Friday'), 'The new note is appended.');

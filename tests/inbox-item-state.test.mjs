@@ -260,7 +260,7 @@ test('internal notes on an inbox item: viewers read, editors add, the author or 
   const notes = ({ cookie = f.people.owner.cookie, project = f.path, query = key } = {}) => f.request(`${project}/item-notes?${new URLSearchParams(query)}`, { cookie });
   const add = (body, cookie = f.people.editor.cookie) => f.request(`${f.path}/item-notes`, { method: 'POST', body: { ...key, ...body }, cookie });
   const remove = (noteId, cookie) => f.request(`${f.path}/item-notes/${encodeURIComponent(noteId)}`, { method: 'DELETE', cookie });
-  assert.deepEqual((await notes()).data, { notes: [] });
+  assert.deepEqual((await notes()).data, { notes: [], truncated: false });
   // Viewers cannot add; bodies are bounded; unknown fields are refused.
   assert.equal((await add({ body: 'Viewer note' }, f.people.viewer.cookie)).status, 403);
   for (const body of ['', '   ', 'x'.repeat(4001), 'bell\u0007']) assert.equal((await add({ body })).data.error?.code, 'INVALID_INBOX_NOTE', JSON.stringify(body));
@@ -282,4 +282,25 @@ test('internal notes on an inbox item: viewers read, editors add, the author or 
   assert.equal((await remove(second.id, f.people.owner.cookie)).status, 200, 'An owner can delete any note.');
   assert.deepEqual((await notes()).data.notes, []);
   assert.deepEqual(f.calls, [], 'Notes never reach the provider.');
+});
+
+test('note reads return the newest 500 oldest first and say when older ones exist; a retried add with its id saves one note', pg, async t => {
+  const f = await appFixture(t), key = { accountId: 'fb', kind: 'comment', resourceId: 'comment-many' };
+  const notes = () => f.request(`${f.path}/item-notes?${new URLSearchParams(key)}`, { cookie: f.people.owner.cookie });
+  const add = body => f.request(`${f.path}/item-notes`, { method: 'POST', body: { ...key, ...body }, cookie: f.people.editor.cookie });
+  // 502 notes, one second apart: the window holds the newest 500 (2..501), oldest first.
+  await f.app.sql.run(`INSERT INTO inbox_item_notes (id,project_id,profile_id,account_id,kind,resource_id,author_id,body,created_at)
+    SELECT 'n-' || lpad(i::text, 4, '0'), ?, 'inbox-profile', 'fb', 'comment', 'comment-many', ?, 'Note ' || i, to_char(timestamp '2026-10-01' + i * interval '1 second', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM generate_series(0, 501) i`, f.projectId, f.people.editor.id);
+  let read = (await notes()).data;
+  assert.equal(read.notes.length, 500); assert.equal(read.truncated, true); assert.equal(read.notes[0].body, 'Note 2'); assert.equal(read.notes.at(-1).body, 'Note 501');
+  await f.app.sql.run("DELETE FROM inbox_item_notes WHERE resource_id='comment-many'");
+  assert.equal((await notes()).data.truncated, false);
+  // Retrying with the same id after a lost response returns the saved note and adds nothing.
+  const id = randomUUID(), first = await add({ id, body: 'Follow up tomorrow.' }), again = await add({ id, body: 'Follow up tomorrow.' });
+  assert.equal(first.status, 200); assert.equal(again.status, 200); assert.equal(again.data.note.id, id); assert.equal(again.data.note.createdAt, first.data.note.createdAt);
+  assert.equal((await notes()).data.notes.length, 1);
+  // The id cannot be reused for a different note, and must be a UUID.
+  assert.equal((await add({ id, body: 'Something else' })).data.error.code, 'INBOX_NOTE_CONFLICT');
+  assert.equal((await add({ id: 'not-a-uuid', body: 'x' })).data.error.code, 'INVALID_INBOX_NOTE');
+  assert.equal((await notes()).data.notes.length, 1);
 });

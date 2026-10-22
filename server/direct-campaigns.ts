@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from './database.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
-import { createContacts, lockContacts } from './contacts.ts';
+import { activeSuppression, createContacts, lockContacts } from './contacts.ts';
 import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions } from './direct-providers.ts';
 
 const channels = ['email', 'sms', 'whatsapp'];
@@ -50,7 +50,7 @@ function validate(raw: any) {
 function exclusion(contact: any, channel: string) {
   if (!contact) return 'Contact no longer exists';
   if (!contact.consents?.[channel]) return 'No recorded consent';
-  if (contact.suppression?.[channel]) return `Suppressed: ${contact.suppression[channel].reason}`;
+  const suppression = activeSuppression(contact, channel); if (suppression) return `Suppressed: ${suppression.reason}`;
   if (!(channel === 'email' ? contact.email : contact.phone)) return channel === 'email' ? 'No email address' : 'No E.164 phone number';
   if (channel === 'email' && contact.hygiene?.disposable) return 'Disposable email address';
   if (channel === 'email' && ['no_mx', 'null_mx', 'nxdomain'].includes(contact.hygiene?.dnsStatus)) return 'Email domain cannot receive mail';
@@ -171,10 +171,28 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
   }
   // Cloudflare's suppression list (bounces, complaints) applied to this project's contacts. Refresh runs it, and so does the
   // worker before an email campaign's first send and every 15 minutes while it sends, so a new complaint stops later sends.
+  // A row with an expiry holds the contact only until then and keeps its consent. Cloudflare does not define `policy`, so a
+  // policy row may be a sender-side block: it raises a project deliverability alert instead of suppressing the recipient.
   async function applyEmailSuppressions(projectId: string, assertMapping: () => unknown) {
     const result = await syncEmailSuppressions({ env: { ...env }, assertMapping }), domain = env.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase();
     const suppressed = (result.suppressions || []).filter((row: any) => (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()) && (row.scope?.type !== 'sending_domain' || row.scope.value.toLowerCase() === domain));
-    for (const contact of await contacts.list(projectId)) { const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (match) await contacts.suppress(projectId, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason); }
+    const policy: { contactId: string; expiresAt: string | null }[] = [];
+    for (const contact of await contacts.list(projectId)) {
+      const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (!match) continue;
+      if (match.reason === 'policy') policy.push({ contactId: contact.id, expiresAt: match.expiresAt });
+      else if (match.expiresAt) await contacts.suppressUntil(projectId, contact.id, 'email', match.reason, match.expiresAt);
+      else await contacts.suppress(projectId, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason);
+    }
+    await db.transaction(async tx => {
+      const seenAt = nowISO();
+      for (const row of policy) await tx.execute(sql`INSERT INTO direct_deliverability_alerts VALUES (${projectId}, 'cloudflare', 'policy', ${row.contactId}, ${row.expiresAt}, ${seenAt}, ${seenAt}) ON CONFLICT (project_id, provider, kind, contact_id) DO UPDATE SET expires_at = excluded.expires_at, last_seen_at = excluded.last_seen_at`);
+      await tx.execute(sql`DELETE FROM direct_deliverability_alerts WHERE project_id = ${projectId} AND provider = 'cloudflare' AND last_seen_at <> ${seenAt}`);
+    });
+  }
+  // Open alerts, grouped by provider report, for the project's direct-messaging status.
+  async function deliverabilityAlerts(projectId: string) {
+    const rows = await resultRows(db.execute(sql`SELECT provider, kind, count(*)::int AS contacts, min(first_seen_at) AS "firstSeenAt", max(last_seen_at) AS "lastSeenAt", max(expires_at) AS "expiresAt", bool_or(expires_at IS NULL) AS permanent FROM direct_deliverability_alerts WHERE project_id = ${projectId} AND (expires_at IS NULL OR expires_at > ${nowISO()}) GROUP BY provider, kind ORDER BY provider, kind`));
+    return rows.map((row: any) => ({ provider: row.provider, kind: row.kind, channel: 'email', contacts: row.contacts, firstSeenAt: row.firstSeenAt, lastSeenAt: row.lastSeenAt, expiresAt: row.permanent ? null : row.expiresAt }));
   }
   async function sendDue(now: number, limit: number) {
     const rows = (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns WHERE data->>'status' IN ('scheduled', 'sending') ORDER BY seq`))).map(row => row.data).filter((campaign: any) => ['scheduled', 'sending'].includes(campaign.status) && Date.parse(campaign.scheduledAt) <= now);
@@ -241,7 +259,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     const route = url.pathname.match(/^\/api\/projects\/[^/]+\/direct\/(status|templates|contacts|campaigns)(?:\/([^/]+))?(?:\/([^/]+))?$/);
     if (!route) return false;
     const [, kind, id, action] = route, method = req.method;
-    if (kind === 'status' && method === 'GET') { let accounts: any[] = [], accountError: any; if (env.ZERNIO_API_KEY && project.zernioProfileId) { try { accounts = await scopedAccounts(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping(project.zernioProfileId)), project.zernioProfileId); } catch (error: any) { accountError = error instanceof IntegrationError ? error.message : 'WhatsApp accounts could not be loaded.'; } } send(200, { providers: Object.fromEntries(channels.map(channel => [channel, ready(channel) && (channel !== 'whatsapp' || Boolean(project.zernioProfileId && !accountError))])), accounts: accounts.filter(account => account.platform === 'whatsapp').map(account => ({ id: account._id || account.id, name: account.displayName || account.username || 'WhatsApp Business' })), accountError, emailPolicy: 'transactional_only', callbackUrl: `${appUrl}/api/webhooks/twilio/inbound`, publicCallbacks: appUrl.startsWith('https://') }); return true; }
+    if (kind === 'status' && method === 'GET') { let accounts: any[] = [], accountError: any; if (env.ZERNIO_API_KEY && project.zernioProfileId) { try { accounts = await scopedAccounts(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping(project.zernioProfileId)), project.zernioProfileId); } catch (error: any) { accountError = error instanceof IntegrationError ? error.message : 'WhatsApp accounts could not be loaded.'; } } send(200, { providers: Object.fromEntries(channels.map(channel => [channel, ready(channel) && (channel !== 'whatsapp' || Boolean(project.zernioProfileId && !accountError))])), accounts: accounts.filter(account => account.platform === 'whatsapp').map(account => ({ id: account._id || account.id, name: account.displayName || account.username || 'WhatsApp Business' })), accountError, emailPolicy: 'transactional_only', deliverabilityAlerts: await deliverabilityAlerts(project.id), callbackUrl: `${appUrl}/api/webhooks/twilio/inbound`, publicCallbacks: appUrl.startsWith('https://') }); return true; }
     if (kind === 'templates' && method === 'GET') { send(200, await listWhatsAppTemplates({ env: { ...env }, project, accountId: url.searchParams.get('accountId'), assertMapping: () => context.assertProjectMapping(project.zernioProfileId) })); return true; }
     if (kind === 'contacts') {
       if (!id && method === 'GET') send(200, { contacts: await contacts.list(project.id) });

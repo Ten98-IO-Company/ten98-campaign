@@ -193,6 +193,10 @@ test('a budget of another type is never judged a decrease, so changing a lifetim
   assert.equal(sent(), 0, 'No write is sent unapproved.'); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_REQUIRED', JSON.stringify(result.data));
   assert.equal((await f.integration('ads/campaign', { campaignId: 'openai-campaign', platform: 'openai', budget: { amount: 400, type: 'lifetime' } })).status, 200, 'A lifetime decrease still needs none.');
   assert.equal(sent(), 1);
+  // A budget reported without a type is not comparable, so a smaller daily figure still needs approval.
+  f.state.openaiAmount = 500; f.state.openaiType = undefined;
+  const untyped = await f.integration('ads/campaign', { campaignId: 'openai-campaign', platform: 'openai', budget: { amount: 40, type: 'daily' } });
+  assert.equal(untyped.data.error?.code, 'AD_SPEND_APPROVAL_REQUIRED', JSON.stringify(untyped.data)); assert.equal(sent(), 1);
 });
 
 test('a setting change voids an approval whose write is still in flight, so a later failure does not release it', { skip: postgresSkip }, async t => {
