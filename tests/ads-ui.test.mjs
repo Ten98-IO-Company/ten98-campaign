@@ -8,6 +8,7 @@ import { AppField } from '@ten98/ui/app';
 import * as designSystem from '@ten98/ui';
 import { transformWithOxc } from 'vite';
 import * as adsView from '../src/ads-view.ts';
+import { adSpendBlock } from '../src/approval-status.ts';
 
 const composer = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8'), details = await readFile(new URL('../src/AdDetails.tsx', import.meta.url), 'utf8'), analytics = await readFile(new URL('../src/SocialAnalytics.tsx', import.meta.url), 'utf8');
 const javascript = value => stripTypeScriptTypes(value);
@@ -158,7 +159,7 @@ test('closed or changed ad scopes never notify the parent or swallow an aborted 
     const isCurrent = () => mounted && identity === 'campaign-a';
     const scopedRequest = compile(requestSource, { isCurrent, requester: { current: path => { requests.push(path); return new Promise((_, fail) => { reject = fail; }); } } });
     const readAd = compile(readSource, { scopedRequest, isCurrent, setNeedsRefresh() {}, setSelected: value => selections.push(value), setReadVersion() {}, setError: value => errors.push(value) });
-    const act = compile(actionSource, { isCurrent, setBusy() {}, setError: value => errors.push(value), setNotice: value => notices.push(value), onChanged: () => changes.push(true) });
+    const act = compile(actionSource, { isCurrent, setBusy() {}, setSpendBlock() {}, adSpendBlock, setError: value => errors.push(value), setNotice: value => notices.push(value), onChanged: () => changes.push(true) });
     const work = act(() => readAd('ad-a', true), 'Changes saved');
     if (stale === 'unmounted') mounted = false;
     if (stale === 'changed-identity') identity = 'campaign-b';
@@ -180,7 +181,7 @@ test('ad refresh and selection wait for explicit discard, while uncertain saves 
     isCurrent: () => true, draftDirty: true, editorForm: { current: form }, actionTrigger: { current: null }, pendingContinuation: { current: null },
     document: { activeElement: { id: 'refresh-button' } }, HTMLInputElement: Input, HTMLTextAreaElement: Textarea,
     setDraftDirty: value => { dirty = value; }, setPendingAction: value => { pending = value; },
-    setBusy() {}, setError: value => errors.push(value), setNotice() {},
+    setBusy() {}, setSpendBlock() {}, adSpendBlock, setError: value => errors.push(value), setNotice() {},
   };
   context.confirmForm = compile(source('function confirmForm(', '  function discardDraft('), context);
   context.hasDraft = compile(source('function hasDraft(', '  function trackDraft('), context);
@@ -235,7 +236,7 @@ test('saving a campaign or ad set reviews sibling drafts before its full refresh
       isCurrent: () => true, draftDirty: false, editorForm: { current: null }, detailsSection: { current: { querySelectorAll: () => [submitted, sibling] } },
       actionTrigger: { current: null }, pendingContinuation: { current: null }, document: { activeElement: { focus() {} } }, HTMLInputElement: Input,
       HTMLTextAreaElement: class {}, HTMLSelectElement: class {}, setPendingAction: value => { pending = value; },
-      setDraftDirty() {}, setBusy() {}, setError() {}, setNotice() {}, campaignId: 'campaign-a', platform: 'facebook', data: { campaign: { name: 'Original name' } },
+      setDraftDirty() {}, setBusy() {}, setSpendBlock() {}, adSpendBlock, setError() {}, setNotice() {}, campaignId: 'campaign-a', platform: 'facebook', data: { campaign: { name: 'Original name' } },
       FormData: FormValues, scopedRequest: async (path, payload) => { requests.push({ path, payload }); }, setRetry: update => { retry = update(retry); },
     };
     context.hasDraft = compile(source('function hasDraft(', '  function trackDraft('), context);
@@ -286,7 +287,7 @@ async function adSetUi(respond = async (path, body) => body ? statusReceipt(body
   const effect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), integrateCode = javascript(main.match(/async function integrate\([\s\S]*?\n  \}/)[0]);
   const request = new Function('state', 'activeProject', 'pendingKeys', 'crypto', 'api', 'endpoint', `return (${integrateCode});`)({ projectId: 'project-a' }, { current: 'project-a' }, { current: keys }, { randomUUID: () => 'key-' + calls.length }, async (path, method, body, key) => { const route = path.replace('integrations/', ''); calls.push({ path: route, body, key, method }); return respond(route, body); }, path => path);
-  const Component = new Function('React', 'AppField', 'useState', 'useRef', 'useEffect', 'window', 'document', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'FormData', 'detailsView', `const { ${detailsImports}, adCreativeView, adMetricCells, readHideAmounts } = detailsView;` + detailsCode + ';return AdDetails;')(React, AppField, state, ref, effect, { confirm() { assert.fail('Ad-set tests must use the explicit in-page confirmation buttons.'); } }, { activeElement: { focus() {} } }, Input, class {}, class {}, class { constructor(form) { return Object.entries(form.values || {}); } }, { ...designSystem, ...adsView });
+  const Component = new Function('React', 'AppField', 'useState', 'useRef', 'useEffect', 'window', 'document', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'FormData', 'detailsView', `const { ${detailsImports}, adCreativeView, adMetricCells, readHideAmounts, adSpendBlock, AdSpendNotice } = detailsView;` + detailsCode + ';return AdDetails;')(React, AppField, state, ref, effect, { confirm() { assert.fail('Ad-set tests must use the explicit in-page confirmation buttons.'); } }, { activeElement: { focus() {} } }, Input, class {}, class {}, class { constructor(form) { return Object.entries(form.values || {}); } }, { ...designSystem, ...adsView, adSpendBlock, AdSpendNotice: () => null });
   function paint() { if (unmounted) return; for (let pass = 0; dirty; pass++) { assert.ok(pass < 25, 'Rendering settles.'); dirty = false; cursor = 0; tree = Component({ campaign: { platformCampaignId: 'campaign/a', platform: 'facebook' }, canWrite: true, request, onChanged() { changed++; }, ...props }); const formNodes = detailNodes(tree).filter(node => node.type === designSystem.Form); for (let i = 0; i < formNodes.length; i++) { forms[i] ||= { values: {}, elements: [new Input()], reset() { this.elements.forEach(input => { input.value = input.defaultValue; }); }, dispatchEvent(event) { events.push(event); } }; if (formNodes[i].props.ref) formNodes[i].props.ref.current = forms[i]; } const section = detailNodes(tree).find(node => node.props?.as === 'section'); section.props.ref.current = { querySelectorAll: () => forms.slice(0, formNodes.length) }; while (queued.length) queued.shift()(); } }
   const tick = async () => { for (let turn = 0; turn < 2; turn++) { await new Promise(resolve => setImmediate(resolve)); paint(); } };
   const button = (label, index = 0) => detailNodes(tree).flatMap(node => node.type === designSystem.Button && detailText(node) === label ? [node] : node.type === designSystem.ReviewConfirm ? reviewButtons(node).filter(([text]) => text === label).map(([, disabled, onClick]) => ({ props: { disabled, onClick } })) : [])[index];

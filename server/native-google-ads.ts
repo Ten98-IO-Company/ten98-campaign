@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
 import type { Executor } from './database.ts';
 import { fail, IntegrationError, providerRequest, operation, reportObject as object, type OperationContext, type ProviderRecord } from './provider-core.ts';
+import { assertAdSpendApproval } from './approvals.ts';
 
 type NativeContext = OperationContext & { project: ProviderRecord; user: ProviderRecord; role: string; store: ProviderRecord; send: (status: number, body: unknown) => void; body?: any };
 type CurrentCheck = (() => void | Promise<void>) | undefined;
@@ -128,7 +129,7 @@ export async function handleNativeGoogleAds(context: NativeContext) {
       if (body.status !== undefined && !['PAUSED', 'ENABLED'].includes(body.status)) fail(400, 'INVALID_GOOGLE_STATUS', 'Choose a paused or enabled campaign switch.');
       if (body.enableCreatedChildren !== undefined && (body.enableCreatedChildren !== true || body.status !== 'ENABLED')) fail(400, 'INVALID_GOOGLE_STATUS', 'Created ad groups and ads can be enabled only with their campaign.');
       const resource = `customers/${originalCustomer}/campaigns/${body.campaignId}`;
-      const result = await operation(context, async () => {
+      const result = await operation(context, async key => {
         const account = await readCustomer(env, token, originalCustomer, assertCurrent);
         const stateQuery = `SELECT customer.id, campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign_budget.resource_name, campaign_budget.period, campaign_budget.amount_micros, campaign_budget.explicitly_shared FROM campaign WHERE campaign.resource_name = '${resource}'`;
         const rows = searchRows(await call('googleAds:search', { query: stateQuery })), selected = rows[0];
@@ -157,6 +158,9 @@ export async function handleNativeGoogleAds(context: NativeContext) {
           if (users.nextPageToken || searchRows(users).length !== 1 || String(users.results[0].campaign?.id) !== body.campaignId) fail(409, 'GOOGLE_SHARED_BUDGET', 'This budget serves more than one campaign or its sharing state is unknown.');
           operations.push({ campaignBudgetOperation: { update: { resourceName: budget, amountMicros: micros(body.dailyBudget, account.currencyCode, 'daily budget') }, updateMask: 'amount_micros' } }); expected.push(['campaignBudgetResult', budget]);
         }
+        // Enabling spends the current daily budget; a budget change spends the new one. Campaign-total budgets have no daily amount to approve.
+        const currentDaily = selected.campaignBudget?.period === 'DAILY' && /^\d{1,18}$/.test(String(selected.campaignBudget.amountMicros)) ? Number(selected.campaignBudget.amountMicros) / 1000000 : null;
+        if (body.status === 'ENABLED' || body.dailyBudget !== undefined) await assertAdSpendApproval(context, { subjectId: body.campaignId, platform: 'google', action: body.status ? 'google-native/campaign-status' : 'google-native/campaign-budget', amount: body.status ? currentDaily : body.dailyBudget, currency: account.currencyCode, currentAmount: currentDaily, activates: body.status === 'ENABLED' }, key);
         const response = await call('googleAds:mutate', { mutateOperations: operations, partialFailure: false, responseContentType: 'RESOURCE_NAME_ONLY' }, true);
         if (response.partialFailureError || !Array.isArray(response.mutateOperationResponses) || response.mutateOperationResponses.length !== expected.length || expected.some(([kind, name], index) => response.mutateOperationResponses[index]?.[kind]?.resourceName !== name)) throw new IntegrationError(502, 'GOOGLE_UPDATE_UNCONFIRMED', 'Google did not confirm every campaign update.', true);
         let after: ProviderRecord[];

@@ -1,14 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Card, Checkbox, ConfirmDialog, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
+import { adSpendBlock, type AdSpendBlock } from './approval-status';
+import AdSpendNotice from './AdSpendNotice';
 
 type Row = Record<string, any>;
-type Props = { projectId: string; role: string; isOperator: boolean; request: (path: string, method?: string, body?: any, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void };
+type Props = { projectId: string; role: string; isOperator: boolean; request: (path: string, method?: string, body?: any, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void; onOpenApprovals?: () => void };
 const lines = (value: FormDataEntryValue | null) => String(value || '').split('\n').map(row => row.trim()).filter(Boolean);
 const today = () => new Date().toISOString().slice(0, 10);
 
-export default function MicrosoftAds({ projectId, role, isOperator, request, onChanged, mode = 'workflow', onOpenIntegrations }: Props) {
+export default function MicrosoftAds({ projectId, role, isOperator, request, onChanged, mode = 'workflow', onOpenIntegrations, onOpenApprovals }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/microsoft-ads`, active = useRef(true), readVersion = useRef(0), pending = useRef(false), keys = useRef(new Map<string, string>()), requester = useRef(request); requester.current = request;
-  const [status, setStatus] = useState<Row | null>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [report, setReport] = useState<Row | null>(null), [confirming, setConfirming] = useState<{ campaign: Row; body: Row }>();
+  const [status, setStatus] = useState<Row | null>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [report, setReport] = useState<Row | null>(null), [confirming, setConfirming] = useState<{ campaign: Row; body: Row }>(), [spendBlock, setSpendBlock] = useState<AdSpendBlock | null>(null);
   const canWrite = ['owner', 'admin', 'editor'].includes(role), canMap = isOperator && ['owner', 'admin'].includes(role);
   async function load() {
     if (!active.current) return;
@@ -21,8 +23,8 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
   }
   useEffect(() => { active.current = true; const loading = load(), read = readVersion.current; loading.catch(failure => { if (active.current && read === readVersion.current) setError(failure.message); }); return () => { active.current = false; }; }, [projectId, mode]);
   async function action(run: () => Promise<void>) {
-    if (pending.current || !active.current) return; readVersion.current++; pending.current = true; setBusy(true); setError(''); setNotice('');
-    try { await run(); } catch (failure) { if (active.current) setError((failure as Error).message || 'Microsoft Advertising could not complete this action.'); }
+    if (pending.current || !active.current) return; readVersion.current++; pending.current = true; setBusy(true); setError(''); setNotice(''); setSpendBlock(null);
+    try { await run(); } catch (failure) { const block = adSpendBlock(failure); if (active.current && block) setSpendBlock(block); else if (active.current) setError((failure as Error).message || 'Microsoft Advertising could not complete this action.'); }
     finally { if (active.current) { pending.current = false; setBusy(false); } }
   }
   async function write(target: string, body: Row) {
@@ -61,7 +63,7 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
   async function refreshReport() { if (!report) return; await action(async () => { const result = await requester.current(path + '/reports/' + encodeURIComponent(report.id)); if (active.current) setReport(result.report); }); }
   return <Frame connection={mode === 'connection'} title="Microsoft Advertising" description={mode === 'connection' ? 'Choose the advertising account used by this project.' : 'Search campaigns, budgets and performance exports.'} actions={<Button type="button" variant="secondary" disabled={busy} onClick={() => action(load)}>Refresh Microsoft account</Button>}>
     {mode === 'workflow' && <Text tone="muted">Campaigns start paused, in English, with a CPC cap. Copilot placement depends on Microsoft eligibility. Advanced targeting is available in <Link href="https://ads.microsoft.com/" target="_blank" rel="noreferrer">Microsoft Advertising</Link>.</Text>}
-    {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}{busy && <StatusLine busy>Checking Microsoft Advertising…</StatusLine>}
+    {error && <Alert tone="danger">{error}</Alert>}{spendBlock && <AdSpendNotice block={spendBlock} onOpenApprovals={onOpenApprovals}/>}{notice && <StatusLine>{notice}</StatusLine>}{busy && <StatusLine busy>Checking Microsoft Advertising…</StatusLine>}
     {status && <Text tone="muted">{status.configured ? 'Credentials configured.' : 'Microsoft Advertising credentials are not configured.'} {status.mapping ? `${status.mapping.name} · ${status.mapping.accountId} · ${status.mapping.currency}` : 'No advertising account is mapped to this project.'}</Text>}
     {mode === 'workflow' && onOpenIntegrations && <Inline><Button variant="secondary" type="button" disabled={busy} onClick={onOpenIntegrations}>Open integrations</Button></Inline>}
     {mode === 'connection' && canMap && status && !status.mapping && <Disclosure summary="Approve Microsoft account mapping"><Stack as="form" onSubmit={mapAccount}><Stack as="fieldset" gap={3} disabled={busy || !status.configured}>
