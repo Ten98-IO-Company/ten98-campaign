@@ -146,6 +146,43 @@ for (const [name, route] of Object.entries(routes)) {
   });
 }
 
+test('an unconsumed approval is usable for 7 days from its decision, then needs re-approval', { skip: postgresSkip }, async t => {
+  const f = await spendFixture(t), route = routes['Microsoft activate'], send = route.send(f), sent = () => f.writes.filter(row => row.name === route.write).length;
+  await f.policy(true);
+  const age = (id, ms) => f.pool.query('UPDATE post_approval_reviews SET reviewed_at=$1 WHERE id=$2', [new Date(Date.now() - ms).toISOString(), id]), day = 86400000;
+  // Just inside the window: usable.
+  let approved = await f.approve(route.change); await age(approved.id, 7 * day - 60000);
+  let result = await send(); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(sent(), 1);
+  f.state.msStatus = 'Paused';
+  // Just past it: refused as expired, nothing sent, and a fresh review of this change is opened.
+  approved = await f.approve(route.change); await age(approved.id, 7 * day + 60000);
+  result = await send(); assert.equal(result.status, 403); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_EXPIRED'); assert.equal(sent(), 1);
+  assert.ok((await f.reviews()).some(row => row.status === 'pending' && row.snapshot.amount === route.change.amount), 'A fresh review was requested.');
+  // An approval released by a failed write keeps its original clock.
+  await f.pool.query("DELETE FROM post_approval_reviews WHERE kind='ad_spend'");
+  approved = await f.approve(route.change);
+  await f.pool.query("INSERT INTO integration_operations (id,project_id,request_key,request_hash,status,created_at) VALUES ('released-op',$1,'released-key','h','failed',$2)", [f.project.id, new Date().toISOString()]);
+  await f.pool.query("UPDATE post_approval_reviews SET consumed_by='released-key',consumed_at=$1 WHERE id=$2", [new Date().toISOString(), approved.id]);
+  await age(approved.id, 7 * day + 60000);
+  result = await send(); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_EXPIRED'); assert.equal(sent(), 1);
+});
+
+test('changing the ad spend setting either way voids unconsumed approvals and pending requests', { skip: postgresSkip }, async t => {
+  const f = await spendFixture(t), route = routes['Microsoft activate'], send = route.send(f), sent = () => f.writes.filter(row => row.name === route.write).length;
+  const voided = async ids => { const rows = (await f.reviews()).filter(row => ids.includes(row.id)); return rows.every(row => row.status === 'rejected' && /setting changed/.test(row.note)); };
+  // On → off voids; switching back on does not revive them.
+  await f.policy(true);
+  const approved = await f.approve(route.change), pending = await f.request({ ...route.change, amount: route.change.amount + 100 });
+  await f.policy(true); assert.equal((await f.reviews()).find(row => row.id === approved.id).status, 'approved', 'Re-sending the same setting voids nothing.');
+  await f.policy(false); assert.ok(await voided([approved.id, pending.id]));
+  await f.policy(true); let result = await send(); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_REQUIRED'); assert.equal(sent(), 0);
+  // Off → on voids an approval given while the setting was off.
+  await f.pool.query("DELETE FROM post_approval_reviews WHERE kind='ad_spend'"); await f.policy(false);
+  const early = await f.approve(route.change);
+  await f.policy(true); assert.ok(await voided([early.id]));
+  result = await send(); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_REQUIRED'); assert.equal(sent(), 0);
+});
+
 test('ads/create cannot activate spend: an active status is refused with or without an approval and nothing is sent', { skip: postgresSkip }, async t => {
   const f = await spendFixture(t);
   const body = { platform: 'facebook', accountId: 'metaads', adAccountId: 'act_123', name: 'Launch', goal: 'traffic', budgetAmount: 20, headline: 'Launch', body: 'Discover it.', imageUrl: 'https://cdn.example.com/launch.jpg', linkUrl: 'https://example.com/launch', callToAction: 'LEARN_MORE', countries: ['AE'], currency: 'AED', status: 'ACTIVE' };
