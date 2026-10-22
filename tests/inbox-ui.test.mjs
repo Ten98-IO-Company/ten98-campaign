@@ -124,7 +124,7 @@ test('Reddit inline edit exposes before and after review only for owned comments
   const helper = section('  function commentMessage(', '  const noun = '), { code } = await transformWithOxc('function Comments() {' + helper + ' return <ConversationThread label="Post comments" messages={threadRows.map(row => commentMessage(row, selected))}/>; }', 'Comments.tsx', { jsx: { runtime: 'classic' } });
   const row = { id: 'comment', message: 'Original', from: { isOwner: true }, editVersion: 'review', depth: 0 }, commentEdit = { ...row, accountId: 'rd', postId: 'post', content: 'Corrected', confirmed: '' };
   const render = changes => {
-    const context = { React, ...ui, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'rd', account: { platform: 'reddit', name: 'Reddit account' }, capabilities: { commentEdit: true }, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [row], detail: {}, commentEdit, when: () => '', link: () => '', ...changes };
+    const context = { React, ...ui, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'rd', account: { platform: 'reddit', name: 'Reddit account' }, capabilities: { commentEdit: true }, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [row], detail: {}, commentEdit, when: () => '', link: () => '', states: {}, triageLabel: () => '', waitingFor: () => '', userId: '', triageError: '', assignees: [], TriageControls: () => null, changeTriage() {}, ...changes };
     return renderToStaticMarkup(new Function(...Object.keys(context), code + '; return Comments;')(...Object.values(context))());
   };
   const html = render(); assert.match(html, /Edit comment/); assert.match(html, /<figcaption[^>]*>Before</); assert.match(html, /<label[^>]*>After</); assert.match(html, /Original/); assert.match(html, /Corrected/); assert.match(html, /I reviewed this account and the before and after text/); assert.match(html, /disabled="">Save comment edit/); assert.match(html, /after this review can be overwritten/);
@@ -223,10 +223,10 @@ test('mention cards expand locally for readers and expose only returned safe Lin
   assert.equal(safeLink(accepted, true), accepted); assert.equal(safeLink('https://linkedin.com/posts/example', true), 'https://linkedin.com/posts/example');
   for (const unsafe of [null, '', '/posts/123', 'javascript:alert(1)', 'http://www.linkedin.com/post', 'https://user:secret@www.linkedin.com/post', 'https://linkedin.com.evil.test/post', 'https://evil.test/linkedin.com/post']) assert.equal(safeLink(unsafe, true), undefined, String(unsafe));
   assert.equal(safeLink('https://example.test/attachment'), 'https://example.test/attachment', 'Other inbox links retain their existing HTTPS behavior.');
-  const start = source.indexOf("<Stack as=\"section\" gap={3} aria-label={tab === 'mentions'"), markup = source.slice(start, source.indexOf('\n      {loaded && !visibleRows.length && listEmpty}', start)); assert.ok(start > 0);
+  const start = source.indexOf("<Stack as=\"section\" gap={3} aria-label={tab === 'mentions'"), markup = source.slice(start, source.indexOf('\n      {loaded && !visibleRows.length && ', start)); assert.ok(start > 0);
   const code = await transformWithOxc('function MentionCards() { return (' + markup + '); }', 'MentionCards.tsx', { jsx: { runtime: 'classic' } });
   const rows = [{ id: 'mention-document', content: '<Campaign update>', authorName: null, authorUsername: null, publishedAt: null, permalink: accepted }, { id: 'another-document', content: 'More content', authorName: 'Sam', permalink: null }, { id: 'unsafe-document', permalink: 'https://evil.test/post' }];
-  const component = new Function('React', ...uiNames, 'visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', code.code + '; return MentionCards;')(React, ...uiValues, rows, 'mentions', { name: 'Connected account' }, () => 'Time unavailable', safeLink, true);
+  const component = new Function('React', ...uiNames, 'visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', 'states', 'triageLabel', 'userId', 'TriageControls', 'accountId', 'triageError', 'busy', 'assignees', 'changeTriage', code.code + '; return MentionCards;')(React, ...uiValues, rows, 'mentions', { name: 'Connected account' }, () => 'Time unavailable', safeLink, true, {}, () => '', '', () => null, 'li', '', '', [], () => {});
   const html = renderToStaticMarkup(React.createElement(component));
   assert.equal((html.match(/<details/g) || []).length, 3); assert.match(html, /<summary[^>]*><span[^>]*>Read mention/); assert.match(html, /LinkedIn author/); assert.match(html, /Time unavailable/); assert.match(html, /&lt;Campaign update&gt;/); assert.match(html, /Connected account/); assert.match(html, /Open post on LinkedIn/); assert.match(html, /target="_blank" rel="noopener noreferrer"/); assert.equal((html.match(/href=/g) || []).length, 1); assert.equal((html.match(/Post link unavailable/g) || []).length, 2); assert.doesNotMatch(html, /<button|<textarea|<form|evil\.test/);
   const mentions = markup.slice(markup.indexOf("tab === 'mentions' ?"), markup.indexOf(' : <Card as="article"')); assert.ok(mentions.length > 0);
@@ -883,22 +883,25 @@ test('lost Reddit edit response terminal unsent receipt requires a fresh comment
 const { validPostInstant } = await import('../shared/social-posts.ts');
 function triageHelpers() {
   const start = source.indexOf('// Team triage overlay'), end = source.indexOf('function TriageControls(', start); assert.ok(start > 0 && end > start);
-  return new Function('validPostInstant', 'when', stripTypeScriptTypes(source.slice(start, end)) + '; return { triageFilters, triageNames, triageKey, triageVisible, waitingFor, triageLabel, snoozeUntil, validSnooze, mergeTriage, loadItemStates, snoozePresets };')(validPostInstant, value => 'at ' + value);
+  return new Function('validPostInstant', 'when', stripTypeScriptTypes(source.slice(start, end)) + '; return { triageFilters, triageNames, triageKinds, triageKey, triageComments, triageVisible, waitingFor, triageLabel, snoozeUntil, validSnooze, mergeTriage, loadItemStates, snoozePresets };')(validPostInstant, value => 'at ' + value);
 }
 async function triageControls(useState = initial => [initial, () => {}]) {
   const start = source.indexOf('function TriageControls('), end = source.indexOf('\nexport default function UnifiedInbox(', start); assert.ok(start > 0 && end > start);
   const { code } = await transformWithOxc(source.slice(start, end), 'TriageControls.tsx', { jsx: { runtime: 'classic' } }), helpers = triageHelpers();
   return new Function('React', 'useState', 'when', ...Object.keys(helpers), ...uiNames, code + '; return TriageControls;')(React, useState, value => 'at ' + value, ...Object.values(helpers), ...uiValues);
 }
+// The component's own scoping line: a tab sees only the states of its account and kind.
+const triageScope = context => compile('function scope() {' + source.match(/^  const triageKind = triageKinds\[tab\].*;$/m)[0] + ' return { triageKind, states, triageError }; }', context)();
 function triageContext(overrides = {}) {
   const helpers = triageHelpers(), calls = [], context = { ...helpers, path, tab: 'messages', accountId: 'tg', readOnly: false, version: { current: 1 }, pending: { current: false }, revision: { current: 0 }, errors: [], notices: [], setBusy() {}, when: value => 'at ' + value, ...overrides };
-  context.triage = { accountId: 'tg', states: { 'thread-1': { accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', status: 'open', updatedAt: '2026-10-22T08:00:00.000Z' } }, error: '' };
+  context.triage = overrides.triage || { accountId: 'tg', kind: 'conversation', states: { 'thread-1': { accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', status: 'open', updatedAt: '2026-10-22T08:00:00.000Z' } }, error: '' };
+  const first = Object.keys(context.triage.states)[0];
   context.setTriage = value => { context.triage = typeof value === 'function' ? value(context.triage) : value; };
   context.setError = value => context.errors.push(value); context.setNotice = value => context.notices.push(value);
-  context.requester = { current: async (...args) => { calls.push(args); return overrides.respond ? overrides.respond(...args) : { state: { ...context.triage.states['thread-1'], ...args[2], updatedAt: '2026-10-22T09:00:00.000Z' } }; } };
+  context.requester = { current: async (...args) => { calls.push(args); return overrides.respond ? overrides.respond(...args) : { state: { ...context.triage.states[first], ...args[2], updatedAt: '2026-10-22T09:00:00.000Z' } }; } };
   context.action = compile(section('async function action(', '  async function write('), context);
   // Each call closes over the states of a fresh render, as React would.
-  const changeTriage = (...args) => compile(section('async function changeTriage(', '  async function searchHistory('), { ...context, states: context.triage.accountId === context.accountId ? context.triage.states : {} })(...args);
+  const changeTriage = (...args) => compile(section('async function changeTriage(', '  async function searchHistory('), { ...context, ...triageScope(context) })(...args);
   return { context, calls, changeTriage };
 }
 
@@ -929,7 +932,7 @@ test('the triage filter defaults to open and pending, keeps unloaded items and l
   const saved = { 'a': { status: 'resolved', updatedAt: '2026-10-22T09:00:00.000Z' }, 'b': { status: 'open', updatedAt: '2026-10-22T09:00:00.000Z' } };
   const merged = mergeTriage(saved, { a: { status: 'open', updatedAt: '2026-10-22T08:00:00.000Z' }, b: { status: 'open', updatedAt: '2026-10-22T09:00:00.000Z', waitingSince: '2026-10-22T10:00:00.000Z' }, c: { status: 'open', updatedAt: null } });
   assert.equal(merged.a.status, 'resolved', 'A read that started before a change cannot undo it.'); assert.equal(merged.b.waitingSince, '2026-10-22T10:00:00.000Z'); assert.equal(merged.c.status, 'open');
-  assert.match(source, /triageVisible\(states\[triageKey\(row\)\], triageFilter\)/); assert.match(source, /meta: \[when\(item\.lastMessageAt \|\| item\.updatedTime\), waitingFor\(states\[triageKey\(item\)\]\?\.waitingSince\)\]/);
+  assert.match(source, /triageVisible\(states\[triageKey\(row, triageKind\)\], triageFilter\)/); assert.match(source, /meta: \[when\(item\.lastMessageAt \|\| item\.updatedTime\), waitingFor\(states\[triageKey\(item\)\]\?\.waitingSince\)\]/);
 });
 
 test('snooze presets send local times with an offset, and invalid snoozes never reach the server', async () => {
@@ -996,4 +999,108 @@ test('editors can assign a conversation to an eligible teammate from the project
   const { calls, context, changeTriage } = triageContext({ userId: 'me', assignees: members }); await changeTriage({ id: 'thread-1' }, { assigneeId: 'mate' });
   assert.equal(calls.at(-1)[2].assigneeId, 'mate'); assert.deepEqual(context.notices.filter(Boolean).at(-1), 'Conversation assigned to Sam.');
   assert.ok(source.includes("if (readOnly) return; let closed = false; requester.current(`/projects/${encodeURIComponent(projectId)}/assignees`)"), 'Viewers do not read the directory.');
+});
+
+// Comments, reviews and mentions use the same overlay, keyed by their own kind and provider ID.
+const kindStates = (kind, ids, extra = {}) => Object.fromEntries(ids.map(resourceId => [resourceId, { accountId: 'tg', kind, resourceId, status: 'open', assigneeId: null, waitingSince: null, updatedAt: '2026-10-22T08:00:00.000Z', ...extra }]));
+function triageLoader(context) {
+  const start = source.indexOf('  // States for the loaded items'), marker = "  }, [tab === 'comments' ? detail : rows, accountId, tab]);", end = source.indexOf(marker, start) + marker.length; assert.ok(start > 0 && end > start);
+  return compile('function load() {' + source.slice(start, end) + '}', { useEffect: effect => effect(), ...context });
+}
+
+test('comments, reviews and mentions load triage states of their own kind for the loaded items only', async () => {
+  const { triageKinds, triageKey, loadItemStates, mergeTriage } = triageHelpers();
+  assert.deepEqual(triageKinds, { messages: 'conversation', comments: 'comment', reviews: 'review', mentions: 'mention' });
+  assert.equal(triageKey({ id: 'comment-1', platformConversationId: 't_platform' }, 'comment'), 'comment-1', 'Only conversations use the platform thread ID.');
+  const cases = [
+    ['comments', { threadRows: [{ id: 'comment-1', depth: 0 }, { id: 'reply-1', depth: 1 }], rows: [{ id: 'post-1' }] }, ['comment-1', 'reply-1']],
+    ['reviews', { threadRows: [], rows: [{ id: 'review-1' }, { id: 'review-2', platformConversationId: 'unrelated' }] }, ['review-1', 'review-2']],
+    ['mentions', { threadRows: [], rows: [{ id: 'mention-1' }] }, ['mention-1']],
+  ];
+  for (const [tab, items, ids] of cases) {
+    const calls = [], kind = triageKinds[tab];
+    let triage = { accountId: 'tg', kind: 'conversation', states: kindStates('conversation', ['comment-1', 'review-1', 'mention-1']), error: '' };
+    const requester = { current: async (...args) => { calls.push(args); const query = new URL('https://x.test' + args[0]).searchParams; return { states: query.getAll('id').map(resourceId => ({ accountId: 'tg', kind: query.get('kind'), resourceId, status: 'pending', updatedAt: null })) }; } };
+    triageLoader({ ...items, tab, triageKind: kind, accountId: 'tg', detail: {}, version: { current: 1 }, requester, path, loadItemStates, mergeTriage, triageKey, setTriage: change => { triage = change(triage); } })();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls.length, 1, tab); assert.equal(calls[0].length, 1, 'Reads are plain GETs.');
+    const query = new URL('https://x.test' + calls[0][0]).searchParams; assert.equal(query.get('kind'), kind); assert.deepEqual(query.getAll('id'), ids, tab + ' requests its visible items, never the post ID.');
+    assert.equal(triage.kind, kind); assert.deepEqual(Object.keys(triage.states), ids, 'A previous kind’s states are dropped, not merged.'); assert.ok(Object.values(triage.states).every(state => state.kind === kind));
+  }
+  const calls = []; triageLoader({ tab: 'reviews', triageKind: 'review', accountId: '', rows: [{ id: 'review-1' }], threadRows: [], detail: {}, version: { current: 1 }, requester: { current: async (...args) => calls.push(args) }, path, loadItemStates, mergeTriage, triageKey, setTriage() {} })();
+  assert.equal(calls.length, 0, 'Without an account nothing is read.');
+});
+
+test('switching tabs never shows another kind’s triage states', () => {
+  const triage = { accountId: 'tg', kind: 'comment', states: kindStates('comment', ['shared-id']), error: 'Comment read failed' };
+  const helpers = triageHelpers();
+  assert.deepEqual(triageScope({ ...helpers, triage, accountId: 'tg', tab: 'comments' }).states, triage.states);
+  for (const tab of ['messages', 'reviews', 'mentions']) { const scoped = triageScope({ ...helpers, triage, accountId: 'tg', tab }); assert.deepEqual(scoped.states, {}, tab); assert.equal(scoped.triageError, '', tab); }
+  assert.deepEqual(triageScope({ ...helpers, triage, accountId: 'other', tab: 'comments' }).states, {}, 'Another account sees nothing.');
+});
+
+test('the triage filter hides reviews and mentions by status, and filters comments inside the thread', () => {
+  const { triageVisible, triageKey, triageComments } = triageHelpers(), conversationMatches = compile(section('function conversationMatches(', 'function SmsInbox('));
+  const line = source.match(/^  const visibleRows = .*;$/m)[0], visible = context => compile('function shown() {' + line + ' return visibleRows; }', { historyFilter: null, search: '', conversationMatches, triageVisible, triageKey, ...context })().map(row => row.id);
+  const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }], states = { a: { status: 'open' }, b: { status: 'resolved' } };
+  for (const [tab, triageKind] of [['reviews', 'review'], ['mentions', 'mention']]) {
+    assert.deepEqual(visible({ tab, triageKind, rows, states, triageFilter: 'active' }), ['a', 'c'], tab + ': resolved items leave the default view; unloaded ones stay.');
+    assert.deepEqual(visible({ tab, triageKind, rows, states, triageFilter: 'resolved' }), ['b', 'c']);
+  }
+  assert.deepEqual(visible({ tab: 'comments', triageKind: 'comment', rows, states, triageFilter: 'resolved' }), ['a', 'b', 'c'], 'Posts are never hidden by comment states.');
+  const thread = [{ id: 'kept', replies: [] }, { id: 'parent', replies: [{ id: 'reply', replies: [] }, { id: 'done', replies: [] }] }, { id: 'closed', replies: [{ id: 'closed-reply', replies: [] }] }];
+  const status = { kept: 'open', parent: 'resolved', reply: 'pending', done: 'resolved', closed: 'resolved', 'closed-reply': 'snoozed' };
+  const ids = rows => rows.map(row => [row.id, ids(row.replies)]);
+  assert.deepEqual(ids(triageComments(thread, row => triageVisible({ status: status[row.id] }, 'active'))), [['kept', []], ['parent', [['reply', []]]]], 'A resolved parent stays only to show its matching reply.');
+  assert.deepEqual(ids(triageComments(thread, () => true)), ids(thread));
+  assert.ok(source.includes("const shownComments = triageComments(detail?.comments || [], row => triageVisible(states[row.id], triageFilter));"));
+  assert.ok(source.includes('replies: shownComments }] : shownComments).map((item: Row) => commentMessage(item, selected))'));
+  assert.match(source, /^      <Field label="Triage status" description=/m, 'The status filter is offered on every tab.');
+});
+
+test('review, mention and comment rows show their triage label, with waiting time except on mentions', async () => {
+  const TriageControls = await triageControls(), { triageLabel, waitingFor } = triageHelpers(), waitingSince = new Date(Date.now() - 3 * 3600000 - 60000).toISOString();
+  const start = source.indexOf("<Stack as=\"section\" gap={3} aria-label={tab === 'mentions'"), markup = source.slice(start, source.indexOf('\n      {loaded && !visibleRows.length && ', start));
+  const { code } = await transformWithOxc('function Cards() { return (' + markup + '); }', 'Cards.tsx', { jsx: { runtime: 'classic' } });
+  const names = ['visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', 'canReply', 'capabilities', 'busy', 'prepareReply', 'setConfirming', 'states', 'triageLabel', 'waitingFor', 'userId', 'TriageControls', 'accountId', 'triageError', 'assignees', 'changeTriage', 'title'];
+  const render = (tab, ids, readOnly, extra = {}) => renderToStaticMarkup(React.createElement(new Function('React', ...uiNames, ...names, code + '; return Cards;')(React, ...uiValues, ids.map(id => ({ id, content: 'Text', text: 'Text' })), tab, {}, () => 'when', () => undefined, readOnly, false, {}, '', () => {}, () => {}, kindStates(tab === 'mentions' ? 'mention' : 'review', ids, { status: 'pending', assigneeId: 'me', waitingSince, ...extra }), triageLabel, waitingFor, 'me', TriageControls, 'tg', '', [], () => {}, value => value || '')));
+  const reviews = render('reviews', ['review-1'], false);
+  assert.match(reviews, /when · Pending · Assigned to you · waiting 3h/); assert.match(reviews, /Triage: Pending · waiting 3h · Assigned to you/); assert.match(reviews, />Resolve<\/button>/);
+  const mentions = render('mentions', ['mention-1'], false);
+  assert.match(mentions, /<summary[^>]*><span[^>]*>Read mention · LinkedIn author · when · Pending · Assigned to you/); assert.match(mentions, /Triage: Pending · Assigned to you/); assert.match(mentions, />Resolve<\/button>/);
+  assert.doesNotMatch(mentions, /waiting/, 'Mentions never show waiting text.');
+  const viewer = render('reviews', ['review-1'], true); assert.match(viewer, /Triage: Pending/); assert.doesNotMatch(viewer, /<button|<select/, 'Viewers see the status without controls.');
+  assert.doesNotMatch(renderToStaticMarkup(React.createElement(TriageControls, { kind: 'mention', state: { status: 'open', waitingSince }, readOnly: true, busy: false, userId: '', onChange() {} })), /waiting/);
+  assert.match(renderToStaticMarkup(React.createElement(TriageControls, { kind: 'mention', error: 'x', readOnly: false, busy: false, userId: '', onChange() {} })), /Refresh the mentions to try again/);
+
+  const helper = section('  function commentMessage(', '  const noun = '), comments = await transformWithOxc('function Comments() {' + helper + ' return <ConversationThread label="Post comments" messages={threadRows.map(row => commentMessage(row, selected))}/>; }', 'Comments.tsx', { jsx: { runtime: 'classic' } });
+  const context = { React, ...ui, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'tg', account: { platform: 'facebook' }, capabilities: {}, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [{ id: 'comment-1', message: 'Hello', likeCount: 2, depth: 0 }], detail: {}, commentEdit: null, when: () => '', link: () => '', states: kindStates('comment', ['comment-1'], { status: 'resolved', assigneeId: 'mate', waitingSince }), triageLabel, waitingFor, userId: 'me', triageError: '', assignees: [{ id: 'mate', name: 'Sam' }], TriageControls, changeTriage() {} };
+  const thread = renderToStaticMarkup(new Function(...Object.keys(context), comments.code + '; return Comments;')(...Object.values(context))());
+  assert.match(thread, /2 likes · Resolved · Assigned · waiting 3h/); assert.match(thread, /Comment triage/); assert.match(thread, /Triage: Resolved · waiting 3h · Assigned to Sam/); assert.match(thread, />Reopen<\/button>/);
+});
+
+test('comment, review and mention triage changes carry their kind and provider ID and name the item', async () => {
+  const members = [{ id: 'mate', name: 'Sam' }];
+  for (const [tab, kind, id, change, notice] of [['comments', 'comment', 'comment-1', { status: 'resolved' }, 'Comment resolved.'], ['reviews', 'review', 'review-1', { assigneeId: 'mate' }, 'Review assigned to Sam.'], ['mentions', 'mention', 'mention-1', { status: 'pending' }, 'Mention marked pending.']]) {
+    const { context, calls, changeTriage } = triageContext({ tab, userId: 'me', assignees: members, triage: { accountId: 'tg', kind, states: kindStates(kind, [id]), error: '' } });
+    await changeTriage({ id, platformConversationId: 'ignored' }, change);
+    assert.deepEqual(calls, [[path + '/item-states', 'PATCH', { accountId: 'tg', kind, resourceId: id, expectedUpdatedAt: '2026-10-22T08:00:00.000Z', ...change }]], tab);
+    assert.equal(context.notices.at(-1), notice); assert.equal(context.triage.kind, kind); assert.equal(context.triage.states[id].updatedAt, '2026-10-22T09:00:00.000Z');
+    const viewer = triageContext({ tab, readOnly: true, triage: { accountId: 'tg', kind, states: kindStates(kind, [id]), error: '' } }); await viewer.changeTriage({ id }, change); assert.equal(viewer.calls.length, 0, tab + ' refuses viewer changes.');
+  }
+  const crossed = triageContext({ tab: 'reviews', triage: { accountId: 'tg', kind: 'comment', states: kindStates('comment', ['review-1']), error: '' } });
+  await crossed.changeTriage({ id: 'review-1' }, { status: 'resolved' }); assert.equal(crossed.calls.length, 0, 'Another kind’s state with the same ID is never written.');
+  const wrongKind = triageContext({ tab: 'reviews', triage: { accountId: 'tg', kind: 'review', states: kindStates('review', ['review-1']), error: '' }, respond: () => ({ state: { ...kindStates('comment', ['review-1'])['review-1'], status: 'resolved' } }) });
+  await wrongKind.changeTriage({ id: 'review-1' }, { status: 'resolved' }); assert.equal(wrongKind.context.triage.states['review-1'].status, 'open'); assert.match(wrongKind.context.errors.at(-1), /Refresh the reviews/);
+});
+
+test('a stale comment, review or mention change reloads that kind and item only', async () => {
+  for (const [tab, kind, id] of [['comments', 'comment', 'comment-1'], ['reviews', 'review', 'review-1'], ['mentions', 'mention', 'mention-1']]) {
+    const fresh = { ...kindStates(kind, [id])[id], status: 'resolved', updatedAt: '2026-10-22T08:30:00.000Z' };
+    const { context, calls, changeTriage } = triageContext({ tab, triage: { accountId: 'tg', kind, states: kindStates(kind, [id, 'other-' + kind]), error: '' }, respond: (url, method) => { if (method === 'PATCH') throw Object.assign(new Error('changed'), { status: 409, code: 'INBOX_STATE_CHANGED' }); return { states: [fresh] }; } });
+    await changeTriage({ id }, { status: 'pending' });
+    assert.equal(calls.length, 2); assert.deepEqual(calls[1], [path + '/item-states?' + new URLSearchParams([['accountId', 'tg'], ['kind', kind], ['id', id]])]);
+    assert.deepEqual(context.triage.states[id], fresh); assert.equal(context.triage.states['other-' + kind].status, 'open'); assert.equal(context.triage.kind, kind);
+    assert.equal(context.errors.at(-1), `This ${kind}’s triage changed elsewhere. Its latest status is shown; choose again to apply your change.`);
+  }
 });
