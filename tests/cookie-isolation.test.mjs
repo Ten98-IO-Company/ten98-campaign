@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac, randomBytes } from 'node:crypto';
 import { createAuth, hashPassword } from '../server/auth.ts';
-import { postgresSkip, testDatabase } from './postgres.mjs';
+import { postgresSkip, signInRedirectError, testDatabase } from './postgres.mjs';
 
 test('same-host instances keep session and OIDC cookies isolated while safely migrating their own legacy cookies', { skip: postgresSkip }, async t => {
   const { db: dbA, sql: sqlA } = await testDatabase(t), { db: dbB, sql: sqlB } = await testDatabase(t);
@@ -55,7 +55,7 @@ test('same-host instances keep session and OIDC cookies isolated while safely mi
   };
   const oidcA = createAuth(dbA, configA, { openidClient: async () => oidcClient }), oidcB = createAuth(dbB, configB, { openidClient: async () => oidcClient });
   async function start(auth) { const res = response(); await auth.oidcStart({ ...request(), url: '/api/auth/oidc/start' }, res); absorb(res); return { state: new URL(res.headers.Location).searchParams.get('state'), cookieName: setCookies(res)[0].split('=')[0] }; }
-  async function callback(auth, appUrl, state) { const res = response(); await auth.oidcCallback(request(), res, new URL(appUrl + '/api/auth/oidc/callback?state=' + encodeURIComponent(state) + '&code=fixture')); absorb(res); return res; }
+  async function callback(auth, appUrl, state) { const res = response(); await auth.oidcCallback(request(), res, new URL(appUrl + '/api/auth/oidc/callback?state=' + encodeURIComponent(state) + '&code=fixture')); absorb(res); return signInRedirectError(res); }
   const flowA = await start(oidcA), flowB = await start(oidcB);
   assert.notEqual(flowA.cookieName, flowB.cookieName); assert.equal(jar.has(flowA.cookieName), true); assert.equal(jar.has(flowB.cookieName), true);
   assert.equal((await callback(oidcA, configA.appUrl, flowA.state)).status, 302); assert.equal(jar.has(flowB.cookieName), true);
