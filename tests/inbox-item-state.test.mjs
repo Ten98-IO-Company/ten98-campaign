@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createContacts } from '../server/contacts.ts';
 import { createWebhookService } from '../server/webhooks.ts';
 import { handleInbox } from '../server/inbox.ts';
-import { blockWrites, postgresSkip, testApp, testDatabase } from './postgres.mjs';
+import { blockWrites, lockWaiters, postgresSkip, testApp, testDatabase } from './postgres.mjs';
 
 // Team triage overlay (ten98-campaign#41 change 1): waiting/first reply from the webhook drain and confirmed replies,
 // and the item-state read and update endpoints with their role, membership, lock and optimistic-concurrency gates.
@@ -122,8 +122,7 @@ async function appFixture(t) {
   const read = (ids, { cookie = owner, accountId = 'tg', kind = 'conversation', project = path } = {}) => request(`${project}/item-states?${new URLSearchParams([['accountId', accountId], ['kind', kind], ...ids.map(value => ['id', value])])}`, { cookie });
   const change = (body, cookie = people.editor.cookie) => request(`${path}/item-states`, { method: 'PATCH', body: { accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', ...body }, cookie });
   const send = (action, body, cookie = owner) => request(`${path}/${action}`, { method: 'POST', body, cookie, headers: { 'Idempotency-Key': randomUUID() } });
-  const waitForLocks = async count => { for (const deadline = Date.now() + 5000; ;) { const { waiting } = await app.sql.get("SELECT count(*) AS waiting FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"); if (waiting >= count) return; if (Date.now() > deadline) throw new Error(`Expected ${count} lock waiters, saw ${waiting}.`); await new Promise(resolve => setTimeout(resolve, 20)); } };
-  return { app, request, read, change, send, path, projectId, workspaceId, people, writes, calls, waitForLocks };
+  return { app, request, read, change, send, path, projectId, workspaceId, people, writes, calls };
 }
 
 test('an inbound webhook marks a thread waiting; a confirmed reply clears it and records the first reply once', pg, async t => {
@@ -247,10 +246,10 @@ test('an assignee removed, or an actor demoted, while the update waits on the wo
     try {
       await client.query('BEGIN'); await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [f.workspaceId]);
       const pending = f.change({ expectedUpdatedAt: null, ...body }, cookie);
-      await f.waitForLocks(1); await client.query(change[0], change[1]); await client.query('COMMIT');
+      await lockWaiters(client, 1); await client.query(change[0], change[1]); await client.query('COMMIT');
       const result = await pending;
       assert.equal(result.status, code, label);
-    } finally { client.release(); }
+    } finally { await client.query('ROLLBACK').catch(() => undefined); client.release(); }
     assert.equal(await f.app.sql.get('SELECT * FROM inbox_item_state'), undefined, `${label}: nothing is written`);
   }
 });
