@@ -162,15 +162,18 @@ async function connectionUi(respond = async path => path.endsWith('/accounts') ?
   return { calls, tick, form, event, input, button, change, submit, click, html: () => renderToStaticMarkup(tree), link: () => nodes(tree).find(node => node.type === design.Link && nodeText(node) === 'Continue with provider'), get connected() { return connected; }, get postUnmountUpdates() { return postUnmountUpdates; }, scope: async next => { props = { ...props, ...next }; dirty = true; paint(); await tick(); }, unmount() { hooks.forEach(hook => hook.close?.()); unmounted = true; } };
 }
 
+// The stub authorization URL carries the requested path as `target`; read the shop parameter from it, not a substring.
+const linkShop = href => new URL(new URL(href).searchParams.get('target'), 'https://app.example.test').searchParams.get('shop');
+
 test('connection authorization links remain valid unchanged and disappear immediately when the posting account or Shopify domain changes', async () => {
   const ui = await connectionUi();
   await ui.change('Channel or store', 'ads:twitter'); await ui.change('X posting account *', 'x-a'); await ui.submit(); await ui.tick();
   const original = ui.link().props.href; assert.match(decodeURIComponent(original), /accountId=x-a/); await ui.tick(); assert.equal(ui.link().props.href, original);
   await ui.change('X posting account *', 'x-b'); assert.equal(ui.link(), undefined); assert.doesNotMatch(ui.html(), /Continue with the provider, then return/);
   await ui.submit(); await ui.tick(); assert.match(decodeURIComponent(ui.link().props.href), /accountId=x-b/);
-  await ui.change('Channel or store', 'store:shopify'); await ui.change('Store domain *', 'shop-a.myshopify.com'); await ui.submit(); await ui.tick(); assert.ok(decodeURIComponent(ui.link().props.href).includes('shop-a.myshopify.com'));
+  await ui.change('Channel or store', 'store:shopify'); await ui.change('Store domain *', 'shop-a.myshopify.com'); await ui.submit(); await ui.tick(); assert.equal(linkShop(ui.link().props.href), 'shop-a.myshopify.com');
   await ui.change('Store domain *', 'shop-b.myshopify.com'); assert.equal(ui.link(), undefined); assert.doesNotMatch(ui.html(), /Continue with the provider, then return/);
-  await ui.submit(); await ui.tick(); assert.ok(decodeURIComponent(ui.link().props.href).includes('shop-b.myshopify.com'));
+  await ui.submit(); await ui.tick(); assert.equal(linkShop(ui.link().props.href), 'shop-b.myshopify.com');
 });
 
 test('posting-account refresh withdraws the old authorization link before loading, including account removal', async () => {
