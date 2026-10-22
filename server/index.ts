@@ -305,6 +305,12 @@ export async function createApp(options: AppOptions = {}) {
             const activityRemoved = await db.transaction(async tx => { const scoped = createStore(tx); for (const { collection, record } of samples) await scoped.remove(project.id, collection, record.id); const removed = (await tx.execute(sql`DELETE FROM activity WHERE project_id=${project.id} AND sample`)).rowCount; await scoped.activity(project.id, 'Sample data removed.'); return removed; });
             return send(200, { removed: samples.length, activityRemoved });
           }
+          // Members a project item can be assigned to (editors and above), for editors and above: no email addresses, unlike the
+          // administrator-only team route.
+          if (projectRoute[2] === 'assignees' && req.method === 'GET') {
+            if (!['owner', 'admin', 'editor'].includes(role)) throw new HttpError(403, 'Editing permission is required to assign work.');
+            return send(200, { members: (await db.execute(sql`SELECT u.id,u.name,m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=${project.workspaceId} AND m.role IN ('owner','admin','editor') ORDER BY u.name, u.id`)).rows });
+          }
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
           const requestRevision = integrationSettings.revision;
           // One round trip per guard: the session, the actor's current role and the project's provider mappings.
