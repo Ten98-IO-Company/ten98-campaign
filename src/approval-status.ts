@@ -50,6 +50,7 @@ export type AdSpendBlock = { code: string; title: string; text: string; review: 
 export function adSpendBlock(failure: unknown): AdSpendBlock | null {
   const code = (failure as { code?: unknown } | null)?.code;
   if (code === 'AD_SPEND_APPROVAL_REQUIRED') return { code, review: true, title: 'Sent for approval', text: 'This project requires approval before ads start delivery or budgets go up, so nothing was sent to the provider. A review of this exact change is waiting in Approvals. After an owner or administrator approves it, make the same change again to send it.' };
+  if (code === 'AD_SPEND_APPROVAL_EXPIRED') return { code, review: true, title: 'Needs re-approval', text: 'The approval of this spend change is more than 7 days old, so nothing was sent to the provider. A new review of this exact change is waiting in Approvals.' };
   if (code === 'AD_SPEND_APPROVAL_MISMATCH') return { code, review: true, title: 'This change differs from the approved one', text: 'An approved spend change exists, but its amount, currency, platform, campaign or action differs from this change, so nothing was sent. A review of this exact change was requested in Approvals.' };
   if (code === 'AD_SPEND_AMOUNT_UNAVAILABLE') return { code, review: false, title: 'The amount cannot be checked exactly', text: 'The budget or currency of this change could not be read exactly, so it cannot be matched to an approval and nothing was sent. Make this change in the provider’s own dashboard.' };
   return null;

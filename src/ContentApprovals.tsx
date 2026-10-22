@@ -1,5 +1,5 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Disclosure, EmptyState, FeatureControls, Field, FormActions, Grid, Heading, Inline, Link, List, ListItem, Option, Progress, ReviewSummary, SegmentedControl, Select, StatusLine, Stack, Switch, Text, Textarea, ValidationSummary, type ReviewChange, type ValidationTarget } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Disclosure, EmptyState, FeatureControls, Field, FormActions, Grid, Heading, Inline, Link, List, ListItem, Option, Progress, ReviewSummary, SegmentedControl, Select, StatusLine, Stack, Switch, Text, Textarea, ValidationSummary, type ReviewChange, type ValidationTarget, useConfirmDialog } from '@ten98/ui';
 import { PostVariantPreview } from './PostComposer';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { reviewKeyAction } from './review-keys';
@@ -71,6 +71,12 @@ function ProposedUpdateComparison({ item }: { item: any }) {
 // amount in minor units and currency. A blocked activation or budget increase opens its review on the server; approving
 // allows one matching provider write and never sends it.
 const spendSubject = (action: string) => action === 'ooh/booking' ? 'OOH booking' : action.includes('ad-status') ? 'Ad' : action.includes('adset') ? 'Ad set' : 'Campaign';
+// Changing the ad spend setting voids unused approvals and pending requests (council decision on #35 Q1), so the switch
+// confirms first; the page's handler runs only after confirmation.
+function AdSpendPolicySwitch({ label, checked, disabled, onCheckedChange }: { label: string; checked: boolean; disabled: boolean; onCheckedChange: (checked: boolean) => void }) {
+  const [confirm, dialog] = useConfirmDialog();
+  return <>{dialog}<Switch label={label} checked={checked} disabled={disabled} onCheckedChange={async next => { if (await confirm({ title: next ? 'Require ad spend approval?' : 'Stop requiring ad spend approval?', description: 'Changing this setting voids every unused ad spend approval and pending ad spend request in this project. They stay listed as rejected.', confirmLabel: next ? 'Require approval' : 'Stop requiring approval' })) onCheckedChange(next); }}/></>;
+}
 function AdSpendReviews({ path, required, canReview, request, onChanged }: { path: string; required: boolean; canReview: boolean; request: Props['request']; onChanged?: Props['onChanged'] }) {
   const [data, setData] = useState<any>(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [notes, setNotes] = useState<Record<string, string>>({});
   const active = useRef(true), readVersion = useRef(0);
@@ -78,7 +84,7 @@ function AdSpendReviews({ path, required, canReview, request, onChanged }: { pat
     const read = ++readVersion.current, result = await request(path + '/ad-spend');
     if (active.current && read === readVersion.current) setData(result);
   }
-  useEffect(() => { active.current = true; load().catch(err => { if (active.current) setError(err.message); }); return () => { active.current = false; }; }, [path]);
+  useEffect(() => { active.current = true; load().catch(err => { if (active.current) setError(err.message); }); return () => { active.current = false; }; }, [path, required]);
   async function act(name: string, work: () => Promise<void>) {
     if (busy || !active.current) return; setBusy(name); setError(''); setNotice('');
     try { await work(); } catch (err) { if (active.current) setError((err as Error).message || 'This review could not be saved.'); }
@@ -185,7 +191,7 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
       {data && <Text tone="muted" size="sm">Publishing approval is <Text as="strong">{data.requireApproval ? 'required' : 'optional'}</Text> for this project. Approving a post never publishes it.</Text>}
       {canReview && data && <Switch label="Require approval before publishing" disabled={Boolean(busy)} checked={data.requireApproval} onCheckedChange={requireApproval => { action('policy', async () => { const result = await request(path + '/policy', 'POST', { requireApproval }); if (!active.current) return; setData((previous: any) => ({ ...previous, ...result })); setNotice(requireApproval ? 'Every post now needs current approval before publishing or retrying.' : 'Publishing approval is now optional.'); await onChanged?.(); await load(); }); }}/>}
       {data && <Text tone="muted" size="sm">Ad spend approval is <Text as="strong">{data.requireAdApproval ? 'required' : 'optional'}</Text> for this project. Approving a spend change never sends it to the provider.</Text>}
-      {canReview && data && <Switch label="Require approval before activating ads or raising budgets" disabled={Boolean(busy)} checked={Boolean(data.requireAdApproval)} onCheckedChange={requireAdApproval => { action('ad-policy', async () => { const result = await request(path + '/policy', 'POST', { requireAdApproval }); if (!active.current) return; setData((previous: any) => ({ ...previous, ...result })); setNotice(requireAdApproval ? 'Activating ads and raising budgets now need an approved review first.' : 'Ad spend approval is now optional.'); await onChanged?.(); }); }}/>}
+      {canReview && data && <AdSpendPolicySwitch label="Require approval before activating ads or raising budgets" disabled={Boolean(busy)} checked={Boolean(data.requireAdApproval)} onCheckedChange={requireAdApproval => { action('ad-policy', async () => { const result = await request(path + '/policy', 'POST', { requireAdApproval }); if (!active.current) return; setData((previous: any) => ({ ...previous, ...result })); setNotice(requireAdApproval ? 'Activating ads and raising budgets now need an approved review first.' : 'Ad spend approval is now optional.'); await onChanged?.(); }); }}/>}
       <Inline><Button variant="secondary" disabled={Boolean(busy)} onClick={() => action('refresh', load)}>{busy === 'refresh' ? 'Refreshing…' : 'Refresh review queue'}</Button></Inline>
       {canReview && <Text tone="muted" size="sm">Keyboard review: focus a post, move with ↑ and ↓, then press A to approve or R to request changes.</Text>}
       {data?.requireApproval && <Text tone="muted" size="sm">While approval is required, an owner or administrator must make changes to posts already submitted to a provider. Editors can still cancel or remove copies using the publishing controls.</Text>}
