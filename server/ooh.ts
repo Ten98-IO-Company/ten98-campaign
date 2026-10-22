@@ -5,6 +5,7 @@ import { advisoryLock } from './auth.ts';
 import { IntegrationError, fail, operation, reportObject as object } from './provider-core.ts';
 import type { OperationContext, ProviderRecord } from './provider-core.ts';
 import { createStore, type Database, type Executor } from './database.ts';
+import { assertAdSpendApproval } from './approvals.ts';
 
 // Contracts: https://docs.broadsign.com/broadsign-platform/en/Documentation_Gteed_Campaigns/g-c-new-campaign-rest.html
 // API-key auth: https://docs.broadsign.com/broadsign-platform/en/Documentation_Settings/settings-api-keys.html
@@ -305,11 +306,14 @@ export async function handleOoh(context: OperationContext & { body: ProviderReco
         if (body.confirmBooking !== true) fail(400, 'OOH_CONFIRMATION_REQUIRED', 'Explicitly confirm this paid booking before submission.');
         // The resource key serialises submissions of this booking under different keys: a parallel one sees this receipt
         // pending and is not sent, so Broadsign receives one booking request.
-        const result = await operation(context, async () => {
+        const result = await operation(context, async key => {
           if (booking.stage !== 'draft') fail(409, 'OOH_ALREADY_SUBMITTED', 'This proposal has already been submitted or requires reconciliation.');
           const available = await availability(env, connection, booking);
           if (available.availability !== 'available') fail(409, 'OOH_UNAVAILABLE', 'The requested inventory is not available for booking.');
           if ((await storedBooking(db, project.id, booking.id))?.snapshot !== row.snapshot) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during the availability check. Refresh before continuing.');
+          // A booking commits paid inventory, so it needs ad spend approval of this exact quote when the project requires it
+          // (manager decision on #35 Q1 scope). Broadsign quotes carry no currency; the configured account currency supplies it.
+          await assertAdSpendApproval(context, { subjectId: booking.id, platform: 'broadsign', action: 'ooh/booking', amount: booking.price, currency: env.BROADSIGN_CURRENCY, currentAmount: null, activates: true }, key);
           await provider(env, `/api/v1/proposal/book_proposal/${booking.proposalId}`, {});
           booking.stage = 'submitted';
           if (!await replaceBooking(db, project.id, booking, row.snapshot)) fail(409, 'OOH_BOOKING_CHANGED', 'This booking changed during submission. Review the provider outcome before continuing.', true);
