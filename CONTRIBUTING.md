@@ -1,25 +1,23 @@
 # Contributing
 
-Use Node.js 24, run `npm ci`, then `npm run dev`. Verify changes with `npm run build` and `npm test` before opening a pull request. The suite runs on PostgreSQL: set `TEST_DATABASE_URL` to a disposable server whose role may create databases (each test file clones its own database from a migrated template), for example `docker run -d --name campaign-test-pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:18` with `TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/postgres`. Without it, database tests are skipped locally; CI always runs them.
+Thanks for helping improve Campaign. This file replaces the [Ten98 organisation guide](https://github.com/Ten98-IO-Company/.github/blob/main/CONTRIBUTING.md) for this repository and adds Campaign's own rules.
 
-Keep `main` and `dev` as the two permanent branches. Start each feature on a temporary `codex/` branch from the updated `dev` branch and merge its tested pull request into `dev`. Promote `dev` to `main` through a pull request, then fast-forward `dev` to the merge result so both branches stay synchronized. Tag and release the promoted `main` commit. Delete the merged feature branch; keep `dev`.
+Setup, checks, the test database and the container check are in the wiki's [Development](https://github.com/Ten98-IO-Company/ten98-campaign/wiki/Development) page. Questions and ideas go to [Discussions](https://github.com/Ten98-IO-Company/ten98-campaign/discussions); security problems go through [SECURITY.md](SECURITY.md), not public issues.
 
-Keep changes focused. Reuse the existing provider helpers and native platform features before adding dependencies. Every nontrivial behavior change needs a small runnable regression check. Provider tests must use mocks, never real spending or credentials.
+## Pull requests
 
-Trace every caller when fixing shared behavior. Review asynchronous results for project changes, unmounted editors, concurrent updates and uncertain provider writes. Remove unused code only after checking its callers; keep validation, consent and access controls intact.
+Branch from `dev` and open your pull request into `dev`; `main` receives tested releases promoted from `dev`. Run `npm run build` and `npm test` before opening it. Describe what changed, why, and how you verified it.
 
-After changing Docker packaging or runtime imports, verify the actual image:
+## Campaign rules
 
-```sh
-docker build -t ten98-campaign:check .
-docker network create campaign-check
-docker run -d --name campaign-check-pg --network campaign-check -e POSTGRES_PASSWORD=check postgres:18
-docker run --rm -i --network campaign-check -e DATABASE_URL=postgres://postgres:check@campaign-check-pg:5432/postgres --entrypoint node ten98-campaign:check --input-type=module < scripts/check-container.mjs
-docker rm -f campaign-check-pg && docker network rm campaign-check
-```
+- Keep changes focused. Reuse the existing provider helpers and native platform features before adding dependencies.
+- Every nontrivial behavior change needs a small runnable regression check. Provider tests must use mocks, never real spending or credentials.
+- Trace every caller when fixing shared behavior. Review asynchronous results for project changes, unmounted editors, concurrent updates and uncertain provider writes. Remove unused code only after checking its callers; keep validation, consent and access controls intact.
+- After changing Docker packaging or runtime imports, run the container check in the wiki's Development page.
+- Enforce project membership at every server entry point. Instance-wide credentials and provider mappings require instance operator authority in addition to workspace administration.
+- Treat inbox messages, provider data, and AI output as untrusted input.
+- Never put keys, `.env`, databases, customer conversations, or production logs in a commit or issue.
 
-In PowerShell, pipe `Get-Content -Raw scripts/check-container.mjs` to the same `docker run` command instead of using `<`. The check migrates the empty database it is given, uses a temporary data directory, and makes no external requests; the private network reaches only that database.
+## Licence and conduct
 
-Enforce project membership at every server entry point. Instance-wide credentials and provider mappings require instance operator authority in addition to workspace administration. Treat inbox messages, provider data, and AI output as untrusted input. Never put keys, `.env`, databases, customer conversations, or production logs in a commit or issue.
-
-Contributions are distributed under the repository’s MIT license. Preserve notices for any third-party source you reuse. Describe what changed, why, and how you verified it in your pull request.
+Contributions are distributed under the repository's MIT license. Preserve notices for any third-party source you reuse. By taking part, you agree to follow the [Code of Conduct](https://github.com/Ten98-IO-Company/.github/blob/main/CODE_OF_CONDUCT.md).
