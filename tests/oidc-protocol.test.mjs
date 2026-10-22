@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { createAuth } from '../server/auth.ts';
-import { postgresSkip, testDatabase } from './postgres.mjs';
+import { postgresSkip, signInRedirectError, testDatabase } from './postgres.mjs';
 
 const pg = { skip: postgresSkip };
 const appUrl = 'https://campaign.example', clientId = 'campaign-fixture-client', clientSecret = randomBytes(24).toString('base64url');
@@ -74,7 +74,7 @@ async function signIn(t) {
   const callback = async (flow, code) => {
     const res = response();
     await auth.oidcCallback({ headers: { cookie: flow.cookie } }, res, new URL(`${appUrl}/api/auth/oidc/callback?code=${code}&state=${encodeURIComponent(flow.location.searchParams.get('state'))}`));
-    return res;
+    return signInRedirectError(res);
   };
   return { db, idp, start, callback };
 }
@@ -108,13 +108,13 @@ test('OIDC callback refuses ID tokens with the wrong nonce, audience or issuer',
   const { db, idp, start, callback } = await signIn(t);
   for (const claims of [{ nonce: 'another-transaction' }, { aud: 'another-client' }, { iss: 'https://auth.example/application/o/other/' }]) {
     const flow = await start();
-    await assert.rejects(callback(flow, idp.authorize(flow.location, { claims })), error => error.status === 400 && /could not be verified/.test(error.message), JSON.stringify(claims));
+    await assert.rejects(callback(flow, idp.authorize(flow.location, { claims })), error => error.code === 'OIDC_SIGN_IN_FAILED', JSON.stringify(claims));
   }
   assert.equal((await db.$client.query('SELECT count(*)::int AS count FROM oidc_identities')).rows[0].count, 0);
 });
 
 test('OIDC provisioning needs email_verified true, which Authentik sends only when configured', pg, async t => {
   const { db, idp, start, callback } = await signIn(t), flow = await start();
-  await assert.rejects(callback(flow, idp.authorize(flow.location, { claims: { email_verified: false } })), error => error.status === 403);
+  await assert.rejects(callback(flow, idp.authorize(flow.location, { claims: { email_verified: false } })), error => error.code === 'OIDC_EMAIL_UNVERIFIED');
   assert.equal((await db.$client.query('SELECT count(*)::int AS count FROM oidc_identities')).rows[0].count, 0);
 });
