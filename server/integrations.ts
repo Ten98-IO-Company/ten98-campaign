@@ -1458,7 +1458,8 @@ export async function handleIntegration(context: any) {
       if (nativeAccount.selectable === false) fail(409, 'AD_ACCOUNT_UNAVAILABLE', 'This advertising account cannot currently create campaigns. Check it in the provider dashboard.');
       const payload = adBody(body, account, nativeAccount);
       if (path === 'ads/validate') {
-        if (body.platform !== 'openai' && !(body.platform === 'google' && ['pmax', 'demand_gen'].includes(body.campaignType))) fail(422, 'VALIDATION_UNAVAILABLE', 'Provider validation here supports ChatGPT, Google Performance Max and Demand Gen.');
+        // Zernio validates Meta (the inline campaign, ad set, creative and ad, with Meta's validate_only), ChatGPT and Google PMax/Demand Gen.
+        if (!['openai', 'facebook', 'instagram'].includes(body.platform) && !(body.platform === 'google' && ['pmax', 'demand_gen'].includes(body.campaignType))) fail(422, 'VALIDATION_UNAVAILABLE', 'Provider validation here supports Meta, ChatGPT, Google Performance Max and Demand Gen.');
         let result;
         try { result = await api('/ads/create', {}, { ...payload, validateOnly: true }); }
         catch (error: any) { if (error instanceof IntegrationError) error.uncertain = false; throw error; }

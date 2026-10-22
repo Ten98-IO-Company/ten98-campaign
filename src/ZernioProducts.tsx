@@ -12,8 +12,6 @@ type StockLevel = { locationId: string; available: number | null; onHand: number
 type StockItem = { productId: string; variantId: string; sku: string | null; tracked: boolean | null; levels: StockLevel[] | null };
 type StockSnapshot = { product: Product; locations: StockLocation[]; inventory: StockItem[]; loadedAt: string };
 export type Product = { id: string; accountId: string; platform: 'shopify'; title: string; descriptionHtml: string | null; handle: string | null; vendor: string | null; productType: string | null; tags: string[]; status: string; platformStatus: string; featuredImage: Image | null; images: Image[]; options: { name: string; values: string[] }[]; variants: Variant[]; totalInventory: number | null; url: string | null; seo: { title: string | null; description: string | null }; createdAt: string | null; updatedAt: string | null; publishedAt: string | null };
-export type ProductAccount = Account;
-export type ProductStore = Store;
 type Request = (path: string, body?: unknown, validate?: (value: any) => void, outcomeOnly?: boolean) => Promise<any>;
 const productRequestNotSent = (problem: { code?: string; operation?: { status?: string } }) => problem.code === 'OPERATION_NOT_SENT' || problem.operation?.status === 'failed';
 const productNotSentMessage = 'Earlier request was not sent. Refresh the current product or store and review a new action.';
@@ -71,7 +69,6 @@ function ReviewedMutationForm({ onSubmit, identity, guidance, error, unavailable
 }
 
 type Collection = { id: string; accountId: string; platform: 'shopify'; title: string; handle: string | null; descriptionHtml: string | null; image: Image | null; sortOrder: string | null; productCount: number | null; seo: { title: string | null; description: string | null }; updatedAt: string | null };
-export type ProductCollection = Collection;
 const collectionSortOrders = ['manual', 'best_selling', 'alpha_asc', 'alpha_desc', 'price_asc', 'price_desc', 'created', 'created_desc', 'most_relevant'];
 const nativeCollectionId = (value: unknown): value is string => typeof value === 'string' && !!value && value.length <= 500 && !/[\u0000-\u001f\u007f-\u009f\s]/.test(value) && !value.split(/[\\/]/).some(part => part === '.' || part === '..');
 const readableCollection = (value: any, accountId: string): value is Collection => !!value && nativeCollectionId(value.id) && value.accountId === accountId && value.platform === 'shopify' && typeof value.title === 'string' && ['handle', 'descriptionHtml', 'updatedAt'].every(key => nullableText(value[key])) && (value.image === null || image(value.image)) && (value.sortOrder === null || collectionSortOrders.includes(value.sortOrder)) && nullableCount(value.productCount) && (value.productCount === null || value.productCount >= 0) && !!value.seo && nullableText(value.seo.title) && nullableText(value.seo.description);

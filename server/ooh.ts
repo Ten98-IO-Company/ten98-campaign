@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
+import { readResponseText, workspaceRoles } from '@ten98/runtime';
 import { advisoryLock } from './auth.ts';
 import { IntegrationError, fail, operation, reportObject as object } from './provider-core.ts';
 import type { OperationContext, ProviderRecord } from './provider-core.ts';
@@ -100,9 +101,7 @@ async function provider(env: ProviderRecord, path: string, body?: any, method = 
       try { await env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', true); }
       return {};
     }
-    const reader = response.body!.getReader(), chunks: Uint8Array[] = []; let size = 0;
-    for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; if (size > 2 * 1024 * 1024) { await reader.cancel(); throw new Error(); } chunks.push(next.value); }
-    const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const result = JSON.parse(await readResponseText(response, { maxBytes: 2 * 1024 * 1024, preserveBOM: true }));
     if (!object(result)) fail(502, 'INVALID_OOH_RESPONSE', 'Broadsign returned an invalid response.', writing);
     try { await env.assertIntegrationSettings?.(); } catch { fail(409, 'OOH_CREDENTIALS_CHANGED', 'Integration credentials changed during this request. Review the provider outcome.', writing); }
     return result;
@@ -154,7 +153,7 @@ export async function handleOoh(context: OperationContext & { body: ProviderReco
   if (!url.pathname.startsWith(prefix)) return false;
   const path = url.pathname.slice(prefix.length), env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) };
   try {
-    if (!['owner', 'admin', 'editor', 'viewer'].includes(role)) fail(403, 'OOH_PROJECT_ACCESS_REQUIRED', 'Project membership is required.');
+    if (!(workspaceRoles as readonly string[]).includes(role)) fail(403, 'OOH_PROJECT_ACCESS_REQUIRED', 'Project membership is required.');
     if (!['GET', 'POST'].includes(req.method!)) fail(405, 'METHOD_NOT_ALLOWED', 'This OOH action does not support that method.');
     if (req.method === 'POST' && !WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this action.');
     if (path === 'status' && req.method === 'GET') {
