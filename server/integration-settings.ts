@@ -14,7 +14,7 @@ const groups: Record<string, Record<string, string>> = {
   googleMaps: { browserApiKey: 'GOOGLE_MAPS_BROWSER_API_KEY', mapId: 'GOOGLE_MAPS_MAP_ID' },
   googleAdsNative: { clientId: 'GOOGLE_ADS_CLIENT_ID', clientSecret: 'GOOGLE_ADS_CLIENT_SECRET', refreshToken: 'GOOGLE_ADS_REFRESH_TOKEN', developerToken: 'GOOGLE_ADS_DEVELOPER_TOKEN', loginCustomerId: 'GOOGLE_ADS_LOGIN_CUSTOMER_ID' },
   microsoftAds: { clientId: 'MICROSOFT_ADS_CLIENT_ID', clientSecret: 'MICROSOFT_ADS_CLIENT_SECRET', refreshToken: 'MICROSOFT_ADS_REFRESH_TOKEN', developerToken: 'MICROSOFT_ADS_DEVELOPER_TOKEN' },
-  broadsign: { apiKey: 'BROADSIGN_API_KEY', environment: 'BROADSIGN_ENVIRONMENT', domainId: 'BROADSIGN_DOMAIN_ID' },
+  broadsign: { apiKey: 'BROADSIGN_API_KEY', environment: 'BROADSIGN_ENVIRONMENT', domainId: 'BROADSIGN_DOMAIN_ID', currency: 'BROADSIGN_CURRENCY' },
   twilio: { accountSid: 'TWILIO_ACCOUNT_SID', authToken: 'TWILIO_AUTH_TOKEN', fromNumber: 'TWILIO_FROM_NUMBER', messagingServiceSid: 'TWILIO_MESSAGING_SERVICE_SID' },
   cloudflareEmail: { accountId: 'CLOUDFLARE_ACCOUNT_ID', apiKey: 'CLOUDFLARE_EMAIL_API_TOKEN', zoneId: 'CLOUDFLARE_ZONE_ID', fromAddress: 'CLOUDFLARE_EMAIL_FROM_ADDRESS', fromName: 'CLOUDFLARE_EMAIL_FROM_NAME', replyToAddress: 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS' },
 };
@@ -47,6 +47,7 @@ function validate(field: string, input: any) {
   if (field === 'loginCustomerId') { const id = value.replace(/-/g, ''); if (!/^\d{10}$/.test(id)) fail(400, 'INVALID_SETTING', 'Enter the ten-digit Google Ads manager customer ID.'); return id; }
   if (field === 'mapId' && (value.length > 100 || !/^[A-Za-z0-9_-]+$/.test(value))) fail(400, 'INVALID_SETTING', 'Enter a valid Google map ID.');
   if (field === 'environment' && !['sandbox', 'production'].includes(value)) fail(400, 'INVALID_SETTING', 'Choose the Broadsign sandbox or production environment.');
+  if (field === 'currency' && !/^[A-Z]{3}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the Broadsign account currency as a three-letter ISO code, such as USD.');
   if (field === 'domainId' && (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)))) fail(400, 'INVALID_SETTING', 'Enter a positive numeric Broadsign domain ID.');
   if (['accountSid', 'messagingServiceSid'].includes(field) && !new RegExp(`^${field === 'accountSid' ? 'AC' : 'MG'}[a-fA-F0-9]{32}$`).test(value)) fail(400, 'INVALID_SETTING', 'Enter the complete Twilio account or Messaging Service SID.');
   if (['accountId', 'zoneId'].includes(field) && !/^[a-fA-F0-9]{32}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the 32-character Cloudflare account or zone ID.');

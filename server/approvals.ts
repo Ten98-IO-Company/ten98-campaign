@@ -244,7 +244,7 @@ async function decide(context: ApprovalContext, { post, review, snapshot, hash, 
 // starts spend (an activation) or raises a budget needs an approved review of exactly that change: subject id,
 // platform, action, amount in minor units and currency. Pauses, ends and budget decreases never need one. The
 // `-status` actions activate; the `-budget` actions raise a budget.
-const AD_SPEND_ACTIONS = ['ads/status', 'ads/ad-status', 'ads/adset-status', 'ads/adset-budget', 'ads/campaign-budget', 'google-native/campaign-status', 'google-native/campaign-budget', 'microsoft/campaign-status', 'microsoft/campaign-budget'];
+const AD_SPEND_ACTIONS = ['ads/status', 'ads/ad-status', 'ads/adset-status', 'ads/adset-budget', 'ads/campaign-budget', 'google-native/campaign-status', 'google-native/campaign-budget', 'microsoft/campaign-status', 'microsoft/campaign-budget', 'ooh/booking'];
 type AdSpendChange = { subjectId: string; platform: string; action: string; amount: number; currency: string };
 // What a gated route read: `amount` is the budget (major units) that spends once the write applies, and
 // `currentAmount` the budget configured now (null when the route could not read it).
@@ -276,7 +276,7 @@ async function openAdSpendReview(tx: Executor, project: ProviderRecord, user: Pr
     return pending.id as string;
   }
   await tx.execute(sql`UPDATE post_approval_reviews SET status='rejected',reviewed_at=${now},note=${'Superseded by a newer ad spend request.'} WHERE project_id=${project.id} AND kind='ad_spend' AND post_id=${subject} AND status='pending'`);
-  const id = randomUUID(), snapshot = { ...change, currentAmount, activates: change.action.endsWith('status') };
+  const id = randomUUID(), snapshot = { ...change, currentAmount, activates: change.action.endsWith('status') || change.action === 'ooh/booking' };
   await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,kind,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${id}, ${project.id}, ${subject}, 'ad_spend', ${hash}, ${JSON.stringify(snapshot)}, 'pending', ${user.id}, ${now})`);
   await createStore(tx).activity(project.id, `Ad spend review requested by ${user.name || user.id}.`);
   return id;
