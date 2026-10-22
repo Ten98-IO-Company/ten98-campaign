@@ -7,9 +7,10 @@ type Props = { projectId: string; role: string; isOperator: boolean; mode?: 'wor
 const statuses: Record<number, string> = { 1: 'Saved', 3: 'Processing', 4: 'Held', 5: 'Partially held', 9: 'Booked', 10: 'Submitted', 11: 'Live', 12: 'Cancelled', 14: 'Ended', 15: 'Cancelling' };
 export default function OohProviders({ projectId, role, isOperator, mode = 'workflow', onOpenIntegrations, onOpenApprovals, onSpendReview, request, onInventory, onChanged }: Props) {
   const [status, setStatus] = useState<any>(null), [inventory, setInventory] = useState<any[]>([]), [bookings, setBookings] = useState<any[]>([]);
-  const [selected, setSelected] = useState<number[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [spendBlock, setSpendBlock] = useState<AdSpendBlock | null>(null);
+  const [selected, setSelected] = useState<number[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [availability, setAvailability] = useState<Record<string, string>>({});
   const [refreshRequired, setRefreshRequired] = useState(false), refreshNeeded = useRef(false);
+  const [spendBlock, setSpendBlock] = useState<AdSpendBlock | null>(null);
   const inventoryCallback = useRef(onInventory); inventoryCallback.current = onInventory;
   const pendingKeys = useRef(new Map<string, string>()), active = useRef(true);
   const canWrite = ['owner', 'admin', 'editor'].includes(role), canMap = isOperator && ['owner', 'admin'].includes(role);
