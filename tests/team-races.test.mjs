@@ -139,3 +139,19 @@ test('an administrator manages editors and viewers but not owners or administrat
   assert.equal((await change('third', undefined, 'DELETE')).status, 200);
   assert.deepEqual((await pool.query('SELECT user_id, role FROM memberships WHERE workspace_id = $1 ORDER BY user_id', [workspaceId])).rows.map(row => [row.user_id, row.role]).sort(), [[first.id, 'owner'], ['second', 'admin']].sort());
 });
+
+test('project assignees list editors and above for editors, without email addresses', { skip: postgresSkip }, async t => {
+  const { pool, request, workspaceId, first } = await owners(t);
+  const projectId = (await request('/state', { cookie: first.cookie })).data.projects.find(project => project.workspaceId === workspaceId).id;
+  const password = 'team race fixture password', hash = (await pool.query("SELECT password FROM users WHERE id = 'second'")).rows[0].password;
+  for (const [id, role] of [['editor', 'editor'], ['viewer', 'viewer']]) { await pool.query('INSERT INTO users VALUES ($1, $2, $3, $4)', [id, id[0].toUpperCase() + id.slice(1), id + '@example.test', hash]); await pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', [workspaceId, id, role]); }
+  const login = async email => (await request('/auth/login', { method: 'POST', body: { email, password } })).cookie;
+  const editor = await login('editor@example.test'), viewer = await login('viewer@example.test');
+  const result = await request(`/projects/${projectId}/assignees`, { cookie: editor });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.data.members.map(member => member.role).sort(), ['editor', 'owner', 'owner']);
+  assert.ok(result.data.members.every(member => Object.keys(member).sort().join() === 'id,name,role'), 'No email addresses or other fields.');
+  assert.equal((await request(`/projects/${projectId}/assignees`, { cookie: viewer })).status, 403);
+  await pool.query("INSERT INTO workspaces (id, name) VALUES ('other', 'Other')"); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('other-project', 'other', 'Other')");
+  assert.equal((await request('/projects/other-project/assignees', { cookie: editor })).status, 404);
+});
