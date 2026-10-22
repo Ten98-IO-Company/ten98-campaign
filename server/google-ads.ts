@@ -134,6 +134,8 @@ export async function handleGoogleAds(context: OperationContext & { body: any },
     let payload: any;
     if (action === 'negatives') { fields(body, ['accountId', 'adAccountId', 'campaignId', 'keywords', 'confirmChange']); payload = { platform: 'google', keywords: keywords(body.keywords, 0) }; }
     if (action === 'targeting') { fields(body, ['accountId', 'adAccountId', 'campaignId', 'targeting', 'confirmChange']); payload = { platform: 'google', targeting: targeting(body.targeting) }; }
+    // Not gated by ad spend approval (manager decision on #35 Q1 scope): a bid change cannot raise spend above the campaign's
+    // budget, and budget increases and activations are gated. Revisit if operators report spend above expectation driven by bids.
     if (action === 'bidding') {
       fields(body, ['accountId', 'adAccountId', 'campaignId', 'bidStrategy', 'bidAmount', 'roasAverageFloor', 'confirmChange']);
       if (!['LOWEST_COST_WITHOUT_CAP', 'COST_CAP', 'LOWEST_COST_WITH_MIN_ROAS', 'LOWEST_COST_WITH_BID_CAP'].includes(body.bidStrategy)) fail(400, 'INVALID_BIDDING', 'Choose a supported Google bid strategy.');
