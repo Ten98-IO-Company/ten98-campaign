@@ -48,6 +48,6 @@ test('revoked invitations stay listed as revoked and only pending ones offer Rev
   const ui = view('owner', 'owner-1');
   ui.state[1] = [{ id: 'invite-revoked', email: 'gone@example.test', role: 'editor', expiresAt: '2026-10-28T00:00:00.000Z', status: 'revoked' }, invitations[0]];
   const html = renderToStaticMarkup(ui.render());
-  assert.match(html, /t98-tone--neutral[^>]*>revoked</, 'The server status is shown with the neutral revoked tone.');
+  assert.match(html, /t98-tone--neutral[^>]*>Revoked</, 'The server status is shown with the neutral revoked tone.');
   assert.match(html, /aria-label="[^"]*: new@example\.test"/); assert.doesNotMatch(html, /aria-label="[^"]*: gone@example\.test"/, 'A revoked invitation cannot be revoked again.');
 });

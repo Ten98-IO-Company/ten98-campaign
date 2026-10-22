@@ -1,20 +1,4 @@
 {
-  "src/IntegrationSettings.tsx": {
-    "element": 1,
-    "styling": 2
-  },
-  "src/OohMap.tsx": {
-    "element": 1,
-    "styling": 2
-  },
-  "src/PostComposer.tsx": {
-    "stylesheet": 1,
-    "styling": 2,
-    "element": 1
-  },
-  "src/UnifiedInbox.tsx": {
-    "element": 1
-  },
   "src/main.tsx": {
     "stylesheet": 1
   }

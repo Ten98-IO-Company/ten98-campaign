@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, ConfirmDialog, Disclosure, Field, FormActions, Grid, Heading, Inline, Input, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
+import { flushSync } from 'react-dom';
+import { Alert, Badge, Button, Card, Checkbox, ConfirmDialog, Disclosure, EmbedHost, Field, FormActions, Grid, Heading, Inline, Input, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
 import { loadGoogleMaps } from './OohMap';
 import ZernioWebhooks from './ZernioWebhooks';
 
@@ -88,9 +89,10 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
       const config = await request(`/projects/${project.id}/maps/config`); if (!active.current) return;
       if (!config.configured) throw new Error('Save a Google Maps browser key before testing this site.');
       mapsTested.current = true;
-      const google = await loadGoogleMaps(config.browserKey); if (!active.current || !mapContainer.current) return;
-      setResults(items => ({ ...items, googleMaps: { ok: false, status: 'browser_loading', message: 'Loading a map preview to check this browser’s access…' } }));
-      mapContainer.current.style.display = 'block';
+      const google = await loadGoogleMaps(config.browserKey); if (!active.current) return;
+      // Rendered synchronously so the host shows its mount before the map attaches to it.
+      flushSync(() => setResults(items => ({ ...items, googleMaps: { ok: false, status: 'browser_loading', message: 'Loading a map preview to check this browser’s access…' } })));
+      if (!mapContainer.current) return;
       const map = new google.Map(mapContainer.current, { center: { lat: 25.2048, lng: 55.2708 }, zoom: 10, mapId: config.mapId || 'DEMO_MAP_ID', streetViewControl: false, mapTypeControl: false });
       await new Promise<void>(resolve => {
         let settled = false;
@@ -127,9 +129,8 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
     googleCalendar: mappingForm('Google Calendar ID', 'calendarId', 500, 'calendar-id@group.calendar.google.com', 'Use a dedicated shared calendar with event editing access for the service account. Each calendar can belong to one project; leaving this empty disconnects it.', 'Save calendar', saveCalendar, !calendarLoaded),
     twilio: canMap && <Stack gap={2} aria-label="SMS incoming webhook"><Heading level={3} size="sm">Incoming SMS webhook</Heading><Text tone="muted">Set this project’s incoming-message webhook in Twilio to HTTP POST.</Text>
       {projectSmsWebhook?.error ? <Alert tone="danger" title={projectSmsWebhook.error}/> : projectSmsWebhook?.url ? <><Field label="Incoming-message webhook URL (HTTP POST)"><Input readOnly value={projectSmsWebhook.url}/></Field>{!projectSmsWebhook.publicCallbacks && <Alert tone="warning" title="Use a public HTTPS app address before configuring incoming SMS delivery."/>}</> : <StatusLine busy>Loading SMS webhook settings…</StatusLine>}</Stack>,
-    // The map preview stays a native, ref-able container until @ten98/ui has a map surface (U2).
     googleMaps: <>{mapsReload && <Alert tone="info" title="Reload the app to apply the browser map settings before testing." actions={<Button variant="secondary" onClick={reloadMaps}>Reload app</Button>}/>}
-      <div ref={mapContainer} className="integration-map-preview" role="region" aria-label="Google Maps connection preview" style={{ display: ['browser_loading', 'browser_loaded', 'failed'].includes(results.googleMaps?.status) ? 'block' : 'none' }}/></>,
+      {['browser_loading', 'browser_loaded', 'failed'].includes(results.googleMaps?.status) && <EmbedHost ref={mapContainer} label="Google Maps connection preview" size="sm"/>}</>,
   };
   function credentials(provider: Provider, definition: typeof definitions[string]) {
     const edits = drafts[provider.id] || {}, changed = dirty(provider), testButton = <Button variant="secondary" loading={busy === provider.id} disabled={Boolean(busy) || !provider.configured || changed || (provider.id === 'googleMaps' && mapsReload)} onClick={() => test(provider)}>Test connection</Button>;

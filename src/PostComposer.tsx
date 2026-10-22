@@ -1,8 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Badge, Button, Checkbox, CheckboxGroup, ContentPreview, DateTimeField, DestinationPicker, Disclosure, Field, Fieldset, Form, FormGrid, Grid, Heading, Image as MediaImage, Inline, Input, List, ListItem, MediaPlayer, MediaStrip, Option, ReviewConfirm, SegmentedControl, Select, Stack, StatusLine, Tabs, Text, Textarea, ValidationSummary, VisuallyHidden, type MediaItem as StripItem, type ValidationMessage } from '@ten98/ui';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Alert, Badge, Button, Checkbox, CheckboxGroup, ContentPreview, DateTimeField, DestinationPicker, Disclosure, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Image as MediaImage, Inline, Input, List, ListItem, MediaPlayer, MediaStrip, Option, ReviewConfirm, SegmentedControl, Select, Stack, StatusLine, Tabs, Text, Textarea, ValidationSummary, VisuallyHidden, type MediaItem as StripItem, type ValidationMessage } from '@ten98/ui';
 import { PLATFORM_RULES, captionLimitForVariant, countCaption, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms, providerPostMediaUrls } from '../shared/social-posts.ts';
-// The library has no sticky form footer; this sheet keeps only that rule.
-import './post-composer.css';
 import InstagramPublishingTools from './InstagramPublishingTools';
 import TikTokPublishingTools from './TikTokPublishingTools';
 
@@ -21,6 +20,8 @@ type Props = {
   onLoadGroups?: () => Promise<any>;
   onShortenLinks?: (values: Record<string, any>) => Promise<{ content: string; platformOverrides: Record<string, any>; accountOverrides?: Record<string, any> }>;
   busy?: boolean; readOnly?: boolean; initialScheduledAt?: string;
+  /** Element (the editor Dialog's footer) the actions render into; without it they follow the form. */
+  actionsHost?: HTMLElement | null;
 };
 const own = Object.hasOwn;
 const localTime = (value = '') => value && Number.isFinite(Date.parse(value)) ? new Date(Date.parse(value) - new Date(value).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
@@ -178,7 +179,7 @@ function MediaEditor({ items, onChange, label, disabled, onInspect }: { items: M
     } catch (failure) { setNotice((failure as Error).message || 'Zernio could not inspect this media.'); } finally { setInspecting(-1); }
   }
   return <Stack gap={4}>
-    <MediaStrip label={`${label} media`} items={strip} readOnly={disabled} emptyMessage="No media. Platforms that require an image or video will show a restriction below." onItemsChange={next => onChange(next.map(entry => { const item = items[Number(entry.id)], altText = entry.altText.slice(0, 1500); return altText === (item.altText || '') ? item : Object.fromEntries(Object.entries({ ...item, altText: altText || undefined }).filter(([, value]) => value !== undefined)) as MediaItem; }))}/>
+    <MediaStrip label={`${label} media`} altMaxLength={1500} items={strip} readOnly={disabled} emptyMessage="No media. Platforms that require an image or video will show a restriction below." onItemsChange={next => onChange(next.map(entry => { const item = items[Number(entry.id)], altText = entry.altText; return altText === (item.altText || '') ? item : Object.fromEntries(Object.entries({ ...item, altText: altText || undefined }).filter(([, value]) => value !== undefined)) as MediaItem; }))}/>
     {items.map((item, index) => <Fieldset key={index} legend={`${label} media ${index + 1} source`}>
       <FormGrid><Field label={`${label} media ${index + 1} type`}><Select value={item.type} onChange={event => update(index, { type: event.target.value, width: undefined, height: undefined, duration: undefined })}><Option value="image">Image</Option><Option value="video">Video</Option><Option value="gif">Animated GIF</Option><Option value="document">Document / PDF</Option></Select></Field>
         <Field label={`${label} media ${index + 1} URL`}><Input type="url" value={item.url} maxLength={4000} required placeholder="https://cdn.example.com/creative.jpg" onChange={event => { const { width, height, duration, size, mimeType, ...rest } = item; onChange(items.map((media, position) => position === index ? { ...rest, url: event.target.value } : media)); }}/></Field></FormGrid>
@@ -212,21 +213,21 @@ function StructuredOption({ schema, value, onChange, label, onInvalid, depth = 0
 const previewMedia = (items: MediaItem[] = []) => items.length ? <Grid columns="auto" minItemWidth="sm" gap={2}>{items.map((item, index) => <Stack key={item.url + ':' + index} gap={1}><PreviewMedia item={item}/>{items.length > 1 && <Text size="xs" tone="muted">{index + 1} / {items.length}</Text>}</Stack>)}</Grid> : undefined;
 type PreviewSize = 'mobile' | 'desktop';
 // The mobile/desktop preview toggle follows zernio-dev/latewiz@28dd018063b955769de11f881acd03bb64c61cd4 src/app/dashboard/compose/_components/platform-previews.tsx:34-50 (MIT).
-// ContentPreview has no frame width, so the size changes where feeds cut a caption: phones show fewer characters.
+// The size sets the previewed device width and where feeds cut a caption: phones show fewer characters.
 const captionCutoff = (platform: string, size: PreviewSize) => ['instagram', 'tiktok', 'threads'].includes(platform) ? size === 'mobile' ? 125 : 180 : size === 'mobile' ? 140 : 300;
-export function PostVariantPreview({ platform, variant, accountName = 'Your brand', scheduled = false, size = 'desktop' }: { platform: string; variant: { content: string; mediaItems: MediaItem[]; options?: Record<string, any> }; accountName?: string; scheduled?: boolean; size?: PreviewSize }) {
+export function PostVariantPreview({ platform, variant, accountName = 'Your brand', scheduled = false, size }: { platform: string; variant: { content: string; mediaItems: MediaItem[]; options?: Record<string, any> }; accountName?: string; scheduled?: boolean; size?: PreviewSize }) {
   const options = variant.options || {}, rule = PLATFORM_RULES[platform];
   const entries: { content?: string; mediaItems?: MediaItem[] }[] = options.threadItems?.length ? options.threadItems : [variant];
   const pollAnswers = options.poll?.options || options.poll?.answers?.map((answer: any) => answer.poll_media?.text || 'Poll answer') || [];
   const [first, ...rest] = entries, caption = first.content || undefined;
-  return <ContentPreview label={`${rule?.label || platform} post preview`} destination={accountName} provider={`${rule?.label || platform} · ${options.postType || options.mediaType || options.contentType || 'Post'}${scheduled ? ' · Planned' : ''}`} chrome={[options.contentType, options.postType].includes('story') ? 'story' : ['discord', 'telegram', 'whatsapp'].includes(platform) ? 'message' : 'post'} captionLimit={captionCutoff(platform, size)} emptyMessage="Your caption will appear here."
+  return <ContentPreview label={`${rule?.label || platform} post preview`} destination={accountName} provider={`${rule?.label || platform} · ${options.postType || options.mediaType || options.contentType || 'Post'}${scheduled ? ' · Planned' : ''}`} chrome={[options.contentType, options.postType].includes('story') ? 'story' : ['discord', 'telegram', 'whatsapp'].includes(platform) ? 'message' : 'post'} device={size} captionLimit={captionCutoff(platform, size || 'desktop')} emptyMessage="Your caption will appear here."
     text={options.title ? <Stack gap={1}><Text weight="semibold">{options.title}</Text>{caption && <Text preserveWhitespace>{caption}</Text>}</Stack> : caption} media={previewMedia(first.mediaItems)}
     thread={rest.map((entry, position) => ({ id: platform + ':' + (position + 1), text: entry.content || undefined, media: previewMedia(entry.mediaItems) }))}
     poll={options.poll ? { question: typeof options.poll.question === 'string' ? options.poll.question : options.poll.question?.text || 'Poll', options: pollAnswers, duration: 'Voting opens on the platform after publication.' } : undefined}
     firstComment={options.firstComment || undefined}/>;
 }
 
-export default function PostComposer({ post, assets = [], campaigns = [], accounts: connectedAccounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onLookupDestinations, onLoadQueues, onLoadGroups, onShortenLinks, providerPost = false, busy = false, readOnly = false, initialScheduledAt }: Props) {
+export default function PostComposer({ post, assets = [], campaigns = [], accounts: connectedAccounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onLookupDestinations, onLoadQueues, onLoadGroups, onShortenLinks, providerPost = false, busy = false, readOnly = false, initialScheduledAt, actionsHost }: Props) {
   const [content, setContent] = useState(post?.content || ''), [platforms, setPlatforms] = useState<string[]>(post?.platforms || []), [selectedAccounts, setAccounts] = useState<string[]>(post?.accounts || []);
   const [assetId, setAssetId] = useState(post?.assetId || ''), [campaignId, setCampaignId] = useState(post?.campaignId || ''), [scheduledAt, setScheduledAt] = useState(localTime(post?.scheduledAt) || initialScheduledAt || '');
   const [baseMode, setBaseMode] = useState(Array.isArray(post?.mediaItems) ? post.mediaItems.length ? 'custom' : 'none' : post?.assetId ? 'asset' : 'none'), [baseMedia, setBaseMedia] = useState<MediaItem[]>(post?.mediaItems || []);
@@ -237,7 +238,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   const [accountsTouched, setAccountsTouched] = useState(false), [loadingAccounts, setLoadingAccounts] = useState(false);
   const [queues, setQueues] = useState<any[]>([]), [queueId, setQueueId] = useState(providerPost ? '' : post?.queueId || ''), [queueVersion, setQueueVersion] = useState(providerPost ? '' : post?.queueVersion || ''), [loadingQueues, setLoadingQueues] = useState(false);
   const [tikTokPermissions, setTikTokPermissions] = useState<Record<string, { mediaType: string; result: any }>>({}), [loadingTikTok, setLoadingTikTok] = useState(false);
-  const headingRef = useRef<HTMLHeadingElement>(null);
+  const headingRef = useRef<HTMLElement>(null), formId = useId();
   const [shortening, setShortening] = useState(false), alive = useRef(true);
   const [groupAccounts, setGroupAccounts] = useState<Row[] | null>(null), accounts = groupAccounts || connectedAccounts;
   const [tagInput, setTagInput] = useState((post?.tags || []).join('\n')), [previewSize, setPreviewSize] = useState<PreviewSize>('desktop');
@@ -345,10 +346,10 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     <SegmentedControl label="Preview size" value={previewSize} onValueChange={value => setPreviewSize(value === 'mobile' ? 'mobile' : 'desktop')} options={[{ value: 'mobile', label: 'Mobile' }, { value: 'desktop', label: 'Desktop' }]}/>
     <PostVariantPreview size={previewSize} platform={selected} variant={variant} accountName={editingAccount ? accountLabel(editingAccount) + ' · ' + editingAccountId : activeAccounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))).map(accountLabel).join(', ') || 'Your brand'} scheduled={!!scheduledAt || !!queueId}/>
   </Stack>;
-  return <Form className="post-composer" onSubmit={(_, event) => submit(event)}>
+  const actions = <>{onDelete && canWrite && !readOnly && !post?.externalId && post?.status !== 'published' && <Button variant="danger" disabled={busy || saving} onClick={onDelete}>Delete</Button>}<Button variant="secondary" disabled={saving} onClick={onCancel}>{readOnly || !canWrite ? 'Close' : 'Cancel'}</Button>{!disabled || busy || saving ? <Button variant="primary" type="submit" form={formId} disabled={disabled}>{saving || busy ? 'Saving…' : post ? 'Save changes' : 'Save draft'}</Button> : null}</>;
+  return <Form id={formId} onSubmit={(_, event) => submit(event)}>
     <Input type="hidden" name="draftSnapshot" readOnly value={JSON.stringify(values)}/>
-    {/* React 19 passes ref as a prop; the library's heading props do not declare it. */}
-    <VisuallyHidden as="h3" tabIndex={-1} {...{ ref: headingRef }}>Post composer</VisuallyHidden>
+    <VisuallyHidden as="h3" tabIndex={-1} ref={headingRef}>Post composer</VisuallyHidden>
     {error && <Alert tone="danger">{error}</Alert>}
     <Text tone="muted">Start with shared content, then tailor captions, media, options and times for each platform or connected account. Save a draft at any stage; publishing checks every selected destination.</Text>
     <Stack as="fieldset" gap={8} disabled={disabled}>
@@ -391,6 +392,6 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
         {onValidate && !providerCheck && <Inline><Button variant="secondary" disabled={disabled || checking || !platforms.length} onClick={checkWithProvider}>{checking ? 'Checking with Zernio…' : 'Check with Zernio'}</Button></Inline>}
       </Stack>
     </Stack>
-    <div className="modal-actions">{onDelete && canWrite && !readOnly && !post?.externalId && post?.status !== 'published' && <Button variant="danger" disabled={busy || saving} onClick={onDelete}>Delete</Button>}<Button variant="secondary" onClick={onCancel}>{readOnly || !canWrite ? 'Close' : 'Cancel'}</Button>{!disabled || busy || saving ? <Button variant="primary" type="submit" disabled={disabled}>{saving || busy ? 'Saving…' : post ? 'Save changes' : 'Save draft'}</Button> : null}</div>
+    {actionsHost ? createPortal(actions, actionsHost) : <FormActions>{actions}</FormActions>}
   </Form>;
 }

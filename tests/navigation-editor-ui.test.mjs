@@ -294,7 +294,10 @@ test('inbox-only drafts register native unload protection, show an accessible co
   ui.api = async path => { ui.calls.push(path); return { user: null }; }; ui.signOut(); ui.discardChanges(); await tick();
   assert.deepEqual(ui.calls, ['/auth/logout', '/session']); assert.equal(ui.inboxDirty, false); assert.equal(ui.state, null);
   // The prompt is the library's accessible ConfirmDialog, opened by discardPrompt and cancelled into keepEditing.
-  assert.match(source, /<ConfirmDialog open=\{discardPrompt\} onOpenChange=\{open => \{ if \(!open\) keepEditing\(\); \}\} danger title="Discard unsaved changes\?"[^>]*onConfirm=\{discardChanges\}/);
+  assert.match(source, /<ConfirmDialog open=\{discardPrompt\} onOpenChange=\{open => \{ if \(!open\) keepEditing\(\); \}\} danger title="Discard unsaved changes\?"[^>]*cancelLabel="Keep editing" onConfirm=\{discardChanges\}/);
+  // The post editor is wide and its composer renders Save and Cancel into the Dialog's always-visible footer.
+  assert.match(source, /<Dialog open=\{!!modal\} size=\{modal\?\.type === 'post' \? 'wide' : 'default'\} footer=\{modal\?\.type === 'post' && !modal\.item\?\.externalId \? <Inline ref=\{setComposerActions\} gap=\{2\}\/> : undefined\}/);
+  assert.match(source, /<PostComposer key=[^\n]+? actionsHost=\{composerActions\}/); assert.match(source, /<Stack ref=\{dialogRef\} gap=\{4\}/);
   assert.match(source, /onDraftChange=\{inboxDraftChanged\}/); assert.match(source, /Discard and switch/);
 });
 

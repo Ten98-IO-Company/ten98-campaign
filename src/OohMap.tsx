@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Card, EmptyState, SelectableList, Stack, Text } from '@ten98/ui';
+import { Alert, Card, EmbedHost, EmptyState, SelectableList, Stack, Text } from '@ten98/ui';
 
 type Location = { id: string; name: string; location?: string; latitude?: number | null; longitude?: number | null; status?: string; sample?: boolean; locationSource?: string };
 type Props = { locations: Location[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; projectId: string; onSelect: (item: Location) => void };
@@ -53,9 +53,8 @@ export default function OohMap({ locations, request, projectId, onSelect }: Prop
   }, [locations, ready]);
   return <Card as="section" headingLevel={2} title="OOH locations" description={`${located.length} mapped locations · ${locations.length - located.length} still need coordinates`} actions={<Text tone="muted" size="sm">Google Maps</Text>}><Stack gap={3}>
     {error && <Alert tone="danger">{error}</Alert>}
-    {config && !config.configured && <EmptyState icon="pin" title="Put your placements on the map" description="Your instance administrator can enable Google Maps with a browser API key. Add coordinates to each booking to show its location."/>}
-    {/* Google Maps draws into this host element; @ten98/ui has no map host (U37 stays an app adapter). */}
-    <div ref={container} className="ooh-map" role="region" aria-label="Google map of outdoor advertising locations" style={{ display: config?.configured ? 'block' : 'none' }}/>
+    {/* Google Maps mounts into the host's ref; without a browser key the host shows the empty state instead. */}
+    <EmbedHost ref={container} label="Google map of outdoor advertising locations" size="lg" narrowSize="md" busy={!ready && !error && config?.configured !== false} loadingLabel="Loading map…" fallback={config && !config.configured ? <EmptyState icon="pin" title="Put your placements on the map" description="Your instance administrator can enable Google Maps with a browser API key. Add coordinates to each booking to show its location."/> : undefined}/>
     {located.length > 0 && <SelectableList label="Mapped locations" onSelect={id => { const location = located.find(row => row.id === id); if (location) onSelect(location); }} items={located.map(location => ({ id: location.id, title: location.name, preview: (location.location || `${location.latitude}, ${location.longitude}`) + (location.sample ? ' · Sample' : location.locationSource === 'provider' ? ' · Provider coordinates' : ' · Team-entered location'), status: location.status === 'live' ? 'Live' : undefined }))}/>}
   </Stack></Card>;
 }

@@ -31,6 +31,8 @@ const localDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth(
 export default function CampaignPublishingAgenda({ posts, googleEvents, month, accounts = [], canWrite, postLabel, onSelect, onCreateDay, googleEventActions, actions, view = 'list', onViewChange, onMonthChange, postApprovals }: Props) {
   const start = new Date(month.getFullYear(), month.getMonth(), 1), end = new Date(month.getFullYear(), month.getMonth() + 1, 1);
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // Days before today offer no Create button: a post cannot be planned in the past.
+  const today = localDate(new Date());
   const format = new Intl.DateTimeFormat('en', { timeZone: timezone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
   const approval = (post: Row) => postApprovals ? ' · ' + (postApprovals[post.id] || 'Approval not requested') : '';
   const timeOnly = new Intl.DateTimeFormat('en', { timeZone: timezone, hour: '2-digit', minute: '2-digit' });
@@ -68,10 +70,10 @@ export default function CampaignPublishingAgenda({ posts, googleEvents, month, a
       <Inline gap={4}><Text size="sm"><Text as="strong">{countPosts('scheduled')}</Text> scheduled</Text><Text size="sm"><Text as="strong">{countPosts('published')}</Text> published</Text><Text size="sm"><Text as="strong">{googleCount}</Text> Google events</Text></Inline>
       {onViewChange && <SegmentedControl label="Calendar view" value={view} onValueChange={value => onViewChange(value as 'month' | 'list')} options={[{ value: 'month', label: 'Month' }, { value: 'list', label: 'List' }]}/>}
     </Inline>
-    {view === 'month' && onMonthChange ? <CalendarMonth month={{ year: month.getFullYear(), month: month.getMonth() + 1 }} weekStartsOn={1} locale="en" today={localDate(new Date())} days={days} onPrev={() => onMonthChange(new Date(month.getFullYear(), month.getMonth() - 1, 1))} onNext={() => onMonthChange(new Date(month.getFullYear(), month.getMonth() + 1, 1))} onToday={() => onMonthChange(new Date(new Date().getFullYear(), new Date().getMonth(), 1))} onCreateDay={canWrite && onCreateDay ? onCreateDay : undefined} createDisabledReason={canWrite ? undefined : 'Read only: your role cannot create posts.'}/> : <>
+    {view === 'month' && onMonthChange ? <CalendarMonth month={{ year: month.getFullYear(), month: month.getMonth() + 1 }} weekStartsOn={1} locale="en" today={today} days={days} onPrev={() => onMonthChange(new Date(month.getFullYear(), month.getMonth() - 1, 1))} onNext={() => onMonthChange(new Date(month.getFullYear(), month.getMonth() + 1, 1))} onToday={() => onMonthChange(new Date(new Date().getFullYear(), new Date().getMonth(), 1))} onCreateDay={canWrite && onCreateDay ? onCreateDay : undefined} isCreatable={day => day >= today} createDisabledReason={canWrite ? undefined : 'Read only: your role cannot create posts.'}/> : <>
     <PublishingAgenda label="Publishing agenda" scope={month.toLocaleDateString('en', { month: 'long', year: 'numeric' })} timezoneLabel={timezone} entries={entries} readOnly={!canWrite} emptyMessage="No scheduled posts or loaded Google events this month." actions={actions}/>
     {canWrite && onCreateDay && <Inline as="form" key={localDate(start)} align="end" onSubmit={event => { event.preventDefault(); const day = String(new FormData(event.currentTarget as HTMLFormElement).get('day') || ''); if (day) onCreateDay(day); }}>
-      <Field label="Post date"><Input type="date" name="day" required defaultValue={localDate(start)}/></Field>
+      <Field label="Post date"><Input type="date" name="day" required min={today} defaultValue={localDate(start) < today ? today : localDate(start)}/></Field>
       <Button variant="secondary" type="submit">Create post on date</Button>
     </Inline>}</>}
   </Stack></Card>;
