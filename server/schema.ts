@@ -409,6 +409,27 @@ export const directDeliveries = pgTable('direct_deliveries', {
 }, t => [
   unique('direct_deliveries_campaign_id_contact_id_key').on(t.campaign_id, t.contact_id),
   index('direct_deliveries_pending').on(t.campaign_id, t.seq).where(sql`${t.data}->>'status' = 'pending'`),
+  index('direct_deliveries_provider_id').on(sql`(${t.data}->>'providerId')`),
+]);
+export const sesNotificationReceipts = pgTable('ses_notification_receipts', {
+  topic_arn: text('topic_arn').notNull(),
+  message_id: text('message_id').notNull(),
+  received_at: text('received_at').notNull(),
+}, t => [
+  primaryKey({ columns: [t.topic_arn, t.message_id] }),
+]);
+export const directEmailFeedback = pgTable('direct_email_feedback', {
+  project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  event_id: text('event_id').notNull(),
+  target_hash: text('target_hash').notNull(),
+  category: text('category').notNull(),
+  sub_type: text('sub_type'),
+  occurred_at: text('occurred_at').notNull(),
+}, t => [
+  primaryKey({ columns: [t.project_id, t.provider, t.event_id, t.target_hash] }),
+  index('direct_email_feedback_recipient').on(t.project_id, t.target_hash, t.occurred_at),
+  check('direct_email_feedback_category_check', sql`${t.category} IN ('transient','undetermined')`),
 ]);
 export const smsConversations = pgTable('sms_conversations', {
   id: text('id').primaryKey(),

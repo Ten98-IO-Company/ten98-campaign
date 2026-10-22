@@ -8,11 +8,24 @@ An instance operator configures credentials in **Integrations**. Use your own pr
 
 | Channel | Configuration | Sending behavior |
 | --- | --- | --- |
-| Email | Cloudflare account ID, Email Sending API token, approved sender address, optional sender name and reply-to address | One recipient per send, with a subject, required plain text and optional HTML. Transactional email only; replies go to the external receiving address. |
+| Email | Amazon SES (region, access key, verified sender, configuration set and SNS topic), or Cloudflare account ID, Email Sending API token and approved sender address; both take an optional sender name and reply-to address | One recipient per send, with a subject, required plain text and optional HTML. Transactional email only; replies go to the external receiving address. |
 | SMS | Twilio Account SID, Auth Token, and either an international sender number or Messaging Service SID | Personalized text with an appended STOP instruction. Encoding and segment totals are estimates; Twilio determines delivery and charges. |
 | WhatsApp | Zernio credentials, a project profile mapping, an active WhatsApp Business account, and an approved template/language | A scoped broadcast containing the explicitly selected phone numbers. The editor supports text variables, approved image/video/document headers using public HTTPS media URLs, and approved URL-button suffix values. |
 
 Cloudflare explicitly limits Email Service to transactional messages. Promotional newsletters and bulk marketing email cannot be sent through this connection, even when a contact has opted in. Review [Cloudflare's current policy](https://developers.cloudflare.com/email-service/reference/faq/) and [sender setup](https://developers.cloudflare.com/email-service/get-started/).
+
+### Amazon SES
+
+Direct email uses whichever of **Amazon SES email** (region, access key, secret and sender address) and Cloudflare is configured. When both are, choose one with **Email provider** in the SES settings (`EMAIL_PROVIDER`, `ses` or `cloudflare`); until then email campaigns cannot be sent (`EMAIL_PROVIDER_REQUIRED`). Each campaign records the provider it was scheduled with, and changing the choice or either provider's settings stops a scheduled campaign for review. Sending uses [SES v2 SendEmail](https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html) through `@ten98/runtime`, signed with AWS Signature Version 4. Each message carries the delivery ID as an `idempotency-key` tag for reconciliation; SES has no request deduplication, so an unconfirmed send marks the delivery uncertain and stops the campaign instead of resending. Throttling and a suspended, paused or unverified sender also stop the campaign for review.
+
+Feedback arrives through an SNS topic in the same region. Set the topic's `SignatureVersion` to 2, subscribe `https://<your app>/api/webhooks/ses/sns` over HTTPS, and publish Bounce, Complaint and Delivery events to it from the configuration set. The webhook accepts only messages signed by the regional SNS certificate for the configured topic; it confirms that topic's subscription itself and records each message once.
+
+- A permanent bounce or complaint suppresses the address for the project, as a Cloudflare hard bounce does. An unsubscribe recorded by SES applies the existing unsubscribe rule.
+- Transient bounces count per recipient; the third within seven days suppresses the address. Each SES event counts once, however often SNS delivers it.
+- A 5.7.x policy or reputation rejection describes the sender, so it raises a `policy` alert instead of suppressing the recipient. An undetermined bounce raises an `undetermined` alert and counts toward the transient threshold, but one alone never suppresses. SES alerts lapse a week after the latest report.
+- An address already on the SES account suppression list marks the delivery suppressed without a local suppression.
+
+The connection test reads the SES account and the sender domain's identity; it sends no email and does not test the SNS subscription. Use a least-privilege IAM user (`ses:SendEmail`, `ses:GetAccount`, `ses:GetEmailIdentity`).
 
 Set **Reply-to address** in Integrations, or `CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS`, to the address your team already receives. The app sends it using Cloudflare's [`reply_to` field](https://developers.cloudflare.com/api/resources/email_sending/methods/send/). To forward replies through Cloudflare, configure an Email Routing address, verify its group/mailbox destination, and enable that route in Cloudflare's dashboard. See [routing rules and verified destinations](https://developers.cloudflare.com/email-service/configuration/email-routing-addresses/). Google Groups or other group mailboxes must also permit the intended external messages. The app does not create these routing rules, read group mail, or maintain an email inbox. A successful sending connection test does not verify the reply route; test it separately with your receiving system.
 

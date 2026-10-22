@@ -16,7 +16,7 @@
     "check:architecture": "node node_modules/@ten98/runtime/check.mjs ."
   },
   "dependencies": {
-    "@ten98/runtime": "file:vendor/ten98-runtime-0.1.16.tgz",
+    "@ten98/runtime": "file:vendor/ten98-runtime-0.1.17.tgz",
     "@ten98/ui": "file:vendor/ten98-ui-0.21.0.tgz",
     "drizzle-orm": "0.45.2",
     "openid-client": "6.8.8",

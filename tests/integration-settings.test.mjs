@@ -25,6 +25,26 @@ test('native ad credentials stay encrypted, masked and independent from shared D
   }
 });
 
+test('Amazon SES settings validate, stay encrypted and masked, and test the account with signed read-only calls', { skip: postgresSkip }, async t => {
+  const { db, pool } = await testDatabase(t), env = {}, manager = await createIntegrationSettings({ db, env, secret }), originalFetch = globalThis.fetch;
+  const fields = { region: 'eu-west-1', accessKeyId: 'AKIAFIXTUREKEY000000', secretAccessKey: 'fixture/secret/access/key/0000000000000A', fromAddress: 'receipts@example.com', configurationSet: 'campaign-feedback', snsTopicArn: 'arn:aws:sns:eu-west-1:123456789012:ses-feedback' };
+  for (const [field, value] of [['emailProvider', 'smtp'], ['region', 'mars-north-1'], ['accessKeyId', 'not-a-key'], ['secretAccessKey', 'short'], ['configurationSet', 'bad set'], ['snsTopicArn', 'arn:aws:sqs:eu-west-1:123456789012:q']]) await rejects(manager.save('amazonSes', { ...fields, [field]: value }), 'INVALID_SETTING');
+  await manager.save('amazonSes', fields);
+  const described = provider(manager, 'amazonSes');
+  assert.equal(described.configured, true); assert.deepEqual(described.secretFields.secretAccessKey, { configured: true, source: 'saved' }); assert.ok(described.options.region.includes('eu-west-1'));
+  assert.equal(JSON.stringify(manager.describe()).includes(fields.secretAccessKey), false); assert.equal(env.AWS_SES_SECRET_ACCESS_KEY, fields.secretAccessKey);
+  assert.ok((await pool.query('SELECT ciphertext FROM integration_settings')).rows.every(row => !Buffer.from(row.ciphertext).toString().includes(fields.secretAccessKey)));
+  const calls = []; let account = { SendingEnabled: true, ProductionAccessEnabled: false };
+  globalThis.fetch = async (target, options) => { calls.push({ url: String(target), options }); return Response.json(String(target).endsWith('/account') ? account : { VerifiedForSendingStatus: true }); };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const result = await manager.test('amazonSes');
+  assert.deepEqual(calls.map(call => [call.url, call.options.method]), [['https://email.eu-west-1.amazonaws.com/v2/email/account', 'GET'], ['https://email.eu-west-1.amazonaws.com/v2/email/identities/example.com', 'GET']]);
+  assert.ok(calls.every(call => /^AWS4-HMAC-SHA256 Credential=AKIAFIXTUREKEY000000\/\d{8}\/eu-west-1\/ses\/aws4_request, /.test(call.options.headers.authorization) && call.options.redirect === 'error'));
+  assert.match(result.message, /sandbox/);
+  account = { SendingEnabled: false }; await rejects(manager.test('amazonSes'), 'SES_SENDING_DISABLED');
+  await manager.save('amazonSes', { snsTopicArn: 'arn:aws:sns:us-east-1:123456789012:ses-feedback' }); await rejects(manager.test('amazonSes'), 'INVALID_SETTING');
+});
+
 test('connection tests reject malformed UTF-8 and oversized bodies and cancel rejected provider responses', { skip: postgresSkip }, async t => {
   const { db } = await testDatabase(t), originalFetch = globalThis.fetch;
   const manager = await createIntegrationSettings({ db, env: { OPENROUTER_API_KEY: 'fixture', OPENROUTER_MODEL: 'fixture/model' }, secret });
