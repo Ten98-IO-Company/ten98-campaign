@@ -270,12 +270,15 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     const metaAccount = { ...account, _id: 'meta-connection', platform: 'metaads' };
     const googleAccount = { ...account, _id: 'google-connection', platform: 'googleads' };
     const pinterestAccount = { ...account, _id: 'pinterest-connection', platform: 'pinterestads' };
-    let adCreates = 0;
+    let adCreates = 0; const validations = [];
     provider = async (url, options) => {
       if (url.pathname.endsWith('/api/v1/accounts')) return { accounts: [metaAccount, googleAccount, pinterestAccount] };
       if (url.pathname.endsWith('/ads/accounts')) {
         assert.equal(url.searchParams.get('inScopeOnly'), 'true');
         return { accounts: [{ id: url.searchParams.get('accountId') === 'meta-connection' ? 'act_123' : 'native-123', currency: 'AED', selectable: true, minimumDailyBudget: 1 }] };
+      }
+      if (url.pathname.endsWith('/ads/create') && JSON.parse(options.body).validateOnly === true) {
+        validations.push(JSON.parse(options.body)); return { validateOnly: true, results: ['campaign', 'adSet', 'creative', 'ad'].map(node => ({ node, status: 'validated' })), message: 'Validated; nothing created.' };
       }
       if (url.pathname.endsWith('/ads/create')) {
         adCreates++; const payload = JSON.parse(options.body);
@@ -303,6 +306,10 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     assert.equal(result.status, 403); assert.equal(adCreates, 0);
     result = await invoke('ads/create', { method: 'POST', body: { ...metaAd, currency: 'USD' }, key: 'ads-currency' });
     assert.equal(result.data.error.code, 'CURRENCY_MISMATCH'); assert.equal(adCreates, 0);
+    // Meta dry run (#42): one validateOnly request with the same payload as the create, and nothing is created.
+    result = await invoke('ads/validate', { method: 'POST', body: metaAd, key: 'ads-meta-validate' });
+    assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.validateOnly, true); assert.deepEqual(result.data.results.map(item => item.node), ['campaign', 'adSet', 'creative', 'ad']);
+    assert.equal(validations.length, 1); assert.equal(validations[0].accountId, 'meta-connection'); assert.equal(validations[0].status, 'PAUSED'); assert.equal(adCreates, 0, 'Validation creates nothing.');
     result = await invoke('ads/create', { method: 'POST', body: metaAd, key: 'ads-meta-01' });
     assert.equal(result.data.campaign.platformCampaignId, 'native-campaign-1'); assert.equal(result.data.campaign.status, 'paused');
     assert.deepEqual(await invoke('ads/create', { method: 'POST', body: metaAd, key: 'ads-meta-01' }), result);
