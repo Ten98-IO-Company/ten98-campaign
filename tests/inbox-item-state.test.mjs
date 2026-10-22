@@ -23,8 +23,9 @@ test('the overlay table holds only key, triage and timing columns, never provide
   const { pool } = await testDatabase(t);
   const columns = (await pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='inbox_item_state' ORDER BY ordinal_position")).rows.map(row => row.column_name);
   assert.deepEqual(columns, allowedColumns);
-  const notes = (await pool.query("SELECT count(*) AS count FROM information_schema.tables WHERE table_schema='public' AND table_name='inbox_item_notes'")).rows[0].count;
-  assert.equal(notes, 0, 'Notes are deferred to the next change.');
+  // Notes hold the team's own text only, keyed like the state rows; no provider content columns.
+  const notes = (await pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='inbox_item_notes' ORDER BY ordinal_position")).rows.map(row => row.column_name);
+  assert.deepEqual(notes, ['id', 'project_id', 'profile_id', 'account_id', 'kind', 'resource_id', 'author_id', 'body', 'created_at']);
 });
 
 async function drainFixture(t) {
@@ -252,4 +253,33 @@ test('an assignee removed, or an actor demoted, while the update waits on the wo
     } finally { client.release(); }
     assert.equal(await f.app.sql.get('SELECT * FROM inbox_item_state'), undefined, `${label}: nothing is written`);
   }
+});
+
+test('internal notes on an inbox item: viewers read, editors add, the author or an administrator deletes, nothing reaches the provider', pg, async t => {
+  const f = await appFixture(t), other = randomUUID(), key = { accountId: 'fb', kind: 'comment', resourceId: 'comment-1' };
+  const notes = ({ cookie = f.people.owner.cookie, project = f.path, query = key } = {}) => f.request(`${project}/item-notes?${new URLSearchParams(query)}`, { cookie });
+  const add = (body, cookie = f.people.editor.cookie) => f.request(`${f.path}/item-notes`, { method: 'POST', body: { ...key, ...body }, cookie });
+  const remove = (noteId, cookie) => f.request(`${f.path}/item-notes/${encodeURIComponent(noteId)}`, { method: 'DELETE', cookie });
+  assert.deepEqual((await notes()).data, { notes: [] });
+  // Viewers cannot add; bodies are bounded; unknown fields are refused.
+  assert.equal((await add({ body: 'Viewer note' }, f.people.viewer.cookie)).status, 403);
+  for (const body of ['', '   ', 'x'.repeat(4001), 'bell\u0007']) assert.equal((await add({ body })).data.error?.code, 'INVALID_INBOX_NOTE', JSON.stringify(body));
+  assert.equal((await add({ body: 'ok', extra: 1 })).status, 400);
+  const first = (await add({ body: '  Called the customer back.\nWaiting on their order number.  ' })).data.note;
+  assert.equal(first.body, 'Called the customer back.\nWaiting on their order number.'); assert.equal(first.authorId, f.people.editor.id);
+  const second = (await add({ body: 'Second editor note' }, f.people.second.cookie)).data.note;
+  // Viewers read them oldest first, with author names; another project or item reads none; a non-member gets 404.
+  const listed = await notes({ cookie: f.people.viewer.cookie });
+  assert.equal(listed.status, 200); assert.deepEqual(listed.data.notes.map(note => [note.id, note.authorName]), [[first.id, 'editor'], [second.id, 'second']]);
+  await f.app.sql.run("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES (?,?,'Other','other-notes-profile')", other, f.workspaceId);
+  assert.deepEqual((await notes({ project: `/api/projects/${other}/integrations/inbox` })).data.notes, []);
+  assert.deepEqual((await notes({ query: { ...key, resourceId: 'comment-2' } })).data.notes, []);
+  assert.equal((await notes({ cookie: f.people.outsider.cookie })).status, 404);
+  // Only the author or an owner/administrator deletes a note.
+  assert.equal((await remove(first.id, f.people.second.cookie)).status, 404, 'Another editor cannot delete it.');
+  assert.equal((await remove(first.id, f.people.viewer.cookie)).status, 403);
+  assert.equal((await remove(first.id, f.people.editor.cookie)).status, 200);
+  assert.equal((await remove(second.id, f.people.owner.cookie)).status, 200, 'An owner can delete any note.');
+  assert.deepEqual((await notes()).data.notes, []);
+  assert.deepEqual(f.calls, [], 'Notes never reach the provider.');
 });
