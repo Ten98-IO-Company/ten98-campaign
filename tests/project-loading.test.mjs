@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
+import { adSpendBlock } from '../src/approval-status.ts';
 
 test('overlapping app work stays busy and stale project callbacks cannot start provider actions or replace errors', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
@@ -9,7 +10,7 @@ test('overlapping app work stays busy and stale project callbacks cannot start p
   const integrationSource = source.slice(source.indexOf('async function integrate('), source.indexOf('\n  useEffect(() => { if (!notice)'));
   const compile = value => stripTypeScriptTypes(value, { mode: 'strip' });
   const activeProject = { current: 'a' }, pendingWork = { current: 0 }, busy = [], errors = [], notices = [], calls = [];
-  const run = new Function('activeProject', 'pendingWork', 'setBusy', 'setError', 'setNotice', compile(runSource) + '; return run;')(activeProject, pendingWork, value => busy.push(value), value => errors.push(value), value => notices.push(value));
+  const run = new Function('activeProject', 'pendingWork', 'setBusy', 'setError', 'setNotice', 'setSpendBlock', 'adSpendBlock', 'loadApprovalSummary', compile(runSource) + '; return run;')(activeProject, pendingWork, value => busy.push(value), value => errors.push(value), value => notices.push(value), () => {}, adSpendBlock, () => {});
   let finishFirst, finishSecond;
   const first = run(() => new Promise(resolve => { finishFirst = resolve; }), 'Saved A');
   const second = run(() => new Promise(resolve => { finishSecond = resolve; }), 'Saved B');

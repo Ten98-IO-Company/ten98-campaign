@@ -6,12 +6,13 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { hashPassword } from '../server/auth.ts';
+import { adSpendBlock } from '../src/approval-status.ts';
 import { postgresSkip, testApp } from './postgres.mjs';
 
 test('failed no-project refresh and workspace readback remain visible through the actual app handlers', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), context = {
     state: { projectId: null, projects: [] }, navigationRef: { current: {} }, writeNavigation() {}, loadVersion: { current: 0 }, activeProject: { current: '' }, pendingWork: { current: 0 }, inboxDraft: { current: { dirty: false, revision: 0 } },
-    setLoading() {}, setState() {}, setBusy() {}, setNotice() {}, errors: [],
+    setLoading() {}, setState() {}, setBusy() {}, setNotice() {}, setSpendBlock() {}, adSpendBlock, loadApprovalSummary() {}, errors: [],
   };
   let failRead = false, creates = 0;
   context.api = async (path) => {
