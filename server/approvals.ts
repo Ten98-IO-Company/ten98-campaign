@@ -244,7 +244,7 @@ async function decide(context: ApprovalContext, { post, review, snapshot, hash, 
 // starts spend (an activation) or raises a budget needs an approved review of exactly that change: subject id,
 // platform, action, amount in minor units and currency. Pauses, ends and budget decreases never need one. The
 // `-status` actions activate; the `-budget` actions raise a budget.
-const AD_SPEND_ACTIONS = ['ads/status', 'ads/ad-status', 'ads/adset-status', 'ads/adset-budget', 'ads/campaign-budget', 'google-native/campaign-status', 'google-native/campaign-budget', 'microsoft/campaign-status', 'microsoft/campaign-budget'];
+const AD_SPEND_ACTIONS = ['ads/status', 'ads/ad-status', 'ads/adset-status', 'ads/adset-budget', 'ads/campaign-budget', 'google-native/campaign-status', 'google-native/campaign-budget', 'microsoft/campaign-status', 'microsoft/campaign-budget', 'ooh/booking'];
 type AdSpendChange = { subjectId: string; platform: string; action: string; amount: number; currency: string };
 // What a gated route read: `amount` is the budget (major units) that spends once the write applies, and
 // `currentAmount` the budget configured now (null when the route could not read it).
@@ -258,7 +258,11 @@ function minorUnits(amount: unknown, currency: unknown) {
 const adSubject = (change: AdSpendChange) => 'ad-spend:' + JSON.stringify([change.platform, change.subjectId, change.action]);
 const adFingerprint = (change: AdSpendChange) => createHash('sha256').update(JSON.stringify([change.subjectId, change.platform, change.action, change.amount, change.currency])).digest('hex');
 // An approval is usable until a provider write consumes it; a consuming receipt that failed releases it.
-const usableApproval = sql`r.status='approved' AND (r.consumed_by IS NULL OR EXISTS (SELECT 1 FROM integration_operations o WHERE o.project_id=r.project_id AND o.request_key=r.consumed_by AND o.status='failed'))`;
+// An approval is unconsumed while unused or released by a failed write; it is usable for AD_APPROVAL_DAYS from its decision
+// (a released approval keeps its original clock). Council decision on ten98-code-system#35 Q1 (approval expiry, option d).
+const AD_APPROVAL_DAYS = 7;
+const unconsumedApproval = sql`r.status='approved' AND (r.consumed_by IS NULL OR EXISTS (SELECT 1 FROM integration_operations o WHERE o.project_id=r.project_id AND o.request_key=r.consumed_by AND o.status='failed'))`;
+const usableApproval = sql`${unconsumedApproval} AND r.reviewed_at::timestamptz > now() - ${AD_APPROVAL_DAYS} * interval '1 day'`;
 async function adSpendReview(db: Executor, row: ProviderRecord | undefined) {
   if (!row) return null;
   const used = row.consumed_by ? await first(db.execute(sql`SELECT status FROM integration_operations WHERE project_id=${row.project_id} AND request_key=${row.consumed_by}`)) : undefined;
@@ -276,7 +280,7 @@ async function openAdSpendReview(tx: Executor, project: ProviderRecord, user: Pr
     return pending.id as string;
   }
   await tx.execute(sql`UPDATE post_approval_reviews SET status='rejected',reviewed_at=${now},note=${'Superseded by a newer ad spend request.'} WHERE project_id=${project.id} AND kind='ad_spend' AND post_id=${subject} AND status='pending'`);
-  const id = randomUUID(), snapshot = { ...change, currentAmount, activates: change.action.endsWith('status') };
+  const id = randomUUID(), snapshot = { ...change, currentAmount, activates: change.action.endsWith('status') || change.action === 'ooh/booking' };
   await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,kind,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${id}, ${project.id}, ${subject}, 'ad_spend', ${hash}, ${JSON.stringify(snapshot)}, 'pending', ${user.id}, ${now})`);
   await createStore(tx).activity(project.id, `Ad spend review requested by ${user.name || user.id}.`);
   return id;
@@ -286,6 +290,8 @@ async function openAdSpendReview(tx: Executor, project: ProviderRecord, user: Pr
 // write. A matching approval is consumed by this receipt (`key`), so one approval allows one provider write. Without
 // one, a review of this exact change is opened: 403 when the project holds no usable ad spend approval, 409 when it
 // holds approvals for a different change (amount, currency, platform, subject or action).
+/** Whether this project requires ad spend approval, for routes that must read extra provider data only when it does. */
+export async function adSpendApprovalRequired(context: ApprovalContext) { return (await policy(context.db, context.project.id)).requireAdApproval; }
 export async function assertAdSpendApproval(context: ApprovalContext, attempt: AdSpendAttempt, key: string) {
   const { project, user, db } = context;
   if (!attempt.activates && typeof attempt.amount === 'number' && typeof attempt.currentAmount === 'number' && attempt.amount <= attempt.currentAmount) return;
@@ -301,10 +307,12 @@ export async function assertAdSpendApproval(context: ApprovalContext, attempt: A
     if (!(await policy(tx, project.id)).requireAdApproval) return 'off';
     const approved = await first(tx.execute(sql`SELECT r.id FROM post_approval_reviews r WHERE r.project_id=${project.id} AND r.kind='ad_spend' AND r.fingerprint=${hash} AND ${usableApproval} ORDER BY r.seq LIMIT 1 FOR UPDATE OF r`));
     if (approved) { await tx.execute(sql`UPDATE post_approval_reviews SET consumed_by=${key},consumed_at=${new Date().toISOString()} WHERE id=${approved.id}`); return 'approved'; }
-    const other = await first(tx.execute(sql`SELECT r.id FROM post_approval_reviews r WHERE r.project_id=${project.id} AND r.kind='ad_spend' AND ${usableApproval} LIMIT 1`));
+    const expired = await first(tx.execute(sql`SELECT r.id FROM post_approval_reviews r WHERE r.project_id=${project.id} AND r.kind='ad_spend' AND r.fingerprint=${hash} AND ${unconsumedApproval} LIMIT 1`));
+    const other = expired ? undefined : await first(tx.execute(sql`SELECT r.id FROM post_approval_reviews r WHERE r.project_id=${project.id} AND r.kind='ad_spend' AND ${usableApproval} LIMIT 1`));
     await openAdSpendReview(tx, project, user, change, currentAmount);
-    return other ? 'mismatch' : 'missing';
+    return expired ? 'expired' : other ? 'mismatch' : 'missing';
   });
+  if (outcome === 'expired') fail(403, 'AD_SPEND_APPROVAL_EXPIRED', `The approval of this spend change is more than ${AD_APPROVAL_DAYS} days old. It needs re-approval; a new review was requested.`);
   if (outcome === 'missing') fail(403, 'AD_SPEND_APPROVAL_REQUIRED', 'An owner or administrator must approve this spend change before it is sent. A review of it was requested.');
   if (outcome === 'mismatch') fail(409, 'AD_SPEND_APPROVAL_MISMATCH', 'This change differs from the approved spend change (amount, currency, platform, campaign or action). A review of this exact change was requested.');
 }
@@ -328,7 +336,13 @@ export async function handleApprovals(context: ApprovalContext) {
       fields(body, ['requireApproval', 'requireAdApproval']);
       const post = Object.hasOwn(body, 'requireApproval'), ads = Object.hasOwn(body, 'requireAdApproval');
       if (!post && !ads || post && typeof body.requireApproval !== 'boolean' || ads && typeof body.requireAdApproval !== 'boolean') fail(400, 'INVALID_APPROVAL_POLICY', 'Publishing approval must be enabled or disabled.');
-      await db.execute(sql`INSERT INTO project_approval_policy (project_id,require_approval,require_ad_approval,updated_by,updated_at) VALUES (${project.id}, ${post ? body.requireApproval : false}, ${ads ? body.requireAdApproval : false}, ${user.id}, ${new Date().toISOString()}) ON CONFLICT (project_id) DO UPDATE SET require_approval=${post ? sql`excluded.require_approval` : sql`project_approval_policy.require_approval`},require_ad_approval=${ads ? sql`excluded.require_ad_approval` : sql`project_approval_policy.require_ad_approval`},updated_by=excluded.updated_by,updated_at=excluded.updated_at`);
+      // Changing the ad spend setting (either way) voids every unconsumed ad spend approval and pending request in the project,
+      // so an approval given under one setting is never used under another (council decision on #35 Q1, approval expiry).
+      await db.transaction(async (tx: Executor) => {
+        const before = (await policy(tx, project.id)).requireAdApproval;
+        await tx.execute(sql`INSERT INTO project_approval_policy (project_id,require_approval,require_ad_approval,updated_by,updated_at) VALUES (${project.id}, ${post ? body.requireApproval : false}, ${ads ? body.requireAdApproval : false}, ${user.id}, ${new Date().toISOString()}) ON CONFLICT (project_id) DO UPDATE SET require_approval=${post ? sql`excluded.require_approval` : sql`project_approval_policy.require_approval`},require_ad_approval=${ads ? sql`excluded.require_ad_approval` : sql`project_approval_policy.require_ad_approval`},updated_by=excluded.updated_by,updated_at=excluded.updated_at`);
+        if (ads && before !== body.requireAdApproval) await tx.execute(sql`UPDATE post_approval_reviews r SET status='rejected',reviewed_at=${new Date().toISOString()},note=${'Voided because the ad spend approval setting changed.'} WHERE r.project_id=${project.id} AND r.kind='ad_spend' AND (r.status='pending' OR ${unconsumedApproval})`);
+      });
       if (post) await store.activity(project.id, `Publishing approval ${body.requireApproval ? 'required' : 'made optional'} by ${user.name || user.id}.`);
       if (ads) await store.activity(project.id, `Ad spend approval ${body.requireAdApproval ? 'required' : 'made optional'} by ${user.name || user.id}.`);
       send(200, await policy(db, project.id)); return true;

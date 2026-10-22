@@ -18,7 +18,7 @@ const maxAge = 7 * 86400, oidcWindow = 600, callbackPath = '/api/auth/oidc/callb
 // Password sign-in attempts per 15 minutes. One client reaches at most 10 attempts per account in a window (20 across two
 // overlapping windows), so only failures from several clients can reach the account-wide limit.
 export const signInLimits = { client: 30, clientAccount: 10, account: 50 };
-export class HttpError extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } }
+export class HttpError extends Error { status: number; code?: string; constructor(status: number, message: string, code?: string) { super(message); this.status = status; if (code) this.code = code; } }
 export const publicUser = (user: UserRow | null | undefined): PublicUser | null => user ? { id: user.id, name: user.name, email: user.email, isOperator: Boolean(user.isOperator) } : null;
 function storedSecret(dataDir: string, provided: string | undefined, filename: string, label: string): string {
   if (provided) { if (provided.length < 32) throw new Error(`${label} must contain at least 32 characters.`); return provided; }
@@ -163,7 +163,23 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       if (token) await db.execute(sql`DELETE FROM sessions WHERE token = ${digest(token)}`);
       setCookie(res, cookie(sessionName, '', 0));
     },
+    // The OIDC routes are full-page navigations, so a failure redirects to the app with a fixed code (never the message or
+    // an email address); the sign-in screen maps the code to its text. An invitation the browser already holds is kept.
     async oidcStart(req: IncomingMessage, res: ServerResponse): Promise<void> {
+      const held = new URL(req.url || '/api/auth/oidc/start', config.appUrl).searchParams.get('invite');
+      try { await startFlow(req, res); } catch (error) { signInError(res, error, held && /^[A-Za-z0-9_-]{43}$/.test(held) ? held : ''); }
+    },
+    async oidcCallback(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+      const held = { invite: '' };
+      try { await finishFlow(req, res, url, held); } catch (error) { signInError(res, error, held.invite); }
+    },
+  };
+  function signInError(res: ServerResponse, error: unknown, invite: string) {
+    const code = error instanceof HttpError && error.code ? error.code : error instanceof HttpError && error.status === 429 ? 'OIDC_RATE_LIMITED' : 'OIDC_SIGN_IN_FAILED';
+    if (res.headersSent) { res.end(); return; }
+    res.writeHead(302, { Location: `${config.appUrl}/?auth_error=${code}${invite ? '&invite=' + encodeURIComponent(invite) : ''}` }); res.end();
+  }
+  async function startFlow(req: IncomingMessage, res: ServerResponse): Promise<void> {
       if (!config.oidcEnabled || !(await db.execute(sql`SELECT id FROM users LIMIT 1`)).rowCount) throw new HttpError(400, 'Identity sign-in is unavailable.');
       await limit('oidc:' + clientAddress(req), 30);
       const { client, provider } = await oidc();
@@ -181,8 +197,8 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       if (continuation) setCookie(res, cookie(inviteName, continuation, oidcWindow, callbackPath));
       setCookie(res, cookie(oidcName, browser, oidcWindow));
       res.writeHead(302, { Location: location.href }); res.end();
-    },
-    async oidcCallback(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  }
+  async function finishFlow(req: IncomingMessage, res: ServerResponse, url: URL, held: { invite: string }): Promise<void> {
       const values = cookies(req), scoped = Object.hasOwn(values, oidcName), state = url.searchParams.get('state'), browser = scoped ? values[oidcName] : values.ten98_oidc;
       setCookie(res, cookie(inviteName, '', 0, callbackPath));
       if (!state || !browser || url.searchParams.getAll('state').length !== 1) throw new HttpError(400, 'Identity sign-in expired. Start again.');
@@ -191,7 +207,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       if (!flow) throw new HttpError(400, 'Identity sign-in expired or was already used.');
       if (!scoped) setCookie(res, cookie('ten98_oidc', '', 0));
       setCookie(res, cookie(oidcName, '', 0));
-      const invite = invitation(req, flow.invite_hash);
+      const invite = invitation(req, flow.invite_hash); held.invite = invite;
       try {
         const { client, provider } = await oidc();
         const tokens = await client.authorizationCodeGrant(provider, url, { pkceCodeVerifier: flow.verifier, expectedState: state, expectedNonce: flow.nonce, idTokenExpected: true });
@@ -206,11 +222,12 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
           const existing = await first<{ user_id: string }>(tx.execute(sql`SELECT user_id FROM oidc_identities WHERE issuer = ${claims.iss} AND subject = ${claims.sub}`));
           if (existing) return establish(res, existing.user_id, req, tx);
           const email = typeof claims.email === 'string' ? claims.email.trim().toLowerCase() : '';
-          if (claims.email_verified !== true || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.');
-          if (invited && invited.email !== email) throw new HttpError(403, `This invitation is for ${invited.email}. Sign in with that identity to accept it.`);
-          if (!invited && !config.oidcAllowedEmails.includes(email)) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.');
+          if (claims.email_verified !== true) throw new HttpError(403, 'Verify this email address with your identity provider first.', 'OIDC_EMAIL_UNVERIFIED');
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.', 'OIDC_NOT_PROVISIONED');
+          if (invited && invited.email !== email) throw new HttpError(403, `This invitation is for ${invited.email}. Sign in with that identity to accept it.`, 'OIDC_INVITE_EMAIL_MISMATCH');
+          if (!invited && !config.oidcAllowedEmails.includes(email)) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.', 'OIDC_NOT_PROVISIONED');
           await advisoryLock(tx, 'email:' + email);
-          if ((await tx.execute(sql`SELECT id FROM users WHERE email = ${email}`)).rowCount) throw new HttpError(403, 'This email already has an account. Automatic identity linking is disabled.');
+          if ((await tx.execute(sql`SELECT id FROM users WHERE email = ${email}`)).rowCount) throw new HttpError(403, 'This email already has an account. Automatic identity linking is disabled.', 'OIDC_ACCOUNT_EXISTS');
           const id = randomUUID(), workspace = randomUUID();
           await tx.execute(sql`INSERT INTO users VALUES (${id}, ${typeof claims.name === 'string' ? claims.name.slice(0, 120) : email}, ${email}, NULL)`);
           await tx.execute(sql`INSERT INTO oidc_identities VALUES (${claims.iss}, ${claims.sub}, ${id})`);
@@ -222,6 +239,5 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
         });
         res.writeHead(302, { Location: config.appUrl + '/' + (invite && !joined ? '?invite=' + encodeURIComponent(invite) : '') }); res.end();
       } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, 'Identity sign-in could not be verified. Start again.'); }
-    },
-  };
+  }
 }

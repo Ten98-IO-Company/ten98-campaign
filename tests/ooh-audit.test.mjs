@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { handleApprovals } from '../server/approvals.ts';
 import assert from 'node:assert/strict';
 import { createStore } from '../server/database.ts';
 import { handleOoh } from '../server/ooh.ts';
@@ -25,9 +26,9 @@ async function fixture(t, run) {
     else throw new Error(`Unexpected provider path ${path}`);
     return new Response(JSON.stringify(result));
   };
-  async function invoke(path, method = 'GET', body = {}, key = 'ooh-audit-default') {
+  async function invoke(path, method = 'GET', body = {}, key = 'ooh-audit-default', as = {}) {
     let response;
-    await handleOoh({ db, store, project, req: { method, headers: { 'idempotency-key': key } }, url: new URL(`http://localhost/api/projects/${project.id}/ooh/${path}`), body, role: 'owner', user: { isOperator: true }, config: { env: {}, BROADSIGN_API_KEY: 'mock-key' }, send(status, data) { response = { status, data }; } });
+    await handleOoh({ db, store, project, req: { method, headers: { 'idempotency-key': key } }, url: new URL(`http://localhost/api/projects/${project.id}/ooh/${path}`), body, role: as.role ?? 'owner', user: as.user ?? { isOperator: true }, config: { env: {}, BROADSIGN_API_KEY: 'mock-key', ...as.config }, send(status, data) { response = { status, data }; } });
     return response;
   }
   try {
@@ -35,7 +36,7 @@ async function fixture(t, run) {
     assert.equal((await invoke('sync', 'POST')).status, 200);
     const result = await invoke('bookings', 'POST', { name: 'Exact OOH terms', screenIds: [101, 102], startDate: '2026-10-20', endDate: '2026-10-22', slotDuration: 10, inventoryType: 'digital', price: 150 }, 'ooh-audit-draft');
     assert.equal(result.status, 200); const booking = result.data.booking;
-    await run({ pool, sql, store, state, calls, invoke, booking, bookingPath: `bookings/${booking.id}` });
+    await run({ pool, db, sql, store, project, state, calls, invoke, booking, bookingPath: `bookings/${booking.id}` });
   } finally { globalThis.fetch = originalFetch; }
 }
 
@@ -187,5 +188,28 @@ test('OOH confirmation racing a cancellation, both reading before either writes,
     if (submitted.status !== 200) { assert.equal(submitted.status, 409); assert.equal(submitted.data.operation.status, 'uncertain'); }
     const saved = (await sql.get('SELECT data FROM project_ooh_bookings WHERE id=?', booking.id)).data;
     assert.equal(saved.stage, 'cancelling'); assert.equal(saved.providerStatus, 15); assert.equal(saved.cancellationOperationId, cancelled.data.operation.id, 'The submission must not overwrite the cancellation receipt.');
+  });
+});
+
+test('an OOH booking needs ad spend approval of its exact quote when the project requires it', { skip: postgresSkip }, async t => {
+  await fixture(t, async ({ pool, db, store, project, calls, invoke, booking, bookingPath }) => {
+    await pool.query("INSERT INTO users VALUES ('o','Owner','o@example.test',NULL),('e','Editor','e@example.test',NULL); INSERT INTO memberships VALUES ('w','o','owner'),('w','e','editor'); INSERT INTO project_approval_policy (project_id,require_approval,require_ad_approval,updated_by,updated_at) VALUES ('ooh-audit',false,true,'o','2026-10-22T00:00:00Z')");
+    const editor = { role: 'editor', user: { id: 'e', name: 'Editor' }, config: { BROADSIGN_CURRENCY: 'USD' } }, books = () => calls.filter(call => call.path.includes('/book_proposal/')).length;
+    const approvals = async (path, method = 'GET', body) => { let out; await handleApprovals({ db, store, project, role: 'owner', user: { id: 'o', name: 'Owner' }, req: { method }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body: body ?? {}, send(status, data) { out = { status, data }; } }); return out; };
+    const approve = async reviewId => assert.equal((await approvals('ad-spend/review', 'POST', { reviewId, decision: 'approved' })).status, 200);
+    // Without a currency the quote cannot be matched to an approval, so the booking is refused rather than guessed.
+    let result = await invoke(bookingPath + '/submit', 'POST', { confirmBooking: true }, 'ooh-spend-no-currency', { ...editor, config: {} });
+    assert.equal(result.data.error.code, 'AD_SPEND_AMOUNT_UNAVAILABLE'); assert.equal(books(), 0);
+    result = await invoke(bookingPath + '/submit', 'POST', { confirmBooking: true }, 'ooh-spend-1', editor);
+    assert.equal(result.status, 403); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_REQUIRED'); assert.equal(books(), 0);
+    const opened = (await approvals('ad-spend')).data.reviews.find(review => review.status === 'pending');
+    assert.deepEqual({ ...opened.snapshot, currentAmount: undefined }, { subjectId: booking.id, platform: 'broadsign', action: 'ooh/booking', amount: 15000, currency: 'USD', currentAmount: undefined, activates: true });
+    // An approval of another amount does not authorize this quote.
+    const other = (await approvals('ad-spend/request', 'POST', { subjectId: booking.id, platform: 'broadsign', action: 'ooh/booking', amount: 15100, currency: 'USD' })).data.review; await approve(other.id);
+    result = await invoke(bookingPath + '/submit', 'POST', { confirmBooking: true }, 'ooh-spend-2', editor);
+    assert.equal(result.status, 409); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_MISMATCH'); assert.equal(books(), 0);
+    const exact = (await approvals('ad-spend')).data.reviews.find(review => review.status === 'pending' && review.snapshot.amount === 15000); await approve(exact.id);
+    result = await invoke(bookingPath + '/submit', 'POST', { confirmBooking: true }, 'ooh-spend-3', editor);
+    assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(books(), 1, 'Exactly one Broadsign booking request.');
   });
 });

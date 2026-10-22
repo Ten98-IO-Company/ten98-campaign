@@ -6,7 +6,7 @@ type Connection = { _id: string; platform: string; displayName?: string; usernam
 type AdAccount = { id: string; name: string; currency?: string; selectable?: boolean; minimumDailyBudget?: number };
 type MetaInterest = { id: string; name: string; type: 'interest'; path?: string[]; audienceSize?: number | null };
 type LeadForm = { id: string; name: string; version: string; status: string; privacyPolicyUrl: string; headline?: string; description?: string; questions: { key: string; label: string; type: string; options: { key: string; value: string }[]; required?: boolean }[]; consents?: { description: string; required: boolean }[] };
-type Props = { request: (path: string, body?: any) => Promise<any>; posts?: any[]; initialDraft?: Record<string, any>; readOnly?: boolean; onCreated: () => void; onCancel: () => void };
+type Props = { request: (path: string, body?: any) => Promise<any>; posts?: any[]; initialDraft?: Record<string, any>; readOnly?: boolean; onCreated: (message?: string) => void; onCancel: () => void };
 const networks: Record<string, string> = { facebook: 'facebook', instagram: 'facebook', metaads: 'facebook', googleads: 'google', pinterest: 'pinterest', pinterestads: 'pinterest', tiktokads: 'tiktok', tiktok: 'tiktok', linkedinads: 'linkedin', linkedin: 'linkedin', xads: 'twitter', twitter: 'twitter', openaiads: 'openai', redditads: 'reddit' };
 const labels: Record<string, string> = { facebook: 'Meta', google: 'Google', pinterest: 'Pinterest', tiktok: 'TikTok', linkedin: 'LinkedIn', twitter: 'X', openai: 'ChatGPT', reddit: 'Reddit' };
 const formats: Record<string, [string, string][]> = {
@@ -32,7 +32,7 @@ export default function AdComposer({ request, posts = [], initialDraft, readOnly
   const identity = JSON.stringify([accountId, adAccountId, format, mode]), currentIdentity = useRef({ identity }), mounted = useRef(true); if (currentIdentity.current.identity !== identity) currentIdentity.current = { identity };
   const view = currentIdentity.current, isCurrent = () => mounted.current && currentIdentity.current === view;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const [loading, setLoading] = useState(true), [loadingAds, setLoadingAds] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState(0);
+  const [loading, setLoading] = useState(true), [loadingAds, setLoadingAds] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState(0), [unrecorded, setUnrecorded] = useState(false);
   const connection = connections.find(item => item._id === accountId), platform = networks[connection?.platform || ''];
   const adAccount = adAccounts.find(item => item.id === adAccountId), currency = adAccount?.currency;
   const [interestQuery, setInterestQuery] = useState(''), [interestResults, setInterestResults] = useState<MetaInterest[] | null>(null), [interestBusy, setInterestBusy] = useState(false), [interestError, setInterestError] = useState(''), [interests, setInterests] = useState<{ id: string; name: string }[]>([]);
@@ -193,7 +193,13 @@ export default function AdComposer({ request, posts = [], initialDraft, readOnly
         }
       }
       currentFrame.current = null; setBusy(true); const result = await requester.current(validating ? 'ads/validate' : boosting ? 'ads/boost' : 'ads/create', payload); if (isCurrent()) { if (validating) setValidation(result.message || 'Validation passed. No campaign was created.'); else onCreated(); }
-    } catch (err) { if (isCurrent() && (err as Error).name !== 'AbortError') setError((err as Error).message || 'The ad could not be created. Your entries are still here.'); } finally { if (isCurrent()) setBusy(false); }
+    } catch (err) {
+      // The provider created a campaign during validation: a saved record closes the composer so the list shows it; an
+      // unsaved one blocks both submits, since another attempt could create a second campaign.
+      const failure = err as Error & { code?: string; details?: { campaignId?: unknown } };
+      if (isCurrent() && failure.code === 'VALIDATION_CREATED_CAMPAIGN') { if (typeof failure.details?.campaignId === 'string') { onCreated(failure.message); return; } setUnrecorded(true); }
+      if (isCurrent() && failure.name !== 'AbortError') setError(failure.message || 'The ad could not be created. Your entries are still here.');
+    } finally { if (isCurrent()) setBusy(false); }
   }
   const interestOptions: ComboboxOption[] = (visibleInterests || []).map(row => ({ value: row.id, label: row.name, description: [`ID: ${row.id}`, row.path?.length ? row.path.join(' / ') : '', row.audienceSize == null ? 'Reach unknown' : `Estimated audience: ${row.audienceSize.toLocaleString('en')}`].filter(Boolean).join(' · ') }));
   return <Form onSubmit={(_, event) => submit(event)} onInput={() => setValidation('')}>
@@ -242,6 +248,6 @@ export default function AdComposer({ request, posts = [], initialDraft, readOnly
     {validation && <StatusLine tone="success">{validation}</StatusLine>}
     {error && <Alert tone="danger">{error}</Alert>}
     {error && !busy && (!connections.length || (accountId && !adAccounts.length)) && <Inline><Button variant="secondary" onClick={() => setRetry(value => value + 1)}>Reload accounts</Button></Inline>}
-    <FormActions>{!boosting && (platform === 'openai' || platform === 'facebook' || platform === 'google' && assets) && <Button variant="secondary" type="submit" data-action="validate" disabled={readOnly || busy || loading || loadingAds || !adAccount || adAccount.selectable === false || !currency}>Validate without creating</Button>}<Button variant="secondary" disabled={busy} onClick={onCancel}>Cancel</Button><Button variant="primary" type="submit" disabled={readOnly || busy || loading || loadingAds || !adAccount || adAccount.selectable === false || !currency || needsLeadForm && (leadBusy || !leadForm || leadSelection.current !== leadView || !usableLeadForm(leadForm) || leadReview !== leadForm.version)}>{busy ? 'Working with provider…' : boosting ? 'Create paused boost' : 'Create paused ad'}</Button></FormActions>
+    <FormActions>{!boosting && (platform === 'openai' || platform === 'facebook' || platform === 'google' && assets) && <Button variant="secondary" type="submit" data-action="validate" disabled={readOnly || unrecorded || busy || loading || loadingAds || !adAccount || adAccount.selectable === false || !currency}>Validate without creating</Button>}<Button variant="secondary" disabled={busy} onClick={onCancel}>Cancel</Button><Button variant="primary" type="submit" disabled={readOnly || unrecorded || busy || loading || loadingAds || !adAccount || adAccount.selectable === false || !currency || needsLeadForm && (leadBusy || !leadForm || leadSelection.current !== leadView || !usableLeadForm(leadForm) || leadReview !== leadForm.version)}>{busy ? 'Working with provider…' : boosting ? 'Create paused boost' : 'Create paused ad'}</Button></FormActions>
   </Form>;
 }

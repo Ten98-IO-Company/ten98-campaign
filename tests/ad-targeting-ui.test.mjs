@@ -180,3 +180,19 @@ test('Meta validates the exact paused-ad payload through the provider dry run wi
   assert.equal(ui.created, 0); assert.equal(ui.calls.some(([name]) => name === 'ads/create'), false);
   assert.match(ui.html(), /Validated; nothing created./);
 });
+
+test('a campaign the provider created during validation is either handed back as created or blocks another attempt', async () => {
+  const validate = ui => ui.form().props.onSubmit({ ...ui.event(), nativeEvent: { submitter: { getAttribute: name => name === 'data-action' ? 'validate' : null } } });
+  const failure = details => Object.assign(new Error('Validation created the paused campaign “Spring”; it is saved in Ads manager.'), { code: 'VALIDATION_CREATED_CAMPAIGN', ...(details ? { details } : {}) });
+  // Saved locally: the composer reports it as created, with the server's message, so the ads list reloads.
+  const saved = await browser(async path => { if (path === 'ads/validate') throw failure({ campaignId: 'local-1', name: 'Spring' }); return { results: [] }; }), messages = [];
+  await saved.props({ onCreated: message => messages.push(message) });
+  await validate(saved); await saved.tick();
+  assert.deepEqual(messages, ['Validation created the paused campaign “Spring”; it is saved in Ads manager.']);
+  // Not saved: the error stays and neither submit is offered again, so a retry cannot create a second campaign.
+  const unsaved = await browser(async path => { if (path === 'ads/validate') throw failure(); return { results: [] }; });
+  await validate(unsaved); await unsaved.tick();
+  assert.equal(unsaved.created, 0); assert.match(unsaved.html(), /Validation created the paused campaign/);
+  assert.equal(unsaved.button('Validate without creating').props.disabled, true); assert.equal(unsaved.button('Create paused ad').props.disabled, true);
+  assert.equal(unsaved.calls.filter(([path]) => path === 'ads/validate').length, 1);
+});

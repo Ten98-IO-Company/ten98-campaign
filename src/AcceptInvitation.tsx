@@ -24,7 +24,7 @@ export default function AcceptInvitation({ token, signedInEmail, request, onAcce
   const state: InvitationState = loading ? 'loading' : !details ? 'unavailable' : details.requiresSignIn ? 'signin-required' : 'details';
   const title = loading ? 'Opening invitation…' : details ? 'Join ' + details.invitation.workspaceName : 'Invitation unavailable';
   const description = loading ? 'Checking your workspace access.' : details ? 'This gives you access to every project in this workspace.' : 'Ask a workspace owner or administrator for a new invitation link.';
-  return <InvitationAcceptFlow brand={<Brand product="Campaign" href="/"/>} label="Workspace invitation" title={title} description={description} state={state} invitation={details?.invitation} formatDate={value => new Date(value).toLocaleDateString()}
+  return <InvitationAcceptFlow surface="card" brand={<Brand product="Campaign" href="/"/>} label="Workspace invitation" title={title} description={description} state={state} invitation={details?.invitation} formatDate={value => new Date(value).toLocaleDateString()}
     signedInEmail={signedInEmail} accountExists={details?.accountExists}
     passwordPolicy={{ minLength: 12, maxLength: 128, hint: 'Use at least 12 characters.' }} busy={busy} busyLabel="Joining your team…" error={error || undefined}
     messages={{ signInRequired: 'Sign in with the invited email to keep your existing account and password.' }} onSignIn={() => onSignIn(details?.invitation.email)} cancel={!loading && !details ? { label: 'Go to sign in', href: '/' } : undefined} onSubmit={accept}/>;

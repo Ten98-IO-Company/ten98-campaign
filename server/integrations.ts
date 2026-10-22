@@ -22,7 +22,7 @@ import { handleZernioQueues, applyQueueIntent, assertQueueReceipt } from './zern
 import { handleZernioMedia } from './zernio-media.ts';
 import { handleZernioBlogs } from './zernio-blogs.ts';
 import { handleZernioProducts } from './zernio-products.ts';
-import { assertAdSpendApproval, assertProposedPostApproval } from './approvals.ts';
+import { adSpendApprovalRequired, assertAdSpendApproval, assertProposedPostApproval } from './approvals.ts';
 
 const GOOGLE = 'https://www.googleapis.com';
 const WRITE_ROLES = new Set(['owner', 'admin', 'editor']);
@@ -1357,7 +1357,13 @@ export async function handleIntegration(context: any) {
           outgoing = reviewedRsaPayload(payload, reviewed, body.expectedCreativeVersion, body);
           await checkMapping(() => context.assertProjectMapping?.(profileId));
         }
-        if (path === 'ads/ad-status' && body.status === 'active') await assertAdSpendApproval(context, { subjectId: ad._id, platform: ad.platform, action: 'ads/ad-status', amount: budgetOf(ad), currency: ad.currency, currentAmount: budgetOf(ad), activates: true }, key);
+        // Zernio ads carry no currency, and most carry no budget of their own (only LinkedIn and X expose one): the ad spends from
+        // its ad set's budget or, failing that, its campaign's, in the campaign node's currency (zernio-node Ad and AdTreeCampaign types).
+        if (path === 'ads/ad-status' && body.status === 'active' && await adSpendApprovalRequired(context)) {
+          const parent = await scopedCampaign(api, profileId, ad.platformCampaignId, ad.platform), set = Array.isArray(parent.adSets) ? parent.adSets.find((row: any) => row.platformAdSetId === ad.platformAdSetId) : undefined;
+          const spend = budgetOf(ad) ?? budgetOf(set) ?? budgetOf(parent);
+          await assertAdSpendApproval(context, { subjectId: ad._id, platform: ad.platform, action: 'ads/ad-status', amount: spend, currency: parent.currency, currentAmount: spend, activates: true }, key);
+        }
         const result = await api(`/ads/${encodeURIComponent(ad._id)}${path === 'ads/ad-status' ? '/status' : ''}`, {}, outgoing, key, 'PUT');
         if (path === 'ads/ad-status') { if (String(result.configuredStatus || '').toUpperCase() !== body.status.toUpperCase()) throw new IntegrationError(502, 'AD_STATUS_NOT_CONFIRMED', 'The ad switch was not confirmed by the provider.', true); }
         else if (result.ad?._id !== ad._id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the edited ad.', true);
@@ -1457,7 +1463,8 @@ export async function handleIntegration(context: any) {
       }
       if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a campaign name or daily budget to change.');
       const outcome = await operation(context, async key => {
-        if (payload.budget) await assertAdSpendApproval(context, { subjectId: campaignId, platform: body.platform, action: 'ads/campaign-budget', amount: payload.budget.amount, currency: campaign.currency, currentAmount: budgetOf(campaign), activates: false }, key);
+        // The budget is re-read here, under the receipt claim: a decrease is judged against the live budget, not the earlier read.
+        if (payload.budget) await assertAdSpendApproval(context, { subjectId: campaignId, platform: body.platform, action: 'ads/campaign-budget', amount: payload.budget.amount, currency: campaign.currency, currentAmount: budgetOf(await scopedCampaign(api, profileId, campaignId, body.platform)), activates: false }, key);
         const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, payload, key, 'PUT');
         if (!Number.isInteger(result.updated) || result.updated < 0 || (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== payload.budget.type)) || (payload.name && result.name !== payload.name)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not acknowledge the campaign changes.', true);
         await saveCampaignSnapshot(context, profileId, body.platform, campaignId, { ...(payload.budget ? { budget: result.budget.amount, budgetType: result.budget.type } : {}), ...(payload.name ? { name: result.name } : {}) });
@@ -1474,21 +1481,29 @@ export async function handleIntegration(context: any) {
       if (!nativeAccount) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This advertising account is not available through this project connection.');
       if (nativeAccount.selectable === false) fail(409, 'AD_ACCOUNT_UNAVAILABLE', 'This advertising account cannot currently create campaigns. Check it in the provider dashboard.');
       const payload = adBody(body, account, nativeAccount);
+      // Records a campaign the provider created, so it is tracked locally even when it arrived from a validation request.
+      const recordCreated = async (ad: any) => {
+        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: payload.status === 'PAUSED' ? 'paused' : ad.status === 'active' ? 'active' : 'draft', budget: payload.budgetAmount, budgetType: payload.budgetType, spent: 0, currency: nativeAccount.currency, platform: ad.platform, externalId: ad._id, platformCampaignId: ad.platformCampaignId, providerStatus: ad.status, zernioProfileId: profileId });
+        await store.activity(project.id, `Created an advertising campaign through Zernio (${payload.status.toLowerCase()}).`);
+        return campaign;
+      };
       if (path === 'ads/validate') {
         // Zernio validates Meta (the inline campaign, ad set, creative and ad, with Meta's validate_only), ChatGPT and Google PMax/Demand Gen.
         if (!['openai', 'facebook', 'instagram'].includes(body.platform) && !(body.platform === 'google' && ['pmax', 'demand_gen'].includes(body.campaignType))) fail(422, 'VALIDATION_UNAVAILABLE', 'Provider validation here supports Meta, ChatGPT, Google Performance Max and Demand Gen.');
         let result;
         try { result = await api('/ads/create', {}, { ...payload, validateOnly: true }); }
         catch (error: any) { if (error instanceof IntegrationError) error.uncertain = false; throw error; }
-        if (result.validateOnly !== true || !Array.isArray(result.results) || !result.results.length || result.results.some(item => !item || typeof item.node !== 'string' || item.status !== 'validated') || result.ad) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm a validation-only result.');
+        // A reply carrying a created ad means the provider created the (paused) campaign despite validateOnly: record it so it is
+        // not left untracked, and report that a campaign now exists rather than a plain validation failure.
+        if (result?.ad) { let campaign; try { assertCreatedAd(result.ad, body.platform, account, nativeAccount, profileId); campaign = await recordCreated(result.ad); } catch {} throw Object.assign(new IntegrationError(502, 'VALIDATION_CREATED_CAMPAIGN', campaign ? `The provider created a paused campaign instead of only validating it. It was saved here as "${String(campaign.name).slice(0, 200)}"; review or delete it before creating another.` : 'The provider may have created a campaign instead of only validating it. Check the provider before creating another.'), campaign ? { details: { campaignId: campaign.id, name: campaign.name } } : {}); }
+        if (result.validateOnly !== true || !Array.isArray(result.results) || !result.results.length || result.results.some(item => !item || typeof item.node !== 'string' || item.status !== 'validated')) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm a validation-only result.');
         send(200, { validateOnly: true, results: result.results.map(item => ({ node: item.node, status: item.status })), message: typeof result.message === 'string' ? result.message.slice(0, 2000) : 'Validation passed. No campaign was created.' }); return true;
       }
       const outcome = await operation(context, async key => {
         await validateAdLeadForm(api, profileId, body);
         const result = await api('/ads/create', {}, payload, key);
         assertCreatedAd(result.ad, body.platform, account, nativeAccount, profileId);
-        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: payload.status === 'PAUSED' ? 'paused' : result.ad.status === 'active' ? 'active' : 'draft', budget: payload.budgetAmount, budgetType: payload.budgetType, spent: 0, currency: nativeAccount.currency, platform: result.ad.platform, externalId: result.ad._id, platformCampaignId: result.ad.platformCampaignId, providerStatus: result.ad.status, zernioProfileId: profileId });
-        await store.activity(project.id, `Created an advertising campaign through Zernio (${payload.status.toLowerCase()}).`);
+        const campaign = await recordCreated(result.ad);
         return { campaign, ad: redact(result.ad), provider: { id: result.ad._id, status: result.ad.status } };
       }); send(outcome.status, outcome.data); return true;
     }
@@ -1515,7 +1530,7 @@ export async function handleIntegration(context: any) {
     }
     fail(404, 'INTEGRATION_NOT_FOUND', 'This integration action was not found.');
   } catch (error: any) {
-    send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'INTEGRATION_ERROR', message: error instanceof IntegrationError ? error.message : 'The integration could not complete this request.' } });
+    send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'INTEGRATION_ERROR', message: error instanceof IntegrationError ? error.message : 'The integration could not complete this request.', ...(error instanceof IntegrationError && error.details ? { details: error.details } : {}) } });
     return true;
   }
 }

@@ -1,13 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
+import AdSpendNotice from './AdSpendNotice';
+import { adSpendBlock, type AdSpendBlock } from './approval-status';
 import { Alert, Button, Card, Checkbox, DataTable, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, ResourceCard, ReviewSummary, Select, Stack, StatusLine, Text, Textarea, VisuallyHidden } from '@ten98/ui';
 
-type Props = { projectId: string; role: string; isOperator: boolean; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onInventory?: (items: any[]) => void; onChanged?: () => void | Promise<void> };
+type Props = { projectId: string; role: string; isOperator: boolean; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void; onOpenApprovals?: () => void; onSpendReview?: () => void; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onInventory?: (items: any[]) => void; onChanged?: () => void | Promise<void> };
 const statuses: Record<number, string> = { 1: 'Saved', 3: 'Processing', 4: 'Held', 5: 'Partially held', 9: 'Booked', 10: 'Submitted', 11: 'Live', 12: 'Cancelled', 14: 'Ended', 15: 'Cancelling' };
-export default function OohProviders({ projectId, role, isOperator, mode = 'workflow', onOpenIntegrations, request, onInventory, onChanged }: Props) {
+export default function OohProviders({ projectId, role, isOperator, mode = 'workflow', onOpenIntegrations, onOpenApprovals, onSpendReview, request, onInventory, onChanged }: Props) {
   const [status, setStatus] = useState<any>(null), [inventory, setInventory] = useState<any[]>([]), [bookings, setBookings] = useState<any[]>([]);
   const [selected, setSelected] = useState<number[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [availability, setAvailability] = useState<Record<string, string>>({});
   const [refreshRequired, setRefreshRequired] = useState(false), refreshNeeded = useRef(false);
+  const [spendBlock, setSpendBlock] = useState<AdSpendBlock | null>(null);
   const inventoryCallback = useRef(onInventory); inventoryCallback.current = onInventory;
   const pendingKeys = useRef(new Map<string, string>()), active = useRef(true);
   const canWrite = ['owner', 'admin', 'editor'].includes(role), canMap = isOperator && ['owner', 'admin'].includes(role);
@@ -44,8 +47,13 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
     return () => { current = false; active.current = false; };
   }, [path, request, mode]);
   async function action(run: () => Promise<void>) {
-    if (busy || !active.current) return; setBusy(true); setError(''); setNotice('');
-    try { await run(); } catch (err) { if (active.current) setError((err as Error).message || 'The OOH action could not be completed.'); }
+    if (busy || !active.current) return; setBusy(true); setError(''); setNotice(''); setSpendBlock(null);
+    try { await run(); } catch (err) {
+      // A booking held back by ad spend approval explains itself; the review it opened updates the Approvals badge.
+      const block = adSpendBlock(err);
+      if (active.current && block) { setSpendBlock(block); if (block.review) onSpendReview?.(); }
+      else if (active.current) setError((err as Error).message || 'The OOH action could not be completed.');
+    }
     finally { if (active.current) setBusy(false); }
   }
   async function saveMapping(event: React.FormEvent<HTMLFormElement>) {
@@ -83,6 +91,9 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
   const body = <>
     {mode === 'workflow' && <Text tone="muted">Upload and schedule creative bundles in <Link href="https://app.broadsign.com/campaigns" target="_blank" rel="noreferrer">Broadsign Guaranteed Campaigns</Link> using the proposal ID below. Your provider account controls creative permissions and approvals.</Text>}
     {error && <Alert tone="danger">{error}</Alert>}
+    {spendBlock && (spendBlock.review ? <AdSpendNotice block={spendBlock} onOpenApprovals={onOpenApprovals} onDismiss={() => setSpendBlock(null)}/>
+      // Broadsign quotes carry no currency: approval-required projects need the account currency in Integrations.
+      : <Alert tone="warning" title="Set the Broadsign account currency" onDismiss={() => setSpendBlock(null)} dismissLabel="Dismiss" actions={onOpenIntegrations && <Button variant="secondary" size="sm" onClick={onOpenIntegrations}>Open integrations</Button>}>This project requires approval before bookings are submitted, and the quote can only be matched to an approval with the Broadsign account currency. Nothing was submitted. Set the account currency in Integrations, then submit again.</Alert>)}
     {notice && <StatusLine>{notice}</StatusLine>}
     {refreshRequired && <Alert tone="warning" actions={<Button disabled={busy} onClick={refresh}>Refresh provider details</Button>}>Broadsign saved the action, but the latest details could not be loaded. Refresh provider details before making further changes.</Alert>}
     <Stack as="fieldset" disabled={refreshRequired}>

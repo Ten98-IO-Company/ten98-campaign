@@ -5,6 +5,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { adSpendBlock } from '../src/approval-status.ts';
 
 const { Button, Checkbox, DataTable, ReviewSummary, Stack } = ui;
 
@@ -32,7 +33,7 @@ test('OOH shared reviews render and submit only their exact booking while native
     if (path.endsWith('/bookings')) return { bookings };
     throw new Error('Unexpected synthetic request: ' + path);
   };
-  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'ui', `const {${libraryImports}} = ui;` + code + '; return OohProviders;')(React, () => {}, initial => { const index = refIndex++; return refs[index] ||= { current: initial }; }, initial => { const index = stateIndex++; if (!(index in states)) states[index] = initial; return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }]; }, ui);
+  const Component = new Function('React', 'adSpendBlock', 'AdSpendNotice', 'useEffect', 'useRef', 'useState', 'ui', `const {${libraryImports}} = ui;` + code + '; return OohProviders;')(React, adSpendBlock, () => null, () => {}, initial => { const index = refIndex++; return refs[index] ||= { current: initial }; }, initial => { const index = stateIndex++; if (!(index in states)) states[index] = initial; return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }]; }, ui);
   const props = { projectId: 'project / exact', role: 'editor', isOperator: false, request };
   function render(extra = {}) { stateIndex = 0; refIndex = 0; return Component({ ...props, ...extra }); }
   const tree = render(), nodes = elements(tree), html = renderToStaticMarkup(tree);

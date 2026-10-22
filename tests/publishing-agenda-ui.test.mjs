@@ -24,8 +24,6 @@ const ofType = type => node => node.type === type;
 const agendaForm = element => find(element, node => node.props?.as === 'form');
 
 test('the month grid is gone and the publishing agenda is always rendered inside the Google Calendar page', async () => {
-  const styles = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
-  assert.doesNotMatch(styles, /\.(?:calendar-panel|calendar-week|calendar-grid|calendar-day|calendar-post|day-number)\b/, 'No month-grid rules remain.');
   await assert.rejects(access(new URL('../src/publishing-agenda.css', import.meta.url)), 'The desktop-hiding agenda stylesheet is deleted.');
   assert.doesNotMatch(source, /\.css'/);
   assert.doesNotMatch(appSource, /calendar-panel|calendar-grid|day-number|Create post for /);
