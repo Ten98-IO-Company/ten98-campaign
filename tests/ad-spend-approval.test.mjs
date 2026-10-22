@@ -20,10 +20,11 @@ async function spendFixture(t, { members = ['owner', 'admin', 'editor', 'viewer'
   await pool.query(`INSERT INTO users (id, name, email) VALUES ${members.map(id => `('${id}','${people[id]}','${id}@example.test')`).join(',')}; INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO memberships VALUES ${members.map(id => `('w','${id}','${id}')`).join(',')}; INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('spend-project','w','Spend','spend-profile')`);
   await pool.query(`INSERT INTO native_google_connections VALUES ('spend-project','1234567890'); INSERT INTO microsoft_ad_connections VALUES ('spend-project','555','777','{"name":"Fixture","currency":"USD","timeZone":"Dubai"}')`);
   const project = { id: 'spend-project', zernioProfileId: 'spend-profile' };
-  const state = { campaignOwned: false, setAmount: 20, campaignAmount: 40, googleAmount: 50, nativeMicros: '25000000', nativeStatus: 'PAUSED', nativePeriod: 'DAILY', msStatus: 'Paused', msBudget: 30 };
+  const state = { campaignOwned: false, setAmount: 20, campaignAmount: 40, googleAmount: 50, openaiAmount: 500, openaiType: 'lifetime', nativeMicros: '25000000', nativeStatus: 'PAUSED', nativePeriod: 'DAILY', msStatus: 'Paused', msBudget: 30 };
   const writes = [], hooks = {};
   const originalFetch = globalThis.fetch; t.after(() => { globalThis.fetch = originalFetch; });
   const metaCampaign = profileId => ({ platform: 'facebook', platformCampaignId: 'spend-campaign', accountId: 'metaads', platformAdAccountId: 'act_123', campaignName: 'Spend', currency: 'AED', status: 'paused', profileId, budgetLevel: state.campaignOwned ? 'campaign' : 'adset', campaignBudget: state.campaignOwned ? { amount: state.campaignAmount, type: 'daily' } : null, adSets: [{ platformAdSetId: 'spend-set', status: 'paused', configuredStatus: 'PAUSED', ...(state.campaignOwned ? {} : { adSetBudget: { amount: state.setAmount, type: 'daily' } }) }] });
+  const openaiCampaign = profileId => ({ platform: 'openai', platformCampaignId: 'openai-campaign', accountId: 'googleads', platformAdAccountId: 'oa-1', campaignName: 'Chat', currency: 'USD', status: 'active', profileId, budgetLevel: 'campaign', campaignBudget: { amount: state.openaiAmount, type: state.openaiType } });
   const googleCampaign = profileId => ({ platform: 'google', platformCampaignId: 'google-campaign', accountId: 'googleads', platformAdAccountId: '1234567890', campaignName: 'Search', currency: 'USD', status: 'active', profileId, budgetLevel: 'campaign', campaignBudget: { amount: state.googleAmount, type: 'daily' } });
   const nativeRow = () => ({ customer: { id: '1234567890' }, campaign: { id: '901', name: 'Shopping', status: state.nativeStatus, advertisingChannelType: 'SHOPPING' }, campaignBudget: { resourceName: 'customers/1234567890/campaignBudgets/3001', period: state.nativePeriod, amountMicros: state.nativeMicros, explicitlyShared: false } });
   globalThis.fetch = async (target, options = {}) => {
@@ -32,7 +33,7 @@ async function spendFixture(t, { members = ['owner', 'admin', 'editor', 'viewer'
     if (url.hostname === 'zernio.com') {
       if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [{ _id: 'metaads', profileId, platform: 'metaads', isActive: true }, { _id: 'googleads', profileId, platform: 'googleads', isActive: true }] });
       if (url.pathname === '/api/v1/ads/accounts') return Response.json({ accounts: [{ id: 'act_123', currency: 'AED', selectable: true }] });
-      if (url.pathname === '/api/v1/ads/tree') return Response.json({ campaigns: [metaCampaign(profileId), googleCampaign(profileId)], pagination: { pages: 1 } });
+      if (url.pathname === '/api/v1/ads/tree') return Response.json({ campaigns: [metaCampaign(profileId), googleCampaign(profileId), openaiCampaign(profileId)], pagination: { pages: 1 } });
       if (url.pathname === '/api/v1/ads') return Response.json({ ads: [{ _id: 'spend-ad', platform: 'facebook', profileId, status: 'paused', platformCampaignId: 'spend-campaign', platformAdSetId: 'spend-set' }], pagination: { pages: 1 } });
       if (url.pathname === '/api/v1/ads/accounts/live') {
         const owned = state.campaignOwned, parent = { platformCampaignId: 'spend-campaign', budget: owned ? { amount: state.campaignAmount, type: 'daily' } : null, dailyBudget: owned ? state.campaignAmount : null, lifetimeBudget: null, configuredStatus: 'PAUSED', platformCampaignStatus: 'PAUSED', status: 'paused' };
@@ -44,6 +45,7 @@ async function spendFixture(t, { members = ['owner', 'admin', 'editor', 'viewer'
       if (method === 'PUT' && url.pathname === '/api/v1/ads/ad-sets/spend-set/status') return write('adset-status', { status: payload.status, updated: 1, skipped: 0 });
       if (method === 'PUT' && url.pathname === '/api/v1/ads/ad-sets/spend-set') { state.setAmount = payload.budget.amount; return write('adset-budget', { budget: { ...payload.budget }, budgetLevel: 'adset' }); }
       if (method === 'PUT' && url.pathname === '/api/v1/ads/campaigns/spend-campaign') { state.campaignAmount = payload.budget.amount; return write('campaign-budget', { updated: 1, budget: { ...payload.budget }, budgetLevel: 'campaign' }); }
+      if (method === 'PUT' && url.pathname === '/api/v1/ads/campaigns/openai-campaign') { state.openaiAmount = payload.budget.amount; state.openaiType = payload.budget.type; return write('openai-budget', { updated: 1, budget: { ...payload.budget } }); }
       if (method === 'PUT' && url.pathname === '/api/v1/ads/campaigns/google-campaign') { state.googleAmount = payload.budget.amount; return write('google-budget', { updated: 1, budget: { ...payload.budget } }); }
       if (method === 'POST' && url.pathname === '/api/v1/ads/create') return write('create', {});
     }
@@ -181,6 +183,39 @@ test('changing the ad spend setting either way voids unconsumed approvals and pe
   const early = await f.approve(route.change);
   await f.policy(true); assert.ok(await voided([early.id]));
   result = await send(); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_REQUIRED'); assert.equal(sent(), 0);
+});
+
+test('a budget of another type is never judged a decrease, so changing a lifetime budget to a daily one needs approval', { skip: postgresSkip }, async t => {
+  const f = await spendFixture(t), sent = () => f.writes.filter(row => row.name === 'openai-budget').length;
+  await f.policy(true);
+  // 40 a day is less than the 500 lifetime figure, but they are different budgets.
+  const result = await f.integration('ads/campaign', { campaignId: 'openai-campaign', platform: 'openai', budget: { amount: 40, type: 'daily' } });
+  assert.equal(sent(), 0, 'No write is sent unapproved.'); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_REQUIRED', JSON.stringify(result.data));
+  assert.equal((await f.integration('ads/campaign', { campaignId: 'openai-campaign', platform: 'openai', budget: { amount: 400, type: 'lifetime' } })).status, 200, 'A lifetime decrease still needs none.');
+  assert.equal(sent(), 1);
+});
+
+test('a setting change voids an approval whose write is still in flight, so a later failure does not release it', { skip: postgresSkip }, async t => {
+  const f = await spendFixture(t), route = routes['Microsoft activate'], send = route.send(f), sent = () => f.writes.filter(row => row.name === route.write).length;
+  // An approval given while the setting was off, whose write is in flight when the setting is switched on, then fails.
+  await f.policy(false);
+  const approved = await f.approve(route.change);
+  await f.pool.query("INSERT INTO integration_operations (id,project_id,request_key,request_hash,status,created_at) VALUES ('inflight-op',$1,'inflight-key','h','pending',$2)", [f.project.id, new Date().toISOString()]);
+  await f.pool.query("UPDATE post_approval_reviews SET consumed_by='inflight-key',consumed_at=$1 WHERE id=$2", [new Date().toISOString(), approved.id]);
+  await f.policy(true); await f.pool.query("UPDATE integration_operations SET status='failed' WHERE id='inflight-op'");
+  const result = await send(); assert.equal(sent(), 0, 'The released approval from the earlier setting sends nothing.'); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_REQUIRED');
+  // A write that completed keeps its approval as used, not voided.
+  const used = await f.approve(route.change);
+  await f.pool.query("INSERT INTO integration_operations (id,project_id,request_key,request_hash,status,created_at) VALUES ('done-op',$1,'done-key','h2','complete',$2)", [f.project.id, new Date().toISOString()]);
+  await f.pool.query("UPDATE post_approval_reviews SET consumed_by='done-key',consumed_at=$1 WHERE id=$2", [new Date().toISOString(), used.id]);
+  await f.policy(false);
+  assert.equal((await f.reviews()).find(row => row.id === used.id).status, 'approved');
+});
+
+test('approved ad spend reviews carry when their approval expires', { skip: postgresSkip }, async t => {
+  const f = await spendFixture(t), approved = await f.approve(routes['Microsoft activate'].change);
+  assert.equal(approved.expiresAt, new Date(Date.parse(approved.reviewedAt) + 7 * 86400000).toISOString());
+  const pending = await f.request({ ...routes['Microsoft activate'].change, amount: 9999 }); assert.equal(pending.expiresAt, null);
 });
 
 test('ads/create cannot activate spend: an active status is refused with or without an approval and nothing is sent', { skip: postgresSkip }, async t => {

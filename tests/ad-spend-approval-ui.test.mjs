@@ -156,3 +156,13 @@ test('changing the ad spend setting is confirmed first, and an expired approval 
   const expired = adSpendBlock(Object.assign(new Error('Server message'), { status: 403, code: 'AD_SPEND_APPROVAL_EXPIRED' }));
   assert.equal(expired.review, true); assert.equal(expired.title, 'Needs re-approval'); assert.match(expired.text, /more than 7 days old[^]*new review/);
 });
+
+test('an unused approval past the server expiry reads as expired and needing re-approval', () => {
+  const card = extra => html(approvalsModule({ 0: { requireAdApproval: true, reviews: [review({ status: 'approved', reviewedAt: '2030-01-01T10:00:00.000Z', reviewedBy: { id: 'owner', name: 'Olive Owner' }, ...extra })] } }).AdSpendReviews({ path: '/projects/p/approvals', required: true, canReview: true, request: async () => ({}) }));
+  const expired = card({ consumed: false, expiresAt: '2000-01-01T00:00:00.000Z' });
+  assert.match(expired, />Expired</); assert.match(expired, /expired before it was used[^<]*re-approval/); assert.doesNotMatch(expired, /not yet used/);
+  const current = card({ consumed: false, expiresAt: '2999-01-01T00:00:00.000Z' });
+  assert.match(current, />Approved</); assert.match(current, /Approved and not yet used/);
+  assert.match(card({ consumed: false }), /Approved and not yet used/, 'Without a server expiry the card keeps the approved wording.');
+  assert.match(card({ consumed: true, expiresAt: '2000-01-01T00:00:00.000Z' }), /used by a provider change/, 'A used approval never reads as expired.');
+});
