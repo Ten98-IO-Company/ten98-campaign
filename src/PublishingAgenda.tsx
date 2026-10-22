@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { Button, CalendarMonth, type CalendarEntry, Card, Field, Inline, Input, PublishingAgenda, type PublishingAgendaEntry, SegmentedControl, Stack, Text } from '@ten98/ui';
 
 type Row = { id: string; [key: string]: any };
@@ -41,8 +42,8 @@ export default function CampaignPublishingAgenda({ posts, googleEvents, month, a
   const entries: (PublishingAgendaEntry & { order: number })[] = posts.filter(entry => new Date(entry.scheduledAt) >= start && new Date(entry.scheduledAt) < end).map(entry => ({
     id: `post:${entry.id}`, title: entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post)),
     dateTime: entry.scheduledAt, when: format.format(new Date(entry.scheduledAt)), order: Date.parse(entry.scheduledAt),
-    status: (entry.post.status || 'Status unavailable') + approval(entry.post),
-    details: [entry.platform, entry.accountId && (accounts.find(account => String(account._id || account.id) === entry.accountId)?.displayName || entry.accountId)].filter(Boolean).join(' · '),
+    status: (entry.post.status ? entry.post.status[0].toUpperCase() + entry.post.status.slice(1) : 'Status unavailable') + approval(entry.post),
+    details: [entry.platform && (PLATFORM_RULES[entry.platform]?.label || entry.platform), entry.accountId && (accounts.find(account => String(account._id || account.id) === entry.accountId)?.displayName || entry.accountId)].filter(Boolean).join(' · '),
     actions: <Button variant="secondary" size="sm" onClick={() => onSelect(entry.post)}>{canWrite ? 'Open post' : 'View post'}</Button>,
   }));
   for (const entry of monthPosts) addDay(localDate(new Date(entry.scheduledAt)), { id: `post:${entry.id}`, label: (entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post))) + approval(entry.post), time: timeOnly.format(new Date(entry.scheduledAt)), onSelect: () => onSelect(entry.post) });

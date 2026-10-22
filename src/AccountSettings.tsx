@@ -35,7 +35,7 @@ export default function AccountSettings({ request, onChanged }: Props) {
     {account && <AccountProfileFlow {...state('profile')} email={account.user.email} defaultValues={{ name: account.user.name, theme: appearance }} description="System follows your device’s light or dark preference. Appearance applies to this browser." onSubmit={values => action('profile', () => saveProfile(values), 'Profile saved.')}/>}
     {account && <PasswordChangeFlow key={passwordForm} {...state('password')} hasPassword={account.localPassword} policy={{ minLength: 12, maxLength: 128 }} messages={{ noPassword: 'Your identity provider manages your password.' }} onSubmit={values => action('password', async () => { await request('/account/password', 'POST', values); setPasswordForm(value => value + 1); }, 'Password changed. Other sessions have been signed out.')}/>}
     {account && <Stack gap={2}>
-      <Text tone="muted">{account.activeSessions} active sessions</Text>
+      <Text tone="muted">{account.activeSessions} active {account.activeSessions === 1 ? 'session' : 'sessions'}</Text>
       <Button variant="secondary" disabled={!!busy || account.activeSessions < 2} loading={sessions.busy} onClick={() => action('sessions', async () => { await request('/account/sessions/revoke', 'POST', {}); }, 'Other sessions signed out.')}>Sign out other sessions</Button>
       {sessions.error && <Alert tone="danger" title={sessions.error}/>}
       {sessions.notice && <StatusLine tone="success">{sessions.notice.text}</StatusLine>}
