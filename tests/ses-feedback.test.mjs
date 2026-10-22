@@ -142,6 +142,51 @@ test('SNS feedback is verified and applied once: bounces, complaints, transient 
   assert.equal((await f.sns(notification(bounce('unknown-message', 'stranger@example.com', 'Permanent', 'General')))).status, 200);
 });
 
+test('SNS messages with another certificate host or path, or SignatureVersion 1, are refused before any certificate fetch', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), robin = await f.person('robin@example.com'), { deliveries } = await f.send([robin]), message = bounce(deliveries[0].providerId, robin.email, 'Permanent', 'General');
+  const before = f.calls.length;
+  for (const fields of [{ SigningCertURL: 'https://sns.us-east-1.amazonaws.com.attacker.example/SimpleNotificationService-fixture.pem' }, { SigningCertURL: 'https://attacker.example/SimpleNotificationService-fixture.pem' }, { SigningCertURL: 'https://sns.us-east-1.amazonaws.com/a/SimpleNotificationService-fixture.pem' }, { SigningCertURL: 'https://sns.us-east-1.amazonaws.com/SimpleNotificationService-fixture.pem?x=1' }, { SignatureVersion: '1' }]) {
+    assert.deepEqual(await f.sns(notification(message, fields)), { status: 400, body: '{}' }, JSON.stringify(fields));
+  }
+  assert.equal(f.calls.length, before, 'Nothing was fetched for a refused message.'); assert.equal((await f.contact(robin.id)).consents.email, true);
+});
+
+test('transient bounces count only within seven days of each other, and concurrent ones still reach the threshold', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), late = await f.person('late@example.com'), busy = await f.person('busy@example.com'), { deliveries } = await f.send([late, busy]), id = Object.fromEntries(deliveries.map(row => [row.recipient, row.providerId]));
+  const at = (email, time) => { const message = bounce(id[email], email, 'Transient', 'General'); message.bounce.timestamp = new Date(time).toISOString(); return notification(message); };
+  const now = Date.now(), day = 86400000;
+  // The first is a minute outside the window of the third, so the third makes only two in seven days.
+  for (const time of [now - 7 * day - 60000, now - day, now]) assert.equal((await f.sns(at(late.email, time))).status, 200);
+  assert.equal((await f.contact(late.id)).suppression.email, undefined);
+  assert.equal((await f.sns(at(late.email, now))).status, 200);
+  assert.equal((await f.contact(late.id)).suppression.email.reason, 'repeated-transient-bounce');
+  // One counted, then two at once: the recipient lock makes the later of the two see both earlier bounces.
+  assert.equal((await f.sns(at(busy.email, now - day))).status, 200);
+  const results = await Promise.all([f.sns(at(busy.email, now)), f.sns(at(busy.email, now))]);
+  assert.deepEqual(results.map(result => result.status), [200, 200]);
+  assert.equal((await f.contact(busy.id)).suppression.email?.reason, 'repeated-transient-bounce');
+});
+
+test('a failed feedback write leaves nothing behind, so the redelivered message is applied in full', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), full = await f.person('full@example.com'), { deliveries } = await f.send([full]), providerId = deliveries[0].providerId;
+  const transient = () => notification(bounce(providerId, full.email, 'Transient', 'MailboxFull'));
+  for (let index = 0; index < 2; index++) assert.equal((await f.sns(transient())).status, 200);
+  const third = transient(), suppress = f.app.direct.contacts.suppressDestination;
+  f.app.direct.contacts.suppressDestination = async () => { throw new Error('storage unavailable'); };
+  assert.equal((await f.sns(third)).status, 500, 'SNS is asked to redeliver.');
+  f.app.direct.contacts.suppressDestination = suppress;
+  assert.equal((await f.pool.query(`SELECT count(*)::int AS n FROM direct_email_feedback`)).rows[0].n, 2, 'The third bounce was not counted.');
+  assert.equal((await f.sns(third)).status, 200);
+  assert.equal((await f.contact(full.id)).suppression.email.reason, 'repeated-transient-bounce');
+});
+
+test('feedback for an earlier SES send still applies after the installation switches to Cloudflare', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), gone = await f.person('gone@example.com'), { deliveries } = await f.send([gone]);
+  f.env.EMAIL_PROVIDER = 'cloudflare';
+  assert.equal((await f.sns(notification(bounce(deliveries[0].providerId, gone.email, 'Permanent', 'General')))).status, 200);
+  assert.equal((await f.contact(gone.id)).suppression.email.reason, 'hard-bounce');
+});
+
 test('with both email providers configured, sending waits for EMAIL_PROVIDER, which then picks the provider', { skip: postgresSkip }, async t => {
   const f = await fixture(t, { ...SES, EMAIL_PROVIDER: undefined }), robin = await f.person('robin@example.com');
   const status = (await f.request(f.path + '/status')).data; assert.deepEqual([status.emailProvider, status.providers.email], [null, false]);

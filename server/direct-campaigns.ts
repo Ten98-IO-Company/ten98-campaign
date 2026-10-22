@@ -5,7 +5,7 @@ import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { activeSuppression, createContacts, lockContacts } from './contacts.ts';
 import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions, emailProvider, requireEmailProvider } from './direct-providers.ts';
-import { classifyEmailFeedback, readResponseText, verifySnsMessage } from '@ten98/runtime';
+import { SES_REGIONS, classifyEmailFeedback, readResponseText, verifySnsMessage } from '@ten98/runtime';
 
 const channels = ['email', 'sms', 'whatsapp'];
 const nowISO = () => new Date().toISOString();
@@ -187,8 +187,8 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     for (const contact of await contacts.list(projectId)) {
       const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (!match) continue;
       const [outcome] = classifyEmailFeedback({ provider: 'cloudflare', email: match.email, reason: match.reason, expiresAt: match.expiresAt }, { transient: feedbackRules });
+      // Only a policy row alerts; any other row, including a reason the classifier does not recognise, suppresses (fail safe).
       if (outcome?.action === 'deliverability-alert') policy.push({ contactId: contact.id, expiresAt: match.expiresAt });
-      else if (!['suppress', 'count-transient'].includes(outcome?.action)) continue;
       // Cloudflare refuses the address itself until the row expires, so an expiring row holds the contact until then.
       else if (match.expiresAt) await contacts.suppressUntil(projectId, contact.id, 'email', match.reason, match.expiresAt);
       else await contacts.suppress(projectId, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason);
@@ -388,54 +388,62 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     if (certificates.size >= 20) certificates.clear(); certificates.set(url, pem); return pem;
   }
   // Amazon SES feedback through an SNS HTTPS subscription. Only a verified message for the configured topic does anything,
-  // and every refusal gets the same empty 400. Returns the HTTP status; a 500 asks SNS to redeliver.
+  // and every refusal gets the same empty 400. Returns the HTTP status; a 500 asks SNS to redeliver. It depends on the
+  // topic settings, not on the current send provider, so feedback for earlier SES sends still applies after a switch.
   async function receiveSes(rawBody: Buffer): Promise<number> {
     const topic = env.AWS_SES_SNS_TOPIC_ARN, region = env.AWS_SES_REGION;
-    if (emailProvider(env) !== 'ses' || !topic || topic.split(':')[3] !== region) return 503;
+    if (!topic || !SES_REGIONS.includes(region) || topic.split(':')[3] !== region) return 503;
     let body: string; try { body = new TextDecoder('utf-8', { fatal: true }).decode(rawBody); } catch { return 400; }
     const claimed = async (id: string) => Boolean((await db.execute(sql`SELECT 1 FROM ses_notification_receipts WHERE topic_arn = ${topic} AND message_id = ${id}`)).rowCount);
     const verified = await verifySnsMessage(body, { allowedRegions: [region], topicArns: [topic], fetchCertificate: snsCertificate, isDuplicate: claimed });
     if (!verified.ok) return 400;
-    if (verified.duplicate || !(await db.execute(sql`INSERT INTO ses_notification_receipts VALUES (${topic}, ${verified.messageId}, ${nowISO()}) ON CONFLICT DO NOTHING`)).rowCount) return 200;
+    if (verified.duplicate) return 200;
     try {
-      if (verified.type === 'SubscriptionConfirmation') {
-        const response = await fetch(verified.subscribeUrl!, { redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(10000) });
-        await response.body?.cancel().catch(() => {}); if (!response.ok) throw new Error('subscription');
-      } else if (verified.type === 'Notification') await applySesFeedback(verified.message);
-      return 200;
-    } catch {
-      // Release the claim so SNS's redelivery is processed.
-      await db.execute(sql`DELETE FROM ses_notification_receipts WHERE topic_arn = ${topic} AND message_id = ${verified.messageId}`);
-      return 500;
-    }
+      // The claim and every effect commit together: a failure or crash leaves nothing, so SNS's redelivery is applied in full.
+      await db.transaction(async tx => {
+        if (!(await tx.execute(sql`INSERT INTO ses_notification_receipts VALUES (${topic}, ${verified.messageId}, ${nowISO()}) ON CONFLICT DO NOTHING`)).rowCount) return;
+        if (verified.type === 'SubscriptionConfirmation') {
+          const response = await fetch(verified.subscribeUrl!, { redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(10000) });
+          await response.body?.cancel().catch(() => {}); if (!response.ok) throw new Error('subscription');
+        } else if (verified.type === 'Notification') await applySesFeedback(tx, verified.message);
+      });
+    } catch { return 500; }
+    // The verifier refuses messages older than an hour, so a day of receipts covers every redelivery it would accept.
+    await db.execute(sql`DELETE FROM ses_notification_receipts WHERE received_at < ${new Date(Date.now() - 86400000).toISOString()}`);
+    return 200;
   }
   // One SES Bounce, Complaint or Delivery record for a direct campaign delivery, classified by the shared runtime mapper.
   // Feedback for mail Campaign did not send through a campaign (no delivery has that SES message ID) is ignored.
-  async function applySesFeedback(message: any) {
+  async function applySesFeedback(tx: Transaction, message: any) {
     const messageId = message?.mail?.messageId;
     if (typeof messageId !== 'string' || !messageId) return;
-    const [row] = await resultRows(db.execute(sql`SELECT d.data AS delivery, c.project_id FROM direct_deliveries d JOIN direct_campaigns c ON c.id = d.campaign_id WHERE d.data->>'providerId' = ${messageId} AND c.data->>'channel' = 'email' LIMIT 1`));
+    const [row] = await resultRows(tx.execute(sql`SELECT d.id, d.data AS delivery, c.project_id FROM direct_deliveries d JOIN direct_campaigns c ON c.id = d.campaign_id WHERE d.data->>'providerId' = ${messageId} AND c.data->>'channel' = 'email' AND c.data->>'emailProvider' = 'ses' LIMIT 1`));
     if (!row) return;
     const delivery = row.delivery, projectId: string = row.project_id, recipient = String(delivery.recipient).toLowerCase(), target = recipientHash(recipient);
+    // One recipient's feedback is applied one message at a time, so concurrent transients cannot both miss the threshold.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'ses-feedback:' + projectId + ':' + target}, 0))`);
     const occurred = Date.parse(message.bounce?.timestamp || message.complaint?.timestamp || message.delivery?.timestamp || message.mail?.timestamp), at = new Date(Number.isFinite(occurred) ? occurred : Date.now()).toISOString();
-    const earlier = (await resultRows(db.execute(sql`SELECT occurred_at FROM direct_email_feedback WHERE project_id = ${projectId} AND target_hash = ${target} AND occurred_at >= ${new Date(Date.parse(at) - feedbackRules.windowMs).toISOString()}`))).map(item => Date.parse(item.occurred_at));
+    const earlier = (await resultRows(tx.execute(sql`SELECT occurred_at FROM direct_email_feedback WHERE project_id = ${projectId} AND target_hash = ${target} AND occurred_at >= ${new Date(Date.parse(at) - feedbackRules.windowMs).toISOString()}`))).map(item => Date.parse(item.occurred_at));
     const eventId = String(message.bounce?.feedbackId || message.complaint?.feedbackId || messageId);
     for (const outcome of classifyEmailFeedback(message, { transient: feedbackRules, history: () => earlier })) {
       if (outcome.recipient.toLowerCase() !== recipient) continue;
       // Each provider event counts once toward the transient threshold, however often SNS delivers it.
       if (['count-transient', 'flag-undetermined'].includes(outcome.action) || outcome.reason === 'repeated-transient') {
-        const counted = await db.execute(sql`INSERT INTO direct_email_feedback VALUES (${projectId}, 'ses', ${eventId}, ${target}, ${message.bounce?.bounceType === 'Undetermined' ? 'undetermined' : 'transient'}, ${outcome.subType ?? null}, ${at}) ON CONFLICT DO NOTHING`);
+        const counted = await tx.execute(sql`INSERT INTO direct_email_feedback VALUES (${projectId}, 'ses', ${eventId}, ${target}, ${message.bounce?.bounceType === 'Undetermined' ? 'undetermined' : 'transient'}, ${outcome.subType ?? null}, ${at}) ON CONFLICT DO NOTHING`);
         if (!counted.rowCount) continue;
       }
-      if (outcome.action === 'suppress') await contacts.suppressDestination(projectId, 'email', recipient, SES_SUPPRESSION_REASONS[outcome.reason] || outcome.reason);
-      if (outcome.action === 'record' && outcome.reason === 'unsubscribed-recipient') await contacts.suppressDestination(projectId, 'email', recipient, 'Unsubscribed');
+      if (outcome.action === 'suppress') await contacts.suppressDestination(projectId, 'email', recipient, SES_SUPPRESSION_REASONS[outcome.reason] || outcome.reason, tx);
+      if (outcome.action === 'record' && outcome.reason === 'unsubscribed-recipient') await contacts.suppressDestination(projectId, 'email', recipient, 'Unsubscribed', tx);
       if (['deliverability-alert', 'flag-undetermined'].includes(outcome.action)) {
         // SES alerts lapse a week after the latest report; Cloudflare's are replaced by each suppression sync.
         const expires = new Date(Date.parse(at) + feedbackRules.windowMs).toISOString(), kind = outcome.action === 'flag-undetermined' ? 'undetermined' : 'policy';
-        await db.execute(sql`INSERT INTO direct_deliverability_alerts SELECT ${projectId}, 'ses', ${kind}, id, ${expires}, ${at}, ${at} FROM direct_contacts WHERE id = ${delivery.contactId} AND project_id = ${projectId} ON CONFLICT (project_id, provider, kind, contact_id) DO UPDATE SET expires_at = excluded.expires_at, last_seen_at = excluded.last_seen_at`);
+        await tx.execute(sql`INSERT INTO direct_deliverability_alerts SELECT ${projectId}, 'ses', ${kind}, id, ${expires}, ${at}, ${at} FROM direct_contacts WHERE id = ${delivery.contactId} AND project_id = ${projectId} ON CONFLICT (project_id, provider, kind, contact_id) DO UPDATE SET expires_at = excluded.expires_at, last_seen_at = excluded.last_seen_at`);
       }
       const status = outcome.action === 'delivered' ? 'delivered' : outcome.action === 'record' && outcome.reason === 'provider-suppressed' ? 'suppressed' : message.bounce ? 'failed' : '';
-      if (status) await changeDelivery(delivery.id, current => { const next = nextStatus(current.status, status); if (next === current.status) return false; current.status = next; });
+      if (status) {
+        const [locked] = await resultRows(tx.execute(sql`SELECT data FROM direct_deliveries WHERE id = ${row.id} FOR UPDATE`)), current = locked?.data;
+        if (current && nextStatus(current.status, status) !== current.status) { current.status = nextStatus(current.status, status); await putDelivery(current, tx); }
+      }
     }
   }
   async function receiveTwilio({ rawBody, headers, url }: { rawBody: any; headers: any; url: URL }) {

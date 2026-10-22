@@ -44,6 +44,8 @@ function sesSender(from: any) {
   return `${name} <${from.address}>`;
 }
 async function sendSes(env: ProviderRecord, body: ProviderRecord, recipient: string, deliveryId: unknown, assertMapping?: () => unknown) {
+  // The mapping guard runs before the send, so its refusal is reported as itself rather than as an unconfirmed send.
+  await assertMapping?.();
   let result: { messageId: string };
   try {
     result = await sendSesEmail({
@@ -52,10 +54,9 @@ async function sendSes(env: ProviderRecord, body: ProviderRecord, recipient: str
       ...(env.AWS_SES_CONFIGURATION_SET ? { configurationSetName: env.AWS_SES_CONFIGURATION_SET } : {}),
       // A correlation tag on the SES event, not a deduplication key: SES has none.
       ...(typeof deliveryId === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(deliveryId) ? { idempotencyKey: deliveryId } : {}),
-      fetch: async (url, init) => { await assertMapping?.(); return fetch(url, { ...init, redirect: 'error', credentials: 'omit' }); },
+      fetch: (url, init) => fetch(url, { ...init, redirect: 'error', credentials: 'omit' }),
     });
   } catch (error: any) {
-    if (error instanceof IntegrationError) throw error;
     if (error?.uncertain) fail(502, 'PROVIDER_UNCERTAIN', 'Amazon SES did not confirm the message. Reconcile with SES before retrying a send.', true);
     if (error?.retryable) fail(429, 'PROVIDER_RATE_LIMITED', 'Amazon SES is throttling sends. Resume the campaign later.');
     if (SES_SENDER_BLOCKS.has(error?.code)) fail(409, 'EMAIL_SENDER_BLOCKED', 'Amazon SES refused this sender. Check the SES account, sending status and configuration set.');
