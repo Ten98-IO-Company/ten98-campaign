@@ -14,7 +14,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     # The suite runs on PostgreSQL; each test file clones its own database from a migrated template.
     services:
       postgres:
@@ -45,7 +45,9 @@ jobs:
           cache: npm
       - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm run build
+      # The suite takes about 4 minutes; a stalled file fails with its name (per-test limit in package.json) well before this.
       - run: npm test
+        timeout-minutes: 10
         env:
           # The import restore test runs pg_dump inside the service container, so client and server versions match.
           # The job context is only available at step level.

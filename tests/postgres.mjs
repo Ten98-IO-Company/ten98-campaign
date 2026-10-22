@@ -58,7 +58,8 @@ export async function testDatabase(t, poolOptions = {}) {
   });
   const opened = connect(databaseUrl(name), poolOptions), connection = { ...opened, url: databaseUrl(name), sql: sqlHelper(opened.pool) };
   const close = async () => {
-    await connection.pool.end().catch(() => undefined);
+    // A client a test never released would make pool.end() wait forever; DROP ... WITH (FORCE) below ends its session.
+    await Promise.race([connection.pool.end().catch(() => undefined), new Promise(resolve => setTimeout(resolve, 5000).unref())]);
     const admin = new pg.Client({ connectionString: adminUrl });
     await admin.connect(); await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`); await admin.end();
   };
@@ -81,19 +82,35 @@ export async function testApp(t, options = {}, poolOptions = {}) {
  * through but blocks writes. Parallel requests that lack their own lock all read the same state before they block.
  * `waiting(n)` resolves once n backends wait on a lock, and `release()` lets them run.
  */
+/**
+ * Waits until `count` sessions in this database wait on a lock. Poll on the connection that holds the lock: the writers it
+ * blocks may hold every other pool connection, so a pool query could wait for one that never frees.
+ */
+export async function lockWaiters(client, count, timeout = 5000) {
+  for (const deadline = Date.now() + timeout; ;) {
+    // Statistics views are snapshotted per transaction, so clear the snapshot to see waiters that arrived since the last poll.
+    await client.query('SELECT pg_stat_clear_snapshot()');
+    const { rows: [row] } = await client.query("SELECT count(*) AS waiting FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'");
+    if (row.waiting >= count) return;
+    if (Date.now() > deadline) throw new Error(`Expected ${count} lock waiters, saw ${row.waiting}.`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
+/**
+ * Holds an EXCLUSIVE lock on `table` so concurrent writers queue behind it. A gate that times out releases its lock before
+ * failing, so the blocked writers and the file's pool.end() can finish.
+ */
 export async function blockWrites(pool, table) {
   const client = await pool.connect();
   await client.query('BEGIN'); await client.query(`LOCK TABLE ${table} IN EXCLUSIVE MODE`);
+  let released = false;
+  const release = async () => { if (released) return; released = true; try { await client.query('COMMIT'); } finally { client.release(); } };
   return {
     async waiting(count, timeout = 5000) {
-      for (const deadline = Date.now() + timeout; ;) {
-        const { rows: [row] } = await pool.query("SELECT count(*) AS waiting FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'");
-        if (row.waiting >= count) return;
-        if (Date.now() > deadline) throw new Error(`Expected ${count} lock waiters, saw ${row.waiting}.`);
-        await new Promise(resolve => setTimeout(resolve, 20));
-      }
+      try { await lockWaiters(client, count, timeout); } catch (error) { await release(); throw error; }
     },
-    async release() { await client.query('COMMIT'); client.release(); },
+    release,
   };
 }
 

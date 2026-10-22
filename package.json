@@ -12,7 +12,7 @@
     "build": "npm run check:architecture && tsc --noEmit && vite build",
     "start": "node --env-file-if-exists=.env server/index.ts",
     "migrate": "node --env-file-if-exists=.env server/cli.ts migrate",
-    "test": "npm run check:architecture && node --test tests/*.test.mjs",
+    "test": "npm run check:architecture && node --test --test-timeout=120000 tests/*.test.mjs",
     "check:architecture": "node node_modules/@ten98/runtime/check.mjs ."
   },
   "dependencies": {
