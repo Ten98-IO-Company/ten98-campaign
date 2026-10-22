@@ -18,7 +18,7 @@ type RestrictionCheck = ReturnType<typeof validatePostForPlatforms>;
 const ZERNIO = 'https://zernio.com/api/v1';
 export class IntegrationError extends Error {
   declare status: number; declare code: string; declare uncertain: boolean;
-  declare providerStatus?: number; declare providerCode?: string | number; declare privateReplyConsumed?: boolean; declare privateReplyOutcome?: string;
+  declare providerStatus?: number; declare providerCode?: string | number; declare privateReplyConsumed?: boolean; declare privateReplyOutcome?: string; declare details?: unknown;
   constructor(status: number, code: string, message: string, uncertain: unknown = false) {
     super(message); Object.assign(this, { status, code, uncertain });
   }

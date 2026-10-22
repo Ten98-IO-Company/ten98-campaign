@@ -154,4 +154,8 @@ test('project assignees list editors and above for editors, without email addres
   assert.equal((await request(`/projects/${projectId}/assignees`, { cookie: viewer })).status, 403);
   await pool.query("INSERT INTO workspaces (id, name) VALUES ('other', 'Other')"); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('other-project', 'other', 'Other')");
   assert.equal((await request('/projects/other-project/assignees', { cookie: editor })).status, 404);
+  // An editor of another workspace is never listed, even when the same person also belongs to this one with a lower role.
+  await pool.query("INSERT INTO users VALUES ('outsider', 'Outsider', 'outsider@example.test', NULL)"); await pool.query("INSERT INTO memberships VALUES ('other', 'outsider', 'owner'), ('other', 'viewer', 'editor')");
+  const listed = (await request(`/projects/${projectId}/assignees`, { cookie: editor })).data.members.map(member => member.id);
+  assert.ok(!listed.includes('outsider') && !listed.includes('viewer'), JSON.stringify(listed));
 });

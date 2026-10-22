@@ -286,6 +286,8 @@ async function openAdSpendReview(tx: Executor, project: ProviderRecord, user: Pr
 // write. A matching approval is consumed by this receipt (`key`), so one approval allows one provider write. Without
 // one, a review of this exact change is opened: 403 when the project holds no usable ad spend approval, 409 when it
 // holds approvals for a different change (amount, currency, platform, subject or action).
+/** Whether this project requires ad spend approval, for routes that must read extra provider data only when it does. */
+export async function adSpendApprovalRequired(context: ApprovalContext) { return (await policy(context.db, context.project.id)).requireAdApproval; }
 export async function assertAdSpendApproval(context: ApprovalContext, attempt: AdSpendAttempt, key: string) {
   const { project, user, db } = context;
   if (!attempt.activates && typeof attempt.amount === 'number' && typeof attempt.currentAmount === 'number' && attempt.amount <= attempt.currentAmount) return;
