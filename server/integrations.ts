@@ -1475,21 +1475,29 @@ export async function handleIntegration(context: any) {
       if (!nativeAccount) fail(403, 'AD_ACCOUNT_OUTSIDE_PROJECT', 'This advertising account is not available through this project connection.');
       if (nativeAccount.selectable === false) fail(409, 'AD_ACCOUNT_UNAVAILABLE', 'This advertising account cannot currently create campaigns. Check it in the provider dashboard.');
       const payload = adBody(body, account, nativeAccount);
+      // Records a campaign the provider created, so it is tracked locally even when it arrived from a validation request.
+      const recordCreated = async (ad: any) => {
+        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: payload.status === 'PAUSED' ? 'paused' : ad.status === 'active' ? 'active' : 'draft', budget: payload.budgetAmount, budgetType: payload.budgetType, spent: 0, currency: nativeAccount.currency, platform: ad.platform, externalId: ad._id, platformCampaignId: ad.platformCampaignId, providerStatus: ad.status, zernioProfileId: profileId });
+        await store.activity(project.id, `Created an advertising campaign through Zernio (${payload.status.toLowerCase()}).`);
+        return campaign;
+      };
       if (path === 'ads/validate') {
         // Zernio validates Meta (the inline campaign, ad set, creative and ad, with Meta's validate_only), ChatGPT and Google PMax/Demand Gen.
         if (!['openai', 'facebook', 'instagram'].includes(body.platform) && !(body.platform === 'google' && ['pmax', 'demand_gen'].includes(body.campaignType))) fail(422, 'VALIDATION_UNAVAILABLE', 'Provider validation here supports Meta, ChatGPT, Google Performance Max and Demand Gen.');
         let result;
         try { result = await api('/ads/create', {}, { ...payload, validateOnly: true }); }
         catch (error: any) { if (error instanceof IntegrationError) error.uncertain = false; throw error; }
-        if (result.validateOnly !== true || !Array.isArray(result.results) || !result.results.length || result.results.some(item => !item || typeof item.node !== 'string' || item.status !== 'validated') || result.ad) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm a validation-only result.');
+        // A reply carrying a created ad means the provider created the (paused) campaign despite validateOnly: record it so it is
+        // not left untracked, and report that a campaign now exists rather than a plain validation failure.
+        if (result?.ad) { let campaign; try { assertCreatedAd(result.ad, body.platform, account, nativeAccount, profileId); campaign = await recordCreated(result.ad); } catch {} throw Object.assign(new IntegrationError(502, 'VALIDATION_CREATED_CAMPAIGN', campaign ? `The provider created a paused campaign instead of only validating it. It was saved here as "${String(campaign.name).slice(0, 200)}"; review or delete it before creating another.` : 'The provider may have created a campaign instead of only validating it. Check the provider before creating another.'), campaign ? { details: { campaignId: campaign.id, name: campaign.name } } : {}); }
+        if (result.validateOnly !== true || !Array.isArray(result.results) || !result.results.length || result.results.some(item => !item || typeof item.node !== 'string' || item.status !== 'validated')) fail(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm a validation-only result.');
         send(200, { validateOnly: true, results: result.results.map(item => ({ node: item.node, status: item.status })), message: typeof result.message === 'string' ? result.message.slice(0, 2000) : 'Validation passed. No campaign was created.' }); return true;
       }
       const outcome = await operation(context, async key => {
         await validateAdLeadForm(api, profileId, body);
         const result = await api('/ads/create', {}, payload, key);
         assertCreatedAd(result.ad, body.platform, account, nativeAccount, profileId);
-        const campaign = await store.create(project.id, 'campaigns', { name: payload.name, channel: 'paid', status: payload.status === 'PAUSED' ? 'paused' : result.ad.status === 'active' ? 'active' : 'draft', budget: payload.budgetAmount, budgetType: payload.budgetType, spent: 0, currency: nativeAccount.currency, platform: result.ad.platform, externalId: result.ad._id, platformCampaignId: result.ad.platformCampaignId, providerStatus: result.ad.status, zernioProfileId: profileId });
-        await store.activity(project.id, `Created an advertising campaign through Zernio (${payload.status.toLowerCase()}).`);
+        const campaign = await recordCreated(result.ad);
         return { campaign, ad: redact(result.ad), provider: { id: result.ad._id, status: result.ad.status } };
       }); send(outcome.status, outcome.data); return true;
     }
@@ -1516,7 +1524,7 @@ export async function handleIntegration(context: any) {
     }
     fail(404, 'INTEGRATION_NOT_FOUND', 'This integration action was not found.');
   } catch (error: any) {
-    send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'INTEGRATION_ERROR', message: error instanceof IntegrationError ? error.message : 'The integration could not complete this request.' } });
+    send(error instanceof IntegrationError ? error.status : 500, { error: { code: error instanceof IntegrationError ? error.code : 'INTEGRATION_ERROR', message: error instanceof IntegrationError ? error.message : 'The integration could not complete this request.', ...(error instanceof IntegrationError && error.details ? { details: error.details } : {}) } });
     return true;
   }
 }
