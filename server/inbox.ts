@@ -689,18 +689,28 @@ async function itemNotes(context: ProviderRecord, noteId?: string): Promise<void
     if ([...url.searchParams.keys()].some(name => !['accountId', 'kind', 'resourceId'].includes(name))) fail(400, 'INVALID_INBOX_FILTER', 'Request notes by accountId, kind and resourceId only.');
     const accountId = id(url.searchParams.get('accountId')), kind = kindOf(url.searchParams.get('kind')), resourceId = id(url.searchParams.get('resourceId'));
     await context.assertProjectMapping(profileId);
+    // The newest 500, returned oldest first; `truncated` says older notes exist beyond them.
     const rows = (await context.db.execute(sql`SELECT n.id,n.author_id,u.name AS author_name,n.body,n.created_at FROM inbox_item_notes n LEFT JOIN users u ON u.id=n.author_id
-      WHERE n.project_id=${project.id} AND n.profile_id=${profileId} AND n.account_id=${accountId} AND n.kind=${kind} AND n.resource_id=${resourceId} ORDER BY n.created_at, n.id LIMIT 500`)).rows as ProviderRecord[];
-    send(200, { notes: rows.map(view) }); return;
+      WHERE n.project_id=${project.id} AND n.profile_id=${profileId} AND n.account_id=${accountId} AND n.kind=${kind} AND n.resource_id=${resourceId} ORDER BY n.created_at DESC, n.id DESC LIMIT 501`)).rows as ProviderRecord[];
+    send(200, { notes: rows.slice(0, 500).reverse().map(view), truncated: rows.length > 500 }); return;
   }
   if (req.method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', 'Read notes with GET or add one with POST.');
   if (!WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this inbox action.');
-  fields(body, ['accountId', 'kind', 'resourceId', 'body']);
+  fields(body, ['id', 'accountId', 'kind', 'resourceId', 'body']);
+  // A client-chosen id makes a retried request after a lost response return the same note instead of adding another.
+  if (body.id !== undefined && (typeof body.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.id))) fail(400, 'INVALID_INBOX_NOTE', 'Send the note id as a UUID, or omit it.');
   const text = typeof body.body === 'string' ? body.body.trim() : '';
   if (!text || text.length > 4000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) fail(400, 'INVALID_INBOX_NOTE', 'Write a note of 1 to 4,000 characters.');
-  const note = { id: randomUUID(), accountId: id(body.accountId), kind: kindOf(body.kind), resourceId: id(body.resourceId), createdAt: new Date().toISOString() };
+  const note = { id: (body.id ?? randomUUID()).toLowerCase(), accountId: id(body.accountId), kind: kindOf(body.kind), resourceId: id(body.resourceId), createdAt: new Date().toISOString() };
   await context.assertProjectMapping(profileId);
-  await context.db.execute(sql`INSERT INTO inbox_item_notes(id,project_id,profile_id,account_id,kind,resource_id,author_id,body,created_at) VALUES(${note.id},${project.id},${profileId},${note.accountId},${note.kind},${note.resourceId},${user.id},${text},${note.createdAt})`);
+  const inserted = await context.db.execute(sql`INSERT INTO inbox_item_notes(id,project_id,profile_id,account_id,kind,resource_id,author_id,body,created_at) VALUES(${note.id},${project.id},${profileId},${note.accountId},${note.kind},${note.resourceId},${user.id},${text},${note.createdAt}) ON CONFLICT (id) DO NOTHING`);
+  if (!inserted.rowCount) {
+    // The same request again returns the saved note; any other use of the id is refused.
+    const saved = (await context.db.execute(sql`SELECT n.id,n.author_id,u.name AS author_name,n.body,n.created_at FROM inbox_item_notes n LEFT JOIN users u ON u.id=n.author_id
+      WHERE n.id=${note.id} AND n.project_id=${project.id} AND n.profile_id=${profileId} AND n.account_id=${note.accountId} AND n.kind=${note.kind} AND n.resource_id=${note.resourceId} AND n.author_id=${user.id} AND n.body=${text}`)).rows[0] as ProviderRecord | undefined;
+    if (!saved) fail(409, 'INBOX_NOTE_CONFLICT', 'This note id is already used by a different note. Retry with a new id.');
+    send(200, { note: view(saved!) }); return;
+  }
   send(200, { note: { id: note.id, authorId: user.id, authorName: user.name || user.id, body: text, createdAt: note.createdAt } });
 }
 
