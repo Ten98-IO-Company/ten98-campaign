@@ -22,7 +22,7 @@ import { handleZernioQueues, applyQueueIntent, assertQueueReceipt } from './zern
 import { handleZernioMedia } from './zernio-media.ts';
 import { handleZernioBlogs } from './zernio-blogs.ts';
 import { handleZernioProducts } from './zernio-products.ts';
-import { assertAdSpendApproval, assertProposedPostApproval } from './approvals.ts';
+import { adSpendApprovalRequired, assertAdSpendApproval, assertProposedPostApproval } from './approvals.ts';
 
 const GOOGLE = 'https://www.googleapis.com';
 const WRITE_ROLES = new Set(['owner', 'admin', 'editor']);
@@ -1357,7 +1357,13 @@ export async function handleIntegration(context: any) {
           outgoing = reviewedRsaPayload(payload, reviewed, body.expectedCreativeVersion, body);
           await checkMapping(() => context.assertProjectMapping?.(profileId));
         }
-        if (path === 'ads/ad-status' && body.status === 'active') await assertAdSpendApproval(context, { subjectId: ad._id, platform: ad.platform, action: 'ads/ad-status', amount: budgetOf(ad), currency: ad.currency, currentAmount: budgetOf(ad), activates: true }, key);
+        // Zernio ads carry no currency, and most carry no budget of their own (only LinkedIn and X expose one): the ad spends from
+        // its ad set's budget or, failing that, its campaign's, in the campaign node's currency (zernio-node Ad and AdTreeCampaign types).
+        if (path === 'ads/ad-status' && body.status === 'active' && await adSpendApprovalRequired(context)) {
+          const parent = await scopedCampaign(api, profileId, ad.platformCampaignId, ad.platform), set = Array.isArray(parent.adSets) ? parent.adSets.find((row: any) => row.platformAdSetId === ad.platformAdSetId) : undefined;
+          const spend = budgetOf(ad) ?? budgetOf(set) ?? budgetOf(parent);
+          await assertAdSpendApproval(context, { subjectId: ad._id, platform: ad.platform, action: 'ads/ad-status', amount: spend, currency: parent.currency, currentAmount: spend, activates: true }, key);
+        }
         const result = await api(`/ads/${encodeURIComponent(ad._id)}${path === 'ads/ad-status' ? '/status' : ''}`, {}, outgoing, key, 'PUT');
         if (path === 'ads/ad-status') { if (String(result.configuredStatus || '').toUpperCase() !== body.status.toUpperCase()) throw new IntegrationError(502, 'AD_STATUS_NOT_CONFIRMED', 'The ad switch was not confirmed by the provider.', true); }
         else if (result.ad?._id !== ad._id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the edited ad.', true);
