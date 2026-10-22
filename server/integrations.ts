@@ -22,7 +22,7 @@ import { handleZernioQueues, applyQueueIntent, assertQueueReceipt } from './zern
 import { handleZernioMedia } from './zernio-media.ts';
 import { handleZernioBlogs } from './zernio-blogs.ts';
 import { handleZernioProducts } from './zernio-products.ts';
-import { assertProposedPostApproval } from './approvals.ts';
+import { assertAdSpendApproval, assertProposedPostApproval } from './approvals.ts';
 
 const GOOGLE = 'https://www.googleapis.com';
 const WRITE_ROLES = new Set(['owner', 'admin', 'editor']);
@@ -344,6 +344,16 @@ async function scopedCampaign(api: any, profileId: any, id: any, platform: any, 
   if (!campaign) fail(403, 'CAMPAIGN_OUTSIDE_PROJECT', 'This campaign is not in this project.');
   if (campaign.profileId !== undefined && String(campaign.profileId?._id || campaign.profileId) !== profileId) fail(403, 'CAMPAIGN_OUTSIDE_PROJECT', 'This campaign is not in this project.');
   return campaign;
+}
+// The configured budget (major units) of a campaign, ad set or ad as Zernio reports it, or null when unreadable.
+function budgetOf(row: any): number | null {
+  for (const value of [row?.campaignBudget, row?.adSetBudget, row?.budget]) if (reportObject(value) && typeof value.amount === 'number' && Number.isFinite(value.amount) && value.amount >= 0) return value.amount;
+  return typeof row?.dailyBudget === 'number' && Number.isFinite(row.dailyBudget) && row.dailyBudget >= 0 ? row.dailyBudget : null;
+}
+// What an activated campaign spends: its own budget or, with ad set budgets, the sum of every ad set's budget.
+function campaignSpend(campaign: any): number | null {
+  const own = budgetOf(campaign), sets = Array.isArray(campaign.adSets) ? campaign.adSets.map(budgetOf) : [];
+  return own ?? (sets.length && sets.every((value: number | null) => value !== null) ? sets.reduce((sum: number, value: number) => sum + value, 0) : null);
 }
 const adSetTerminal = (value: any) => ['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(String(value ?? '').toLowerCase());
 const adSetReference = (value: any) => typeof value === 'string' ? value : reportObject(value) && typeof value._id === 'string' ? value._id : undefined;
@@ -1313,6 +1323,7 @@ export async function handleIntegration(context: any) {
       const campaign = await scopedCampaign(api, profileId, campaignId, body.platform);
       if (['rejected', 'completed', 'cancelled', 'archived', 'deleted'].includes(campaign.status)) fail(409, 'TERMINAL_AD_STATUS', 'This campaign cannot resume. Create a new campaign.');
       const outcome = await operation(context, async key => {
+        if (body.status === 'active') await assertAdSpendApproval(context, { subjectId: campaignId, platform: body.platform, action: 'ads/status', amount: campaignSpend(campaign), currency: campaign.currency, currentAmount: campaignSpend(campaign), activates: true }, key);
         const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}/status`, {}, { status: body.status, platform: body.platform }, key, 'PUT');
         if (['pinterest', 'linkedin', 'twitter'].includes(body.platform)) {
           if (result.status !== body.status || ![0, 1].includes(result.updated) || ![0, 1].includes(result.skipped) || result.updated + result.skipped !== 1) throw new IntegrationError(502, 'AD_STATUS_NOT_CONFIRMED', 'The provider did not acknowledge this status request.', true);
@@ -1346,6 +1357,7 @@ export async function handleIntegration(context: any) {
           outgoing = reviewedRsaPayload(payload, reviewed, body.expectedCreativeVersion, body);
           await checkMapping(() => context.assertProjectMapping?.(profileId));
         }
+        if (path === 'ads/ad-status' && body.status === 'active') await assertAdSpendApproval(context, { subjectId: ad._id, platform: ad.platform, action: 'ads/ad-status', amount: budgetOf(ad), currency: ad.currency, currentAmount: budgetOf(ad), activates: true }, key);
         const result = await api(`/ads/${encodeURIComponent(ad._id)}${path === 'ads/ad-status' ? '/status' : ''}`, {}, outgoing, key, 'PUT');
         if (path === 'ads/ad-status') { if (String(result.configuredStatus || '').toUpperCase() !== body.status.toUpperCase()) throw new IntegrationError(502, 'AD_STATUS_NOT_CONFIRMED', 'The ad switch was not confirmed by the provider.', true); }
         else if (result.ad?._id !== ad._id) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not confirm the edited ad.', true);
@@ -1377,6 +1389,7 @@ export async function handleIntegration(context: any) {
           const snapshot = await adSetBudgetSnapshot(context, api, profileId, campaignId, body.platform, adSetId, current);
           if (snapshot.currency !== body.currency || body.version !== budgetReviewVersion(snapshot, payload.budget.amount, body.reviewExpiresAt)) fail(409, 'BUDGET_REVIEW_CHANGED', 'The proposal, budget or advertising connection changed. Load a fresh review.');
           if (Date.parse(body.reviewExpiresAt) <= Date.now() || Date.now() - Date.parse(snapshot.readAt) > 60000 || Date.parse(snapshot.readAt) > Date.now() + 30000) fail(409, 'BUDGET_REVIEW_EXPIRED', 'The review expired during its final checks. Load a fresh review before confirming.');
+          await assertAdSpendApproval(context, { subjectId: adSetId, platform: body.platform, action: 'ads/adset-budget', amount: payload.budget.amount, currency: snapshot.currency, currentAmount: snapshot.currentAmount, activates: false }, key);
           await claimAdSetBudget(context, snapshot, key);
           const result = await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}`, {}, payload, key, 'PUT');
           try {
@@ -1387,6 +1400,8 @@ export async function handleIntegration(context: any) {
           } catch { throw new IntegrationError(502, 'AD_SET_BUDGET_NOT_CONFIRMED', 'The budget request may have applied, but its independent live budget could not be verified. Review the provider outcome before repeating it.', true); }
         }
         if (statusOnly) {
+          // An ad set without its own budget spends from its campaign's budget.
+          if (body.status === 'active') await assertAdSpendApproval(context, { subjectId: adSetId, platform: body.platform, action: 'ads/adset-status', amount: budgetOf(current.adSet) ?? budgetOf(current.campaign), currency: current.campaign.currency, currentAmount: budgetOf(current.adSet) ?? budgetOf(current.campaign), activates: true }, key);
           const result = await api(`/ads/ad-sets/${encodeURIComponent(adSetId)}/status`, {}, payload, key, 'PUT');
           const rawStatus = (value: any) => value == null || typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/u.test(value);
           const reasons = Object.hasOwn(result, 'skippedReasons') ? result.skippedReasons : [];
@@ -1416,6 +1431,7 @@ export async function handleIntegration(context: any) {
           const snapshot = await campaignBudgetSnapshot(context, api, profileId, campaignId, body.platform, initial);
           if (body.currency !== snapshot.currency || body.version !== budgetReviewVersion(snapshot, amount, body.reviewExpiresAt)) fail(409, 'BUDGET_REVIEW_CHANGED', 'The proposal, campaign budget or advertising connection changed. Load a fresh review.');
           if (Date.parse(body.reviewExpiresAt) <= Date.now() || Date.parse(body.reviewExpiresAt) > Date.now() + budgetReviewAge || Date.now() - Date.parse(snapshot.readAt) > 60000 || Date.parse(snapshot.readAt) > Date.now() + 30000) fail(409, 'BUDGET_REVIEW_EXPIRED', 'The campaign review expired during its final checks. Load a fresh review before confirming.');
+          await assertAdSpendApproval(context, { subjectId: campaignId, platform: body.platform, action: 'ads/campaign-budget', amount, currency: snapshot.currency, currentAmount: snapshot.currentAmount, activates: false }, key);
           await claimCampaignBudget(context, snapshot, key);
           const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, { platform: body.platform, budget: { amount, type: 'daily' } }, key, 'PUT');
           try {
@@ -1441,6 +1457,7 @@ export async function handleIntegration(context: any) {
       }
       if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a campaign name or daily budget to change.');
       const outcome = await operation(context, async key => {
+        if (payload.budget) await assertAdSpendApproval(context, { subjectId: campaignId, platform: body.platform, action: 'ads/campaign-budget', amount: payload.budget.amount, currency: campaign.currency, currentAmount: budgetOf(campaign), activates: false }, key);
         const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, payload, key, 'PUT');
         if (!Number.isInteger(result.updated) || result.updated < 0 || (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== payload.budget.type)) || (payload.name && result.name !== payload.name)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not acknowledge the campaign changes.', true);
         await saveCampaignSnapshot(context, profileId, body.platform, campaignId, { ...(payload.budget ? { budget: result.budget.amount, budgetType: result.budget.type } : {}), ...(payload.name ? { name: result.name } : {}) });
