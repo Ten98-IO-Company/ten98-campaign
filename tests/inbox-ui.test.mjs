@@ -124,7 +124,7 @@ test('Reddit inline edit exposes before and after review only for owned comments
   const helper = section('  function commentMessage(', '  const noun = '), { code } = await transformWithOxc('function Comments() {' + helper + ' return <ConversationThread label="Post comments" messages={threadRows.map(row => commentMessage(row, selected))}/>; }', 'Comments.tsx', { jsx: { runtime: 'classic' } });
   const row = { id: 'comment', message: 'Original', from: { isOwner: true }, editVersion: 'review', depth: 0 }, commentEdit = { ...row, accountId: 'rd', postId: 'post', content: 'Corrected', confirmed: '' };
   const render = changes => {
-    const context = { React, ...ui, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'rd', account: { platform: 'reddit', name: 'Reddit account' }, capabilities: { commentEdit: true }, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [row], detail: {}, commentEdit, when: () => '', link: () => '', states: {}, triageLabel: () => '', waitingFor: () => '', userId: '', triageError: '', assignees: [], TriageControls: () => null, changeTriage() {}, ...changes };
+    const context = { React, ...ui, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'rd', account: { platform: 'reddit', name: 'Reddit account' }, capabilities: { commentEdit: true }, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [row], detail: {}, commentEdit, when: () => '', link: () => '', states: {}, triageLabel: () => '', waitingFor: () => '', userId: '', triageError: '', assignees: [], TriageControls: () => null, changeTriage() {}, notesFor: () => null, ...changes };
     return renderToStaticMarkup(new Function(...Object.keys(context), code + '; return Comments;')(...Object.values(context))());
   };
   const html = render(); assert.match(html, /Edit comment/); assert.match(html, /<figcaption[^>]*>Before</); assert.match(html, /<label[^>]*>After</); assert.match(html, /Original/); assert.match(html, /Corrected/); assert.match(html, /I reviewed this account and the before and after text/); assert.match(html, /disabled="">Save comment edit/); assert.match(html, /after this review can be overwritten/);
@@ -226,7 +226,7 @@ test('mention cards expand locally for readers and expose only returned safe Lin
   const start = source.indexOf("<Stack as=\"section\" gap={3} aria-label={tab === 'mentions'"), markup = source.slice(start, source.indexOf('\n      {loaded && !visibleRows.length && ', start)); assert.ok(start > 0);
   const code = await transformWithOxc('function MentionCards() { return (' + markup + '); }', 'MentionCards.tsx', { jsx: { runtime: 'classic' } });
   const rows = [{ id: 'mention-document', content: '<Campaign update>', authorName: null, authorUsername: null, publishedAt: null, permalink: accepted }, { id: 'another-document', content: 'More content', authorName: 'Sam', permalink: null }, { id: 'unsafe-document', permalink: 'https://evil.test/post' }];
-  const component = new Function('React', ...uiNames, 'visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', 'states', 'triageLabel', 'userId', 'TriageControls', 'accountId', 'triageError', 'busy', 'assignees', 'changeTriage', code.code + '; return MentionCards;')(React, ...uiValues, rows, 'mentions', { name: 'Connected account' }, () => 'Time unavailable', safeLink, true, {}, () => '', '', () => null, 'li', '', '', [], () => {});
+  const component = new Function('React', ...uiNames, 'visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', 'states', 'triageLabel', 'userId', 'TriageControls', 'accountId', 'triageError', 'busy', 'assignees', 'changeTriage', 'notesFor', code.code + '; return MentionCards;')(React, ...uiValues, rows, 'mentions', { name: 'Connected account' }, () => 'Time unavailable', safeLink, true, {}, () => '', '', () => null, 'li', '', '', [], () => {}, () => null);
   const html = renderToStaticMarkup(React.createElement(component));
   assert.equal((html.match(/<details/g) || []).length, 3); assert.match(html, /<summary[^>]*><span[^>]*>Read mention/); assert.match(html, /LinkedIn author/); assert.match(html, /Time unavailable/); assert.match(html, /&lt;Campaign update&gt;/); assert.match(html, /Connected account/); assert.match(html, /Open post on LinkedIn/); assert.match(html, /target="_blank" rel="noopener noreferrer"/); assert.equal((html.match(/href=/g) || []).length, 1); assert.equal((html.match(/Post link unavailable/g) || []).length, 2); assert.doesNotMatch(html, /<button|<textarea|<form|evil\.test/);
   const mentions = markup.slice(markup.indexOf("tab === 'mentions' ?"), markup.indexOf(' : <Card as="article"')); assert.ok(mentions.length > 0);
@@ -1062,8 +1062,8 @@ test('review, mention and comment rows show their triage label, with waiting tim
   const TriageControls = await triageControls(), { triageLabel, waitingFor } = triageHelpers(), waitingSince = new Date(Date.now() - 3 * 3600000 - 60000).toISOString();
   const start = source.indexOf("<Stack as=\"section\" gap={3} aria-label={tab === 'mentions'"), markup = source.slice(start, source.indexOf('\n      {loaded && !visibleRows.length && ', start));
   const { code } = await transformWithOxc('function Cards() { return (' + markup + '); }', 'Cards.tsx', { jsx: { runtime: 'classic' } });
-  const names = ['visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', 'canReply', 'capabilities', 'busy', 'prepareReply', 'setConfirming', 'states', 'triageLabel', 'waitingFor', 'userId', 'TriageControls', 'accountId', 'triageError', 'assignees', 'changeTriage', 'title'];
-  const render = (tab, ids, readOnly, extra = {}) => renderToStaticMarkup(React.createElement(new Function('React', ...uiNames, ...names, code + '; return Cards;')(React, ...uiValues, ids.map(id => ({ id, content: 'Text', text: 'Text' })), tab, {}, () => 'when', () => undefined, readOnly, false, {}, '', () => {}, () => {}, kindStates(tab === 'mentions' ? 'mention' : 'review', ids, { status: 'pending', assigneeId: 'me', waitingSince, ...extra }), triageLabel, waitingFor, 'me', TriageControls, 'tg', '', [], () => {}, value => value || '')));
+  const names = ['visibleRows', 'tab', 'account', 'when', 'link', 'readOnly', 'canReply', 'capabilities', 'busy', 'prepareReply', 'setConfirming', 'states', 'triageLabel', 'waitingFor', 'userId', 'TriageControls', 'accountId', 'triageError', 'assignees', 'changeTriage', 'title', 'notesFor'];
+  const render = (tab, ids, readOnly, extra = {}) => renderToStaticMarkup(React.createElement(new Function('React', ...uiNames, ...names, code + '; return Cards;')(React, ...uiValues, ids.map(id => ({ id, content: 'Text', text: 'Text' })), tab, {}, () => 'when', () => undefined, readOnly, false, {}, '', () => {}, () => {}, kindStates(tab === 'mentions' ? 'mention' : 'review', ids, { status: 'pending', assigneeId: 'me', waitingSince, ...extra }), triageLabel, waitingFor, 'me', TriageControls, 'tg', '', [], () => {}, value => value || '', () => null)));
   const reviews = render('reviews', ['review-1'], false);
   assert.match(reviews, /when · Pending · Assigned to you · waiting 3h/); assert.match(reviews, /Triage: Pending · waiting 3h · Assigned to you/); assert.match(reviews, />Resolve<\/button>/);
   const mentions = render('mentions', ['mention-1'], false);
@@ -1074,7 +1074,7 @@ test('review, mention and comment rows show their triage label, with waiting tim
   assert.match(renderToStaticMarkup(React.createElement(TriageControls, { kind: 'mention', error: 'x', readOnly: false, busy: false, userId: '', onChange() {} })), /Refresh the mentions to try again/);
 
   const helper = section('  function commentMessage(', '  const noun = '), comments = await transformWithOxc('function Comments() {' + helper + ' return <ConversationThread label="Post comments" messages={threadRows.map(row => commentMessage(row, selected))}/>; }', 'Comments.tsx', { jsx: { runtime: 'classic' } });
-  const context = { React, ...ui, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'tg', account: { platform: 'facebook' }, capabilities: {}, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [{ id: 'comment-1', message: 'Hello', likeCount: 2, depth: 0 }], detail: {}, commentEdit: null, when: () => '', link: () => '', states: kindStates('comment', ['comment-1'], { status: 'resolved', assigneeId: 'mate', waitingSince }), triageLabel, waitingFor, userId: 'me', triageError: '', assignees: [{ id: 'mate', name: 'Sam' }], TriageControls, changeTriage() {} };
+  const context = { React, ...ui, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'tg', account: { platform: 'facebook' }, capabilities: {}, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [{ id: 'comment-1', message: 'Hello', likeCount: 2, depth: 0 }], detail: {}, commentEdit: null, when: () => '', link: () => '', states: kindStates('comment', ['comment-1'], { status: 'resolved', assigneeId: 'mate', waitingSince }), triageLabel, waitingFor, userId: 'me', triageError: '', assignees: [{ id: 'mate', name: 'Sam' }], TriageControls, changeTriage() {}, notesFor: () => null };
   const thread = renderToStaticMarkup(new Function(...Object.keys(context), comments.code + '; return Comments;')(...Object.values(context))());
   assert.match(thread, /2 likes · Resolved · Assigned · waiting 3h/); assert.match(thread, /Comment triage/); assert.match(thread, /Triage: Resolved · waiting 3h · Assigned to Sam/); assert.match(thread, />Reopen<\/button>/);
 });
@@ -1103,4 +1103,120 @@ test('a stale comment, review or mention change reloads that kind and item only'
     assert.deepEqual(context.triage.states[id], fresh); assert.equal(context.triage.states['other-' + kind].status, 'open'); assert.equal(context.triage.kind, kind);
     assert.equal(context.errors.at(-1), `This ${kind}’s triage changed elsewhere. Its latest status is shown; choose again to apply your change.`);
   }
+});
+
+// Internal team notes: the actual ItemNotes component with ordered hooks, the shared action lock and a stubbed transport.
+const settleNotes = () => new Promise(resolve => setImmediate(resolve));
+const deferredNote = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+const treeOf = node => Array.isArray(node) ? node.flatMap(treeOf) : React.isValidElement(node) ? [node, ...treeOf(node.props.children)] : [];
+const labelOf = node => Array.isArray(node) ? node.map(labelOf).join('') : React.isValidElement(node) ? labelOf(node.props.children) : node == null || typeof node === 'boolean' ? '' : String(node);
+const note = (id, authorId, body = 'Note ' + id) => ({ id, authorId, authorName: authorId === 'me' ? 'Mira' : 'Sam', body, createdAt: '2026-10-22T08:00:00.000Z' });
+async function mountNotes(overrides = {}) {
+  const start = source.indexOf('// Internal team notes'), end = source.indexOf('\nexport default function UnifiedInbox(', start); assert.ok(start > 0 && end > start);
+  const { code } = await transformWithOxc(source.slice(start, end), 'ItemNotes.tsx', { jsx: { runtime: 'classic' } });
+  const states = [], refs = [], effects = []; let stateIndex = 0, refIndex = 0, effectIndex = 0;
+  const useState = initial => { const index = stateIndex++; if (!(index in states)) states[index] = initial; return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }]; };
+  const useRef = initial => refs[refIndex++] ||= { current: initial };
+  const useEffect = (callback, deps) => { const index = effectIndex++, previous = effects[index]; if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) effects[index] = { deps, callback, cleanup: previous?.cleanup }; };
+  const ItemNotes = new Function('React', ...uiNames, 'useState', 'useRef', 'useEffect', 'when', 'merge', code + '; return ItemNotes;')(React, ...uiValues, useState, useRef, useEffect, value => 'at ' + value, merge);
+  const calls = [], errors = [], notices = [], replies = [];
+  const context = { version: { current: 1 }, pending: { current: false }, revision: { current: 0 }, setBusy() {}, setError: value => errors.push(value), setNotice: value => notices.push(value) };
+  const action = compile(section('async function action(', '  async function write('), context);
+  const request = (...args) => { calls.push(args); const reply = replies.shift(); return reply ? reply(...args) : Promise.resolve({ notes: [] }); };
+  let props = { path, request, accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', readOnly: false, role: 'editor', userId: 'me', busy: false, defaultOpen: true, run: action, onNotice: value => notices.push(value), ...overrides };
+  const h = {
+    calls, errors, notices, replies, context,
+    render(next = {}) { props = { ...props, ...next }; stateIndex = refIndex = effectIndex = 0; return ItemNotes(props); },
+    flush() { for (const effect of effects) if (effect.callback) { effect.cleanup?.(); effect.cleanup = effect.callback(); effect.callback = null; } },
+    async step(next) { h.render(next); h.flush(); await settleNotes(); h.render(); h.flush(); await settleNotes(); return h.render(); },
+    html() { return renderToStaticMarkup(h.render()); },
+    find(type, label) { return treeOf(h.render()).find(node => node.type === type && (label === undefined || labelOf(node.props.children) === label)); },
+    type(value) { h.find(ui.Textarea).props.onChange({ target: { value } }); },
+    submit() { return h.find(ui.Form).props.onSubmit(new FormData(), event); },
+  };
+  return h;
+}
+
+test('internal notes use each tab’s triage kind and resource ID, and load only when opened', async () => {
+  const line = source.match(/^  const notesFor = .*;$/m)[0], { code } = await transformWithOxc('function make() {' + line + ' return notesFor; }', 'Notes.tsx', { jsx: { runtime: 'classic' } });
+  const marker = () => null, requester = { current: async () => ({}) }, action = async () => {}, setNotice = () => {};
+  const notesFor = new Function('React', 'ItemNotes', 'accountId', 'path', 'requester', 'readOnly', 'role', 'userId', 'busy', 'action', 'setNotice', code + '; return make();')(React, marker, 'tg', path, requester, false, 'admin', 'me', '', action, setNotice);
+  const element = notesFor('review', 'review-1');
+  assert.equal(element.type, marker); assert.equal(element.key, JSON.stringify(['tg', 'review', 'review-1']), 'Each item mounts its own notes.');
+  assert.deepEqual({ ...element.props }, { path, request: requester.current, accountId: 'tg', kind: 'review', resourceId: 'review-1', readOnly: false, role: 'admin', userId: 'me', busy: false, defaultOpen: false, run: action, onNotice: setNotice });
+  assert.equal(notesFor('conversation', 't_platform', true).props.defaultOpen, true);
+  assert.ok(source.includes("{notesFor('conversation', triageKey(selected), true)}"), 'Messages open the selected conversation’s notes, keyed like triage.');
+  assert.ok(source.includes("onChange={change => changeTriage(item, change)}/></Disclosure>{notesFor('comment', item.id)}"), 'Each comment has its own notes.');
+  for (const kind of ['review', 'mention']) assert.ok(source.includes(`kind="${kind}" state={states[item.id]} error={triageError} readOnly={readOnly} busy={!!busy} userId={userId} members={assignees} onChange={change => changeTriage(item, change)}/>{notesFor('${kind}', item.id)}`), kind);
+
+  for (const [kind, resourceId] of [['comment', 'comment-1'], ['review', 'review-1'], ['mention', 'mention-1']]) {
+    const h = await mountNotes({ kind, resourceId, defaultOpen: false });
+    await h.step(); assert.equal(h.calls.length, 0, kind + ' notes are not read for a closed row.');
+    assert.match(h.html(), /Internal notes, visible only to your team/);
+    h.find(ui.Disclosure).props.onOpenChange(true); await h.step();
+    assert.deepEqual(h.calls, [[path + '/item-notes?' + new URLSearchParams({ accountId: 'tg', kind, resourceId })]], kind + ' reads are plain GETs.');
+    assert.match(h.html(), /No internal notes yet/);
+  }
+  const h = await mountNotes({ resourceId: 't_platform' }); h.replies.push(async () => ({ notes: [note('n-1', 'mate', 'Called the customer.\nWaiting on a refund.'), { id: 'bad' }, { ...note('n-2', 'gone'), authorName: 'Former team member' }] }));
+  await h.step(); assert.deepEqual(h.calls, [[path + '/item-notes?accountId=tg&kind=conversation&resourceId=t_platform']]);
+  const html = h.html();
+  assert.match(html, /Internal notes, visible only to your team \(2\)/); assert.match(html, /Sam/); assert.match(html, /Former team member/); assert.match(html, /<time[^>]*dateTime="2026-10-22T08:00:00.000Z"/i); assert.match(html, /at 2026-10-22T08:00:00.000Z/);
+  assert.match(html, /Called the customer.\nWaiting on a refund./, 'Newlines are preserved.'); assert.ok(html.indexOf('Called the customer') < html.indexOf('Note n-2'), 'Oldest first, as returned.');
+  const failed = await mountNotes(); failed.replies.push(async () => { throw new Error('Notes unavailable'); }); await failed.step();
+  assert.match(failed.html(), /Notes unavailable/); assert.equal(failed.calls.length, 1, 'A failed read is not retried automatically.');
+  failed.find(ui.Button, 'Load notes again').props.onClick(); await failed.step(); assert.equal(failed.calls.length, 2); assert.match(failed.html(), /No internal notes yet/);
+});
+
+test('editors add a note with its exact body once, append the returned note and clear the box; viewers only read', async () => {
+  const h = await mountNotes({ kind: 'comment', resourceId: 'comment-1' }); h.replies.push(async () => ({ notes: [note('n-1', 'mate')] })); await h.step();
+  assert.equal(h.find(ui.Textarea).props.maxLength, 4000); assert.equal(h.find(ui.Button, 'Add note').props.disabled, true, 'An empty note cannot be added.');
+  h.type('  Follow up\nby Friday ');
+  const count = h.find(ui.Field).props.count; assert.equal(count.max, 4000); assert.equal(count.measure(count.value), 22, 'The live count follows the typed text.');
+  const post = deferredNote(); h.replies.push(() => post.promise);
+  const first = h.submit(), second = h.submit(); h.render(); const third = h.submit();
+  assert.equal(h.calls.length, 2, 'Double clicks send one POST.'); assert.deepEqual(h.calls[1], [path + '/item-notes', 'POST', { accountId: 'tg', kind: 'comment', resourceId: 'comment-1', body: '  Follow up\nby Friday ' }], 'The POST carries the typed body and no action key.');
+  post.resolve({ note: { ...note('n-2', 'me'), body: 'Follow up\nby Friday' } }); await Promise.all([first, second, third]);
+  assert.equal(h.context.pending.current, false); assert.equal(h.find(ui.Textarea).props.value, ''); assert.equal(h.notices.at(-1), 'Note added.');
+  const html = h.html(); assert.match(html, /\(2\)/); assert.ok(html.indexOf('Note n-1') < html.indexOf('Follow up\nby Friday'), 'The new note is appended.');
+  const failed = await mountNotes(); await failed.step(); failed.type('Keep me'); failed.replies.push(async () => { throw Object.assign(new Error('Write a note of 1 to 4,000 characters.'), { status: 400, code: 'INVALID_INBOX_NOTE' }); });
+  await failed.submit(); await settleNotes(); assert.equal(failed.calls.length, 2, 'A failed add is not retried.'); assert.equal(failed.errors.at(-1), 'Write a note of 1 to 4,000 characters.'); assert.equal(failed.find(ui.Textarea).props.value, 'Keep me', 'A failed note stays in the box.');
+  const viewer = await mountNotes({ readOnly: true, role: 'viewer' }); viewer.replies.push(async () => ({ notes: [note('n-1', 'me')] })); await viewer.step();
+  const shown = viewer.html(); assert.match(shown, /Note n-1/); assert.doesNotMatch(shown, /<textarea|<form|Add note|Delete note/, 'Viewers get the list only.');
+  assert.equal(viewer.find(ui.Form), undefined); assert.equal(viewer.find(ui.Button, 'Delete note'), undefined);
+});
+
+test('note deletion is offered for your own notes or to owners and admins, confirms first and reloads after a 404', async () => {
+  const listed = { notes: [note('n-1', 'me'), note('n-2', 'mate')] }, deletes = h => treeOf(h.render()).filter(node => node.type === ui.Button && labelOf(node.props.children) === 'Delete note');
+  for (const [role, userId, count] of [['editor', 'me', 1], ['editor', '', 0], ['admin', 'me', 2], ['owner', 'other', 2]]) {
+    const h = await mountNotes({ role, userId }); h.replies.push(async () => structuredClone(listed)); await h.step();
+    assert.equal(deletes(h).length, count, role + ' ' + (userId || 'unknown user'));
+  }
+  const h = await mountNotes({ role: 'admin' }); h.replies.push(async () => structuredClone(listed)); await h.step();
+  deletes(h)[1].props.onClick();
+  assert.equal(h.calls.length, 1, 'Choosing delete only asks first.'); const dialog = h.find(ui.ConfirmDialog); assert.equal(dialog.props.open, true); assert.equal(dialog.props.danger, true);
+  dialog.props.onOpenChange(false); assert.equal(h.find(ui.ConfirmDialog).props.open, false); assert.equal(h.calls.length, 1, 'Cancelling sends nothing.');
+  deletes(h)[1].props.onClick(); h.replies.push(async () => ({ deleted: true })); await h.find(ui.ConfirmDialog).props.onConfirm();
+  assert.deepEqual(h.calls[1], [path + '/item-notes/n-2', 'DELETE']); assert.doesNotMatch(h.html(), /Note n-2/); assert.equal(h.notices.at(-1), 'Note deleted.');
+  h.replies.push(async () => { throw Object.assign(new Error('This note was not found, or only its author or an administrator can delete it.'), { status: 404, code: 'INBOX_NOTE_NOT_FOUND' }); }, async () => ({ notes: [note('n-3', 'mate')] }));
+  deletes(h)[0].props.onClick(); await h.find(ui.ConfirmDialog).props.onConfirm(); await h.step();
+  assert.deepEqual(h.calls.slice(2), [[path + '/item-notes/n-1', 'DELETE'], [path + '/item-notes?accountId=tg&kind=conversation&resourceId=thread-1']], 'A missing note reloads that item’s notes.');
+  assert.equal(h.errors.at(-1), 'This note was not found, or only its author or an administrator can delete it.'); const html = h.html(); assert.match(html, /Note n-3/); assert.doesNotMatch(html, /Note n-1/);
+  const other = await mountNotes(); other.replies.push(async () => structuredClone(listed)); await other.step();
+  other.replies.push(async () => { throw Object.assign(new Error('Editing permission is required for this inbox action.'), { status: 403, code: 'WRITE_PERMISSION_REQUIRED' }); });
+  deletes(other)[0].props.onClick(); await other.find(ui.ConfirmDialog).props.onConfirm(); assert.equal(other.calls.length, 2, 'Other failures do not reload.'); assert.match(other.html(), /Note n-1/);
+});
+
+test('switching item never shows another item’s notes or applies a stale read or add', async () => {
+  const h = await mountNotes({ resourceId: 'thread-a' }), first = deferredNote(), second = deferredNote(); h.replies.push(() => first.promise, () => second.promise);
+  h.render(); h.flush(); assert.equal(h.calls.length, 1);
+  h.render({ resourceId: 'thread-b' }); h.flush(); h.render(); h.flush();
+  assert.deepEqual(h.calls.map(call => new URL('https://x.test' + call[0]).searchParams.get('resourceId')), ['thread-a', 'thread-b']);
+  first.resolve({ notes: [note('a-1', 'mate', 'Thread A note')] }); await settleNotes(); h.render(); h.flush();
+  assert.doesNotMatch(h.html(), /Thread A note/); assert.match(h.html(), /Loading notes…/, 'A stale read is ignored.');
+  second.resolve({ notes: [note('b-1', 'mate', 'Thread B note')] }); await h.step(); assert.match(h.html(), /Thread B note/);
+  h.render({ accountId: 'other' }); h.flush(); assert.doesNotMatch(h.html(), /Thread B note/, 'Another account starts empty.'); await h.step();
+  const add = await mountNotes({ resourceId: 'thread-a' }); await add.step(); add.type('For thread A'); const post = deferredNote(); add.replies.push(() => post.promise);
+  const sent = add.submit(); await add.step({ resourceId: 'thread-b' });
+  post.resolve({ note: note('a-2', 'me', 'For thread A') }); await sent; add.render();
+  assert.doesNotMatch(add.html(), /For thread A/, 'A late add does not appear on another item.'); assert.equal(add.notices.includes('Note added.'), false); assert.equal(add.find(ui.Textarea).props.value, '');
 });
