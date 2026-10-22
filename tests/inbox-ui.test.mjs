@@ -885,10 +885,10 @@ function triageHelpers() {
   const start = source.indexOf('// Team triage overlay'), end = source.indexOf('function TriageControls(', start); assert.ok(start > 0 && end > start);
   return new Function('validPostInstant', 'when', stripTypeScriptTypes(source.slice(start, end)) + '; return { triageFilters, triageNames, triageKey, triageVisible, waitingFor, triageLabel, snoozeUntil, validSnooze, mergeTriage, loadItemStates, snoozePresets };')(validPostInstant, value => 'at ' + value);
 }
-async function triageControls() {
+async function triageControls(useState = initial => [initial, () => {}]) {
   const start = source.indexOf('function TriageControls('), end = source.indexOf('\nexport default function UnifiedInbox(', start); assert.ok(start > 0 && end > start);
   const { code } = await transformWithOxc(source.slice(start, end), 'TriageControls.tsx', { jsx: { runtime: 'classic' } }), helpers = triageHelpers();
-  return new Function('React', 'useState', 'when', ...Object.keys(helpers), ...uiNames, code + '; return TriageControls;')(React, initial => [initial, () => {}], value => 'at ' + value, ...Object.values(helpers), ...uiValues);
+  return new Function('React', 'useState', 'when', ...Object.keys(helpers), ...uiNames, code + '; return TriageControls;')(React, useState, value => 'at ' + value, ...Object.values(helpers), ...uiValues);
 }
 function triageContext(overrides = {}) {
   const helpers = triageHelpers(), calls = [], context = { ...helpers, path, tab: 'messages', accountId: 'tg', readOnly: false, version: { current: 1 }, pending: { current: false }, revision: { current: 0 }, errors: [], notices: [], setBusy() {}, when: value => 'at ' + value, ...overrides };
@@ -980,4 +980,20 @@ test('read-only users see triage status without controls, and the handler refuse
   const { calls, changeTriage } = triageContext({ readOnly: true }); await changeTriage({ id: 'thread-1' }, { status: 'resolved' }); assert.equal(calls.length, 0);
   const comments = triageContext({ tab: 'comments' }); await comments.changeTriage({ id: 'thread-1' }, { status: 'resolved' }); assert.equal(comments.calls.length, 0);
   assert.match(source, /<TriageControls key=\{accountId \+ ':' \+ triageKey\(selected\)\} state=\{states\[triageKey\(selected\)\]\}/);
+});
+
+test('editors can assign a conversation to an eligible teammate from the project assignee directory', async () => {
+  const members = [{ id: 'me', name: 'Mira', role: 'owner' }, { id: 'mate', name: 'Sam', role: 'editor' }];
+  const state = { accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', status: 'open', assigneeId: 'mate', updatedAt: '2026-10-22T08:00:00.000Z' };
+  const shown = renderToStaticMarkup(React.createElement(await triageControls(), { state, readOnly: false, busy: false, userId: 'me', members, onChange() {} }));
+  assert.match(shown, /Assigned to Sam/); assert.match(shown, />Mira \(you\)<\/option>/); assert.doesNotMatch(shown, />Sam<\/option>/, 'The current assignee is not offered again.');
+  // The picker's choice is local state; with Sam chosen, Assign sends only the assignee.
+  const Picked = await triageControls(initial => [initial === '' ? 'mate' : initial, () => {}]), changes = [];
+  const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children)] : [];
+  const assign = elements(Picked({ state: { ...state, assigneeId: null }, readOnly: false, busy: false, userId: 'me', members, onChange: change => changes.push(change) })).find(node => node.type === ui.Button && node.props.children === 'Assign');
+  assert.equal(assign.props.disabled, false); assign.props.onClick(); assert.deepEqual(changes, [{ assigneeId: 'mate' }]);
+  assert.doesNotMatch(renderToStaticMarkup(React.createElement(await triageControls(), { state, readOnly: false, busy: false, userId: 'me', onChange() {} })), /Assign to<|Choose a teammate/, 'Without the directory only Assign to me and Unassign remain.');
+  const { calls, context, changeTriage } = triageContext({ userId: 'me', assignees: members }); await changeTriage({ id: 'thread-1' }, { assigneeId: 'mate' });
+  assert.equal(calls.at(-1)[2].assigneeId, 'mate'); assert.deepEqual(context.notices.filter(Boolean).at(-1), 'Conversation assigned to Sam.');
+  assert.ok(source.includes("if (readOnly) return; let closed = false; requester.current(`/projects/${encodeURIComponent(projectId)}/assignees`)"), 'Viewers do not read the directory.');
 });
