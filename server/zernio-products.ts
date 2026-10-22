@@ -281,6 +281,8 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
     try {
       const account = await selected(context, api, profileId, accountId), store = await storeRead(context, api, profileId, account);
       collectionPermission(store);
+      // Collection IDs are opaque provider values and may contain '/' (Shopify GIDs). The ID is encoded into one path segment,
+      // assertProviderPath refuses dot parts even after decoding, and this route only ever reads (GET). Decision on #33.
       const result = await read(context, api, profileId, account, `/commerce/collections${id === undefined ? '' : '/' + encodeURIComponent(id)}`, { accountId, ...query });
       let response;
       if (id === undefined) {
