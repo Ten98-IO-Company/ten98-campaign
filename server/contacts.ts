@@ -222,11 +222,11 @@ export function createContacts({ db }: { db: Database }) {
       return persist(tx, record);
     });
   }
-  async function suppressDestination(projectId: string, channel: string, target: any, reason: any) {
+  async function suppressDestination(projectId: string, channel: string, target: any, reason: any, executor: Executor = db) {
     reason = suppressionReason(channel, reason);
     target = channel === 'email' ? emailAddress(target) : text(target, 'phone number', 16);
     if (!target || channel !== 'email' && !/^\+[1-9]\d{6,14}$/.test(target)) fail(400, 'Provide a valid destination to suppress.');
-    return db.transaction(async tx => {
+    return atomic(executor, async tx => {
       if (!(await tx.execute(sql`SELECT id FROM projects WHERE id = ${projectId}`)).rowCount) return { suppressed: 0 };
       await lockContacts(tx, projectId);
       const at = new Date().toISOString(); await remember(tx, projectId, channel, hash(target), reason, at);
