@@ -234,3 +234,15 @@ test('the test send is offered only on writable email and SMS drafts, behind a c
   assert.match(source, /<ConfirmDialog open={confirmingTest}[^>]*onConfirm={sendTest}/);
   assert.match(source, /acknowledgement={current\.channel === 'sms' \?/);
 });
+
+test('provider deliverability alerts show as a warning that names the provider and does not claim recipients were suppressed', async () => {
+  const text = await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8');
+  const helper = name => text.match(new RegExp(`^const ${name} = [^\n]+;$`, 'm'))[0].replace(`const ${name} = `, '').replace(/;$/, '');
+  const emailProviderName = compile(helper('emailProviderName')), deliverabilityAlerts = compile(helper('deliverabilityAlerts'));
+  assert.equal(emailProviderName('cloudflare'), 'Cloudflare'); assert.equal(emailProviderName('ses'), 'Amazon SES');
+  const status = { deliverabilityAlerts: [{ provider: 'cloudflare', kind: 'policy', channel: 'email', contacts: 2, firstSeenAt: 'x', lastSeenAt: 'y', expiresAt: null }, { provider: 'cloudflare', kind: 'policy', contacts: 0, expiresAt: null }, { provider: 7 }, null] };
+  assert.deepEqual(deliverabilityAlerts(status).map(row => [row.provider, row.kind, row.contacts]), [['cloudflare', 'policy', 2]], 'Malformed or empty groups are not shown.');
+  assert.deepEqual(deliverabilityAlerts({}), []); assert.deepEqual(deliverabilityAlerts(null), []);
+  assert.match(text, /\{deliverabilityAlerts\(status\)\.map\(alert => <Alert key=\{alert\.provider \+ ':' \+ alert\.kind\} tone="warning" title=\{`\$\{emailProviderName\(alert\.provider\)\} reports a \$\{alert\.kind\} block for /);
+  assert.match(text, /It may concern your sending account, not the recipients, so they were not suppressed\./);
+});

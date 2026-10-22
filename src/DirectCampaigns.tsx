@@ -2,6 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, AudienceSummary, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, ContentPreview, DataTable, DateTimeField, DescriptionList, Disclosure, EmptyState, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Inline, Input, List, ListItem, LoadMore, OperationResults, Option, ReviewConfirm, SandboxedPreview, Select, Stack, StatusLine, Tabs, Text, Textarea, type OperationStatus } from '@ten98/ui';
 import WhatsAppTemplate, { templateRestriction, templatePreviewText } from './WhatsAppTemplate';
 
+// Provider deliverability reports that are not a recipient's own suppression, such as a Cloudflare policy block (#77).
+type DeliverabilityAlert = { provider: string; kind: string; contacts: number; expiresAt: string | null };
+const emailProviderName = (provider: string) => ({ cloudflare: 'Cloudflare', ses: 'Amazon SES' }[provider] || provider);
+const deliverabilityAlerts = (status: any): DeliverabilityAlert[] => (Array.isArray(status?.deliverabilityAlerts) ? status.deliverabilityAlerts : []).filter((row: any) => typeof row?.provider === 'string' && typeof row.kind === 'string' && Number.isSafeInteger(row.contacts) && row.contacts > 0 && (row.expiresAt === null || typeof row.expiresAt === 'string'));
+
 type Row = { id: string; [key: string]: any };
 type Channel = 'email' | 'sms' | 'whatsapp';
 type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string> };
@@ -211,6 +216,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   return <Stack gap={6}>
     <Inline justify="between" align="center"><Stack gap={1}><Heading level={2}>Direct campaigns</Heading><Text tone="muted">Manage permission-based email, SMS and approved WhatsApp template campaigns with one contact list.</Text></Stack><Button variant="secondary" disabled={!!busy} onClick={() => action('Refreshing campaigns', async generation => { await load(generation); })}>Refresh lists</Button></Inline>
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
+    {deliverabilityAlerts(status).map(alert => <Alert key={alert.provider + ':' + alert.kind} tone="warning" title={`${emailProviderName(alert.provider)} reports a ${alert.kind} block for ${alert.contacts} ${alert.contacts === 1 ? 'contact' : 'contacts'}`}>It may concern your sending account, not the recipients, so they were not suppressed. Check {emailProviderName(alert.provider)} Email Sending.{alert.expiresAt ? ` The provider lists it until ${new Date(alert.expiresAt).toLocaleString()}.` : ''}</Alert>)}
     {status?.accountError && <Alert tone="warning" variant="inline">WhatsApp accounts could not be loaded: {status.accountError}. Email and SMS remain available when configured.</Alert>}
     {status?.publicCallbacks === false && <Alert tone="warning" title="Sending needs a public address">Before sending, the instance operator must set APP_URL to this app’s public HTTPS address and restart the service. Unsubscribe links and delivery updates need that address. Drafts and contacts can be saved now.</Alert>}
     <Tabs label="Direct campaign sections" value={tab} onValueChange={setTab} keepMounted={false} items={[{ value: 'campaigns', label: <>Campaigns <Badge>{campaigns.length}</Badge></>, content: <Stack gap={6}>
