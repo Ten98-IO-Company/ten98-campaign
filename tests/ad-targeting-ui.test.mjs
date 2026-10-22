@@ -170,3 +170,13 @@ test('a role change blocks new actions without dropping an already dispatched re
     assert.equal(ui.calls.filter(([path]) => path === 'ads/create').length, 1, 'Permission changes never resend.');
   }
 });
+
+test('Meta validates the exact paused-ad payload through the provider dry run without creating it', async () => {
+  const ui = await browser(async path => path === 'ads/validate' ? { validateOnly: true, results: [], message: 'Validated; nothing created.' } : { results: [] });
+  assert.ok(ui.button('Validate without creating'), 'Meta offers the dry run.');
+  await ui.form().props.onSubmit({ ...ui.event(), nativeEvent: { submitter: { getAttribute: name => name === 'data-action' ? 'validate' : null } } }); await ui.tick();
+  const [path, payload] = ui.calls.at(-1);
+  assert.equal(path, 'ads/validate'); assert.equal(payload.platform, 'facebook'); assert.equal(payload.status, 'PAUSED');
+  assert.equal(ui.created, 0); assert.equal(ui.calls.some(([name]) => name === 'ads/create'), false);
+  assert.match(ui.html(), /Validated; nothing created./);
+});
