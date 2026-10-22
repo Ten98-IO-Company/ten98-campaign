@@ -77,7 +77,8 @@ export default function AdComposer({ request, posts = [], initialDraft, readOnly
   useEffect(() => {
     const length = interestQuery.trim().length; if (length < interestMinQuery || length > interestMaxQuery) return;
     const timer = setTimeout(() => latestInterestSearch.current(), interestDebounceMs); interestTimer.current = timer; return () => clearTimeout(timer);
-  }, [interestIdentity, interestQuery]);
+    // Re-armed when busy, loading or read-only clears, so a search typed during those states still runs.
+  }, [interestSearchIdentity]);
   useEffect(() => {
     leadRead.current++; leadSelection.current = null; setLeadForms([]); setLeadForm(null); setLeadPage(null); setLeadBusy(false); setLeadLoaded(false); setLeadError(''); setLeadUnavailable(false); setManualLeadId(''); setManualLead(false); setLeadReview(false);
     if (needsLeadForm && accountId && adAccountId) void loadLeadForms();

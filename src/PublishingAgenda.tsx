@@ -73,7 +73,7 @@ export default function CampaignPublishingAgenda({ posts, googleEvents, month, a
     {view === 'month' && onMonthChange ? <CalendarMonth month={{ year: month.getFullYear(), month: month.getMonth() + 1 }} weekStartsOn={1} locale="en" today={today} days={days} onPrev={() => onMonthChange(new Date(month.getFullYear(), month.getMonth() - 1, 1))} onNext={() => onMonthChange(new Date(month.getFullYear(), month.getMonth() + 1, 1))} onToday={() => onMonthChange(new Date(new Date().getFullYear(), new Date().getMonth(), 1))} onCreateDay={canWrite && onCreateDay ? onCreateDay : undefined} isCreatable={day => day >= today} createDisabledReason={canWrite ? undefined : 'Read only: your role cannot create posts.'}/> : <>
     <PublishingAgenda label="Publishing agenda" scope={month.toLocaleDateString('en', { month: 'long', year: 'numeric' })} timezoneLabel={timezone} entries={entries} readOnly={!canWrite} emptyMessage="No scheduled posts or loaded Google events this month." actions={actions}/>
     {canWrite && onCreateDay && <Inline as="form" key={localDate(start)} align="end" onSubmit={event => { event.preventDefault(); const day = String(new FormData(event.currentTarget as HTMLFormElement).get('day') || ''); if (day) onCreateDay(day); }}>
-      <Field label="Post date"><Input type="date" name="day" required defaultValue={localDate(start)}/></Field>
+      <Field label="Post date"><Input type="date" name="day" required min={today} defaultValue={localDate(start) < today ? today : localDate(start)}/></Field>
       <Button variant="secondary" type="submit">Create post on date</Button>
     </Inline>}</>}
   </Stack></Card>;

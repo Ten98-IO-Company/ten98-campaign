@@ -16,6 +16,7 @@ const Agenda = new Function('React', 'PLATFORM_RULES', ...Object.keys(ui), code 
 const appSource = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
 const overlay = new Function(stripTypeScriptTypes(appSource.match(/^function calendarOverlayEvents\([^\r\n]+\}$/m)[0]) + '; return calendarOverlayEvents;')();
 const postLabel = post => post.content || 'Media post';
+const localToday = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const children = element => React.Children.toArray(element.props.children);
 // Finds the first element of a type (or matching a predicate) in an unrendered tree.
 const find = (element, match) => { if (!element || typeof element !== 'object') return undefined; if (match(element)) return element; for (const child of children(element)) { const found = find(child, match); if (found) return found; } };
@@ -74,14 +75,17 @@ test('verified Google copies stay deduplicated while cross-month all-day and unr
 
 test('agenda creation forwards the chosen date to the native composer and resets the default with the month', () => {
   const dates = [], props = { posts: [], googleEvents: [], month: new Date(2026, 9, 1), canWrite: true, postLabel, onSelect() {}, onCreateDay: day => dates.push(day) };
+  props.month = new Date(2099, 9, 1);
   const form = agendaForm(Agenda(props)), input = children(children(form)[0])[0];
   assert.equal(form.props.as, 'form'); assert.equal(input.type, ui.Input); assert.equal(children(form)[1].props.type, 'submit');
-  assert.equal(input.props.defaultValue, '2026-10-01');
+  assert.equal(input.props.defaultValue, '2099-10-01'); assert.equal(input.props.min, localToday());
+  // A month that has started defaults to today: the date field offers no past days.
+  assert.equal(agendaForm(Agenda({ ...props, month: new Date(2000, 0, 1) })).props.children[0].props.children.props.defaultValue, localToday());
   const NativeFormData = globalThis.FormData;
-  try { globalThis.FormData = class { get(name) { assert.equal(name, 'day'); return '2026-10-27'; } }; form.props.onSubmit({ preventDefault() {}, currentTarget: {} }); }
+  try { globalThis.FormData = class { get(name) { assert.equal(name, 'day'); return '2099-10-27'; } }; form.props.onSubmit({ preventDefault() {}, currentTarget: {} }); }
   finally { globalThis.FormData = NativeFormData; }
-  assert.deepEqual(dates, ['2026-10-27']);
-  assert.notEqual(form.key, agendaForm(Agenda({ ...props, month: new Date(2026, 10, 1) })).key);
+  assert.deepEqual(dates, ['2099-10-27']);
+  assert.notEqual(form.key, agendaForm(Agenda({ ...props, month: new Date(2099, 10, 1) })).key);
 });
 
 test('Google entries carry the supplied event actions and month navigation reaches the shared agenda header', () => {
