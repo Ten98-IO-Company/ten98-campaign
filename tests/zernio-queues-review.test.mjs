@@ -7,11 +7,10 @@ const source = await readFile(new URL('../src/ZernioQueues.tsx', import.meta.url
 
 test('queue deletion and rescheduling confirm in dialogs that call the unchanged writes', () => {
   assert.doesNotMatch(source, /window\.confirm/);
-  assert.ok(source.includes("if (moveExisting && !reshuffleConfirmed) { setConfirming({ kind: 'reshuffle' }); return; }"), 'Rescheduling waits for the dialog.');
-  assert.ok(source.includes('onConfirm={async () => { setConfirming(null); await save(undefined, true); }}'));
-  assert.ok(source.includes("function remove(row: Queue) { if (canManage) setConfirming({ kind: 'delete', row }); }"));
+  assert.ok(source.includes('[confirm, confirmDialog] = useConfirmDialog({ danger: true })') && source.includes('\n    {confirmDialog}\n'), 'The library dialog collects both decisions.');
+  assert.ok(source.includes("if (moveExisting && !await confirm({ title: 'Reschedule existing queued posts?'"), 'Rescheduling waits for the dialog.');
+  assert.match(source, /async function remove\(row: Queue\) \{ if \(canManage && await confirm\(\{ title: `Delete the publishing queue “\$\{row\.name\}”\?`[^\n]+\)\) await removeConfirmed\(row\); \}/);
   assert.ok(source.includes("await write(`${path}/${encodeURIComponent(row._id)}/delete`, { expectedVersion: row.version, confirmDelete: row._id }, 'delete')"), 'The delete write is unchanged.');
-  assert.ok(source.includes('if (target) await removeConfirmed(target);'));
 });
 
 test('the queue timezone is validated like the server, so saved zones the browser list omits stay usable', () => {
