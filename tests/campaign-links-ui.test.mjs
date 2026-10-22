@@ -37,7 +37,7 @@ test('settings restrict domain changes to the operator and late project response
   const save = compile(section('async function saveSettings(', '  async function loadAnalytics('), context); await save(event); assert.deepEqual(calls[0][2], { allowedWebsiteOrigins: ['https://example.com', 'https://www.example.com'] });
   await compile(section('async function saveSettings(', '  async function loadAnalytics('), { ...context, canChangeDomain: true })(event); assert.equal(calls[1][2].shortBaseUrl, 'https://go.example.com');
   version.current = 2; await save(event); assert.equal(settings.length, 2);
-  const load = compile(section('async function loadAnalytics(', '  async function copy('), { action: async (_, run) => run(1), days: '30', campaignId: 'campaign/a', requester: { current: async (...args) => { calls.push(args); return { totals: {} }; } }, path, version, setReport: value => reports.push(value) });
+  const load = compile(section('async function loadAnalytics(', '  const campaignOptions'), { action: async (_, run) => run(1), days: '30', campaignId: 'campaign/a', requester: { current: async (...args) => { calls.push(args); return { totals: {} }; } }, path, version, setReport: value => reports.push(value) });
   await load(event); assert.equal(reports.length, 0); const query = new URL(calls.at(-1)[0], 'https://app.example').searchParams; assert.equal(query.get('campaignId'), 'campaign/a'); assert.equal(query.get('days'), '30');
 });
 
@@ -50,10 +50,10 @@ test('local-address warnings and website snippet escaping use actual production 
 test('link setup discloses configured administration while keeping unconfigured setup and public-address warnings visible', async () => {
   const start = source.indexOf('    {settings && localShortAddress'), end = source.indexOf('    {!readOnly && <Card as="section" headingLevel={2} title="Create a short link"', start);
   assert.ok(start > 0 && end > start);
-  const { code } = await transformWithOxc(`function Setup(props) { const { settings, settingsForm, canManageSettings, readOnly, canChangeDomain, busy, saveSettings, setSettingsForm, copy } = props; return <>${source.slice(start, end)}</>; }`, 'LinkSetup.tsx', { jsx: { runtime: 'classic' } });
+  const { code } = await transformWithOxc(`function Setup(props) { const { settings, settingsForm, canManageSettings, readOnly, canChangeDomain, busy, saveSettings, setSettingsForm } = props; return <>${source.slice(start, end)}</>; }`, 'LinkSetup.tsx', { jsx: { runtime: 'classic' } });
   const Setup = new Function('React', 'localShortAddress', 'siteSnippet', ...Object.keys(UI), code + '; return Setup;')(React, compile(source.match(/const localShortAddress = (.+);/)[1]), compile(source.match(/const siteSnippet = (.+);/)[1]), ...Object.values(UI));
   const settings = { shortBaseUrl: 'https://go.example.com', allowedWebsiteOrigins: ['https://example.com'], scriptUrl: 'https://app.example/t/site.js', domainStatus: 'configured_unverified' };
-  const props = { settings, settingsForm: { shortBaseUrl: settings.shortBaseUrl, allowedWebsiteOrigins: 'https://example.com' }, canManageSettings: true, readOnly: false, canChangeDomain: true, busy: '', saveSettings() {}, setSettingsForm() {}, copy() {} };
+  const props = { settings, settingsForm: { shortBaseUrl: settings.shortBaseUrl, allowedWebsiteOrigins: 'https://example.com' }, canManageSettings: true, readOnly: false, canChangeDomain: true, busy: '', saveSettings() {}, setSettingsForm() {} };
   const render = changes => renderToStaticMarkup(React.createElement(Setup, { ...props, ...changes }));
   const html = render(), disclosure = html.match(/<details[\s\S]*?<\/details>/)?.[0];
   assert.ok(disclosure, 'Setup must remain mounted inside a native disclosure.');
