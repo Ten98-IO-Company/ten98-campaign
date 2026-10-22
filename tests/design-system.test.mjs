@@ -53,12 +53,11 @@ test('AdDetails keeps provider values as uncontrolled defaults and preserves num
 
 test('Campaign stylesheets keep only overrides for markup it still renders', async () => {
   const styles = await source('styles.css');
-  // The map hosts keep their canvas and frame until Google Maps paints the artwork.
-  assert.match(styles, /\.ooh-map\{height:390px;width:100%;border-top:1px solid var\(--border\);border-bottom:1px solid var\(--border\);background:#f2f0f8\}/, 'map artwork and its existing canvas remain unchanged');
-  assert.match(styles, /\.integration-map-preview\{height:230px;margin-top:15px;border:1px solid var\(--border\);border-radius:5px;background:#f2f0f8\}/, 'the connection map preview keeps its frame');
+  // Map hosts are the library EmbedHost now, so the app sheet carries no map rules.
+  assert.doesNotMatch(styles, /ooh-map|integration-map-preview/, 'map sizing comes from EmbedHost');
   assert.match(styles, /:root\{[^}]*color:var\(--color-text\);background:var\(--color-canvas\)[^}]*--border:var\(--color-border\);--text:var\(--color-text\)\}/, 'the page and the aliases the kept rules use resolve to semantic tokens');
   // Every class left in the app sheets belongs to markup Campaign renders itself or through the library components it uses.
-  const rendered = ['auth-shell', 'auth-form', 'eyebrow', 'brand', 'auth-footnote', 'or-divider', 'field', 'required', 't98-review-table', 'ooh-map', 'integration-map-preview'];
+  const rendered = ['auth-shell', 'auth-form', 'eyebrow', 'brand', 'auth-footnote', 'or-divider', 'field', 'required', 't98-review-table'];
   const classes = new Set([...styles.replace(/^@import .*$/gm, '').matchAll(/\.([a-zA-Z][\w-]*)/g)].map(match => match[1]));
   for (const name of classes) assert.ok(rendered.includes(name), name + ' is rendered by Campaign or a library component it uses');
   // The unified inbox and direct campaigns render only @ten98/ui components, so they no longer ship stylesheets of their own.

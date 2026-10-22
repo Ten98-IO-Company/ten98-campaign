@@ -1,12 +1,4 @@
 {
-  "src/IntegrationSettings.tsx": {
-    "element": 1,
-    "styling": 2
-  },
-  "src/OohMap.tsx": {
-    "element": 1,
-    "styling": 2
-  },
   "src/main.tsx": {
     "stylesheet": 1
   }

@@ -33,7 +33,3 @@
 @media(max-width:960px){.auth-form{padding:30px}}
 @media(max-width:760px){.auth-form{padding:24px}}
 
-/* Google Maps hosts in OohMap and IntegrationSettings. */
-.ooh-map{height:390px;width:100%;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:#f2f0f8}
-@media(max-width:760px){.ooh-map{height:300px}}
-.integration-map-preview{height:230px;margin-top:15px;border:1px solid var(--border);border-radius:5px;background:#f2f0f8}
