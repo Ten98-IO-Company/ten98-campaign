@@ -170,33 +170,35 @@ const validNote = (note: unknown): note is Row => typeof (note as Row)?.id === '
 async function loadItemNotes(request: Props['request'], path: string, accountId: string, kind: string, resourceId: string) {
   const result = await request(path + '/item-notes?' + new URLSearchParams({ accountId, kind, resourceId }));
   if (!Array.isArray(result?.notes)) throw new Error('The notes response could not be read. Try again.');
-  return result.notes.filter(validNote) as Row[];
+  return { notes: result.notes.filter(validNote) as Row[], truncated: result.truncated === true };
 }
 type NoteProps = { path: string; request: Props['request']; accountId: string; kind: string; resourceId: string; readOnly: boolean; role?: string; userId: string; busy: boolean; defaultOpen?: boolean; run: (label: string, change: (generation: number) => Promise<void>) => Promise<void>; onNotice: (notice: string) => void; onDraftChange?: (text: string) => void };
 function ItemNotes({ path, request, accountId, kind, resourceId, readOnly, role, userId, busy, defaultOpen = false, run, onNotice, onDraftChange }: NoteProps) {
-  const [open, setOpen] = useState(defaultOpen), [notes, setNotes] = useState<Row[] | null>(null), [loadError, setLoadError] = useState(''), [text, setText] = useState(''), [removing, setRemoving] = useState<Row | null>(null);
+  const [open, setOpen] = useState(defaultOpen), [notes, setNotes] = useState<Row[] | null>(null), [loadError, setLoadError] = useState(''), [text, setText] = useState(''), [removing, setRemoving] = useState<Row | null>(null), [truncated, setTruncated] = useState(false);
   // `scope` changes with the item and on unmount; `reads` orders reads so an older read never replaces a newer list;
   // `loaded` is the item last read, so each item is read once when opened and a failed read waits for the user.
-  const scope = useRef(0), reads = useRef(0), loaded = useRef(''), manager = noteManagers.includes(role || '');
+  const scope = useRef(0), reads = useRef(0), loaded = useRef(''), noteId = useRef(''), manager = noteManagers.includes(role || '');
   useEffect(() => { scope.current++; setNotes(null); setLoadError(''); setText(''); setRemoving(null); return () => { scope.current++; }; }, [accountId, kind, resourceId]);
   // An unsent note counts as a draft, so leaving the item asks first like an unsent reply.
-  useEffect(() => { onDraftChange?.(text); }, [text]);
+  useEffect(() => { onDraftChange?.(text); noteId.current = ''; }, [text]);
   useEffect(() => () => onDraftChange?.(''), []);
   useEffect(() => { const item = JSON.stringify([accountId, kind, resourceId]); if (open && loaded.current !== item) { loaded.current = item; void load(); } }, [open, accountId, kind, resourceId]);
   async function load() {
     const current = scope.current, read = ++reads.current; setLoadError('');
-    try { const found = await loadItemNotes(request, path, accountId, kind, resourceId); if (current === scope.current && read === reads.current) setNotes(found); }
+    try { const found = await loadItemNotes(request, path, accountId, kind, resourceId); if (current === scope.current && read === reads.current) { setNotes(found.notes); setTruncated(found.truncated); } }
     catch (failure) { if (current === scope.current && read === reads.current) setLoadError((failure as Error).message || 'Notes could not be loaded.'); }
   }
-  // Adding has no idempotency key, so the shared action lock allows one request at a time and a failure is never retried.
+  // The shared action lock allows one add at a time. The note id is chosen here and kept until the text changes or the add
+  // succeeds, so adding the same note again after a lost response returns the saved note instead of a second copy.
   async function add(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (readOnly || notes === null || !text.trim() || text.trim().length > 4000) return;
-    const current = scope.current, body = { accountId, kind, resourceId, body: text };
+    noteId.current ||= crypto.randomUUID();
+    const current = scope.current, body = { id: noteId.current, accountId, kind, resourceId, body: text };
     await run('Adding note', async () => {
       const result = await request(path + '/item-notes', 'POST', body);
       if (current !== scope.current) return;
       if (!validNote(result?.note)) { void load(); throw new Error('The note response could not be read. The notes are being reloaded; check them before adding it again.'); }
-      reads.current++; setText(''); setNotes(previous => merge(previous || [], [result.note])); onNotice('Note added.');
+      reads.current++; noteId.current = ''; setText(''); setNotes(previous => merge(previous || [], [result.note])); onNotice('Note added.');
     });
   }
   async function remove(note: Row) {
@@ -209,6 +211,7 @@ function ItemNotes({ path, request, accountId, kind, resourceId, readOnly, role,
     });
   }
   return <Disclosure variant="plain" open={open} onOpenChange={setOpen} summary={'Internal notes, visible only to your team' + (notes?.length ? ` (${notes.length})` : '')}><Stack as="section" aria-label="Internal notes" gap={3}>
+    {!loadError && truncated && !!notes?.length && <Text tone="muted" size="sm">Only the newest {notes.length} notes are shown.</Text>}
     {loadError ? <Alert tone="danger" variant="inline"><Stack gap={2}><Text>{loadError}</Text><Inline><Button variant="secondary" size="sm" onClick={() => { void load(); }}>Load notes again</Button></Inline></Stack></Alert> : notes === null ? <StatusLine busy>Loading notes…</StatusLine> : notes.length ? <Stack as="ol" gap={3}>{notes.map(note => <Stack as="li" key={note.id} gap={1}>
       <Inline gap={2}><Text size="sm">{note.authorName || 'Former team member'}</Text><Text as="time" size="sm" tone="muted" dateTime={note.createdAt}>{when(note.createdAt)}</Text></Inline>
       <Text preserveWhitespace>{note.body}</Text>
