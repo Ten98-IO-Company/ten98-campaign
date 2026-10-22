@@ -36,7 +36,9 @@ async function browser(respond = async () => ({ results: [interest()] })) {
   const picker = () => nodes(tree).find(node => node.type === ui.MultiCombobox);
   const choice = label => { const box = picker(), adding = label.startsWith('Add '), name = label.slice(adding ? 4 : 7), option = box && (adding ? box.props.options : box.props.values).find(item => item.label === name); if (!option) return undefined; const picked = box.props.values.some(item => item.value === option.value); return { props: { disabled: !!box.props.disabled || (adding ? picked : !picked), onClick: () => box.props.onValuesChange(adding ? [...box.props.values, option] : box.props.values.filter(item => item.value !== option.value)) } }; };
   const button = label => nodes(tree).find(node => node.type === ui.Button && (node.props['aria-label'] === label || text(node) === label)) || (/^(Add|Remove) /.test(label) ? choice(label) : undefined);
-  const input = label => { const wrapper = nodes(tree).find(node => node.type === ui.Field && node.props.label === label.replace(/ \*$/, '')); return nodes(wrapper).find(node => [ui.Input, ui.Select].includes(node.type)); };
+  // "Interest search" is the MultiCombobox's typed text, driven as the field's onInputValueChange would be.
+  const typed = () => { const box = picker(); return box && { props: { value: box.props.inputValue, disabled: !!box.props.disabled, onChange: event => box.props.onInputValueChange(event.target.value) } }; };
+  const input = label => { if (label === 'Interest search') return typed(); const wrapper = nodes(tree).find(node => node.type === ui.Field && node.props.label === label.replace(/ \*$/, '')); return nodes(wrapper).find(node => [ui.Input, ui.Select].includes(node.type)); };
   const change = async (label, value) => { const field = input(label); assert.ok(field, label); field.props.onChange({ target: { value } }); paint(); await tick(); };
   const click = label => { const control = button(label); assert.ok(control, label); assert.equal(!!control.props.disabled, false, label); const pending = control.props.onClick(); paint(); return pending; };
   const form = () => { const node = nodes(tree).find(node => node.type === ui.Form); return React.cloneElement(node, { onSubmit: event => node.props.onSubmit(undefined, event) }); };
@@ -60,9 +62,9 @@ test('a discarded same-value render leaves committed search, selection and submi
 test('explicit interest search renders provider text inertly and selected IDs/names merge into the exact paused-ad payload', async () => {
   const literal = interest('opaque/<script>&+', '<img src=x onerror=bad()>', { path: ['<b>Sport</b>'], audienceSize: null }), zero = interest('zero', 'Zero reach', { audienceSize: 0 });
   const ui = await browser(async path => path === 'ads/create' ? {} : { results: [literal, zero, interest('unknown', 'Missing reach')] });
-  assert.match(ui.html(), /No search results are loaded/); assert.equal(ui.button('Search interests').props.disabled, true); assert.equal(ui.input('Interest search').props.maxLength, 200);
+  assert.match(ui.html(), /No search results are loaded/); assert.equal(ui.button('Search interests').props.disabled, true);
   const before = ui.calls.length, query = '  fitness / & +  ';
-  await ui.change('Interest search', query); assert.equal(ui.calls.length, before, 'Typing never fetches.');
+  await ui.change('Interest search', query); assert.equal(ui.calls.length, before, 'Typing does not fetch per keystroke.');
   await ui.click('Search interests'); await ui.tick();
   assert.deepEqual(ui.calls.at(-1), ['ads/targeting?accountId=meta%20%2Fa&adAccountId=advertiser%20%2Fa&dimension=interest&q=fitness%20%2F%20%26%20%2B']);
   const html = ui.html(); assert.match(html, /&lt;img src=x onerror=bad\(\)&gt;/); assert.match(html, /&lt;b&gt;Sport&lt;\/b&gt;/); assert.match(html, /opaque\/&lt;script&gt;&amp;\+/); assert.equal((html.match(/Reach unknown/g) || []).length, 2); assert.match(html, /Estimated audience: 0/); assert.doesNotMatch(html, /<img|<script|<b>Sport/);
@@ -76,6 +78,19 @@ test('explicit interest search renders provider text inertly and selected IDs/na
   assert.equal(ui.created, 1);
   await ui.click('Remove Zero reach'); await ui.tick(); await ui.submit(); await ui.tick(); assert.equal(ui.calls.at(-1)[1].targeting.interests, undefined);
   assert.ok(ui.calls.filter(([path]) => path !== 'ads/create').every(args => args.length === 1), 'Only fully mocked creation has a body.'); assert.equal(ui.calls.some(([path]) => path === 'ads/validate'), false);
+});
+
+test('typed interest text searches once after a pause, and short or replaced text never searches', async () => {
+  const ui = await browser(), searches = () => ui.calls.filter(([path]) => path.startsWith('ads/targeting?'));
+  const pause = async () => { await new Promise(resolve => setTimeout(resolve, 450)); await ui.tick(); await ui.tick(); };
+  await ui.change('Interest search', 'f'); await pause(); assert.equal(searches().length, 0, 'One character never searches.');
+  for (const text of ['fi', 'fit', 'fitn', 'fitness']) await ui.change('Interest search', text);
+  assert.equal(searches().length, 0, 'No provider request per keystroke.');
+  await pause(); assert.deepEqual(searches(), [['ads/targeting?accountId=meta%20%2Fa&adAccountId=advertiser%20%2Fa&dimension=interest&q=fitness']]); assert.match(ui.html(), /Provider interest/);
+  await pause(); assert.equal(searches().length, 1, 'A finished search is not repeated.');
+  await ui.change('Interest search', 'yoga'); await ui.click('Search interests'); await pause(); assert.equal(searches().length, 2, 'An explicit search replaces the pending one.');
+  await ui.change('Interest search', 'running'); await ui.change('Advertising account *', advertisers[1].id); await pause(); assert.equal(searches().length, 2, 'A scope change cancels the pending search.');
+  await ui.change('Interest search', 'cycling'); ui.unmount(); await new Promise(resolve => setTimeout(resolve, 450)); assert.equal(searches().length, 2, 'Unmounting cancels the pending search.'); assert.equal(ui.postUnmountUpdates, 0);
 });
 
 test('advertiser, connection, source and platform transitions clear selection and reject A to B to A retained actions', async () => {
@@ -112,14 +127,15 @@ test('unknown, empty, provider failure and malformed search responses remain dis
   await ui.search('x'); assert.match(ui.html(), /No interests were returned for this search/); assert.doesNotMatch(ui.html(), /No search results are loaded/);
   response = new Error('Synthetic search unavailable'); await ui.search('failure'); assert.match(ui.html(), /Synthetic search unavailable/); assert.doesNotMatch(ui.html(), /No interests were returned/);
   response = { results: [{ ...interest(), audienceSize: -1 }] }; await ui.search('malformed'); assert.match(ui.html(), /interest search response could not be read/); assert.doesNotMatch(ui.html(), /Add interest|Estimated audience/);
-  const count = ui.calls.length; await ui.change('Interest search', ' '); assert.equal(ui.button('Search interests').props.disabled, true); await ui.change('Interest search', 'x'.repeat(201)); assert.equal(ui.button('Search interests').props.disabled, true); await ui.button('Search interests').props.onClick(); assert.equal(ui.calls.length, count);
+  const count = ui.calls.length; await ui.change('Interest search', ' '); assert.equal(ui.button('Search interests').props.disabled, true); await ui.button('Search interests').props.onClick(); assert.equal(ui.calls.length, count);
+  await ui.change('Interest search', 'x'.repeat(201)); assert.equal(ui.input('Interest search').props.value.length, 200, 'Typed text is capped at 200 characters.');
   response = { results: [] }; await ui.search('x'.repeat(200)); assert.equal(new URL(ui.calls.at(-1)[0], 'https://example.test').searchParams.get('q').length, 200);
 });
 
 test('opaque-ID deduplication preserves the original selected provider name and the 100-interest cap survives disabled handlers', async () => {
   let batch = 0, renamed = false; const ui = await browser(async path => path === 'ads/create' ? {} : { results: Array.from({ length: 25 }, (_, index) => interest(`opaque:${batch * 25 + index}`, `${renamed ? 'Renamed ' : ''}Interest ${batch * 25 + index}`)) });
   for (batch = 0; batch < 4; batch++) { await ui.search('batch ' + batch); for (let index = 0; index < 25; index++) { await ui.click('Add Interest ' + (batch * 25 + index)); await ui.tick(); } }
-  assert.match(ui.html(), /Selected interests: 100 \/ 100/); await ui.search('over the cap'); assert.equal(ui.button('Add Interest 100'), undefined, 'At the cap no further interests are offered.'); const box = ui.picker(); box.props.onValuesChange([...box.props.values, { value: 'opaque:100', label: 'Interest 100' }]); await ui.tick(); assert.match(ui.html(), /Selected interests: 100 \/ 100/);
+  assert.match(ui.html(), /Selected interests: 100 \/ 100/); await ui.search('over the cap'); assert.equal(ui.picker().props.max, 100, 'At the cap the library lists further interests as not pickable.'); const box = ui.picker(); box.props.onValuesChange([...box.props.values, { value: 'opaque:100', label: 'Interest 100' }]); await ui.tick(); assert.match(ui.html(), /Selected interests: 100 \/ 100/);
   await ui.click('Remove Interest 99'); await ui.tick(); assert.match(ui.html(), /Selected interests: 99 \/ 100/);
   batch = 0; renamed = true; await ui.search('duplicate id'); assert.equal(ui.button('Add Renamed Interest 0').props.disabled, true); ui.button('Add Renamed Interest 0').props.onClick(); await ui.tick(); await ui.submit(); await ui.tick();
   assert.equal(ui.calls.at(-1)[1].targeting.interests.length, 99); assert.deepEqual(ui.calls.at(-1)[1].targeting.interests[0], { id: 'opaque:0', name: 'Interest 0' });
