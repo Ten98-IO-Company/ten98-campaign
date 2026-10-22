@@ -188,6 +188,19 @@ test('pauses and budget decreases need no approval, and with ad approval off not
   assert.deepEqual(await f.reviews(), [], 'With ad approval off no review is opened.');
 });
 
+test('a budget lowered elsewhere after the first read makes a raise from the live budget need approval', { skip: postgresSkip }, async t => {
+  const f = await spendFixture(t);
+  await f.policy(true);
+  // The first read sees the old, higher budget; every later read sees the budget lowered elsewhere in the meantime.
+  const lowered = (key, high, low) => { let reads = 0; Object.defineProperty(f.state, key, { configurable: true, get: () => reads++ === 0 ? high : low, set: () => {} }); };
+  lowered('msBudget', 30, 10);
+  let result = await f.microsoft({ dailyBudget: 20, confirmed: true });
+  assert.equal(f.writes.filter(row => row.name === 'microsoft').length, 0, 'No write is sent unapproved.'); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_REQUIRED');
+  lowered('googleAmount', 50, 30);
+  result = await f.integration('ads/campaign', { campaignId: 'google-campaign', platform: 'google', budget: { amount: 40, type: 'daily' } });
+  assert.equal(f.writes.filter(row => row.name === 'google-budget').length, 0, 'No write is sent unapproved.'); assert.equal(result.data.error.code, 'AD_SPEND_APPROVAL_REQUIRED');
+});
+
 test('an activation whose budget cannot be read exactly is refused while ad approval is on', { skip: postgresSkip }, async t => {
   const f = await spendFixture(t);
   await f.policy(true); f.state.nativePeriod = 'CUSTOM_PERIOD';
