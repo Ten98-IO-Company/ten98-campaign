@@ -60,15 +60,33 @@ export function pathSegment(value: unknown): string {
   if (!text || text === '.' || text === '..') INVALID_PATH();
   return encodeURIComponent(text);
 }
+/** The fixed origin for an allowed provider host; anything else is refused. */
+export function providerOrigin(hostname: string): string {
+  switch (hostname) {
+    case 'zernio.com': return 'https://zernio.com';
+    case 'www.googleapis.com': return 'https://www.googleapis.com';
+    case 'oauth2.googleapis.com': return 'https://oauth2.googleapis.com';
+    case 'googleads.googleapis.com': return 'https://googleads.googleapis.com';
+    case 'login.microsoftonline.com': return 'https://login.microsoftonline.com';
+    case 'clientcenter.api.bingads.microsoft.com': return 'https://clientcenter.api.bingads.microsoft.com';
+    case 'campaign.api.bingads.microsoft.com': return 'https://campaign.api.bingads.microsoft.com';
+    case 'reporting.api.bingads.microsoft.com': return 'https://reporting.api.bingads.microsoft.com';
+    case 'api.twilio.com': return 'https://api.twilio.com';
+    case 'api.cloudflare.com': return 'https://api.cloudflare.com';
+    default: return fail(500, 'INVALID_PROVIDER', 'The provider endpoint is invalid.');
+  }
+}
 export async function providerRequest(url: string | URL, options: RequestInit = {}, provider = 'Zernio', assertMapping?: MappingCheck, observeReceipt?: (result: ProviderRecord) => void): Promise<ProviderRecord> {
   // A URL object is already resolved; its builder must use pathSegment. A string is checked as written.
   assertProviderPath(typeof url === 'string' ? url : url.href);
   const target = new URL(url);
-  if (target.protocol !== 'https:' || !['zernio.com', 'www.googleapis.com', 'oauth2.googleapis.com', 'googleads.googleapis.com', 'login.microsoftonline.com', 'clientcenter.api.bingads.microsoft.com', 'campaign.api.bingads.microsoft.com', 'reporting.api.bingads.microsoft.com', 'api.twilio.com', 'api.cloudflare.com'].includes(target.hostname)) fail(500, 'INVALID_PROVIDER', 'The provider endpoint is invalid.');
+  if (target.protocol !== 'https:' || target.port || target.username || target.password) fail(500, 'INVALID_PROVIDER', 'The provider endpoint is invalid.');
+  // The request is rebuilt on a constant origin, so the scheme and host sent never come from a caller's value.
+  const destination = providerOrigin(target.hostname) + target.pathname + target.search;
   await checkMapping(assertMapping);
   const signal = AbortSignal.timeout(['/api/v1/ads/create', '/api/v1/ads/boost'].includes(target.pathname) ? 180000 : 20000);
   let response: Response;
-  try { response = await fetch(target, { ...options, redirect: 'error', signal }); }
+  try { response = await fetch(destination, { ...options, redirect: 'error', signal }); }
   catch { throw new IntegrationError(502, 'PROVIDER_UNAVAILABLE', `${provider} did not confirm the request.`, options.method && options.method !== 'GET'); }
   if (!response.ok) {
     const status = response.status === 429 ? 429 : response.status >= 500 ? 502 : 400;
