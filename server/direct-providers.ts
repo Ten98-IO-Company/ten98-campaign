@@ -76,7 +76,9 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
     if (values.length) matches.push(status);
   }
   if (matches.length !== 1 || data.result.message_id != null && !validId(data.result.message_id)) invalid('Cloudflare Email Sending', true);
-  return { providerId: data.result.message_id || null, status: matches[0], recipient: contact.email, ...(matches[0] === 'failed' ? { suppressionReason: 'hard-bounce' } : matches[0] === 'suppressed' ? { suppressionReason: 'Provider suppression' } : {}) };
+  // A suppressed recipient is not suppressed locally here: the receipt carries no reason or expiry, so a temporary block would
+  // become permanent. The suppression-list sync records it with Cloudflare's own reason and expiry.
+  return { providerId: data.result.message_id || null, status: matches[0], recipient: contact.email, ...(matches[0] === 'failed' ? { suppressionReason: 'hard-bounce' } : {}) };
 }
 
 export function sendSmsReply({ env, sender, recipient, message, callbackUrl, appUrl, assertMapping }: ProviderRecord) {

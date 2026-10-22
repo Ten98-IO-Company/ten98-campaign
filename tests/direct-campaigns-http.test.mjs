@@ -25,7 +25,7 @@ async function fixture(t, poolOptions) {
       const id = url.pathname.split('/').at(-1).replace('.json', ''); return json(messages.get(id));
     }
     if (url.hostname === 'api.cloudflare.com') {
-      if (url.pathname.endsWith('/send')) { const body = JSON.parse(options.body), email = body.to[0]; return json({ success: true, result: { message_id: 'email-' + calls.length, delivered: emailMode === 'delivered' ? [email] : [], queued: emailMode === 'queued' ? [email] : [], permanent_bounces: emailMode === 'bounce' ? [email] : [], suppressed_recipients: [] } }); }
+      if (url.pathname.endsWith('/send')) { const body = JSON.parse(options.body), email = body.to[0]; return json({ success: true, result: { message_id: 'email-' + calls.length, delivered: emailMode === 'delivered' ? [email] : [], queued: emailMode === 'queued' ? [email] : [], permanent_bounces: emailMode === 'bounce' ? [email] : [], suppressed_recipients: emailMode === 'suppressed' ? [email] : [] } }); }
       if (url.pathname.endsWith('/suppressions')) return json({ success: true, result: suppressions, result_info: { next_cursor: null } });
     }
     if (url.hostname === 'zernio.com') {
@@ -178,6 +178,43 @@ test('Cloudflare email enforces transactional purpose, reports true receipts, ap
     f.setSuppressions([{ id: 'suppression-other-domain', email: safeContact.email, reason: 'hard_bounce', scope: { type: 'sending_domain', value: 'another.example' }, expires_at: null }, { id: 'suppression-expired', email: safeContact.email, reason: 'complaint', scope: { type: 'account' }, expires_at: '2020-01-01T00:00:00Z' }]);
     assert.equal((await f.request(f.path + `/campaigns/${campaign.id}/refresh`, 'POST', {})).status, 200); assert.equal((await f.request(f.path + '/contacts')).data.contacts.find(item => item.id === safeContact.id).consents.email, true, 'Unrelated and expired provider suppressions are not applied.');
     const draft = await f.draft({ channel: 'email', subject: 'Service', text: 'Service' }); assert.equal((await f.request(f.path + `/campaigns/${draft.id}/refresh`, 'POST', {})).data.campaign.status, 'draft', 'Refreshing a draft cannot mark it completed.');
+  } finally { await f.close(); }
+});
+
+// ten98-campaign#77: Cloudflare lists soft bounces and some hard bounces with an expiry. Campaign holds those contacts only
+// until then and keeps their consent; a `policy` row (undefined by Cloudflare, possibly sender-side) raises an alert instead.
+test('Cloudflare temporary suppressions expire without withdrawing consent, and policy rows alert instead of suppressing', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const soft = await f.person({ email: 'soft@example.com', phone: '+12025550131' }), policy = await f.person({ email: 'policy@example.com', phone: '+12025550132' }), complaint = await f.person({ email: 'complaint@example.com', phone: '+12025550133' }), moved = await f.person({ email: 'moved@example.com', phone: '+12025550134' });
+    const later = new Date(Date.now() + 86400000).toISOString(), contact = async id => (await f.request(f.path + '/contacts')).data.contacts.find(item => item.id === id);
+    const status = async () => (await f.request(f.path + '/status')).data.deliverabilityAlerts;
+    f.setSuppressions([{ id: 's1', email: soft.email, reason: 'soft_bounce', scope: { type: 'account' }, expires_at: later }, { id: 's2', email: policy.email, reason: 'policy', scope: { type: 'account' }, expires_at: null }, { id: 's3', email: complaint.email, reason: 'complaint', scope: { type: 'account' }, expires_at: null }, { id: 's5', email: moved.email, reason: 'hard_bounce', scope: { type: 'account' }, expires_at: later }]);
+    const draft = await f.draft({ channel: 'email', subject: 'Service', text: 'Service', contactIds: [soft.id, policy.id, complaint.id] });
+    assert.equal((await f.request(f.path + `/campaigns/${draft.id}/refresh`, 'POST', {})).status, 200);
+    const held = await contact(soft.id);
+    assert.equal(held.consents.email, true, 'A temporary provider suppression keeps the consent Campaign did not withdraw.'); assert.ok(held.consentEvidence.email);
+    assert.deepEqual([held.suppression.email.reason, held.suppression.email.expiresAt], ['soft_bounce', later]);
+    assert.equal((await pool.query(`SELECT count(*)::int AS n FROM direct_contact_suppressions WHERE reason = 'soft_bounce'`)).rows[0].n, 0, 'A temporary suppression is not written to the permanent ledger.');
+    const flagged = await contact(policy.id); assert.equal(flagged.consents.email, true); assert.equal(flagged.suppression.email, undefined, 'A policy row does not suppress the recipient.');
+    assert.equal((await contact(complaint.id)).consents.email, false, 'Permanent suppressions keep withdrawing consent.');
+    assert.deepEqual((await status()).map(({ provider, kind, channel, contacts, expiresAt }) => ({ provider, kind, channel, contacts, expiresAt })), [{ provider: 'cloudflare', kind: 'policy', channel: 'email', contacts: 1, expiresAt: null }]);
+    let preview = (await f.request(f.path + `/campaigns/${draft.id}/preview`, 'POST', {})).data.audience;
+    assert.deepEqual(preview.exclusions.map(row => [row.id, row.reason]).sort(), [[complaint.id, 'No recorded consent'], [soft.id, 'Suppressed: soft_bounce']].sort());
+    assert.equal((await contact(moved.id)).suppression.email.reason, 'hard-bounce');
+    assert.equal((await f.request(f.path + '/contacts/' + moved.id, 'PATCH', { email: 'moved-new@example.com' })).status, 200); assert.equal((await contact(moved.id)).suppression.email, undefined, 'A temporary hold belongs to the old address.');
+    // Editing the contact keeps its consent, and the hold lifts by itself once Cloudflare's expiry passes.
+    assert.equal((await f.request(f.path + '/contacts/' + soft.id, 'PATCH', { name: 'Soft changed' })).status, 200); assert.equal((await contact(soft.id)).consents.email, true);
+    await pool.query(`UPDATE direct_contacts SET data = jsonb_set(data::jsonb, '{suppression,email,expiresAt}', '"2020-01-01T00:00:00.000Z"')::json WHERE id = $1`, [soft.id]);
+    preview = (await f.request(f.path + `/campaigns/${draft.id}/preview`, 'POST', {})).data.audience; assert.deepEqual(preview.exclusions.map(row => row.id), [complaint.id]);
+    // A later permanent report replaces the temporary hold, and a policy row Cloudflare no longer lists clears the alert.
+    f.setSuppressions([{ id: 's4', email: soft.email, reason: 'complaint', scope: { type: 'account' }, expires_at: null }]);
+    assert.equal((await f.request(f.path + `/campaigns/${draft.id}/refresh`, 'POST', {})).status, 200);
+    const reported = await contact(soft.id); assert.deepEqual([reported.consents.email, reported.suppression.email.reason, reported.suppression.email.expiresAt], [false, 'complaint', undefined]);
+    assert.deepEqual(await status(), []);
+    // A suppressed send receipt names no reason or expiry, so it does not suppress the contact locally.
+    f.setSuppressions([]); f.setEmailMode('suppressed'); const receipt = await f.draft({ channel: 'email', subject: 'Service', text: 'Service', contactIds: [policy.id] }); assert.equal((await f.arm(receipt)).status, 200); await f.app.direct.processPending();
+    assert.equal((await f.request(f.path + `/campaigns/${receipt.id}`)).data.deliveries[0].status, 'suppressed'); assert.equal((await contact(policy.id)).consents.email, true);
   } finally { await f.close(); }
 });
 
