@@ -8,6 +8,7 @@ import { postgresSkip, testApp } from './postgres.mjs';
 test('health reports ready only while PostgreSQL answers, and a scheduler switch typo refuses to start', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-health-')); t.after(() => rm(dataDir, { recursive: true, force: true }));
   await assert.rejects(testApp(t, { dataDir, env: { DIRECT_SCHEDULER: 'of' }, directScheduler: false }), /DIRECT_SCHEDULER must be on or off/);
+  await assert.rejects(testApp(t, { dataDir, env: { BROADSIGN_CURRENCY: 'usd' }, directScheduler: false }), /BROADSIGN_CURRENCY must be a three-letter ISO currency code/);
   const app = await testApp(t, { dataDir, env: { DIRECT_SCHEDULER: 'off' } });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const health = async () => { const response = await fetch(`http://127.0.0.1:${app.server.address().port}/api/health`); return { status: response.status, data: await response.json() }; };

@@ -130,6 +130,8 @@ export async function createApp(options: AppOptions = {}) {
   // refuses to start, so a typo cannot leave sending enabled.
   const directScheduler = env.DIRECT_SCHEDULER || 'on';
   if (!['on', 'off'].includes(directScheduler)) throw new Error('DIRECT_SCHEDULER must be on or off.');
+  // Install-wide: Broadsign bookings are approved in this currency (Integrations validates the same rule when saved).
+  if (env.BROADSIGN_CURRENCY && !/^[A-Z]{3}$/.test(env.BROADSIGN_CURRENCY)) throw new Error('BROADSIGN_CURRENCY must be a three-letter ISO currency code, such as USD.');
   const { pool, db } = options.database || getDatabase(env.DATABASE_URL), store = createStore(db);
   await assertSchema(pool);
   const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean), trustedProxies: env.TRUSTED_PROXIES || '' };
