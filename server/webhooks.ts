@@ -6,6 +6,7 @@ import { createContacts } from './contacts.ts';
 import { HttpError } from './auth.ts';
 import { validPostInstant as iso } from '../shared/social-posts.ts';
 import { paidAdEvents, minimizeAdEvent, recordAdEvent } from './zernio-ad-events.ts';
+import { markInboxItemWaiting } from './inbox.ts';
 
 const rows = async (query: Promise<{ rows: unknown[] }>) => (await query).rows as any[];
 const first = async (query: Promise<{ rows: unknown[] }>) => (await rows(query))[0] as any;
@@ -99,7 +100,7 @@ export function createWebhookService({ db, storeFor = createStore, contacts = cr
     const eventAt = new Date(payload.timestamp).toISOString();
     let found = false;
     for (const project of projects) {
-      const post = (await store.list(project.id, 'posts')).find((item: any) => item.externalId === payload.post.id && item.zernioProfileId === project.zernio_profile_id && !item.sample);
+      const post = (await store.byExternalId(project.id, 'posts', String(payload.post.id))).find((item: any) => item.externalId === payload.post.id && item.zernioProfileId === project.zernio_profile_id && !item.sample);
       if (!post) continue;
       found = true;
       if (post.providerDeletedAt || !newer(eventAt, post.providerEventAt)) continue;
@@ -125,6 +126,9 @@ export function createWebhookService({ db, storeFor = createStore, contacts = cr
     }
     const data = { id: payload.id, event: payload.event, accountId, platform: account.platform, resourceId: conversationId || payload.comment?.id || payload.review?.id, ...(conversationId ? { conversationId } : {}), ...(payload.comment ? { postId: payload.comment.platformPostId } : {}), ...(contact ? { contactId: contact.id } : {}), receivedAt: payload.timestamp };
     await tx.execute(sql`INSERT INTO webhook_inbox_updates(project_id,profile_id,account_id,event_id,event,data) VALUES(${project.id},${profileId},${accountId},${payload.id},${payload.event},${JSON.stringify(data)}) ON CONFLICT(event_id) DO NOTHING`);
+    // Triage overlay: an inbound message, comment or new review now awaits a reply.
+    const waiting = payload.event === 'message.received' && payload.message?.direction === 'incoming' && conversationId ? ['conversation', conversationId] : payload.event === 'comment.received' ? ['comment', payload.comment.id] : payload.event === 'review.new' ? ['review', payload.review.id] : null;
+    if (waiting) await markInboxItemWaiting(tx, { projectId: project.id, profileId, accountId, kind: waiting[0], resourceId: waiting[1] }, payload.timestamp);
   }
   async function drain({ limit = 25, now = Date.now() }: { limit?: number; now?: number }) {
     const queue = await rows(db.execute(sql`SELECT id FROM webhook_events WHERE status='pending' AND next_attempt<=${now} ORDER BY seq LIMIT ${Math.min(100, Math.max(1, Number.isInteger(limit) ? limit : 25))}`));

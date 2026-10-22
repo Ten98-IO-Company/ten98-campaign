@@ -5,6 +5,8 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as social from '../shared/social-posts.ts';
+import * as ui from '@ten98/ui';
+import { DestinationPicker } from '@ten98/ui';
 
 const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview').replace('export const accountLabel', 'const accountLabel'), 'BusinessLocations.tsx', { jsx: { runtime: 'classic' } });
@@ -12,7 +14,7 @@ const accounts = ['account-a', 'account-b'].map(id => ({ id, platform: 'googlebu
 const location = (id = 'locations/123') => ({ id, name: '<Bakery>', accountId: 'accounts/native-google', accountName: 'Business owner', address: 'Dubai', category: 'Bakery', storeCode: 'store-01' });
 const page = (id = accounts[0].id, locations = [location()]) => ({ accountId: id, platform: 'googlebusiness', locations, selectedLocationId: 'account-default', cached: null, hasMore: null });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
-const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
+const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...[...React.Children.toArray(node.props?.children), ...(node.props?.items || []).map(item => item?.content)].flatMap(nodes)];
 function InstagramToolsProbe() { return null; }
 function TikTokToolsProbe() { return null; }
 
@@ -21,17 +23,17 @@ function browser(kind, initialProps) {
   const useState = initial => { const index = cursor++; hooks[index] ||= { value: typeof initial === 'function' ? initial() : initial }; return [hooks[index].value, update => { const next = typeof update === 'function' ? update(hooks[index].value) : update; if (!Object.is(next, hooks[index].value)) { hooks[index].value = next; dirty = true; } }]; };
   const useRef = initial => { const index = cursor++; return hooks[index] ||= { current: initial }; };
   const useEffect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
-  const context = { React, useState, useRef, useEffect, useMemo: compute => compute(), InstagramPublishingTools: InstagramToolsProbe, TikTokPublishingTools: TikTokToolsProbe, ...social };
+  const context = { ...ui, MediaImage: ui.Image, React, useState, useRef, useEffect, useMemo: compute => compute(), InstagramPublishingTools: InstagramToolsProbe, TikTokPublishingTools: TikTokToolsProbe, ...social };
   const components = new Function(...Object.keys(context), code + ';return { PostComposer, PublishingDestinations };')(...Object.values(context));
   function paint() { for (let pass = 0; dirty; pass++) { assert.ok(pass < 20, 'Rendering settles.'); dirty = false; cursor = 0; tree = components[kind](props); while (queued.length) queued.shift()(); } }
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
-  const field = label => { const native = nodes(tree).find(node => node.type === 'label' && nodes(node).some(child => child.type === 'span' && child.props.children === label)); return nodes(native).find(node => ['input', 'select', 'textarea'].includes(node.type)); };
+  const field = label => { const native = nodes(tree).find(node => node.type === ui.Field && node.props.label === label); return nodes(native).find(node => [ui.Input, ui.Select, ui.Textarea].includes(node.type)); };
   const find = predicate => nodes(tree).find(predicate);
-  const snapshot = () => JSON.parse(find(node => node.type === 'input' && node.props.name === 'draftSnapshot').props.value);
+  const snapshot = () => JSON.parse(find(node => node.props?.name === 'draftSnapshot').props.value);
   paint();
   return { tick, field, find, snapshot, html: () => renderToStaticMarkup(tree), paint,
     change: async (label, value) => { const input = field(label); assert.ok(input, label); input.props.onChange({ target: { value } }); paint(); await tick(); },
-    click: text => { const button = find(node => node.type === 'button' && React.Children.toArray(node.props.children).join('') === text); assert.ok(button, text); const pending = button.props.onClick(); paint(); return pending; },
+    click: text => { const button = find(node => node.type === ui.Button && React.Children.toArray(node.props.children).join('') === text); assert.ok(button, text); const pending = button.props.onClick(); paint(); return pending; },
     setProps: changes => { props = { ...props, ...changes }; dirty = true; paint(); },
     unmount: () => hooks.forEach(hook => hook.close?.()),
   };
@@ -87,7 +89,7 @@ test('multiple GBP accounts cannot read or mutate a location and disabled handle
   const ui = picker(undefined, { accounts });
   assert.match(ui.html(), /Choose one account in Customise destination/); assert.equal(ui.field('Google Business Profile location').props.disabled, true); assert.equal(ui.field('Google Business Profile location ID').props.disabled, true);
   await ui.click('Load available locations'); await ui.change('Google Business Profile location', 'locations/123'); await ui.change('Google Business Profile location ID', 'bare'); assert.deepEqual(ui.calls, []); assert.deepEqual(ui.writes, []);
-  const disabled = picker(undefined, { disabled: true }); assert.match(disabled.html(), /<fieldset disabled=""/); await disabled.click('Load available locations'); await disabled.change('Google Business Profile location', 'locations/123'); assert.deepEqual(disabled.calls, []); assert.deepEqual(disabled.writes, []);
+  const disabled = picker(undefined, { disabled: true }); assert.match(disabled.html(), /<fieldset[^>]* disabled=""/); await disabled.click('Load available locations'); await disabled.change('Google Business Profile location', 'locations/123'); assert.deepEqual(disabled.calls, []); assert.deepEqual(disabled.writes, []);
 });
 
 test('actual composer stores location choices on the exact account and exposes those changes to the draft guard', async () => {
@@ -98,8 +100,8 @@ test('actual composer stores location choices on the exact account and exposes t
   widget().props.onChange({ ...widget().props.options, locationId: 'locations/123' }); ui.paint();
   const chosen = ui.snapshot(); assert.notDeepEqual(chosen, before); assert.equal(chosen.accountOverrides['account-a'].options.locationId, 'locations/123'); assert.equal(chosen.platformOverrides.googlebusiness.options.locationId, undefined);
   assert.equal(ui.find(node => node.props.name === 'draftSnapshot').props.readOnly, true);
-  const sibling = ui.find(node => node.type === 'label' && nodes(node).some(child => child.type === 'span' && React.Children.toArray(child.props.children)[0] === 'account-b'));
-  nodes(sibling).find(node => node.type === 'input').props.onChange({ target: { checked: true } }); ui.paint();
+  const picker = ui.find(node => node.type === DestinationPicker); assert.ok(picker.props.accounts.some(account => account.name === 'account-b'));
+  picker.props.onSelectionChange([...picker.props.selectedIds, 'account-b']); ui.paint();
   const multiple = ui.snapshot(); assert.equal(social.resolveVariant(multiple, 'googlebusiness', [], 'account-b').options.locationId, undefined); assert.equal(widget().props.accounts.length, 2);
   widget().props.onChange({ locationId: 'cannot-fan-out' }); ui.paint(); assert.deepEqual(ui.snapshot(), multiple);
   await ui.change('Customise destination', 'account-b'); widget().props.onChange({ topicType: 'STANDARD', locationId: 'bare-456' }); ui.paint();
@@ -109,9 +111,9 @@ test('actual composer stores location choices on the exact account and exposes t
 
 test('SSR composer shows one location picker, keeps account-only options visible and disables read-only controls', () => {
   const hooks = { useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute() };
-  const context = { React, ...hooks, ...social }, Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
+  const context = { React, ...hooks, ...social, ...ui, MediaImage: ui.Image }, Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
   const props = { post: { content: 'Update', platforms: ['googlebusiness'], accounts: ['account-a'], mediaItems: [], accountOverrides: { 'account-a': { platform: 'googlebusiness', options: { locationId: 'locations/saved' } } } }, accounts, canWrite: true, readOnly: true, onSubmit: async () => {}, onLookupDestinations: async () => page() };
-  const html = renderToStaticMarkup(Composer(props)); assert.equal((html.match(/>Google Business Profile location</g) || []).length, 1); assert.match(html, /Current location · locations\/saved/); assert.match(html, /name="draftSnapshot"/); assert.match(html, /<fieldset disabled=""/); assert.match(html, /Enter a location ID manually/);
+  const html = renderToStaticMarkup(Composer(props)); assert.equal((html.match(/>Google Business Profile location</g) || []).length, 1); assert.match(html, /Current location · locations\/saved/); assert.match(html, /name="draftSnapshot"/); assert.match(html, /<fieldset[^>]* disabled=""/); assert.match(html, /Enter a location ID manually/);
 });
 
 test('Reddit destination choices and account default survive choosing a subreddit', async () => {
@@ -131,8 +133,8 @@ test('Instagram audio selection updates one account snapshot and cannot fan out 
   widget().props.onChange({ ...options, audioConfiguration: { ...options.audioConfiguration, audioId: '123' } }); ui.paint();
   const chosen = ui.snapshot(); assert.notDeepEqual(chosen, original); assert.deepEqual(chosen.accountOverrides['ig-a'].options.audioConfiguration, { audioVolume: 0.4, videoVolume: 0.7, audioId: '123' });
   assert.equal(chosen.platformOverrides.instagram.options.audioConfiguration, undefined);
-  const sibling = ui.find(node => node.type === 'label' && nodes(node).some(child => child.type === 'span' && React.Children.toArray(child.props.children)[0] === 'ig-b'));
-  nodes(sibling).find(node => node.type === 'input').props.onChange({ target: { checked: true } }); ui.paint();
+  const picker = ui.find(node => node.type === DestinationPicker); assert.ok(picker.props.accounts.some(account => account.name === 'ig-b'));
+  picker.props.onSelectionChange([...picker.props.selectedIds, 'ig-b']); ui.paint();
   const multiple = ui.snapshot(); assert.equal(widget().props.account, null); assert.equal(social.resolveVariant(multiple, 'instagram', [], 'ig-b').options.audioConfiguration, undefined);
   widget().props.onChange({ audioConfiguration: { audioId: 'cannot-fan-out' } }); ui.paint(); assert.deepEqual(ui.snapshot(), multiple);
   await ui.change('Customise destination', 'ig-b'); widget().props.onChange({ audioConfiguration: { audioId: '456' } }); ui.paint();
@@ -148,8 +150,8 @@ test('TikTok selections preserve one account options and leave inherited sibling
   const before = ui.snapshot(); widget().props.onChange({ ...widget().props.options, musicSoundInfo: { ...widget().props.options.musicSoundInfo, musicSoundId: 'clip-one' }, locationId: 'place-one', locationName: 'Exact venue' }); ui.paint();
   const chosen = ui.snapshot(); assert.notDeepEqual(chosen, before); assert.deepEqual(chosen.accountOverrides['tt-a'].options, { ...options, musicSoundInfo: { ...options.musicSoundInfo, musicSoundId: 'clip-one' }, locationId: 'place-one', locationName: 'Exact venue' });
   assert.equal(chosen.platformOverrides.tiktok?.options?.locationId, undefined);
-  const sibling = ui.find(node => node.type === 'label' && nodes(node).some(child => child.type === 'span' && React.Children.toArray(child.props.children)[0] === 'tt-b'));
-  nodes(sibling).find(node => node.type === 'input').props.onChange({ target: { checked: true } }); ui.paint();
+  const picker = ui.find(node => node.type === DestinationPicker); assert.ok(picker.props.accounts.some(account => account.name === 'tt-b'));
+  picker.props.onSelectionChange([...picker.props.selectedIds, 'tt-b']); ui.paint();
   const multiple = ui.snapshot(); assert.equal(widget().props.account, null); assert.equal(social.resolveVariant(multiple, 'tiktok', [], 'tt-b').options.locationId, undefined);
   widget().props.onChange({ locationId: 'cannot-fan-out', locationName: 'Unreviewed place' }); ui.paint(); assert.deepEqual(ui.snapshot(), multiple);
   await ui.change('Customise destination', 'tt-b'); widget().props.onChange({ locationId: 'place-two', locationName: 'Second venue' }); ui.paint();

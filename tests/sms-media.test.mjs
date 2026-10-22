@@ -73,10 +73,11 @@ test('SMS attachments link to their authenticated app download while generic inb
   const source = await readFile(new URL('../src/UnifiedInbox.tsx', import.meta.url), 'utf8'), start = source.indexOf('function Attachment('), end = source.indexOf('\nfunction ZernioInbox(', start);
   const { code } = await transformWithOxc(source.slice(start, end), 'Attachment.tsx', { jsx: { runtime: 'classic' } });
   const React = { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) }, link = value => { try { const url = new URL(value || ''); return url.protocol === 'https:' && !url.username && !url.password ? url.href : undefined; } catch { return undefined; } };
-  const Attachment = new Function('React', 'useState', 'link', code + '\nreturn Attachment;')(React, () => [false, () => {}], link), flatten = node => node && typeof node === 'object' ? [node, ...node.children.flat(Infinity).flatMap(flatten)] : [];
+  const ui = await import('@ten98/ui'), media = [ui.Image, ui.MediaPlayer, 'img', 'video', 'audio'];
+  const Attachment = new Function('React', 'useState', 'link', ...Object.keys(ui), code + '\nreturn Attachment;')(React, () => [false, () => {}], link, ...Object.values(ui)), flatten = node => node && typeof node === 'object' ? [node, ...node.children.flat(Infinity).flatMap(flatten)] : [];
   const path = '/api/projects/a/sms-inbox/media/verified-message/0', item = { type: 'image', url: 'https://api.twilio.com/protected' }, download = flatten(Attachment({ item, downloadUrl: path }));
-  assert.equal(download.find(node => node.type === 'a').props.href, path); assert.equal(download.some(node => node.type === 'img'), false); assert.match(download.find(node => node.type === 'a').children.join(''), /Download image/);
-  assert.equal(flatten(Attachment({ item: { url: '/untrusted-relative' } })).some(node => node.type === 'a'), false);
-  assert.equal(flatten(Attachment({ item: { type: 'image', url: 'https://cdn.example.test/image.jpeg' } })).find(node => node.type === 'img').props.src, 'https://cdn.example.test/image.jpeg');
+  assert.equal(download.find(node => node.type === ui.Link).props.href, path); assert.equal(download.some(node => media.includes(node.type)), false); assert.match(download.find(node => node.type === ui.Link).children.join(''), /Download image/);
+  assert.equal(flatten(Attachment({ item: { url: '/untrusted-relative' } })).some(node => node.type === ui.Link), false);
+  assert.equal(flatten(Attachment({ item: { type: 'image', url: 'https://cdn.example.test/image.jpeg' } })).find(node => node.type === ui.Image).props.src, 'https://cdn.example.test/image.jpeg');
   assert.match(source, /downloadUrl=\{`\/api\$\{path\}\/media\/\$\{encodeURIComponent\(item\.id\)\}\/\$\{index\}`\}/);
 });

@@ -4,7 +4,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve, relative, extname, sep, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
-import { oidcEndpoint, workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
+import { oidcEndpoint, workspaceRoles as roles, mayManageWorkspaceMember } from '@ten98/runtime';
 import { assertSchema, closeDatabase, createStore, collections, getDatabase, type Connection, type Database, type Executor, type Store } from './database.ts';
 import { createAuth, sessionSecret, bootstrapToken, hashPassword, HttpError, lockWorkspace, memberRole, publicUser, type AuthConfig, type PublicUser } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
@@ -12,7 +12,7 @@ import { seedSample } from './seed.ts';
 import { handleIntegration } from './integrations.ts';
 import { IntegrationError, mediaUrl, type ProviderRecord, type OperationContext } from './provider-core.ts';
 import { createIntegrationSettings } from './integration-settings.ts';
-import { handleInvitations } from './invitations.ts';
+import { handleInvitations, revokeMemberInvitations } from './invitations.ts';
 import { handleOperationRecovery } from './operation-recovery.ts';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from './approvals.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.ts';
@@ -132,7 +132,7 @@ export async function createApp(options: AppOptions = {}) {
   if (!['on', 'off'].includes(directScheduler)) throw new Error('DIRECT_SCHEDULER must be on or off.');
   const { pool, db } = options.database || getDatabase(env.DATABASE_URL), store = createStore(db);
   await assertSchema(pool);
-  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean) };
+  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean), trustedProxies: env.TRUSTED_PROXIES || '' };
   config.oidcEnabled = Boolean(config.oidcIssuer && config.oidcClientId);
   if (!await claimed(db)) config.bootstrapToken = bootstrapToken(dataDir, env.BOOTSTRAP_TOKEN);
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
@@ -189,7 +189,7 @@ export async function createApp(options: AppOptions = {}) {
           return send(200, { user: publicUser(current), setupRequired: !await claimed(db), oidcEnabled: config.oidcEnabled, ...(sessionEnded ? { sessionEnded: true } : {}) });
         }
         if (path === '/api/auth/setup' && req.method === 'POST') {
-          await auth.limit('setup:' + req.socket.remoteAddress, 10);
+          await auth.limit('setup:' + auth.clientAddress(req), 10);
           if (await claimed(db)) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
           auth.requireSetupProof(body.token);
           const name = text(body.name, 'Name'), mail = email(body.email), hash = await hashPassword(password(body.password));
@@ -275,10 +275,12 @@ export async function createApp(options: AppOptions = {}) {
             if (!['owner', 'admin'].includes(current)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
             const target = { id: memberRoute[2] }, previous = await memberRole(tx, memberRoute[1], target.id);
             if (!previous) throw new HttpError(404, 'Workspace member not found.');
-            if ((requested !== null && !mayGrantWorkspaceRole(current, requested)) || !mayGrantWorkspaceRole(current, previous)) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
+            // The shared rule checks both the saved and the requested role; removal passes no next role.
+            if (!mayManageWorkspaceMember(current, previous, requested ?? undefined)) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
             if (previous === 'owner' && requested !== 'owner' && (await first<{ count: number }>(tx.execute(sql`SELECT count(*) AS count FROM memberships WHERE workspace_id=${memberRoute[1]} AND role='owner'`)))!.count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
             if (req.method === 'DELETE') await tx.execute(sql`DELETE FROM memberships WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
             else await tx.execute(sql`UPDATE memberships SET role=${requested} WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
+            await revokeMemberInvitations(tx, memberRoute[1], target.id, requested);
             const activityStore = createStore(tx);
             for (const project of (await tx.execute(sql`SELECT id FROM projects WHERE workspace_id=${memberRoute[1]}`)).rows as { id: string }[]) await activityStore.activity(project.id, 'Workspace team membership updated.');
           });
@@ -309,15 +311,24 @@ export async function createApp(options: AppOptions = {}) {
           // Inside a transaction, pass its executor: a second pool connection can starve the pool and reads outside the lock.
           // Errors keep their precedence: session ended, then project unavailable, then role changed, then credentials.
           type CurrentAccess = { session: boolean; role: string | null; zernio_profile_id: string | null; drive_folder_id: string | null; project: string | null };
-          const assertIntegrationSettings = async (executor: Executor = db): Promise<CurrentAccess> => {
+          const readAccess = async (executor: Executor): Promise<CurrentAccess> => {
             const current = (await first<CurrentAccess>(executor.execute(sql`SELECT EXISTS (SELECT 1 FROM sessions WHERE token = ${auth.sessionKey(req)} AND expires_at > ${Date.now()} AND user_id = ${user.id}) AS session,
               (SELECT m.role FROM memberships m WHERE m.workspace_id = p.workspace_id AND m.user_id = ${user.id}) AS role, p.id AS project, p.zernio_profile_id, p.drive_folder_id
               FROM (SELECT 1) one LEFT JOIN projects p ON p.id = ${project.id}`)))!;
             if (!current.session) throw new HttpError(403, 'Your sign-in session ended. Sign in again.');
             if (!current.project || !current.role) throw new HttpError(404, 'Project not found or unavailable.');
             if (current.role !== role) throw new HttpError(403, 'Your workspace role changed. Refresh this project before continuing.');
-            if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.');
             return current;
+          };
+          // Guards often run back to back (a mapping check calls this, then the handler calls it again) with no I/O between
+          // them. They share one read until the event loop's next check phase after it settles: anything awaited on I/O (a
+          // provider call, another query) resumes after that phase and reads again, so each check after I/O sees current access.
+          let sharedAccess: Promise<CurrentAccess> | undefined;
+          const assertIntegrationSettings = async (executor: Executor = db): Promise<CurrentAccess> => {
+            // The clear is scheduled once the read settles, so the calls that run straight after it still share it.
+            const access = await (executor !== db ? readAccess(executor) : sharedAccess ??= readAccess(db).finally(() => setImmediate(() => { sharedAccess = undefined; })));
+            if (integrationSettings.revision !== requestRevision) throw new HttpError(409, 'Integration credentials changed. Refresh this project before continuing.');
+            return access;
           };
           const context: RequestContext = { req, res, url, body, user, project, role, db, send, store, config: { ...config, env: { ...env }, assertIntegrationSettings }, assertIntegrationSettings, assertProjectMapping: async (expected: string | null, executor: Executor = db) => { const current = await assertIntegrationSettings(executor); if (current.zernio_profile_id !== expected) throw new HttpError(409, 'The provider mapping changed. Refresh this project.'); }, assertDriveMapping: async (expected: string | null, executor: Executor = db) => { const current = await assertIntegrationSettings(executor); if (current.drive_folder_id !== expected) throw new HttpError(409, 'The Drive mapping changed. Refresh this project.'); }, prepareDraft: async (collection: string, fields: ProviderRecord) => { rejectProviderFields(fields, collection); const data = validateRecord(collection, { ...fields, status: 'draft' }); await checkReferences(store, project.id, data); return data; } };
           context.assertPublishingApproval = (post: ProviderRecord) => assertPublishingApproval(context, post);

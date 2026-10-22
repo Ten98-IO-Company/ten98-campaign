@@ -55,7 +55,7 @@ for (const path of ['blogs/site/91/create', 'blogs/site/91/articles/12/update'])
   await invoke('blogs/site/91/articles/12', {}, validate); assert.equal(saved.length, 1, 'Reading an article cannot clear a draft.');
   wait = true; const pending = invoke(path, {}, validate); revisions.set(form, 2); response.resolve(result); await pending;
   assert.equal(saved.length, 1, 'A completed save cannot clear later edits.');
-  assert.match(source, /modal\.type === 'blog-draft' \? <React\.Suspense/);
+  assert.match(source, /modal\.type === 'blog-draft' \? <Suspense/);
   assert.match(source, /onCreate=\{canWrite \?/);
   assert.match(source, /onEditDraft=\{canWrite \?/);
   assert.match(source, /article=\{modal\.item!\.article\}/);
@@ -76,11 +76,11 @@ for (const [path, receiptField] of [['products/shop/9001/update', 'product'], ['
   result.accountId = 'shop'; await invoke(path, {}, validate); assert.equal(saved.length, 1);
   await invoke('products/shop/9001', {}, validate); assert.equal(saved.length, 1, 'Reading cannot clear a draft.');
   wait = true; const pending = invoke(path, {}, validate); revisions.set(form, 2); response.resolve(result); await pending; assert.equal(saved.length, 1);
-  assert.match(source, /modal\.type === 'product-edit' \? <React\.Suspense/);
+  assert.match(source, /modal\.type === 'product-edit' \? <Suspense/);
   assert.match(source, /<ProductEditor[^>]+readOnly=\{!canWrite\} request=\{editorIntegrate\}/);
-  assert.match(source, /modal\.type === 'product-create' \? <React\.Suspense/);
+  assert.match(source, /modal\.type === 'product-create' \? <Suspense/);
   assert.match(source, /<ProductCreator[^>]+readOnly=\{!canWrite\} request=\{editorIntegrate\}/);
-  assert.match(source, /modal\.type === 'product-price' \? <React\.Suspense/);
+  assert.match(source, /modal\.type === 'product-price' \? <Suspense/);
   assert.match(source, /<ProductPriceEditor[^>]+readOnly=\{!canWrite\} request=\{editorIntegrate\}/);
   assert.match(source, /<ProductStateReview[^>]+readOnly=\{!canWrite\} request=\{editorIntegrate\}/);
   assert.match(source, /onDeactivate=\{canWrite \?/);
@@ -289,14 +289,12 @@ test('inbox-only drafts register native unload protection, show an accessible co
   const ui = app('https://campaign.example/?view=inbox&project=a'); ui.inboxDraftChanged(true);
   const cleanup = ui.warnOnUnload(); let prevented = 0; const event = { preventDefault() { prevented++; } }; ui.unload(event);
   assert.equal(prevented, 1); assert.equal(event.returnValue, ''); cleanup(); ui.unload(event); assert.equal(prevented, 1);
-  let open = false; const discardDialogRef = { current: { get open() { return open; }, showModal() { open = true; }, close() { open = false; } } };
-  const start = source.indexOf('    const dialog = discardDialogRef.current;'), end = source.indexOf('\n  }, [discardPrompt]);', start);
-  const showPrompt = prompt => new Function('discardDialogRef', 'discardPrompt', source.slice(start, end))(discardDialogRef, prompt);
-  ui.signOut(); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []); showPrompt(ui.discardPrompt); assert.equal(open, true);
-  ui.keepEditing(); showPrompt(ui.discardPrompt); assert.equal(open, false); assert.equal(ui.inboxDirty, true);
+  ui.signOut(); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []);
+  ui.keepEditing(); assert.equal(ui.discardPrompt, false); assert.equal(ui.inboxDirty, true);
   ui.api = async path => { ui.calls.push(path); return { user: null }; }; ui.signOut(); ui.discardChanges(); await tick();
   assert.deepEqual(ui.calls, ['/auth/logout', '/session']); assert.equal(ui.inboxDirty, false); assert.equal(ui.state, null);
-  assert.match(source, /<dialog ref=\{discardDialogRef\}[^>]*role="alertdialog"[^>]*aria-labelledby="discard-title"[^>]*aria-describedby="discard-description"/);
+  // The prompt is the library's accessible ConfirmDialog, opened by discardPrompt and cancelled into keepEditing.
+  assert.match(source, /<ConfirmDialog open=\{discardPrompt\} onOpenChange=\{open => \{ if \(!open\) keepEditing\(\); \}\} danger title="Discard unsaved changes\?"[^>]*onConfirm=\{discardChanges\}/);
   assert.match(source, /onDraftChange=\{inboxDraftChanged\}/); assert.match(source, /Discard and switch/);
 });
 

@@ -146,7 +146,7 @@ test('Messaging Service replies pin the verified sender and live access or suppr
   } finally { await f.close(); }
 });
 
-test('signed STOP excludes future-project imports, campaign sends and replies even after START', pg, async t => {
+test('signed STOP excludes future-project imports and campaign sends; START lifts only the opt-out and restores no campaign consent', pg, async t => {
   const f = await fixture(t);
   try {
     await f.outbound(); await f.inbound({ MessageSid: token('SM', 901), Body: 'STOP' });
@@ -154,11 +154,32 @@ test('signed STOP excludes future-project imports, campaign sends and replies ev
     const contact = await f.contacts.save('future', { phone: '+12025550123', consents: { sms: true }, consentSource: 'New project signup cannot clear STOP' }); assert.equal(contact.consents.sms, false);
     await f.contacts.remove('future', contact.id); const imported = await f.contacts.import('future', { csv: 'phone,name\n+12025550123,Imported', consents: { sms: true }, consentSource: 'Imported opt-in cannot clear STOP' }); assert.equal(imported.contacts[0].consents.sms, false);
     await f.inbound({ MessageSid: token('SM', 902), Body: 'START' }); assert.equal((await f.contacts.list('future'))[0].consents.sms, false);
+    assert.equal((await f.contacts.list('future'))[0].suppression.sms, undefined, 'The copied opt-out is lifted from the contact too.');
     const draft = await f.request('direct/campaigns', 'POST', { name: 'Blocked future campaign', channel: 'sms', text: 'Must not send' }, undefined, 'future'), id = draft.data.campaign.id;
     const preview = await f.request(`direct/campaigns/${id}/preview`, 'POST', {}, undefined, 'future'); assert.equal(preview.data.audience.eligible, 0);
     await assert.rejects(f.request(`direct/campaigns/${id}/send`, 'POST', { confirmed: true, previewToken: preview.data.previewToken }, undefined, 'future'), error => error.status === 400); await f.direct.processPending(); assert.equal(f.calls.length, 0);
-    await f.outbound('future'); const conversation = (await f.request('sms-inbox/conversations', 'GET', undefined, undefined, 'future')).data.conversations[0]; assert.equal(conversation.blocked, true);
-    await assert.rejects(f.request(`sms-inbox/conversations/${conversation.id}/reply`, 'POST', { message: 'Must also remain blocked' }, undefined, 'future'), error => error.code === 'SMS_RECIPIENT_SUPPRESSED'); assert.equal(f.calls.length, 0);
+    // Council decision ten98-code-system#35 Q3: START is the recipient's carrier-level re-opt-in, so replies resume, but
+    // campaign consent stays off until a new consent source is recorded.
+    await f.outbound('future'); const conversation = (await f.request('sms-inbox/conversations', 'GET', undefined, undefined, 'future')).data.conversations[0]; assert.equal(conversation.blocked, false);
+    assert.equal((await f.request(`sms-inbox/conversations/${conversation.id}/reply`, 'POST', { message: 'Replies resume after START' }, undefined, 'future')).status, 200); assert.equal(f.calls.length, 1);
+    await f.inbound({ MessageSid: token('SM', 903), Body: 'STOP' }); assert.equal((await f.request('sms-inbox/conversations', 'GET', undefined, undefined, 'future')).data.conversations[0].blocked, true, 'A later STOP applies again.');
+  } finally { await f.close(); }
+});
+
+test('every signed START form lifts only an opt-out, never a manual suppression', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const phone = '+12025550123'; let sid = 910;
+    for (const fields of [{ Body: 'START' }, { Body: ' unstop ' }, { Body: 'Yes' }, { Body: 'anything', OptOutType: 'START' }]) {
+      await f.inbound({ MessageSid: token('SM', sid++), Body: 'STOP' }); assert.ok(await f.contacts.smsSuppression(phone));
+      await f.inbound({ MessageSid: token('SM', sid++), ...fields }); assert.equal(await f.contacts.smsSuppression(phone), undefined, JSON.stringify(fields));
+    }
+    // A suppression with any other reason (manual, or recorded by an operator) is untouched by START.
+    await f.contacts.suppressSmsGlobally(phone, 'Operator block'); await f.inbound({ MessageSid: token('SM', sid++), Body: 'START' });
+    assert.equal((await f.contacts.smsSuppression(phone)).reason, 'Operator block');
+    // An ordinary message that merely contains the word does not re-subscribe.
+    await f.pool.query('DELETE FROM direct_sms_suppressions'); await f.inbound({ MessageSid: token('SM', sid++), Body: 'STOP' });
+    await f.inbound({ MessageSid: token('SM', sid++), Body: 'please start again later' }); assert.ok(await f.contacts.smsSuppression(phone));
   } finally { await f.close(); }
 });
 

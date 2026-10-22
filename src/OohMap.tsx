@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Alert, Card, EmptyState, SelectableList, Stack, Text } from '@ten98/ui';
 
 type Location = { id: string; name: string; location?: string; latitude?: number | null; longitude?: number | null; status?: string; sample?: boolean; locationSource?: string };
 type Props = { locations: Location[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; projectId: string; onSelect: (item: Location) => void };
@@ -50,10 +51,11 @@ export default function OohMap({ locations, request, projectId, onSelect }: Prop
     if (located.length > 1) mapRef.current.fitBounds(bounds, 60);
     else if (located.length === 1) { mapRef.current.setCenter({ lat: located[0].latitude, lng: located[0].longitude }); mapRef.current.setZoom(14); }
   }, [locations, ready]);
-  return <section className="panel ooh-map-panel"><div className="panel-heading"><div><h2>OOH locations</h2><p>{located.length} mapped locations · {locations.length - located.length} still need coordinates</p></div><span className="subtle-tag">Google Maps</span></div>
-    {error && <p className="alert error" role="alert">{error}</p>}
-    {config && !config.configured && <div className="empty"><h3>Put your placements on the map</h3><p>Your instance administrator can enable Google Maps with a browser API key. Add coordinates to each booking to show its location.</p></div>}
+  return <Card as="section" headingLevel={2} title="OOH locations" description={`${located.length} mapped locations · ${locations.length - located.length} still need coordinates`} actions={<Text tone="muted" size="sm">Google Maps</Text>}><Stack gap={3}>
+    {error && <Alert tone="danger">{error}</Alert>}
+    {config && !config.configured && <EmptyState icon="pin" title="Put your placements on the map" description="Your instance administrator can enable Google Maps with a browser API key. Add coordinates to each booking to show its location."/>}
+    {/* Google Maps draws into this host element; @ten98/ui has no map host (U37 stays an app adapter). */}
     <div ref={container} className="ooh-map" role="region" aria-label="Google map of outdoor advertising locations" style={{ display: config?.configured ? 'block' : 'none' }}/>
-    <div className="map-location-list">{located.map(location => <button key={location.id} onClick={() => onSelect(location)}><span className={'status-dot ' + (location.status === 'live' ? 'green' : '')}/><strong>{location.name}</strong><small>{location.location || `${location.latitude}, ${location.longitude}`}{location.sample ? ' · Sample' : location.locationSource === 'provider' ? ' · Provider coordinates' : ' · Team-entered location'}</small></button>)}</div>
-  </section>;
+    {located.length > 0 && <SelectableList label="Mapped locations" onSelect={id => { const location = located.find(row => row.id === id); if (location) onSelect(location); }} items={located.map(location => ({ id: location.id, title: location.name, preview: (location.location || `${location.latitude}, ${location.longitude}`) + (location.sample ? ' · Sample' : location.locationSource === 'provider' ? ' · Provider coordinates' : ' · Team-entered location'), status: location.status === 'live' ? 'Live' : undefined }))}/>}
+  </Stack></Card>;
 }

@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { transformWithOxc } from 'vite';
+import * as ui from '@ten98/ui';
 
 const pg = { skip: postgresSkip };
 async function fixture(t) {
@@ -286,15 +287,15 @@ test('lead picker responses cannot cross account scopes, overwrite newer preview
     let manual = false; const context = { needsLeadForm: true, accountId: 'account', adAccountId: 'advertiser', currentLeadView: () => true, leadRead: { current: 0 }, leadSelection: { current: null }, setLeadBusy() {}, setLeadError() {}, setLeadUnavailable: value => { manual = value; }, setLeadForm() {}, setLeadReview() {}, readableLeadForm, requester: { current: async () => { throw Object.assign(new Error(code), { code, status }); } } };
     await compile(loadSource, context)(); assert.equal(manual, expected, code);
   }
-  const start = adSource.indexOf('<section className="helper-note" aria-label="Lead form selection"'), end = adSource.indexOf('</section>}', start), { code } = await transformWithOxc(`const render = () => (${adSource.slice(start, end + 10)});`, 'LeadFormPicker.tsx', { jsx: { runtime: 'classic' } });
+  const start = adSource.indexOf('<Stack as="section" gap={3} aria-label="Lead form selection"'), end = adSource.indexOf("</Stack>}\n          {goal === 'conversions'", start), { code } = await transformWithOxc(`const render = () => (${adSource.slice(start, end + 8)});`, 'LeadFormPicker.tsx', { jsx: { runtime: 'classic' } });
   const React = { createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter(Boolean) }) }, view = {}, previewed = []; let reviewed = false;
-  const context = { React, platform: 'facebook', leadSelection: { current: view }, leadView: view, leadForm: form, leadForms: [form, { ...form, id: 'archived', status: 'ARCHIVED' }], leadBusy: false, adAccountId: 'advertiser', previewLeadForm: (...args) => previewed.push(args), setLeadForm() {}, setLeadReview: value => { reviewed = value; }, usableLeadForm: row => row.status === 'ACTIVE', loadLeadForms() {}, leadPage: null, leadLoaded: true, leadError: '', leadUnavailable: false, manualLeadId: '', setManualLeadId() {}, leadReview: false, manualLead: false };
+  const context = { ...ui, React, platform: 'facebook', leadSelection: { current: view }, leadView: view, leadForm: form, leadForms: [form, { ...form, id: 'archived', status: 'ARCHIVED' }], leadBusy: false, adAccountId: 'advertiser', previewLeadForm: (...args) => previewed.push(args), setLeadForm() {}, setLeadReview: value => { reviewed = value; }, usableLeadForm: row => row.status === 'ACTIVE', loadLeadForms() {}, leadPage: null, leadLoaded: true, leadError: '', leadUnavailable: false, manualLeadId: '', setManualLeadId() {}, leadReview: false, manualLead: false };
   const render = () => new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))(), all = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(all)] : [];
-  const nodes = all(render()); assert.equal(nodes.find(node => node.type === 'option' && node.props.value === 'archived').props.disabled, true); assert.equal(nodes.find(node => node.type === 'input' && node.props.readOnly).props.value, form.privacyPolicyUrl);
-  nodes.find(node => node.type === 'select').props.onChange({ target: { value: form.id } }); assert.deepEqual(previewed, [[form.id]]);
-  nodes.find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange({ target: { checked: true } }); assert.equal(reviewed, form.version);
-  assert.equal(nodes.some(node => node.type === 'button' && node.children.includes('Preview and verify this ID')), false);
-  context.leadUnavailable = true; assert.equal(all(render()).some(node => node.type === 'button' && node.children.includes('Preview and verify this ID')), true); assert.doesNotMatch(adSource, /window\.confirm/);
+  const nodes = all(render()); assert.equal(nodes.find(node => node.type === ui.Option && node.props.value === 'archived').props.disabled, true); assert.equal(nodes.find(node => node.type === ui.Input && node.props.readOnly).props.value, form.privacyPolicyUrl);
+  nodes.find(node => node.type === ui.Select).props.onChange({ target: { value: form.id } }); assert.deepEqual(previewed, [[form.id]]);
+  nodes.find(node => node.type === ui.Checkbox).props.onChange({ target: { checked: true } }); assert.equal(reviewed, form.version);
+  assert.equal(nodes.some(node => node.type === ui.Button && node.children.includes('Preview and verify this ID')), false);
+  context.leadUnavailable = true; assert.equal(all(render()).some(node => node.type === ui.Button && node.children.includes('Preview and verify this ID')), true); assert.doesNotMatch(adSource, /window\.confirm/);
 });
 
 

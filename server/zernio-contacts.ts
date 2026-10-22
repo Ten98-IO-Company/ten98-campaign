@@ -4,7 +4,7 @@ import type { Executor } from './database.ts';
 import { advisoryLock } from './auth.ts';
 type Ctx = OperationContext & { body: any };
 import { createHash, randomUUID } from 'node:crypto';
-import { IntegrationError, claimFence, operation, releaseFence, scopedAccounts, requireAccount, fail, reportObject as object } from './provider-core.ts';
+import { IntegrationError, claimFence, operation, pathSegment, releaseFence, scopedAccounts, requireAccount, fail, reportObject as object } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const text = (value: any, maximum = 20000, empty = false) => typeof value === 'string' && value.length <= maximum && (empty || !!value.trim()) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
@@ -195,7 +195,7 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
       if (!current && before.some((row: ProviderRecord) => row.slug === body.slug)) fail(409, 'CUSTOM_FIELD_EXISTS', 'This field slug already exists in the project profile.');
       await assertAccess();
       let response;
-      try { response = await api(current ? `/custom-fields/${current.id}` : '/custom-fields', {}, payload, key, task === 'delete' ? 'DELETE' : task === 'update' ? 'PATCH' : 'POST'); }
+      try { response = await api(current ? `/custom-fields/${pathSegment(current.id)}` : '/custom-fields', {}, payload, key, task === 'delete' ? 'DELETE' : task === 'update' ? 'PATCH' : 'POST'); }
       catch (error) { if (task !== 'delete' || !(error instanceof IntegrationError) || error.code !== 'INVALID_PROVIDER_RESPONSE') throw error; response = {}; }
       try {
         const after = await definitions(api, profileId);

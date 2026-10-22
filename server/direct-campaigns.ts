@@ -2,7 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { sql } from 'drizzle-orm';
 import { createStore } from './database.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
-import { IntegrationError, fail, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
+import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { createContacts, lockContacts } from './contacts.ts';
 import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions } from './direct-providers.ts';
 
@@ -72,6 +72,8 @@ const resultRows = async (query: Promise<{ rows: unknown[] }>) => (await query).
 const atomic = <T>(executor: Executor, run: (tx: Transaction) => Promise<T>): Promise<T> => (executor as Database).transaction(run);
 
 // `store` stays in the options for callers; campaign activity is written with createStore(tx) inside the scheduling transaction.
+// Twilio's re-subscribe keywords (Advanced Opt-Out): a signed START, YES or UNSTOP, or its OptOutType.
+export const smsStarted = (form: URLSearchParams) => form.get('OptOutType') === 'START' || /^(START|UNSTOP|YES)$/i.test((form.get('Body') || '').trim());
 export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Database; env: any; appUrl: string; secret: string; store?: Store }) {
   const contacts = createContacts({ db });
   let smsInbox: any, attaching: Promise<void> | undefined;
@@ -138,10 +140,11 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     return ids;
   }
   async function finish(campaign: any, ex: Executor = db) {
-    const rows = await deliveries(campaign.id, ex);
-    if (!rows.length || ['draft', 'cancelled'].includes(campaign.status)) return save(campaign, ex);
-    if (rows.some((row: any) => row.status === 'uncertain')) campaign.status = 'attention';
-    else if (!rows.some((row: any) => ['pending', 'sending'].includes(row.status))) campaign.status = 'completed';
+    // Counted in SQL: a send finishes after every message, so reading every delivery here made a campaign O(N²).
+    const [counts] = await resultRows(ex.execute(sql`SELECT count(*) AS total, count(*) FILTER (WHERE data->>'status' = 'uncertain') AS uncertain, count(*) FILTER (WHERE data->>'status' IN ('pending', 'sending')) AS open FROM direct_deliveries WHERE campaign_id = ${campaign.id}`));
+    if (!counts.total || ['draft', 'cancelled'].includes(campaign.status)) return save(campaign, ex);
+    if (counts.uncertain) campaign.status = 'attention';
+    else if (!counts.open) campaign.status = 'completed';
     return save(campaign, ex);
   }
   // Row lock: finishing the stored campaign cannot overwrite a worker or schedule write that lands between its read and save.
@@ -166,8 +169,15 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       });
     } finally { active = false; }
   }
+  // Cloudflare's suppression list (bounces, complaints) applied to this project's contacts. Refresh runs it, and so does the
+  // worker before an email campaign's first send and every 15 minutes while it sends, so a new complaint stops later sends.
+  async function applyEmailSuppressions(projectId: string, assertMapping: () => unknown) {
+    const result = await syncEmailSuppressions({ env: { ...env }, assertMapping }), domain = env.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase();
+    const suppressed = (result.suppressions || []).filter((row: any) => (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()) && (row.scope?.type !== 'sending_domain' || row.scope.value.toLowerCase() === domain));
+    for (const contact of await contacts.list(projectId)) { const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (match) await contacts.suppress(projectId, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason); }
+  }
   async function sendDue(now: number, limit: number) {
-    const rows = (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns ORDER BY seq`))).map(row => row.data).filter((campaign: any) => ['scheduled', 'sending'].includes(campaign.status) && Date.parse(campaign.scheduledAt) <= now);
+    const rows = (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns WHERE data->>'status' IN ('scheduled', 'sending') ORDER BY seq`))).map(row => row.data).filter((campaign: any) => ['scheduled', 'sending'].includes(campaign.status) && Date.parse(campaign.scheduledAt) <= now);
     for (const campaign of rows.slice(0, Math.max(1, Math.min(25, limit)))) {
       try {
         const project = await guard(campaign), currentEnv = { ...env }, assertMapping = async () => { await guard(campaign); if (campaign.channel === 'whatsapp') { if ((await find(campaign.projectId, campaign.id)).status === 'cancelled') fail(409, 'CAMPAIGN_CANCELLED', 'This campaign was cancelled while its broadcast was being prepared.'); for (const delivery of (await deliveries(campaign.id)).filter((row: any) => row.status === 'pending')) { const contact: any = await contacts.get(campaign.projectId, delivery.contactId); if (exclusion(contact, 'whatsapp') || contact.phone !== delivery.recipient) fail(409, 'AUDIENCE_CHANGED', 'Recipient permission changed while preparing the broadcast.'); } } };
@@ -196,7 +206,9 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           for (const delivery of pending) if (selected.some((contact: any) => contact.id === delivery.contactId)) { delivery.status = result.status === 'failed' ? 'failed' : 'accepted'; delivery.providerId = campaign.providerId; await putDelivery(delivery); }
           await finish(campaign);
         } else {
-          const delivery = (await deliveries(campaign.id)).find((row: any) => row.status === 'pending');
+          // A failed sync leaves this tick's send waiting rather than sending past a fresh complaint.
+          if (campaign.channel === 'email' && !(Date.parse(campaign.suppressionsSyncedAt) > Date.now() - 900000)) { await applyEmailSuppressions(campaign.projectId, assertMapping); campaign.suppressionsSyncedAt = new Date().toISOString(); await save(campaign); }
+          const [delivery] = (await resultRows(db.execute(sql`SELECT data FROM direct_deliveries WHERE campaign_id = ${campaign.id} AND data->>'status' = 'pending' ORDER BY seq LIMIT 1`))).map(row => row.data);
           if (!delivery) { await finish(campaign); continue; }
           const contact: any = await contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, campaign.channel);
           if (reason || (campaign.channel === 'email' ? contact.email : contact.phone) !== delivery.recipient) { await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; current.status = 'suppressed'; current.error = reason || 'Contact address changed'; }); await finish(campaign); continue; }
@@ -254,6 +266,27 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     }
     if (method !== 'POST') return false;
     if (action === 'preview') { if (campaign.channel === 'whatsapp') { const result = await listWhatsAppTemplates({ env: { ...env }, project, accountId: campaign.accountId, assertMapping: () => context.assertProjectMapping(project.zernioProfileId) }), approved = result.templates.find((template: any) => template.name === campaign.templateName && template.language === campaign.templateLanguage); if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template.'); validateWhatsAppTemplate(campaign, approved); } send(200, await preview(campaign)); return true; }
+    // A test send renders the draft for one recipient: the signed-in user's own email address, or one project contact with
+    // recorded SMS consent. It creates no delivery and leaves the draft unchanged; its receipt keeps a retried key from
+    // sending twice, and a project gets 10 per hour.
+    if (action === 'test') {
+      if (campaign.status !== 'draft') fail(409, 'CAMPAIGN_LOCKED', 'Send a test from a draft.');
+      if (!['email', 'sms'].includes(campaign.channel)) fail(400, 'TEST_SEND_UNSUPPORTED', 'Test sends are available for email and SMS drafts.');
+      if (!body || typeof body !== 'object' || Object.keys(body).some(key => !['confirmed', 'contactId'].includes(key))) fail(400, 'INVALID_TEST_SEND', 'Use only the fields shown in the test send form.');
+      if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Confirm the test send and its provider charge.');
+      if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
+      if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending.');
+      let contact: any;
+      if (campaign.channel === 'email') { if (body.contactId !== undefined) fail(400, 'INVALID_TEST_RECIPIENT', 'Email tests go to your own address.'); contact = { name: user.name, email: user.email }; }
+      else { contact = typeof body.contactId === 'string' ? await contacts.get(project.id, body.contactId) : null; if (!contact || exclusion(contact, 'sms')) fail(400, 'INVALID_TEST_RECIPIENT', 'Choose one contact with recorded SMS consent.'); }
+      const [recent] = await resultRows(db.execute(sql`SELECT count(*) AS count FROM integration_operations WHERE project_id = ${project.id} AND action_path LIKE 'POST %/test' AND created_at > ${new Date(Date.now() - 3600000).toISOString()}`));
+      if (recent.count >= 10) fail(429, 'TEST_SEND_LIMIT', 'A project can send 10 tests per hour. Try again later.');
+      const outcome = await operation(context, async () => {
+        const result: any = await sendDirect({ channel: campaign.channel, campaign: content(campaign, contact), contact, env: { ...env }, project, appUrl, unsubscribeUrl: campaign.channel === 'email' ? `${appUrl}/api/direct/unsubscribe/${unsubscribeToken(project.id, contact.email)}` : undefined, assertMapping: () => context.assertIntegrationSettings() });
+        return { test: { channel: campaign.channel, recipient: campaign.channel === 'email' ? contact.email : contact.phone, status: result.status, providerId: result.providerId } };
+      });
+      send(outcome.status, outcome.data); return true;
+    }
     if (['send', 'schedule'].includes(action)) {
       if (campaign.status !== 'draft') { send(200, { campaign: await decorate(campaign), deliveries: await deliveries(id) }); return true; }
       if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Review the audience and confirm provider charges before sending.');
@@ -310,7 +343,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           await recordSms(campaign, latest); if (result.errorCode === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
         }
       }
-      if (campaign.channel === 'email' && ready('email')) { const result = await syncEmailSuppressions({ env: { ...env }, assertMapping: () => context.assertIntegrationSettings() }); const suppressed = (result.suppressions || []).filter((row: any) => (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()) && (row.scope?.type !== 'sending_domain' || row.scope.value.toLowerCase() === env.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase())); for (const contact of await contacts.list(project.id)) { const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (match) await contacts.suppress(project.id, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason); } }
+      if (campaign.channel === 'email' && ready('email')) await applyEmailSuppressions(project.id, () => context.assertIntegrationSettings());
       await context.assertIntegrationSettings(); await finishLatest(project.id, id); send(200, { campaign: await decorate(await find(project.id, id)), deliveries: await deliveries(id) }); return true;
     }
     return false;
@@ -342,7 +375,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       if (smsInbox) return await smsInbox.receiveVerified(form, { projectId: url.pathname.split('/')[5] || undefined });
       if (form.get('OptOutType') === 'STOP' || /^(STOP|STOPALL|UNSUBSCRIBE|CANCEL|END|QUIT|REVOKE|OPT OUT)$/i.test((form.get('Body') || '').trim())) {
         await contacts.suppressSmsGlobally(form.get('From')!, 'Recipient opted out');
-      }
+      } else if (smsStarted(form)) await contacts.liftSmsOptOut(form.get('From')!);
     } else fail(404, 'WEBHOOK_NOT_FOUND', 'Webhook not found.');
     return { accepted: true };
   }

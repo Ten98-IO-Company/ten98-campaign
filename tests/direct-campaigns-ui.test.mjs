@@ -138,7 +138,7 @@ test('explicit message shortening preserves HTML/template content and ignores st
 });
 
 test('reply navigation carries the selected campaign account and recipient without choosing another channel', () => {
-  const calls = [], open = compile(section('function openReplies(', '  return <div className="direct-campaigns">'), { onOpenReplies: (...args) => calls.push(args) });
+  const calls = [], open = compile(section('function openReplies(', '\n  const deliveries: any[] ='),{ onOpenReplies: (...args) => calls.push(args) });
   open({ channel: 'whatsapp', accountId: 'campaign-account' }, '+971501234567'); open({ channel: 'sms', accountId: 'unused' }, '+971501234567'); open({ channel: 'email' }, 'person@example.com');
   assert.deepEqual(calls, [['whatsapp', 'campaign-account', '+971501234567'], ['sms', undefined, '+971501234567']]);
 });
@@ -191,4 +191,46 @@ test('a replacement CSV cannot import the previous text while its file is still 
   edit({ target: { value: 'name,email\nManual,manual@example.com' } }); await submit(); assert.equal(requests.length, 1); assert.match(requests[0].csv, /Manual/);
   finish('name,email\nReplacement,replacement@example.com'); await reading; assert.match(csv, /Manual/);
   csv = '   '; await submit(); assert.equal(requests.length, 1);
+});
+
+test('a draft test send posts a confirmed request under a new key per click, with a contact only for SMS', async () => {
+  const handler = section('async function sendTest(', '  async function importContacts(');
+  const smsTestContacts = compile(section('const smsTestContacts =', '\nconst testSendErrors').replace(/^const smsTestContacts = /, '').replace(/;\s*$/, ''));
+  const sms = { id: 'sms /1', status: 'draft', channel: 'sms' }, people = [{ id: 'consented', phone: '+971501234567', consents: { sms: true } }, { id: 'no-permission', phone: '+971501234568', consents: { sms: false } }, { id: 'suppressed', phone: '+971501234569', consents: { sms: true }, suppression: { sms: { reason: 'Recipient opted out' } } }, { id: 'no-phone', consents: { sms: true } }];
+  assert.deepEqual(smsTestContacts(people).map(person => person.id), ['consented']);
+  async function run(changes = {}) {
+    const requests = [], results = [], keys = { next: 0 };
+    const context = { current: { id: 'campaign /1', status: 'draft', channel: 'email' }, readOnly: false, testContactId: '', contacts: people, smsTestContacts, testSendError: () => 'readable', crypto: { randomUUID: () => 'key-' + ++keys.next }, path: '/projects/a/direct', version: { current: 1 }, action: async (_, perform) => perform(1), setTestSend: value => results.push(value), requester: { current: async (...args) => { requests.push(args); return { operation: { id: 'operation', status: 'complete' }, test: { channel: 'email', recipient: 'owner@example.test', status: 'queued', providerId: 'provider-1' } }; } }, ...changes };
+    const send = compile(handler, context); await send(); await send(); return { requests, results };
+  }
+  const email = await run();
+  assert.deepEqual(email.requests.map(([path, method, body]) => [path, method, body]), Array(2).fill(['/projects/a/direct/campaigns/campaign%20%2F1/test', 'POST', { confirmed: true }]));
+  assert.deepEqual(email.requests.map(request => request[3]), ['key-1', 'key-2'], 'Each click sends a new Idempotency-Key.');
+  assert.deepEqual(email.results[0], { campaignId: 'campaign /1', result: { channel: 'email', recipient: 'owner@example.test', status: 'queued', providerId: 'provider-1' } });
+  assert.deepEqual((await run({ current: sms, testContactId: 'consented' })).requests[0].slice(0, 3), ['/projects/a/direct/campaigns/sms%20%2F1/test', 'POST', { confirmed: true, contactId: 'consented' }]);
+  for (const changes of [{ readOnly: true }, { current: undefined }, { current: { ...sms, status: 'scheduled' } }, { current: { ...sms, channel: 'whatsapp' } }, { current: sms }, { current: sms, testContactId: 'no-permission' }, { current: sms, testContactId: 'suppressed' }]) assert.equal((await run(changes)).requests.length, 0);
+  const failed = await run({ requester: { current: async () => { throw Object.assign(new Error('Server text'), { status: 429, code: 'TEST_SEND_LIMIT' }); } } });
+  assert.deepEqual(failed.results[0], { campaignId: 'campaign /1', error: 'readable' });
+  assert.equal((await run({ version: { current: 2 } })).results.length, 0, 'A result for a project that is no longer open is ignored.');
+});
+
+test('test send errors are readable for each server code and fall back to the server message', () => {
+  const testSendErrors = compile('(' + section('const testSendErrors', '\nconst testSendError =').replace(/^const testSendErrors[^=]*= /, '').replace(/;\s*$/, '') + ')');
+  const testSendError = compile(section('const testSendError =', '\n').replace(/^const testSendError = /, '').replace(/;\s*$/, ''), { testSendErrors });
+  for (const code of ['SEND_CONFIRMATION_REQUIRED', 'INVALID_TEST_RECIPIENT', 'INVALID_TEST_SEND', 'TEST_SEND_UNSUPPORTED', 'CAMPAIGN_LOCKED', 'INTEGRATION_NOT_CONFIGURED', 'PUBLIC_URL_REQUIRED', 'TEST_SEND_LIMIT']) {
+    const message = testSendError({ code, message: code }); assert.ok(message.length > 20 && !message.includes(code), code);
+  }
+  assert.match(testSendError({ code: 'TEST_SEND_LIMIT' }), /10 tests/);
+  assert.equal(testSendError({ code: 'OPERATION_UNCERTAIN', message: 'Check the provider before another attempt.' }), 'Check the provider before another attempt.');
+  assert.equal(testSendError({ code: 'constructor' }), 'The test could not be sent. Try again.');
+  assert.equal(testSendError(undefined), 'The test could not be sent. Try again.');
+});
+
+test('the test send is offered only on writable email and SMS drafts, behind a confirmation', () => {
+  const expression = source.match(/const testable = (.+?);\n/)[1], testable = (current, readOnly = false) => compile(`() => (${expression})`, { readOnly, current })();
+  assert.equal(testable({ status: 'draft', channel: 'email' }), true); assert.equal(testable({ status: 'draft', channel: 'sms' }), true);
+  for (const current of [undefined, { status: 'draft', channel: 'whatsapp' }, { status: 'scheduled', channel: 'email' }, { status: 'completed', channel: 'sms' }]) assert.equal(testable(current), false);
+  assert.equal(testable({ status: 'draft', channel: 'email' }, true), false);
+  assert.match(source, /<ConfirmDialog open={confirmingTest}[^>]*onConfirm={sendTest}/);
+  assert.match(source, /acknowledgement={current\.channel === 'sms' \?/);
 });

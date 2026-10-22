@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
+import { Button, Card, FormActions, Grid, Inline, SegmentedControl, Stack, Text } from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 
@@ -76,52 +77,48 @@ test('post cards name only saved recipient IDs using current project names and m
   assert.equal(recipients({ ...post, accounts: [] }, accounts), 'No accounts selected');
   assert.equal(recipients({ platforms: ['facebook'], providerResults: post.providerResults, accountOverrides: post.accountOverrides }, accounts), 'Choose connected accounts');
   assert.deepEqual({ post, accounts }, before, 'Display resolution does not change saved identities or loaded accounts.');
-  const markup = appSource.match(/<p className="post-meta"><span>Recipients: \{postRecipients\(p, remote\.accounts\?\.accounts \|\| \[\]\)\}<\/span><\/p>/)?.[0];
+  const markup = appSource.match(/<Text tone="muted" size="sm">Recipients: \{postRecipients\(p, remote\.accounts\?\.accounts \|\| \[\]\)\}<\/Text>/)?.[0];
   assert.ok(markup, 'Cards render recipient identities visibly.');
   const { code } = await transformWithOxc('const render = (p, remote) => ' + markup, 'PostRecipients.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', 'postRecipients', code + '; return render;')(React, recipients);
+  const render = new Function('React', 'postRecipients', 'Text', code + '; return render;')(React, recipients, Text);
   const html = renderToStaticMarkup(render({ accounts: ['<unknown>'] }, {}));
   assert.match(html, /Recipients: &lt;unknown&gt;/); assert.doesNotMatch(html, /<unknown>/);
 });
 
-test('post status buttons remain a subordinate pressed group with their actual local filter callbacks', async () => {
-  const appSource = source(), start = appSource.indexOf('<div className="button-wrap" role="group" aria-label="Post status">'), end = appSource.indexOf('</div>', start) + 6;
+test('post status filter is one labelled segmented control bound to the local filter', async () => {
+  const appSource = source(), start = appSource.indexOf('<SegmentedControl label="Post status"'), end = appSource.indexOf('/>', start) + 2;
   assert.ok(start > 0 && end > start);
   const { code } = await transformWithOxc('const render = (tab, setTab) => ' + appSource.slice(start, end), 'PostStatus.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', 'title', code + '; return render;')(React, value => value[0].toUpperCase() + value.slice(1));
+  const render = new Function('React', 'SegmentedControl', 'title', code + '; return render;')(React, SegmentedControl, value => value[0].toUpperCase() + value.slice(1));
   const statuses = ['all', 'draft', 'scheduled', 'published', 'failed', 'cancelled']; let selected = 'all';
   for (const status of statuses) {
-    const group = render(selected, value => { selected = value; }), buttons = React.Children.toArray(group.props.children);
-    assert.equal(group.props.role, 'group'); assert.equal(group.props['aria-label'], 'Post status'); assert.equal(group.props.className, 'button-wrap');
-    assert.equal(buttons.length, statuses.length);
-    assert.equal(buttons.filter(button => button.props['aria-pressed']).length, 1);
-    for (const [index, button] of buttons.entries()) { assert.equal(button.props.type, 'button'); assert.equal(button.props['aria-pressed'], statuses[index] === selected); assert.equal(button.props.className, 'button' + (statuses[index] === selected ? ' primary' : '')); }
-    buttons[statuses.indexOf(status)].props.onClick(); assert.equal(selected, status);
+    const control = render(selected, value => { selected = value; });
+    assert.equal(control.type, SegmentedControl); assert.equal(control.props.label, 'Post status'); assert.equal(control.props.value, selected);
+    assert.deepEqual(control.props.options.map(option => option.value), statuses); assert.equal(control.props.options[0].label, 'All posts');
+    assert.equal((renderToStaticMarkup(control).match(/aria-checked="true"|aria-pressed="true"/g) || []).length, 1, 'Exactly one status is marked as chosen.');
+    control.props.onValueChange(status); assert.equal(selected, status);
   }
   const declaration = appSource.match(/^  const visiblePosts = .+;$/m)?.[0]; assert.ok(declaration);
   const filter = new Function('state', 'tab', 'filtered', declaration + '; return visiblePosts;');
   const posts = statuses.slice(1).map(status => ({ id: status, status }));
   for (const status of statuses) assert.deepEqual(filter({ posts }, status, rows => rows).map(post => post.id), status === 'all' ? statuses.slice(1) : [status]);
-  assert.match(appSource, /<nav className="tabs" aria-label="Publishing sections">/, 'Publishing route navigation stays separate.');
+  assert.match(appSource, /sections\('Publishing sections', publishingView, /, 'Publishing route navigation stays separate.');
 });
 
 test('Overview campaign totals and channel counts use singular only for one campaign', async () => {
-  const appSource = source();
-  const active = appSource.match(/<span><span className="status-dot green"\/>\{activeCampaigns\}[^\r\n]+?across your project<\/span><\/span>/)?.[0]; assert.ok(active);
-  const start = appSource.indexOf('<div className="channel-breakdown">'), end = appSource.indexOf('</div><button className="text-link"', start) + 6;
-  assert.ok(start > 0 && end > start);
-  const { code } = await transformWithOxc('const active = activeCampaigns => ' + active + '; const renderChannels = state => ' + appSource.slice(start, end), 'CampaignCounts.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', 'channels', code + '; return { active, channels: renderChannels };')(React, { social: 'Social media' });
+  const appSource = source(), declaration = appSource.match(/^const plural = .+;$/m)?.[0]; assert.ok(declaration);
+  const plural = runInNewContext(stripTypeScriptTypes(declaration) + '; plural');
+  assert.match(appSource, /\{plural\(activeCampaigns, 'active campaign'\)\}/); assert.match(appSource, /formatCount=\{count => plural\(count, 'campaign'\)\}/);
   for (const count of [0, 1, 2]) {
     const word = count === 1 ? 'campaign' : 'campaigns';
-    assert.match(renderToStaticMarkup(render.active(count)), new RegExp(count + ' active ' + word + ' '));
-    assert.ok(renderToStaticMarkup(render.channels({ campaigns: Array.from({ length: count }, () => ({ channel: 'social' })) })).includes('<strong>' + count + ' <small>' + word + '</small></strong>'));
+    assert.equal(plural(count, 'active campaign'), `${count} active ${word}`); assert.equal(plural(count, 'campaign'), `${count} ${word}`);
   }
 });
 
 test('local campaign results distinguish missing metrics from zero and never display NaN rates', () => {
-  const appSource = source(), start = appSource.indexOf('<h2>Campaign results</h2>'), row = appSource.slice(start, appSource.indexOf('</tbody>', start));
-  const cells = [...row.matchAll(/<td>\{([^{}]+)\}<\/td>/g)].slice(0, 5).map(match => match[1]);
+  const appSource = source(), start = appSource.indexOf('<DataTable ariaLabel="Campaign results"'), row = appSource.slice(start, appSource.indexOf(']}/>', start) + 1);
+  // The metric columns' render expressions, after the campaign name column.
+  const cells = row.split('render: c => ').slice(2).map(segment => segment.slice(0, segment.lastIndexOf(' }')));
   assert.equal(cells.length, 5);
   const declaration = appSource.match(/^const numeric = .+;$/m)[0].replace('(value: unknown): value is number', '(value)');
   const numeric = runInNewContext(declaration + '; numeric');
@@ -219,12 +216,12 @@ test('Settings keeps its two existing columns and renders scoped receipt recover
   const api = () => assert.fail('Rendering Settings must not submit an operation');
   const activeProject = { current: 'project-a' }, pendingKeys = { current: new Map([['retained', 'key']]) };
   const context = { React, page: 'Settings', project: { id: 'project-a', name: 'Campaign project' }, state: { projectId: 'project-a', user: { id: 'viewer-a', isOperator: true } }, workspace: { id: 'workspace-a', role: 'admin', name: 'Workspace' }, session: { oidcEnabled: false }, canAdmin: true, sample: false, busy: false, activeProject, pendingKeys, api,
-    Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, AccountSettings, OperationRecovery, TeamSettings, title: value => value,
+    Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, Grid, Stack, Card, Inline, Text, Button, FormActions, AccountSettings, OperationRecovery, TeamSettings, title: value => value,
     run: () => assert.fail('Rendering must not run an action'), reload: () => assert.fail('Rendering must not reload'), setPage: () => {}, setModal: () => {}, clearSampleData: () => {} };
   const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context));
   assert.equal(tree.type, React.Fragment);
   const children = React.Children.toArray(tree.props.children), [grid, recovery] = children;
-  assert.equal(children.length, 2); assert.equal(grid.props.className, 'settings-grid'); assert.equal(recovery.type, OperationRecovery);
+  assert.equal(children.length, 2); assert.equal(grid.type, Grid); assert.equal(grid.props.columns, 2); assert.equal(recovery.type, OperationRecovery);
   assert.equal(React.Children.toArray(grid.props.children).length, 2, 'Project/account and workspace/access retain their columns.');
   assert.equal(nodes(grid).filter(node => node.type === AccountSettings).length, 1);
   assert.equal(nodes(grid).filter(node => node.type === TeamSettings).length, 1);
@@ -235,4 +232,23 @@ test('Settings keeps its two existing columns and renders scoped receipt recover
   activeProject.current = 'another-project'; recovery.props.onReviewed('not_applied'); assert.equal(pendingKeys.current.size, 1, 'An old recovery callback cannot clear another project action keys.');
   activeProject.current = 'project-a'; recovery.props.onReviewed('not_applied'); assert.equal(pendingKeys.current.size, 0);
   const html = renderToStaticMarkup(tree); assert.match(html, /Project settings/); assert.match(html, /Workspace &amp; access/); assert.ok(html.indexOf('data-provider-recovery') > html.indexOf('data-workspace-invitations'));
+});
+
+test('post card publishing asks once and names every destination before calling the unchanged publish action', () => {
+  const appSource = source();
+  assert.doesNotMatch(appSource, /onClick=\{\(\) => publish\(p\)\}/, 'A card click never publishes directly.');
+  assert.match(appSource, /title=\{!connected \? 'Connect Zernio in Settings' : ''\} onClick=\{\(\) => setPublishing\(p\)\}>/);
+  const dialog = appSource.match(/<ConfirmDialog open=\{!!publishing\}[^\r\n]+?<\/ConfirmDialog>/)?.[0]; assert.ok(dialog);
+  assert.match(dialog, /onConfirm=\{async \(\) => \{ const post = publishing; if \(post\) await publish\(post\); setPublishing\(null\); \}\}/);
+  assert.match(dialog, /Accounts:<\/Text> \{postRecipients\(publishing, remote\.accounts\?\.accounts \|\| \[\]\)\}/);
+  assert.match(appSource, /async function publish\(post: Row\) \{ await run\(async \(\) => \{ await integrate\('social\/publish', \{ postId: post\.id \}\); await reload\(\); \}/);
+});
+
+test('only an owner is offered to leave the workspace, through one confirmed danger action on their own membership', () => {
+  const appSource = source();
+  assert.ok(appSource.includes("{workspace?.role === 'owner' && <DangerZoneFlow busy={busy} title=\"Leave workspace\""), 'Admins cannot remove themselves on the server, so they are not offered it.');
+  assert.ok(appSource.includes("onConfirm={leaveWorkspace}/>}"));
+  const handler = appSource.slice(appSource.indexOf('async function leaveWorkspace('), appSource.indexOf('  if (!session) return'));
+  assert.ok(handler.includes("await api(`/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`, 'DELETE'); window.location.reload();"), 'It removes the signed-in member only, then reloads the workspace list.');
+  assert.ok(handler.includes('await run('), 'A refusal (for example the last owner) surfaces through the shared error path.');
 });

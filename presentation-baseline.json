@@ -1,70 +1,21 @@
 {
-  "src/AdComposer.tsx": {
-    "element": 174,
-    "styling": 66
-  },
-  "src/AdDetails.tsx": {
-    "element": 186,
-    "styling": 64
-  },
-  "src/DirectCampaigns.tsx": {
-    "stylesheet": 1,
-    "element": 301,
-    "styling": 124
-  },
   "src/IntegrationSettings.tsx": {
     "element": 1,
     "styling": 2
   },
   "src/OohMap.tsx": {
-    "element": 16,
-    "styling": 9
+    "element": 1,
+    "styling": 2
   },
   "src/PostComposer.tsx": {
     "stylesheet": 1,
-    "element": 368,
-    "styling": 158
-  },
-  "src/SocialAnalytics.tsx": {
-    "element": 11,
-    "styling": 1
+    "styling": 2,
+    "element": 1
   },
   "src/UnifiedInbox.tsx": {
-    "stylesheet": 1,
-    "element": 531,
-    "styling": 250
-  },
-  "src/ZernioAdEvents.tsx": {
-    "element": 48,
-    "styling": 14
-  },
-  "src/ZernioContacts.tsx": {
-    "element": 218,
-    "styling": 51
-  },
-  "src/ZernioInsights.tsx": {
-    "element": 7,
-    "styling": 1
-  },
-  "src/ZernioLeads.tsx": {
-    "element": 153,
-    "styling": 57
-  },
-  "src/ZernioQueues.tsx": {
-    "element": 79,
-    "styling": 33
-  },
-  "src/ZernioRecycling.tsx": {
-    "element": 91,
-    "styling": 28
-  },
-  "src/ZernioWhatsAppTemplates.tsx": {
-    "element": 160,
-    "styling": 47
+    "element": 1
   },
   "src/main.tsx": {
-    "stylesheet": 1,
-    "element": 383,
-    "styling": 185
+    "stylesheet": 1
   }
 }

@@ -68,6 +68,7 @@ export const records = pgTable('records', {
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('records_project').on(t.project_id, t.collection, t.seq),
+  index('records_external_id').on(t.project_id, t.collection, sql`(${t.data}->>'externalId')`).where(sql`${t.data}->>'externalId' IS NOT NULL`),
 ]);
 export const activity = pgTable('activity', {
   id: text('id').primaryKey(),
@@ -380,6 +381,7 @@ export const directCampaigns = pgTable('direct_campaigns', {
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('direct_campaigns_project').on(t.project_id),
+  index('direct_campaigns_active').on(t.seq).where(sql`${t.data}->>'status' IN ('scheduled', 'sending')`),
 ]);
 export const directDeliveries = pgTable('direct_deliveries', {
   id: text('id').primaryKey(),
@@ -389,6 +391,7 @@ export const directDeliveries = pgTable('direct_deliveries', {
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   unique('direct_deliveries_campaign_id_contact_id_key').on(t.campaign_id, t.contact_id),
+  index('direct_deliveries_pending').on(t.campaign_id, t.seq).where(sql`${t.data}->>'status' = 'pending'`),
 ]);
 export const smsConversations = pgTable('sms_conversations', {
   id: text('id').primaryKey(),
@@ -503,6 +506,29 @@ export const inboxCommentReactions = pgTable('inbox_comment_reactions', {
   reaction_type: text('reaction_type').notNull(),
 }, t => [
   index('inbox_comment_reactions_target').on(t.platform, t.post_id, t.comment_id),
+]);
+// Team triage overlay (inbox.ts): provider IDs only, never provider content.
+export const inboxItemState = pgTable('inbox_item_state', {
+  project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  profile_id: text('profile_id').notNull(),
+  account_id: text('account_id').notNull(),
+  kind: text('kind').notNull(),
+  resource_id: text('resource_id').notNull(),
+  status: text('status').notNull().default('open'),
+  snoozed_until: text('snoozed_until'),
+  assignee_id: text('assignee_id').references(() => users.id, { onDelete: 'set null' }),
+  waiting_since: text('waiting_since'),
+  first_reply_at: text('first_reply_at'),
+  last_reply_at: text('last_reply_at'),
+  updated_at: text('updated_at'),
+  updated_by: text('updated_by').references(() => users.id, { onDelete: 'set null' }),
+}, t => [
+  check('inbox_item_state_kind_check', sql`${t.kind} IN ('conversation','comment','review','mention')`),
+  check('inbox_item_state_status_check', sql`${t.status} IN ('open','pending','snoozed','resolved')`),
+  check('inbox_item_state_snooze_check', sql`(${t.status} = 'snoozed') = (${t.snoozed_until} IS NOT NULL)`),
+  primaryKey({ columns: [t.project_id, t.profile_id, t.account_id, t.kind, t.resource_id] }),
+  index('inbox_item_state_assignee').on(t.assignee_id, t.project_id, t.profile_id, t.waiting_since),
+  index('inbox_item_state_waiting').on(t.project_id, t.profile_id, t.waiting_since).where(sql`${t.waiting_since} IS NOT NULL`),
 ]);
 
 // Zernio provider state and receipts (zernio-*.ts, integrations.ts)

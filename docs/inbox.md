@@ -44,6 +44,16 @@ Messenger/Instagram history imported before an account connects does not emit in
 
 Contracts: [Zernio unified inbox reference](https://github.com/zernio-dev/unified-inbox), [inbox webhooks](https://docs.zernio.com/webhooks/inbox), [conversations](https://docs.zernio.com/messages/list-inbox-conversations). Provider access and policies can vary by connection.
 
+## Team triage state
+
+Campaign keeps its own triage state for each conversation, comment, review or mention, keyed by project, profile, account, kind and provider ID (`inbox_item_state`). It stores no provider content. A drained `message.received` (incoming), `comment.received` or `review.new` event marks the item waiting from the event time, and reopens a resolved or snoozed item unless it was triaged after that message. A provider-confirmed reply sent through Campaign (message reply, request acceptance, comment reply or review reply) clears waiting and records the first reply once. Replies sent elsewhere do not clear it.
+
+- `GET .../integrations/inbox/item-states?accountId=&kind=&id=` (1–100 repeated `id`) returns one state per ID; IDs without saved state read as open with `updatedAt: null`. Viewers can read.
+- `PATCH .../integrations/inbox/item-states` with `{ accountId, kind, resourceId, expectedUpdatedAt, status?, snoozedUntil?, assigneeId? }` changes status (open, pending, snoozed, resolved) or assignee. It needs editing permission and the `updatedAt` last read (`null` for an item with no saved state). A stale value returns `409 INBOX_STATE_CHANGED`. Assignees must be workspace members with editing permission, checked under the workspace lock. Resolving clears waiting.
+- A snooze ends at `snoozedUntil`: the item then reads as open, with no timer. An assignee who leaves the workspace reads as unassigned.
+
+Neither endpoint calls the provider.
+
 ## Automatic Facebook Messenger contacts
 
 A verified incoming Facebook Messenger message creates a project contact automatically. Signed `message.received` events and inbox history synchronization can create the contact when the incoming sender and account are established. A conversation-start event, outgoing message, comment or review alone does not create a Messenger contact.

@@ -29,7 +29,7 @@ test('password change uses the shared flow, posts only the password fields and r
   const account = { user: { email: 'member@example.test', name: 'Member' }, localPassword: true, activeSessions: 1 };
   const render = view(account, async (path, method, body) => { calls.push([path, method, body]); if (path === '/account/password' && calls.length > 2) throw new Error('Current password is incorrect.'); return account; });
   let tree = render(), html = renderToStaticMarkup(tree);
-  assert.match(html, /value="member@example\.test"/); assert.match(html, /1 active sessions/); assert.doesNotMatch(html, /name="locale"|name="timeZone"/);
+  assert.match(html, /value="member@example\.test"/); assert.match(html, /1 active session</); assert.doesNotMatch(html, /name="locale"|name="timeZone"/);
   assert.match(html, /name="currentPassword"/); assert.match(html, /<input[^>]*minLength="12"[^>]*name="newPassword"/); assert.match(html, /maxLength="128"|maxlength="128"/i);
   assert.match(html, /disabled="">Sign out other sessions/, 'A single session has nothing to sign out.');
   const flow = find(tree, ui.PasswordChangeFlow);

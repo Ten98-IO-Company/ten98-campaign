@@ -5,6 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import * as ui from '@ten98/ui';
 
 const source = (await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
@@ -46,11 +47,11 @@ test('changing subreddit removes stale flair while preserving separate captions,
 });
 
 test('the actual YouTube selector leaves an empty playlist empty and requires explicitly choosing the saved default', async () => {
-  const start = source.indexOf('  return <section className="post-tiktok-permissions"', source.indexOf('function PublishingDestinations(')), end = source.indexOf('\n}\n\nfunction MediaEditor', start);
+  const start = source.indexOf('\n  return <', source.indexOf('function PublishingDestinations(')) + 1, end = source.indexOf('\n}\n\nfunction MediaEditor', start);
   const jsx = source.slice(start + '  return '.length, end).trim().replace(/;$/, '');
   const { code } = await transformWithOxc(`const render = () => (${jsx});`, 'PublishingDestinations.tsx', { jsx: { runtime: 'classic' } });
   function render(loaded, options = {}) {
-    const context = { ...guards(), React, platform: 'youtube', PLATFORM_RULES: { youtube: { label: 'YouTube' } }, sourceAccount: 'yt-account', accounts: [{ id: 'yt-account', name: 'Our channel' }], busy: '', accountId: row => row.id, accountLabel: row => row.name, setSourceId() {}, load() {}, resource: 'youtube-playlists', options, change() {}, loaded, details: {}, error: '', subreddit: '' };
+    const context = { ...ui, ...guards(), React, platform: 'youtube', PLATFORM_RULES: { youtube: { label: 'YouTube' } }, sourceAccount: 'yt-account', accounts: [{ id: 'yt-account', name: 'Our channel' }], busy: '', accountId: row => row.id, accountLabel: row => row.name, setSourceId() {}, load() {}, resource: 'youtube-playlists', options, change() {}, loaded, details: {}, error: '', subreddit: '' };
     return renderToStaticMarkup(new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)));
   }
   const loaded = { defaultPlaylistId: 'PL-default', playlists: [{ id: 'PL-default', title: 'Default collection', privacy: 'private' }] };

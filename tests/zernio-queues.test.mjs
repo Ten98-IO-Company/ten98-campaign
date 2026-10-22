@@ -70,6 +70,12 @@ test('queue lifecycle scopes profile, enforces edit snapshots, manages defaults 
     assert.equal((await f.request(`${f.path}/${row._id}/update`, 'POST', body)).status, 400); assert.equal((await f.request(`${f.path}/foreign/delete`, 'POST', { confirmDelete: 'foreign', expectedVersion: row.version })).status, 403); assert.equal(f.writes().length, beforeInvalid);
     const reshuffled = await f.request(`${f.path}/${row._id}/update`, 'POST', { ...body, confirmReshuffle: true }); assert.equal(reshuffled.data.reshuffledCount, 2);
     const removed = await f.request(`${f.path}/${row._id}/delete`, 'POST', { expectedVersion: reshuffled.data.queue.version, confirmDelete: row._id }); assert.equal(removed.status, 200); assert.equal(removed.data.queues.length, 1); assert.equal(removed.data.queues[0].isDefault, true);
+    // The list's Pause button sends this exact status request: the reviewed version and only the wanted `active` value.
+    const remaining = removed.data.queues[0], paused = await f.request(`${f.path}/${remaining._id}/status`, 'POST', { active: false, expectedVersion: remaining.version });
+    assert.equal(paused.status, 200, JSON.stringify(paused.data)); assert.equal(paused.data.changed, true); assert.equal(paused.data.queue.active, false); assert.equal(paused.data.queue.isDefault, true); assert.equal(paused.data.queues.find(queue => queue._id === remaining._id).active, false);
+    const beforeRepeat = f.writes().length, repeated = await f.request(`${f.path}/${remaining._id}/status`, 'POST', { active: false, expectedVersion: paused.data.queue.version });
+    assert.equal(repeated.status, 200); assert.equal(repeated.data.changed, false); assert.equal(repeated.data.queue.version, paused.data.queue.version); assert.equal(f.writes().length, beforeRepeat, 'An unchanged status sends nothing to the provider.');
+    assert.equal((await f.request(`${f.path}/${remaining._id}/status`, 'POST', { active: true, expectedVersion: remaining.version })).data.error.code, 'QUEUE_CHANGED');
     await f.app.sql.run("UPDATE memberships SET role='editor'"); const beforeEditor = f.calls.length; assert.equal((await f.request(`${f.path}/create`, 'POST', {})).status, 403); assert.equal(f.calls.length, beforeEditor); assert.equal((await f.request(f.path)).status, 200);
   } finally { await f.close(); }
 });
@@ -179,6 +185,8 @@ test('assigned queue posts refresh, reschedule, cancel, retry failures and edit 
     result = await f.request(`${f.project}/integrations/social/status?postId=${failed.id}`); assert.equal(result.data.post.status, 'failed');
     await f.request(`${f.project}/approvals/policy`, 'POST', { requireApproval: true }); const review = await f.request(`${f.project}/approvals/posts/${failed.id}/request`, 'POST', {}); assert.equal(review.status, 200); assert.equal(review.data.item.review.snapshot.queueId, undefined); assert.equal((await f.request(`${f.project}/approvals/posts/${failed.id}/review`, 'POST', { reviewId: review.data.item.review.id, decision: 'approved' })).status, 200);
     result = await f.request(`${f.project}/integrations/social/retry`, 'POST', { postId: failed.id, confirmPublish: true }); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.post.status, 'published'); assert.equal(result.data.post.queueId, '');
+    // With approval required, the published-text edit needs its own approved review.
+    const edit = await f.request(`${f.project}/approvals/posts/${failed.id}/request`, 'POST', { action: 'social/edit-published', proposal: { accountId: 'facebook-queue-account', content: 'Live correction' } }); assert.equal(edit.status, 200, JSON.stringify(edit.data)); assert.equal((await f.request(`${f.project}/approvals/posts/${failed.id}/review`, 'POST', { reviewId: edit.data.item.review.id, decision: 'approved' })).status, 200);
     result = await f.request(`${f.project}/integrations/social/edit-published`, 'POST', { postId: failed.id, accountId: 'facebook-queue-account', content: 'Live correction', confirmEdit: true }); assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.post.providerResults[0].customContent, 'Live correction');
     assert.equal(f.writes().filter(call => call.method === 'POST' && call.url.pathname.endsWith('/posts')).length, 2, 'All sibling actions use the existing provider post, never create another queued post.');
   } finally { await f.close(); }
@@ -194,7 +202,7 @@ test('queue approval cards show verified weekly timing and block stale approval 
     const source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8'), start = source.indexOf('  return <', source.indexOf('export default function')), end = source.lastIndexOf('\n}');
     const { code } = await transformWithOxc(`const render = () => (${source.slice(start + '  return '.length, end).trim().replace(/;$/, '')});`, 'QueueApprovalView.tsx', { jsx: { runtime: 'classic' } });
     const ui = Object.fromEntries(Object.entries(designSystem).filter(([name]) => /^[A-Z]/.test(name)));
-    const render = entry => { const context = { React, ...ui, lines: value => String(value), options: () => [], data: { requireApproval: true, posts: [entry] }, posts: [entry], role: 'owner', busy: '', error: '', notice: '', filter: 'all', notes: {}, canReview: true, canRequest: true, days: ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'], when: value => value, label: value => value, link: () => '', PostVariantPreview: () => null, PLATFORM_RULES: {}, action() {}, setFilter() {}, setNotes() {}, review() {}, path: '', load() {} }; return renderToStaticMarkup(new Function(...Object.keys(context), code + ';return render();')(...Object.values(context))); };
+    const render = entry => { const context = { React, ...ui, lines: value => String(value), options: () => [], data: { requireApproval: true, posts: [entry] }, posts: [entry], role: 'owner', busy: '', error: '', notice: '', filter: 'all', notes: {}, canReview: true, canRequest: true, days: ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'], when: value => value, label: value => value, link: () => '', PostVariantPreview: () => null, PLATFORM_RULES: {}, action() {}, setFilter() {}, setNotes() {}, review() {}, path: '', load() {}, focusId: '', setFocusId() {}, onCardKey() {}, actionable: [], chosen: [], blockedChosen: 0, selected: [], setSelected() {}, bulk: null, bulkResult: null, setBulkResult() {}, bulkReview() {}, postName: item => item.post.id, statusValues: ['all', 'pending', 'stale', 'approved', 'rejected', 'not_requested'], counts: {}, platformChoices: [], platform: '', setPlatform() {}, sort: 'requested', setSort() {}, restrictions: {}, restrictionTargets: () => [], approveBlocked: new Function('return ' + stripTypeScriptTypes(source.match(/^const approveBlocked = (.+);$/m)[1]))(), PublishedEditComparison: () => null, ProposedUpdateComparison: () => null }; return renderToStaticMarkup(new Function(...Object.keys(context), code + ';return render();')(...Object.values(context))); };
     let markup = render(item); assert.match(markup, /Visible launch queue/); assert.match(markup, /America\/New_York/); assert.match(markup, /Monday 09:00/); assert.match(markup, /next free slot assigned on submission/); assert.doesNotMatch(markup, /No planned publishing time/); assert.doesNotMatch(markup, /disabled=""[^>]*>Approve post/);
     f.setHook(url => { if (url.pathname.endsWith('/queue/slots')) throw new Error('Synthetic queue service unavailable'); });
     const list = await f.request(`${f.project}/approvals/posts`); assert.equal(list.status, 200); const unavailable = list.data.posts.find(row => row.post.id === queued.id); assert.equal(unavailable.queue.ready, false); assert.equal(list.data.posts.find(row => row.post.id === ordinary.id).queue, null);
@@ -216,20 +224,65 @@ test('queue enqueue requires inline review of the exact saved post and queue sna
   const projectPath = '/projects/one', approvalRequired = true;
   const enqueueReviewKey = new Function('projectPath', 'approvalRequired', `return (${stripTypeScriptTypes(source.slice(keyStart, enqueueStart))});`)(projectPath, approvalRequired);
   let item = { post: { id: 'post-one', content: 'Reviewed caption', accounts: ['facebook-one'], queueId: 'queue-one', queueVersion: 'v1' }, status: 'approved', assets: [] }, queue = { _id: 'queue-one', name: 'Weekly launch', active: true, version: 'v1', slots: [{ dayOfWeek: 1, time: '09:00' }] }, enqueueReviews = {}, calls = 0;
-  const start = source.indexOf('    <div className="settings-panel"><h3>Saved posts ready for queues'), end = source.indexOf('\n  </section>;', start);
+  const start = source.indexOf('    <Stack as="section" gap={3}><Heading level={3} size="sm">Saved posts ready for queues'), end = source.indexOf("\n    <ConfirmDialog open={confirming?.kind === 'reshuffle'}", start);
   const { code } = await transformWithOxc(`const render = () => (${source.slice(start, end).trim()});`, 'QueueEnqueueReview.tsx', { jsx: { runtime: 'classic' } });
   const review = value => { enqueueReviews = typeof value === 'function' ? value(enqueueReviews) : value; };
-  function render(loaded = true, localPosts = [item]) { const context = { React, loaded, localPosts, queues: [queue], approvalRequired, enqueueReviewKey, enqueueReviews, setEnqueueReviews: review, canWrite: true, busy: false, onOpenApprovals: null, onEditPost: null, enqueue() {} }; return new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)); }
+  function render(loaded = true, localPosts = [item]) { const context = { React, ...designSystem, loaded, localPosts, queues: [queue], approvalRequired, enqueueReviewKey, enqueueReviews, setEnqueueReviews: review, canWrite: true, busy: false, onOpenApprovals: null, onEditPost: null, enqueue() {} }; return new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)); }
   const all = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(all)];
   const submit = async () => {
     const context = { canWrite: true, queues: [queue], approvalRequired, enqueueReviews, enqueueReviewKey, projectPath, action: async run => run(), write: async () => { calls++; return { post: { scheduledAt: '2070-01-01T09:00:00Z' } }; }, current: () => true, setPosts() {}, setNotice() {}, setError() {}, onChanged: null, load: async () => {} };
     return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(enqueueStart, enqueueEnd))});`)(...Object.values(context))(item);
   };
   assert.doesNotMatch(renderToStaticMarkup(render(false, [])), /No unsent local posts/); assert.match(renderToStaticMarkup(render(true, [])), /No unsent local posts/);
-  let markup = renderToStaticMarkup(render()); assert.match(markup, /reserves its next free slot and publishes the post/); assert.match(markup, /disabled=""[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 0);
-  all(render()).find(node => node.type === 'input' && node.props.type === 'checkbox').props.onChange({ target: { checked: true } });
-  markup = renderToStaticMarkup(render()); assert.match(markup, /checked=""/); assert.doesNotMatch(markup, /disabled=""[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 1);
-  for (const changed of [{ ...item, post: { ...item.post, content: 'Changed after review' } }, { ...item, assets: [{ id: 'asset-one', approval: 'pending' }] }]) { const original = item; item = changed; markup = renderToStaticMarkup(render()); assert.doesNotMatch(markup, /checked=""/); assert.match(markup, /disabled=""[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 1); item = original; }
+  let markup = renderToStaticMarkup(render()); assert.match(markup, /reserves its next free slot and publishes the post/); assert.match(markup, /aria-disabled="true"[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 0);
+  all(render()).find(node => node.type === designSystem.Checkbox).props.onChange({ target: { checked: true } });
+  markup = renderToStaticMarkup(render()); assert.match(markup, /checked=""/); assert.doesNotMatch(markup, /aria-disabled="true"[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 1);
+  for (const changed of [{ ...item, post: { ...item.post, content: 'Changed after review' } }, { ...item, assets: [{ id: 'asset-one', approval: 'pending' }] }]) { const original = item; item = changed; markup = renderToStaticMarkup(render()); assert.doesNotMatch(markup, /checked=""/); assert.match(markup, /aria-disabled="true"[^>]*>Add saved post to queue/); await submit(); assert.equal(calls, 1); item = original; }
   queue = { ...queue, version: 'v2' }; item = { ...item, post: { ...item.post, queueVersion: 'v2' } }; markup = renderToStaticMarkup(render()); assert.doesNotMatch(markup, /checked=""/); await submit(); assert.equal(calls, 1, 'Confirmation must not follow a newly reviewed queue version.');
   assert.doesNotMatch(source.slice(enqueueStart, enqueueEnd), /window\.confirm/);
+});
+
+test('pausing and activating a queue sends one receipted update with only its active state changed', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  try {
+    const queue = (await f.create('Pausable')).data.queue, toggle = (row, body, key) => f.request(`${f.path}/${encodeURIComponent(row._id)}/status`, 'POST', body, key);
+    let before = f.writes().length, key = randomUUID();
+    const paused = await toggle(queue, { active: false, expectedVersion: queue.version }, key);
+    assert.equal(paused.status, 200, JSON.stringify(paused.data)); assert.equal(paused.data.operation.status, 'complete'); assert.equal(paused.data.changed, true);
+    assert.deepEqual({ ...paused.data.queue, version: undefined }, { ...queue, active: false, version: undefined }); assert.equal(paused.data.queues[0].active, false);
+    assert.equal(f.writes().length, before + 1, 'One toggle sends exactly one provider request.');
+    assert.deepEqual(f.writes().at(-1).body, { profileId: 'queue-profile', queueId: queue._id, setAsDefault: true, reshuffleExisting: false, name: queue.name, timezone: queue.timezone, slots: queue.slots, active: false });
+    assert.equal(f.writes().at(-1).key, key);
+    assert.deepEqual((await toggle(queue, { active: false, expectedVersion: queue.version }, key)).data, paused.data); assert.equal(f.writes().length, before + 1, 'A retried idempotency key sends nothing.');
+    const stale = await toggle(queue, { active: false, expectedVersion: queue.version }); assert.equal(stale.status, 409); assert.equal(stale.data.error.code, 'QUEUE_CHANGED'); assert.equal(f.writes().length, before + 1);
+    const activated = await toggle(paused.data.queue, { active: true, expectedVersion: paused.data.queue.version }); assert.equal(activated.status, 200, JSON.stringify(activated.data)); assert.equal(activated.data.queue.active, true); assert.equal(f.writes().length, before + 2);
+    const same = await toggle(activated.data.queue, { active: true, expectedVersion: activated.data.queue.version }); assert.equal(same.status, 200); assert.equal(same.data.changed, false); assert.equal(f.writes().length, before + 2, 'An unchanged state sends nothing.');
+    before = f.writes().length;
+    for (const body of [{ active: 'no', expectedVersion: queue.version }, { active: false, expectedVersion: queue.version, name: 'Renamed' }, { active: false }]) assert.equal((await toggle(activated.data.queue, body)).status, 400);
+    assert.equal((await f.request(`${f.path}/${queue._id}/status`)).status, 405);
+    const list = await f.list(), empty = await f.request(`${f.path}/create`, 'POST', { name: 'Empty', timezone: 'UTC', slots: [], active: false, expectedListVersion: list.version }); assert.equal(empty.status, 200, JSON.stringify(empty.data));
+    const noSlots = await toggle(empty.data.queue, { active: true, expectedVersion: empty.data.queue.version }); assert.equal(noSlots.status, 400); assert.equal(noSlots.data.error.code, 'QUEUE_SLOTS_REQUIRED');
+    assert.equal(f.writes().length, before + 1, 'Invalid toggles send nothing (only the empty queue creation was sent).');
+    await f.app.sql.run("UPDATE memberships SET role='editor'"); const calls = f.calls.length;
+    assert.equal((await toggle(queue, { active: false, expectedVersion: activated.data.queue.version })).status, 403); assert.equal(f.calls.length, calls);
+  } finally { await f.close(); }
+});
+
+test('parallel queue toggles send one provider request and an unconfirmed toggle stays uncertain', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  try {
+    const queue = (await f.create('Contended')).data.queue, toggle = (row, body, key) => f.request(`${f.path}/${row._id}/status`, 'POST', body, key), before = f.writes().length;
+    // The first toggle is held at its provider request; the second, under a new key, arrives while the queue still reads active.
+    let reached, release, holding = true; const held = new Promise(resolve => { reached = resolve; }), gate = new Promise(resolve => { release = resolve; });
+    f.setHook(async (url, options) => { if (holding && url.pathname.endsWith('/queue/slots') && options.method === 'PUT') { holding = false; reached(); await gate; } });
+    const leading = toggle(queue, { active: false, expectedVersion: queue.version }); await held;
+    const second = await toggle(queue, { active: false, expectedVersion: queue.version }); release(); const first = await leading; f.setHook(undefined);
+    assert.equal(first.status, 200, JSON.stringify(first.data)); assert.equal(second.status, 409); assert.equal(second.data.error.code, 'OPERATION_NOT_SENT', JSON.stringify(second.data));
+    assert.equal(f.writes().length, before + 1, 'Parallel toggles of one queue reach the provider once.');
+    const paused = first.data.queue;
+    f.setHook((url, options) => url.pathname.endsWith('/queue/slots') && options.method === 'PUT' ? Response.json({ success: true, schedule: { ...structuredClone(f.queues[0]), active: false } }) : undefined);
+    const uncertain = await toggle(paused, { active: true, expectedVersion: paused.version }); assert.equal(uncertain.status, 409); assert.equal(uncertain.data.operation.status, 'uncertain');
+    f.setHook(undefined); const blocked = await toggle(paused, { active: true, expectedVersion: paused.version }); assert.equal(blocked.data.error.code, 'OPERATION_NOT_SENT');
+    assert.equal(f.writes().length, before + 2, 'The unconfirmed toggle was sent once and blocks further queue changes until reviewed.');
+  } finally { await f.close(); }
 });

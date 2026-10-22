@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac, randomUUID } from 'node:crypto';
+import pg from 'pg';
 import { connect, createStore } from '../server/database.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from '../server/webhooks.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
@@ -127,4 +128,16 @@ test('malformed inbox payloads cannot create contacts, while unknown and test ev
     assert.equal((await f.one('SELECT count(*) AS n FROM webhook_inbox_updates')).n, 0);
     assert.equal((await f.store.get('project-a', 'posts', f.post.id)).status, 'submitted');
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test('a post event reads the linked post by provider ID, not the whole collection', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  await f.pool.query(`INSERT INTO records (id, project_id, collection, data) SELECT 'other-' || n, 'project-a', 'posts', json_build_object('id', 'other-' || n, 'content', 'Other post', 'externalId', 'remote-other-' || n, 'zernioProfileId', 'profile-a') FROM generate_series(1, 300) n`);
+  assert.equal((await signed(f.service, event('post.published', { profiles: [{ id: 'profile-a' }] }))).status, 202);
+  // Count rows returned on every connection, including the drain's transaction.
+  let rows = 0; const query = pg.Client.prototype.query;
+  pg.Client.prototype.query = function (...args) { const result = query.apply(this, args); if (result?.then) result.then(value => { rows += value?.rows?.length || 0; }, () => {}); return result; };
+  try { assert.deepEqual(await f.service.processPending(), { processed: 1, pending: 0 }); } finally { pg.Client.prototype.query = query; }
+  assert.equal((await f.store.get('project-a', 'posts', f.post.id)).status, 'published');
+  assert.ok(rows < 40, `Applying one post event read ${rows} rows; loading every post reads more than 300.`);
 });

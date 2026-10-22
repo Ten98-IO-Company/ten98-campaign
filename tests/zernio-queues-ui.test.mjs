@@ -5,12 +5,13 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import * as library from '@ten98/ui';
 
 const source = await readFile(new URL('../src/ZernioQueues.tsx', import.meta.url), 'utf8');
 const section = (start, end) => { const from = source.indexOf(start), to = source.indexOf(end, from); assert.ok(from >= 0 && to > from); return stripTypeScriptTypes(source.slice(from, to)); };
 const compile = (code, context) => new Function(...Object.keys(context), `return (${code});`)(...Object.values(context));
 const loadCode = section('async function load()', '  function choose('), actionCode = section('async function action(', '  async function load()');
-const localPosts = source.match(/^  const localPosts = .+;$/m)?.[0], localEmpty = source.match(/\{[^{}\n]*!localPosts\.length && <p>No unsent local posts[^<]*<\/p>\}/)?.[0];
+const localPosts = source.match(/^  const localPosts = .+;$/m)?.[0], localEmpty = source.match(/\{[^{}\n]*!localPosts\.length && <Text>No unsent local posts[^<]*<\/Text>\}/)?.[0];
 assert.ok(localPosts && localEmpty);
 const { code: renderCode } = await transformWithOxc(`const render = () => { ${localPosts} return (<>${source.slice(source.indexOf('    {error &&'), source.indexOf('    {!!queues.length'))}${localEmpty}</>); };`, 'QueueReadState.tsx', { jsx: { runtime: 'classic' } });
 function ui(read) {
@@ -18,7 +19,7 @@ function ui(read) {
   const set = name => value => { state[name] = typeof value === 'function' ? value(state[name]) : value; };
   const context = { path: '/projects/one/integrations/queues', projectPath: '/projects/one', current: () => true, busyRef: { current: false }, requester: { current: read }, ...Object.fromEntries(Object.keys(state).map(name => ['set' + name[0].toUpperCase() + name.slice(1), set(name)])) };
   const load = compile(loadCode, context), action = compile(actionCode, context);
-  const html = () => { const values = { React, ...state }; return renderToStaticMarkup(new Function(...Object.keys(values), renderCode + '; return render();')(...Object.values(values))); };
+  const html = () => { const values = { React, ...library, ...state }; return renderToStaticMarkup(new Function(...Object.keys(values), renderCode + '; return render();')(...Object.values(values))); };
   return { state, context, load, action, html };
 }
 
@@ -71,21 +72,26 @@ test('queue row actions keep short visible labels, full accessible identities an
   const { code } = await transformWithOxc(`const render = () => (<>${source.slice(start, end)}</>);`, 'QueueRowActions.tsx', { jsx: { runtime: 'classic' } });
   const queue = { _id: 'queue-one', name: 'Weekly launch queue for a long descriptive campaign', timezone: 'UTC', slots: [{ dayOfWeek: 1, time: '09:00' }], active: true, isDefault: true };
   const nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes)];
-  function render(canManage, busy, row = queue) {
-    const calls = [], context = { React, queues: [row], canManage, busy, days: ['Sunday', 'Monday'], inspect: value => calls.push(['Preview', value]), choose: value => calls.push(['Edit', value]), remove: value => calls.push(['Delete', value]) };
-    const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context));
-    return { tree, calls, buttons: nodes(tree).filter(node => node.type === 'button') };
+  function render(canManage, busy, row = queue, editor = { selected: null, editing: false }) {
+    const calls = [], context = { React, ...library, queues: [row], canManage, busy, ...editor, days: ['Sunday', 'Monday'], inspect: value => calls.push(['Preview', value]), choose: value => calls.push(['Edit', value]), remove: value => calls.push(['Delete', value]), setActive: (value, active) => calls.push([active ? 'Activate' : 'Pause', value]) };
+    const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context)), table = nodes(tree).find(node => node.type === library.DataTable);
+    return { tree, table, calls, buttons: nodes(table.props.rowActions(row)).filter(node => node.type === library.Button) };
   }
   for (const canManage of [false, true]) for (const busy of [false, true]) {
-    const view = render(canManage, busy), actions = canManage ? ['Preview', 'Edit', 'Delete'] : ['Preview'];
+    const view = render(canManage, busy), actions = canManage ? ['Preview', 'Pause', 'Edit', 'Delete'] : ['Preview'];
     assert.deepEqual(view.buttons.map(button => button.props.children), actions);
     for (const [index, button] of view.buttons.entries()) {
       assert.equal(button.props['aria-label'], actions[index] + ' ' + queue.name); assert.equal(button.props.disabled, busy);
       if (!busy) button.props.onClick();
     }
     assert.deepEqual(view.calls.map(([action]) => action), busy ? [] : actions); assert.ok(view.calls.every(([, row]) => row === queue));
-    assert.ok(nodes(view.tree).some(node => node.type === 'div' && node.props.className === 'table-scroll'));
+    assert.equal(view.table.props.ariaLabel, 'Publishing queues');
     assert.match(renderToStaticMarkup(view.tree), /aria-label="Preview Weekly launch queue for a long descriptive campaign"/);
   }
   for (const row of [{ ...queue, active: false }, { ...queue, slots: [] }]) assert.equal(render(false, false, row).buttons[0].props.disabled, true);
+  const toggle = (row, editor) => render(true, false, row, editor).buttons.find(button => ['Pause', 'Activate'].includes(button.props.children));
+  assert.equal(toggle(queue, { selected: queue, editing: true }).props.disabled, true, 'The row open with unsaved edits cannot be paused.');
+  assert.equal(toggle(queue, { selected: queue, editing: false }).props.disabled, false);
+  assert.equal(toggle(queue, { selected: { ...queue, _id: 'other' }, editing: true }).props.disabled, false, 'Edits to another queue do not block this row.');
+  assert.equal(toggle({ ...queue, active: false, slots: [] }, { selected: null, editing: false }).props.disabled, true, 'A paused queue without slots cannot be activated.');
 });
