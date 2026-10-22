@@ -23,7 +23,7 @@ function browser(kind, initialProps) {
   const useState = initial => { const index = cursor++; hooks[index] ||= { value: typeof initial === 'function' ? initial() : initial }; return [hooks[index].value, update => { const next = typeof update === 'function' ? update(hooks[index].value) : update; if (!Object.is(next, hooks[index].value)) { hooks[index].value = next; dirty = true; } }]; };
   const useRef = initial => { const index = cursor++; return hooks[index] ||= { current: initial }; };
   const useEffect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
-  const context = { ...ui, MediaImage: ui.Image, React, useState, useRef, useEffect, useMemo: compute => compute(), InstagramPublishingTools: InstagramToolsProbe, TikTokPublishingTools: TikTokToolsProbe, ...social };
+  const context = { ...ui, MediaImage: ui.Image, React, useState, useRef, useEffect, useMemo: compute => compute(), useId: () => 'composer', InstagramPublishingTools: InstagramToolsProbe, TikTokPublishingTools: TikTokToolsProbe, ...social };
   const components = new Function(...Object.keys(context), code + ';return { PostComposer, PublishingDestinations };')(...Object.values(context));
   function paint() { for (let pass = 0; dirty; pass++) { assert.ok(pass < 20, 'Rendering settles.'); dirty = false; cursor = 0; tree = components[kind](props); while (queued.length) queued.shift()(); } }
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
@@ -110,7 +110,7 @@ test('actual composer stores location choices on the exact account and exposes t
 });
 
 test('SSR composer shows one location picker, keeps account-only options visible and disables read-only controls', () => {
-  const hooks = { useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute() };
+  const hooks = { useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute(), useId: () => 'composer' };
   const context = { React, ...hooks, ...social, ...ui, MediaImage: ui.Image }, Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
   const props = { post: { content: 'Update', platforms: ['googlebusiness'], accounts: ['account-a'], mediaItems: [], accountOverrides: { 'account-a': { platform: 'googlebusiness', options: { locationId: 'locations/saved' } } } }, accounts, canWrite: true, readOnly: true, onSubmit: async () => {}, onLookupDestinations: async () => page() };
   const html = renderToStaticMarkup(Composer(props)); assert.equal((html.match(/>Google Business Profile location</g) || []).length, 1); assert.match(html, /Current location · locations\/saved/); assert.match(html, /name="draftSnapshot"/); assert.match(html, /<fieldset[^>]* disabled=""/); assert.match(html, /Enter a location ID manually/);

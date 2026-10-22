@@ -100,15 +100,15 @@ test('actual account composer rendering shows distinct caption, media, options a
   const accounts = [{ id: 'first', platform: 'facebook', displayName: 'Brand One' }, { id: 'second', platform: 'facebook', displayName: 'Brand Two' }];
   const post = { id: 'post', content: 'Shared caption', platforms: ['facebook'], accounts: ['first', 'second'], scheduledAt: '2070-01-01T09:00:00Z', mediaItems: [], platformOverrides: { facebook: { content: 'Platform caption', options: { firstComment: 'Platform comment' } } }, accountOverrides: { second: { platform: 'facebook', content: 'Second brand caption', mediaItems: [{ type: 'image', url: 'https://cdn.example.test/second.jpg' }], options: {}, scheduledAt: '2070-01-02T09:00:00Z' } } };
   let stateIndex = 0;
-  const hooks = { useState: initial => { const index = stateIndex++; return [index === 13 ? 'second' : typeof initial === 'function' ? initial() : initial, () => {}]; }, useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute() };
-  const context = { React, ...hooks, ...social, ...ui, MediaImage: ui.Image };
+  const portals = [], hooks = { useState: initial => { const index = stateIndex++; return [index === 13 ? 'second' : typeof initial === 'function' ? initial() : initial, () => {}]; }, useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute(), useId: () => 'composer-form' };
+  const context = { React, ...hooks, ...social, ...ui, MediaImage: ui.Image, createPortal: (node, host) => { portals.push([node, host]); return null; } };
   const Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
   const html = renderToStaticMarkup(Composer({ post, accounts, assets: [], campaigns: [], canWrite: true, onSubmit: async () => {} }));
-  const stylesheet = await readFile(new URL('../src/post-composer.css', import.meta.url), 'utf8');
-  const stickyFooters = [...stylesheet.matchAll(/\.post-composer \.modal-actions\{([^{}]*)\}/g)].map(([, body]) => body).filter(body => body.includes('position:sticky'));
-  assert.equal(stickyFooters.length, 1, 'The shared local/provider composer footer has one sticky owner.');
-  assert.ok(Number(stickyFooters[0].match(/(?:^|;)bottom:([^;]+)/)?.[1].replace(/px$/, '')) >= 0, 'Composer actions must anchor inside the modal scrollport, never below its clipped edge.');
-  assert.match(html, /<div class="modal-actions">[\s\S]*>Cancel<\/button>[\s\S]*>Save changes<\/button>/, 'Actual composer retains its cancel and save actions.');
+  assert.match(html, /<form id="composer-form"[\s\S]*<div class="t98-form-actions">[\s\S]*>Cancel<\/button>[\s\S]*form="composer-form"[^>]*>Save changes<\/button>[\s\S]*<\/form>/, 'Without a footer host (the provider post editor) the actions follow the form.');
+  // In the editor Dialog the actions render into its always-visible footer, outside the form, so Save names the form it submits.
+  stateIndex = 0; const host = {}, hosted = renderToStaticMarkup(Composer({ post, accounts, assets: [], campaigns: [], canWrite: true, onSubmit: async () => {}, actionsHost: host }));
+  assert.doesNotMatch(hosted, />Save changes</); assert.equal(portals.length, 1); assert.equal(portals[0][1], host);
+  assert.match(renderToStaticMarkup(portals[0][0]), /^<button type="button"[^>]*>Cancel<\/button><button type="submit"[^>]*form="composer-form"[^>]*>Save changes<\/button>$/);
   assert.match(html, /Customise destination/); assert.match(html, /Brand Two · second/); assert.match(html, /Second brand caption/); assert.match(html, /second\.jpg/); assert.match(html, /Separate account publishing options/); assert.match(html, /Separate account time/); assert.match(html, /2070-01-02/); assert.equal(post.platformOverrides.facebook.content, 'Platform caption');
 });
 
@@ -239,7 +239,7 @@ test('YouTube keywords save and reopen as a shared field and reach unpublished u
   const values = draft({ platforms: ['youtube'], tagInput: '#launch, video\nproduct' });
   assert.deepEqual(normalizePostTags(values.tags), ['launch', 'video', 'product']);
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview').replace('export const accountLabel', 'const accountLabel'), 'PostComposer.tsx', { jsx: { runtime: 'classic' } });
-  const hooks = { useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute() };
+  const hooks = { useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute(), useId: () => 'composer' };
   const context = { React, ...hooks, ...social, ...ui, MediaImage: ui.Image }, Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
   const post = { content: 'Video', platforms: ['youtube'], tags: ['launch', 'product'], mediaItems: [] };
   const html = renderToStaticMarkup(Composer({ post, assets: [], accounts: [], campaigns: [], canWrite: true, onSubmit: async () => {} }));

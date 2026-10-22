@@ -18,11 +18,11 @@ function render(type, saved = []) {
 }
 
 test('workspace and project creation use the shared name flow with the editor save and cancel', () => {
-  // The editor Dialog titles the creation ("New workspace"); the flow heading names the step.
-  for (const [type, heading, label, submit] of [['workspace', 'Name your workspace', 'Workspace name', 'Create workspace'], ['project', 'Name your project', 'Project name', 'Create project']]) {
+  // The editor Dialog titles the creation ("New workspace"), so the flow hides its own heading and keeps it as its name.
+  for (const [type, heading, label, submit] of [['workspace', 'New workspace', 'Workspace name', 'Create workspace'], ['project', 'New project', 'Project name', 'Create project']]) {
     const saved = [], element = render(type, saved), html = renderToStaticMarkup(element);
     assert.equal(element.type, type === 'project' ? ProjectCreateFlow : WorkspaceCreateFlow);
-    assert.match(html, new RegExp(`<h2[^>]*>${heading}</h2>`)); assert.match(html, new RegExp(`>${label}<`)); assert.match(html, new RegExp(`>${submit}<`));
+    assert.equal(element.props.hideTitle, true); assert.doesNotMatch(html, /<h[1-6][\s>]/); assert.match(html, new RegExp(`<section[^>]*aria-label="${heading}"`)); assert.match(html, new RegExp(`>${label}<`)); assert.match(html, new RegExp(`>${submit}<`));
     assert.match(html, /Name already used\./); assert.doesNotMatch(html, /name="origin"/);
     element.props.onSubmit({ name: 'Acme' }); element.props.cancel.onClick('');
     assert.deepEqual(saved, [{ name: 'Acme' }, 'closed']);
