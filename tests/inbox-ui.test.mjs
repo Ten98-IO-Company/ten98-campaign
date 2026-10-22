@@ -845,10 +845,12 @@ test('SMS selection waits for discard and cancels a deferred selection from an o
 
 
 test('the actual draft snapshot protects attachment-only and option-only drafts and invalidates reviewed changes', async () => {
-  const context = { replyButtons: [], buttonReview: '', retainedButtonReply: null, projectId: 'p', accountId: 'a', tab: 'messages', selected: { id: 'current' }, focusedComment: '', message: '', attachmentUrl: '', attachmentType: 'image', attachmentName: '', attachmentPreview: '', messageTag: '', templateMode: false, templateKey: '', templateComponents: [], replyTarget: null, privateReplyTarget: null, privateDraft: '', commentEdit: null, messageActionTarget: null, actionText: '', actionEmoji: '👍', controlAction: '', controlNote: '', targetAppId: '263902037430900', openingMessage: '', recipient: '', openingTemplateKey: '', openingTemplateComponents: [], confirmSend: false, confirmReplace: false, confirmControl: false, confirmAccept: false, confirmMessageAction: false, readOnly: false, historyQuery: 'old invoice', historyDirection: 'incoming' };
+  const context = { noteDrafts: {}, replyButtons: [], buttonReview: '', retainedButtonReply: null, projectId: 'p', accountId: 'a', tab: 'messages', selected: { id: 'current' }, focusedComment: '', message: '', attachmentUrl: '', attachmentType: 'image', attachmentName: '', attachmentPreview: '', messageTag: '', templateMode: false, templateKey: '', templateComponents: [], replyTarget: null, privateReplyTarget: null, privateDraft: '', commentEdit: null, messageActionTarget: null, actionText: '', actionEmoji: '👍', controlAction: '', controlNote: '', targetAppId: '263902037430900', openingMessage: '', recipient: '', openingTemplateKey: '', openingTemplateComponents: [], confirmSend: false, confirmReplace: false, confirmControl: false, confirmAccept: false, confirmMessageAction: false, readOnly: false, historyQuery: 'old invoice', historyDirection: 'incoming' };
   const code = section('  const replyDraft =', '  useEffect(() => { onDraftChange(draftSnapshot');
   const snapshot = changes => compile('function snapshot() {' + code + ' return draftSnapshot; }', { ...context, ...changes })();
   assert.equal(snapshot(), '');
+  // An unsent internal note is a draft too, so leaving the item asks first.
+  assert.notEqual(snapshot({ noteDrafts: { '["a","conversation","current"]': 'Call back Monday' } }), '');
   for (const changes of [{ message: ' ' }, { attachmentUrl: 'https://example.test/file' }, { attachmentType: 'audio' }, { attachmentName: 'report.pdf' }, { messageTag: 'HUMAN_AGENT' }, { templateMode: true }, { templateKey: 'template' }, { templateComponents: [{}] }, { replyButtons: ['Yes'] }, { buttonReview: 'reviewed' }, { retainedButtonReply: { message: 'Unknown reply', buttons: [] } }]) assert.notEqual(snapshot(changes), '', JSON.stringify(changes));
   const acceptKey = compile('function acceptKey(selected, message) { return ' + source.match(/title="Review the acceptance reply" reviewKey=\{(JSON\.stringify\(\[selected\.id, selected\.version, message\]\))\}/)[1] + '; }');
   assert.notEqual(acceptKey({ id: 'thread', version: 'v1' }, 'draft'), acceptKey({ id: 'thread', version: 'v1' }, 'edited draft'), 'Editing a reviewed acceptance reply clears its acknowledgement.'); assert.notEqual(acceptKey({ id: 'thread', version: 'v1' }, 'draft'), acceptKey({ id: 'thread', version: 'v2' }, 'draft'), 'A refreshed conversation clears its acknowledgement.');
@@ -1140,10 +1142,12 @@ async function mountNotes(overrides = {}) {
 test('internal notes use each tab’s triage kind and resource ID, and load only when opened', async () => {
   const line = source.match(/^  const notesFor = .*;$/m)[0], { code } = await transformWithOxc('function make() {' + line + ' return notesFor; }', 'Notes.tsx', { jsx: { runtime: 'classic' } });
   const marker = () => null, requester = { current: async () => ({}) }, action = async () => {}, setNotice = () => {};
-  const notesFor = new Function('React', 'ItemNotes', 'accountId', 'path', 'requester', 'readOnly', 'role', 'userId', 'busy', 'action', 'setNotice', code + '; return make();')(React, marker, 'tg', path, requester, false, 'admin', 'me', '', action, setNotice);
+  const notesFor = new Function('React', 'ItemNotes', 'accountId', 'path', 'requester', 'readOnly', 'role', 'userId', 'busy', 'action', 'setNotice', 'setNoteDrafts', code + '; return make();')(React, marker, 'tg', path, requester, false, 'admin', 'me', '', action, setNotice, () => {});
   const element = notesFor('review', 'review-1');
   assert.equal(element.type, marker); assert.equal(element.key, JSON.stringify(['tg', 'review', 'review-1']), 'Each item mounts its own notes.');
-  assert.deepEqual({ ...element.props }, { path, request: requester.current, accountId: 'tg', kind: 'review', resourceId: 'review-1', readOnly: false, role: 'admin', userId: 'me', busy: false, defaultOpen: false, run: action, onNotice: setNotice });
+  const { onDraftChange, ...props } = element.props;
+  assert.deepEqual(props, { path, request: requester.current, accountId: 'tg', kind: 'review', resourceId: 'review-1', readOnly: false, role: 'admin', userId: 'me', busy: false, defaultOpen: false, run: action, onNotice: setNotice });
+  assert.equal(typeof onDraftChange, 'function', 'An unsent note reports itself as a draft.');
   assert.equal(notesFor('conversation', 't_platform', true).props.defaultOpen, true);
   assert.ok(source.includes("{notesFor('conversation', triageKey(selected), true)}"), 'Messages open the selected conversation’s notes, keyed like triage.');
   assert.ok(source.includes("onChange={change => changeTriage(item, change)}/></Disclosure>{notesFor('comment', item.id)}"), 'Each comment has its own notes.');

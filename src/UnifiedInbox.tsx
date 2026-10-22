@@ -172,13 +172,16 @@ async function loadItemNotes(request: Props['request'], path: string, accountId:
   if (!Array.isArray(result?.notes)) throw new Error('The notes response could not be read. Try again.');
   return result.notes.filter(validNote) as Row[];
 }
-type NoteProps = { path: string; request: Props['request']; accountId: string; kind: string; resourceId: string; readOnly: boolean; role?: string; userId: string; busy: boolean; defaultOpen?: boolean; run: (label: string, change: (generation: number) => Promise<void>) => Promise<void>; onNotice: (notice: string) => void };
-function ItemNotes({ path, request, accountId, kind, resourceId, readOnly, role, userId, busy, defaultOpen = false, run, onNotice }: NoteProps) {
+type NoteProps = { path: string; request: Props['request']; accountId: string; kind: string; resourceId: string; readOnly: boolean; role?: string; userId: string; busy: boolean; defaultOpen?: boolean; run: (label: string, change: (generation: number) => Promise<void>) => Promise<void>; onNotice: (notice: string) => void; onDraftChange?: (text: string) => void };
+function ItemNotes({ path, request, accountId, kind, resourceId, readOnly, role, userId, busy, defaultOpen = false, run, onNotice, onDraftChange }: NoteProps) {
   const [open, setOpen] = useState(defaultOpen), [notes, setNotes] = useState<Row[] | null>(null), [loadError, setLoadError] = useState(''), [text, setText] = useState(''), [removing, setRemoving] = useState<Row | null>(null);
   // `scope` changes with the item and on unmount; `reads` orders reads so an older read never replaces a newer list;
   // `loaded` is the item last read, so each item is read once when opened and a failed read waits for the user.
   const scope = useRef(0), reads = useRef(0), loaded = useRef(''), manager = noteManagers.includes(role || '');
   useEffect(() => { scope.current++; setNotes(null); setLoadError(''); setText(''); setRemoving(null); return () => { scope.current++; }; }, [accountId, kind, resourceId]);
+  // An unsent note counts as a draft, so leaving the item asks first like an unsent reply.
+  useEffect(() => { onDraftChange?.(text); }, [text]);
+  useEffect(() => () => onDraftChange?.(''), []);
   useEffect(() => { const item = JSON.stringify([accountId, kind, resourceId]); if (open && loaded.current !== item) { loaded.current = item; void load(); } }, [open, accountId, kind, resourceId]);
   async function load() {
     const current = scope.current, read = ++reads.current; setLoadError('');
@@ -326,10 +329,11 @@ function ZernioInbox({ projectId, request, readOnly = false, role, initialChanne
   const [privateReplyTarget, setPrivateReplyTarget] = useState<Row | null>(null), [privateDraft, setPrivateDraft] = useState('');
   const [commentEdit, setCommentEdit] = useState<Row | null>(null);
   const [triage, setTriage] = useState<{ accountId: string; kind: string; states: Record<string, Row>; error: string }>({ accountId: '', kind: '', states: {}, error: '' }), [triageFilter, setTriageFilter] = useState('active'), [userId, setUserId] = useState(''), [assignees, setAssignees] = useState<Row[]>([]);
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
   const triageKind = triageKinds[tab], triageScoped = triage.accountId === accountId && triage.kind === triageKind, states = triageScoped ? triage.states : {}, triageError = triageScoped ? triage.error : '';
   const access = useRef(readOnly);
   // One item's internal notes, scoped by account, kind and resource so another item's notes are never shown.
-  const notesFor = (kind: string, resourceId: string, defaultOpen = false) => <ItemNotes key={JSON.stringify([accountId, kind, resourceId])} path={path} request={requester.current} accountId={accountId} kind={kind} resourceId={resourceId} readOnly={readOnly} role={role} userId={userId} busy={!!busy} defaultOpen={defaultOpen} run={action} onNotice={setNotice}/>;
+  const notesFor = (kind: string, resourceId: string, defaultOpen = false) => <ItemNotes key={JSON.stringify([accountId, kind, resourceId])} path={path} request={requester.current} accountId={accountId} kind={kind} resourceId={resourceId} readOnly={readOnly} role={role} userId={userId} busy={!!busy} defaultOpen={defaultOpen} run={action} onNotice={setNotice} onDraftChange={text => setNoteDrafts(previous => { const key = JSON.stringify([accountId, kind, resourceId]); if ((previous[key] || '') === text) return previous; const { [key]: _previous, ...rest } = previous; return text ? { ...rest, [key]: text } : rest; })}/>;
   const openingTemplate = openingTemplates.find(item => JSON.stringify([item.name, item.language || item.languageCode]) === openingTemplateKey);
   const canReply = tab === 'mentions' ? false : tab === 'messages' ? capabilities.reply : tab === 'comments' ? capabilities.commentReply : capabilities.reviewReply;
   const messageLimit = privateMessageLimit(capabilities, account?.platform || '', attachmentUrl);
@@ -358,8 +362,8 @@ function ZernioInbox({ projectId, request, readOnly = false, role, initialChanne
   ];
 
   const replyDraft = !!(message || replyButtons.length || buttonReview || retainedButtonReply || attachmentUrl || attachmentName || attachmentType !== 'image' || messageTag || templateMode || templateKey || templateComponents.length || replyTarget || privateReplyTarget || commentEdit || messageActionTarget || controlAction || controlNote);
-  const draftSnapshot = replyDraft || openingMessage || recipient || openingTemplateKey || openingTemplateComponents.length
-    ? JSON.stringify([projectId, accountId, tab, selected?.id, focusedComment, message, replyButtons, buttonReview, retainedButtonReply, attachmentUrl, attachmentType, attachmentName, attachmentPreview, messageTag, templateMode, templateKey, templateComponents, replyTarget, privateReplyTarget, privateReplyTarget ? privateDraft : '', commentEdit, messageActionTarget, actionText, actionEmoji, controlAction, controlNote, targetAppId, openingMessage, recipient, openingTemplateKey, openingTemplateComponents, confirmReplace, readOnly, historyQuery, historyDirection]) : '';
+  const draftSnapshot = Object.keys(noteDrafts).length || replyDraft || openingMessage || recipient || openingTemplateKey || openingTemplateComponents.length
+    ? JSON.stringify([projectId, accountId, tab, selected?.id, focusedComment, message, replyButtons, buttonReview, retainedButtonReply, attachmentUrl, attachmentType, attachmentName, attachmentPreview, messageTag, templateMode, templateKey, templateComponents, replyTarget, privateReplyTarget, privateReplyTarget ? privateDraft : '', commentEdit, messageActionTarget, actionText, actionEmoji, controlAction, controlNote, targetAppId, openingMessage, recipient, openingTemplateKey, openingTemplateComponents, confirmReplace, readOnly, historyQuery, historyDirection, noteDrafts]) : '';
   useEffect(() => { onDraftChange(draftSnapshot, !!busy); }, [draftSnapshot, busy]);
   function switchSelection(change: () => void | Promise<void>) { if (pending.current) return; const generation = version.current; return onSwitch(() => { if (generation === version.current && !pending.current) return change(); }); }
   function resetTemplate() { setTemplateMode(false); setTemplateKey(''); setTemplateComponents([]); }
