@@ -350,6 +350,11 @@ function budgetOf(row: any): number | null {
   for (const value of [row?.campaignBudget, row?.adSetBudget, row?.budget]) if (reportObject(value) && typeof value.amount === 'number' && Number.isFinite(value.amount) && value.amount >= 0) return value.amount;
   return typeof row?.dailyBudget === 'number' && Number.isFinite(row.dailyBudget) && row.dailyBudget >= 0 ? row.dailyBudget : null;
 }
+// The current budget when it has the same type (daily or lifetime) as the new one; a change of type is never a decrease.
+function sameBudgetType(row: any, type: string): number | null {
+  const current = [row?.campaignBudget, row?.adSetBudget, row?.budget].find(value => reportObject(value) && typeof value.amount === 'number');
+  return (current?.type ?? 'daily') === type ? budgetOf(row) : null;
+}
 // What an activated campaign spends: its own budget or, with ad set budgets, the sum of every ad set's budget.
 function campaignSpend(campaign: any): number | null {
   const own = budgetOf(campaign), sets = Array.isArray(campaign.adSets) ? campaign.adSets.map(budgetOf) : [];
@@ -1464,7 +1469,7 @@ export async function handleIntegration(context: any) {
       if (Object.keys(payload).length === 1) fail(400, 'EMPTY_AD_UPDATE', 'Enter a campaign name or daily budget to change.');
       const outcome = await operation(context, async key => {
         // The budget is re-read here, under the receipt claim: a decrease is judged against the live budget, not the earlier read.
-        if (payload.budget) await assertAdSpendApproval(context, { subjectId: campaignId, platform: body.platform, action: 'ads/campaign-budget', amount: payload.budget.amount, currency: campaign.currency, currentAmount: budgetOf(await scopedCampaign(api, profileId, campaignId, body.platform)), activates: false }, key);
+        if (payload.budget) await assertAdSpendApproval(context, { subjectId: campaignId, platform: body.platform, action: 'ads/campaign-budget', amount: payload.budget.amount, currency: campaign.currency, currentAmount: sameBudgetType(await scopedCampaign(api, profileId, campaignId, body.platform), payload.budget.type), activates: false }, key);
         const result = await api(`/ads/campaigns/${encodeURIComponent(campaignId)}`, {}, payload, key, 'PUT');
         if (!Number.isInteger(result.updated) || result.updated < 0 || (payload.budget && (result.budget?.amount !== payload.budget.amount || result.budget?.type !== payload.budget.type)) || (payload.name && result.name !== payload.name)) throw new IntegrationError(502, 'INVALID_PROVIDER_RESPONSE', 'Zernio did not acknowledge the campaign changes.', true);
         await saveCampaignSnapshot(context, profileId, body.platform, campaignId, { ...(payload.budget ? { budget: result.budget.amount, budgetType: result.budget.type } : {}), ...(payload.name ? { name: result.name } : {}) });

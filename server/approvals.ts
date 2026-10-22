@@ -266,7 +266,9 @@ const usableApproval = sql`${unconsumedApproval} AND r.reviewed_at::timestamptz 
 async function adSpendReview(db: Executor, row: ProviderRecord | undefined) {
   if (!row) return null;
   const used = row.consumed_by ? await first(db.execute(sql`SELECT status FROM integration_operations WHERE project_id=${row.project_id} AND request_key=${row.consumed_by}`)) : undefined;
-  return { ...await publicReview(db, row), kind: 'ad_spend', consumed: Boolean(row.consumed_by) && used?.status !== 'failed' };
+  // The end of an approval's usable window, so clients show expiry without repeating the rule.
+  const expiresAt = row.status === 'approved' && row.reviewed_at ? new Date(Date.parse(row.reviewed_at) + AD_APPROVAL_DAYS * 86400000).toISOString() : null;
+  return { ...await publicReview(db, row), kind: 'ad_spend', consumed: Boolean(row.consumed_by) && used?.status !== 'failed', expiresAt };
 }
 // Opens a pending review of `change` (run under its subject's approval lock). An identical pending review is the
 // answer; a different pending change of the same subject and action is superseded. `currentAmount` (minor units) is
@@ -336,12 +338,13 @@ export async function handleApprovals(context: ApprovalContext) {
       fields(body, ['requireApproval', 'requireAdApproval']);
       const post = Object.hasOwn(body, 'requireApproval'), ads = Object.hasOwn(body, 'requireAdApproval');
       if (!post && !ads || post && typeof body.requireApproval !== 'boolean' || ads && typeof body.requireAdApproval !== 'boolean') fail(400, 'INVALID_APPROVAL_POLICY', 'Publishing approval must be enabled or disabled.');
-      // Changing the ad spend setting (either way) voids every unconsumed ad spend approval and pending request in the project,
-      // so an approval given under one setting is never used under another (council decision on #35 Q1, approval expiry).
+      // Changing the ad spend setting (either way) voids every ad spend approval not used by a completed write, and every
+      // pending request, so an approval given under one setting is never used under another (council decision on #35 Q1,
+      // approval expiry). That includes one whose write is still in flight: if that write later fails, it is not released.
       await db.transaction(async (tx: Executor) => {
         const before = (await policy(tx, project.id)).requireAdApproval;
         await tx.execute(sql`INSERT INTO project_approval_policy (project_id,require_approval,require_ad_approval,updated_by,updated_at) VALUES (${project.id}, ${post ? body.requireApproval : false}, ${ads ? body.requireAdApproval : false}, ${user.id}, ${new Date().toISOString()}) ON CONFLICT (project_id) DO UPDATE SET require_approval=${post ? sql`excluded.require_approval` : sql`project_approval_policy.require_approval`},require_ad_approval=${ads ? sql`excluded.require_ad_approval` : sql`project_approval_policy.require_ad_approval`},updated_by=excluded.updated_by,updated_at=excluded.updated_at`);
-        if (ads && before !== body.requireAdApproval) await tx.execute(sql`UPDATE post_approval_reviews r SET status='rejected',reviewed_at=${new Date().toISOString()},note=${'Voided because the ad spend approval setting changed.'} WHERE r.project_id=${project.id} AND r.kind='ad_spend' AND (r.status='pending' OR ${unconsumedApproval})`);
+        if (ads && before !== body.requireAdApproval) await tx.execute(sql`UPDATE post_approval_reviews r SET status='rejected',reviewed_at=${new Date().toISOString()},note=${'Voided because the ad spend approval setting changed.'} WHERE r.project_id=${project.id} AND r.kind='ad_spend' AND (r.status='pending' OR r.status='approved' AND NOT EXISTS (SELECT 1 FROM integration_operations o WHERE o.project_id=r.project_id AND o.request_key=r.consumed_by AND o.status='complete'))`);
       });
       if (post) await store.activity(project.id, `Publishing approval ${body.requireApproval ? 'required' : 'made optional'} by ${user.name || user.id}.`);
       if (ads) await store.activity(project.id, `Ad spend approval ${body.requireAdApproval ? 'required' : 'made optional'} by ${user.name || user.id}.`);
