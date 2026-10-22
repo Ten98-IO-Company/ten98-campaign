@@ -6,7 +6,7 @@ import { validPostInstant } from '../shared/social-posts.ts';
 
 type Row = Record<string, any>;
 type Tab = 'messages' | 'comments' | 'reviews' | 'mentions';
-type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; initialChannel?: 'sms' | 'whatsapp'; initialAccountId?: string; initialSearch?: string; onDraftChange?: (dirty: boolean) => void; onOpenIntegrations?: () => void };
+type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; role?: string; initialChannel?: 'sms' | 'whatsapp'; initialAccountId?: string; initialSearch?: string; onDraftChange?: (dirty: boolean) => void; onOpenIntegrations?: () => void };
 type SelectionProps = { onDraftChange: (snapshot: string, busy?: boolean) => void; onSwitch: (change: () => void | Promise<void>) => void | Promise<void> };
 const tabs: Tab[] = ['messages', 'comments', 'reviews', 'mentions'];
 const title = (value = '') => ({ linkedin: 'LinkedIn', googlebusiness: 'Google Business Profile', twitter: 'X', metaads: 'Meta ads', sms: 'SMS', rcs: 'RCS', whatsapp: 'WhatsApp', imessage: 'iMessage' } as Record<string, string>)[value] || (value ? value.charAt(0).toUpperCase() + value.slice(1) : '');
@@ -101,10 +101,17 @@ function SmsInbox({ projectId, request, readOnly = false, initialSearch, onDraft
 // Neither call reaches the provider; reads take at most 100 IDs each.
 const triageFilters = [['active', 'Open and pending'], ['open', 'Open'], ['pending', 'Pending'], ['snoozed', 'Snoozed'], ['resolved', 'Resolved'], ['all', 'All']];
 const triageNames: Record<string, string> = { open: 'Open', pending: 'Pending', snoozed: 'Snoozed', resolved: 'Resolved' };
-// The webhook drain's key (server/webhooks.ts): the platform thread ID when the provider reports one.
-const triageKey = (item: Row) => String(item.platformConversationId || item.id);
-// A conversation whose state has not loaded stays visible, so a failed read never hides it.
+// Each tab triages one item kind; comments are triaged per comment, not per post.
+const triageKinds: Record<Tab, string> = { messages: 'conversation', comments: 'comment', reviews: 'review', mentions: 'mention' };
+// The webhook drain's key (server/webhooks.ts): the platform thread ID when the provider reports one for a conversation,
+// otherwise the provider's comment, review or mention ID.
+const triageKey = (item: Row, kind = 'conversation') => String(kind === 'conversation' && item.platformConversationId || item.id);
+// An item whose state has not loaded stays visible, so a failed read never hides it.
 const triageVisible = (state: Row | undefined, filter: string) => !state || filter === 'all' || (filter === 'active' ? state.status === 'open' || state.status === 'pending' : state.status === filter);
+// A comment outside the filter stays when one of its replies matches, so a shown reply keeps its context.
+function triageComments(rows: Row[], keep: (row: Row) => boolean, depth = 0): Row[] {
+  return depth > 12 ? [] : rows.flatMap(row => { const replies = triageComments(Array.isArray(row.replies) ? row.replies : [], keep, depth + 1); return keep(row) || replies.length ? [{ ...row, replies }] : []; });
+}
 function waitingFor(since?: string | null, now = Date.now()) {
   const at = Date.parse(since || ''); if (!Number.isFinite(at)) return '';
   const minutes = Math.max(0, Math.floor((now - at) / 60000));
@@ -135,12 +142,13 @@ async function loadItemStates(request: Props['request'], path: string, accountId
 
 const snoozePresets = [['hour', '1 hour from now'], ['tomorrow', 'Tomorrow, 9 AM'], ['week', 'Next week, Monday 9 AM']];
 // Members are the project's assignable people (editors and above); without them only Assign to me and Unassign are offered.
-function TriageControls({ state, error, readOnly, busy, userId, members = [], onChange }: { state?: Row; error?: string; readOnly: boolean; busy: boolean; userId: string; members?: Row[]; onChange: (change: Row) => void }) {
+// Mentions have no inbound webhook, so they never show a waiting time.
+function TriageControls({ state, error, readOnly, busy, userId, members = [], kind = 'conversation', onChange }: { state?: Row; error?: string; readOnly: boolean; busy: boolean; userId: string; members?: Row[]; kind?: string; onChange: (change: Row) => void }) {
   const [preset, setPreset] = useState('hour'), [assignTo, setAssignTo] = useState(''), status = state?.status;
   const assignee = !state?.assigneeId ? 'Unassigned' : state.assigneeId === userId ? 'Assigned to you' : 'Assigned to ' + (members.find(member => member.id === state.assigneeId)?.name || 'a teammate');
   const others = members.filter(member => member.id !== state?.assigneeId);
   return <Stack as="section" aria-label="Team triage" gap={2}>
-    <Text>{state ? [`Triage: ${triageNames[status] || 'Open'}${status === 'snoozed' && state.snoozedUntil ? ' until ' + when(state.snoozedUntil) : ''}`, waitingFor(state.waitingSince), assignee].filter(Boolean).join(' · ') : error ? 'Triage status is unavailable. Refresh the conversations to try again.' : 'Loading triage status…'}</Text>
+    <Text>{state ? [`Triage: ${triageNames[status] || 'Open'}${status === 'snoozed' && state.snoozedUntil ? ' until ' + when(state.snoozedUntil) : ''}`, kind === 'mention' ? '' : waitingFor(state.waitingSince), assignee].filter(Boolean).join(' · ') : error ? `Triage status is unavailable. Refresh the ${kind}s to try again.` : 'Loading triage status…'}</Text>
     {state && !readOnly && <Inline gap={2} align="end">
       {status !== 'open' && <Button variant="secondary" size="sm" disabled={busy} onClick={() => onChange({ status: 'open' })}>{status === 'pending' ? 'Mark open' : 'Reopen'}</Button>}
       {status !== 'pending' && <Button variant="secondary" size="sm" disabled={busy} onClick={() => onChange({ status: 'pending' })}>Mark pending</Button>}
@@ -153,6 +161,59 @@ function TriageControls({ state, error, readOnly, busy, userId, members = [], on
       <Button variant="secondary" size="sm" disabled={busy || !others.some(member => member.id === assignTo)} onClick={() => onChange({ assigneeId: assignTo })}>Assign</Button></>}
     </Inline>}
   </Stack>;
+}
+
+// Internal team notes (server/inbox.ts item-notes): kept in Campaign and never sent to the provider. Viewers read them,
+// editors add them, and the author or an owner or administrator deletes one. An item's notes load only when its section opens.
+const noteManagers = ['owner', 'admin'];
+const validNote = (note: unknown): note is Row => typeof (note as Row)?.id === 'string' && typeof (note as Row).body === 'string';
+async function loadItemNotes(request: Props['request'], path: string, accountId: string, kind: string, resourceId: string) {
+  const result = await request(path + '/item-notes?' + new URLSearchParams({ accountId, kind, resourceId }));
+  if (!Array.isArray(result?.notes)) throw new Error('The notes response could not be read. Try again.');
+  return result.notes.filter(validNote) as Row[];
+}
+type NoteProps = { path: string; request: Props['request']; accountId: string; kind: string; resourceId: string; readOnly: boolean; role?: string; userId: string; busy: boolean; defaultOpen?: boolean; run: (label: string, change: (generation: number) => Promise<void>) => Promise<void>; onNotice: (notice: string) => void };
+function ItemNotes({ path, request, accountId, kind, resourceId, readOnly, role, userId, busy, defaultOpen = false, run, onNotice }: NoteProps) {
+  const [open, setOpen] = useState(defaultOpen), [notes, setNotes] = useState<Row[] | null>(null), [loadError, setLoadError] = useState(''), [text, setText] = useState(''), [removing, setRemoving] = useState<Row | null>(null);
+  // `scope` changes with the item and on unmount; `reads` orders reads so an older read never replaces a newer list;
+  // `loaded` is the item last read, so each item is read once when opened and a failed read waits for the user.
+  const scope = useRef(0), reads = useRef(0), loaded = useRef(''), manager = noteManagers.includes(role || '');
+  useEffect(() => { scope.current++; setNotes(null); setLoadError(''); setText(''); setRemoving(null); return () => { scope.current++; }; }, [accountId, kind, resourceId]);
+  useEffect(() => { const item = JSON.stringify([accountId, kind, resourceId]); if (open && loaded.current !== item) { loaded.current = item; void load(); } }, [open, accountId, kind, resourceId]);
+  async function load() {
+    const current = scope.current, read = ++reads.current; setLoadError('');
+    try { const found = await loadItemNotes(request, path, accountId, kind, resourceId); if (current === scope.current && read === reads.current) setNotes(found); }
+    catch (failure) { if (current === scope.current && read === reads.current) setLoadError((failure as Error).message || 'Notes could not be loaded.'); }
+  }
+  // Adding has no idempotency key, so the shared action lock allows one request at a time and a failure is never retried.
+  async function add(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (readOnly || notes === null || !text.trim() || text.trim().length > 4000) return;
+    const current = scope.current, body = { accountId, kind, resourceId, body: text };
+    await run('Adding note', async () => {
+      const result = await request(path + '/item-notes', 'POST', body);
+      if (current !== scope.current) return;
+      if (!validNote(result?.note)) { void load(); throw new Error('The note response could not be read. The notes are being reloaded; check them before adding it again.'); }
+      reads.current++; setText(''); setNotes(previous => merge(previous || [], [result.note])); onNotice('Note added.');
+    });
+  }
+  async function remove(note: Row) {
+    const current = scope.current;
+    await run('Deleting note', async () => {
+      try { const result = await request(path + '/item-notes/' + encodeURIComponent(note.id), 'DELETE'); if (result?.deleted !== true) throw new Error('The delete response could not be read. Reload the notes to check.'); }
+      catch (failure) { if ((failure as Row).code === 'INBOX_NOTE_NOT_FOUND' && current === scope.current) await load(); throw failure; }
+      if (current !== scope.current) return;
+      reads.current++; setNotes(previous => (previous || []).filter(row => row.id !== note.id)); onNotice('Note deleted.');
+    });
+  }
+  return <Disclosure variant="plain" open={open} onOpenChange={setOpen} summary={'Internal notes, visible only to your team' + (notes?.length ? ` (${notes.length})` : '')}><Stack as="section" aria-label="Internal notes" gap={3}>
+    {loadError ? <Alert tone="danger" variant="inline"><Stack gap={2}><Text>{loadError}</Text><Inline><Button variant="secondary" size="sm" onClick={() => { void load(); }}>Load notes again</Button></Inline></Stack></Alert> : notes === null ? <StatusLine busy>Loading notes…</StatusLine> : notes.length ? <Stack as="ol" gap={3}>{notes.map(note => <Stack as="li" key={note.id} gap={1}>
+      <Inline gap={2}><Text size="sm">{note.authorName || 'Former team member'}</Text><Text as="time" size="sm" tone="muted" dateTime={note.createdAt}>{when(note.createdAt)}</Text></Inline>
+      <Text preserveWhitespace>{note.body}</Text>
+      {!readOnly && (manager || !!userId && note.authorId === userId) && <Inline><Button variant="danger" size="sm" disabled={busy} onClick={() => setRemoving(note)}>Delete note</Button></Inline>}
+    </Stack>)}</Stack> : <EmptyState title="No internal notes yet" description={readOnly ? `Your team has not added notes to this ${kind}.` : `Add context for your team. Notes stay in Campaign and are never sent to the ${kind}’s platform.`}/>}
+    {!readOnly && notes !== null && <Form aria-label="Add an internal note" busy={busy} onSubmit={(_, event) => add(event)}><Field label="New internal note" count={{ value: text, max: 4000, measure: value => value.length }}><Textarea required rows={3} maxLength={4000} value={text} onChange={event => setText(event.target.value)}/></Field><FormActions><Button variant="primary" type="submit" disabled={busy || !text.trim()}>Add note</Button></FormActions></Form>}
+    {!readOnly && <ConfirmDialog open={!!removing} onOpenChange={next => { if (!next) setRemoving(null); }} title="Delete this internal note?" description="The note is removed for your whole team. This cannot be undone." confirmLabel="Delete note" danger onConfirm={() => removing ? remove(removing) : undefined}/>}
+  </Stack></Disclosure>;
 }
 
 export default function UnifiedInbox(props: Props) {
@@ -243,7 +304,7 @@ function LinkedInCommentReaction({ comment, busy, onChange }: { comment: Row; bu
   const [reactionType, setReactionType] = useState('');
   return <Form aria-label="LinkedIn reaction" busy={busy} gap={2} onSubmit={() => { if (reactionType) return onChange('like', comment, reactionType); }}><Inline align="end" gap={2}><Field label="LinkedIn reaction"><Select required disabled={busy} value={reactionType} onChange={event => setReactionType(event.target.value)}><Option value="">Choose a reaction</Option>{Object.entries(linkedInReactions).map(([value, label]) => <Option key={value} value={value}>{label}</Option>)}</Select></Field><Button variant="secondary" size="sm" type="submit" disabled={busy || !reactionType}>Add reaction</Button>{comment.isLiked && <Button variant="secondary" size="sm" disabled={busy} onClick={() => onChange('unlike', comment)}>Remove reaction</Button>}</Inline><Text size="sm" tone="muted">{comment.isLiked ? 'Current reaction type is unknown. A different existing reaction must be removed explicitly first.' : 'Live comments do not report the current reaction type.'}</Text></Form>;
 }
-function ZernioInbox({ projectId, request, readOnly = false, initialChannel, initialAccountId, initialSearch, tab = 'messages', onDraftChange, onSwitch }: Omit<Props, 'onDraftChange'> & SelectionProps & { tab?: Tab }) {
+function ZernioInbox({ projectId, request, readOnly = false, role, initialChannel, initialAccountId, initialSearch, tab = 'messages', onDraftChange, onSwitch }: Omit<Props, 'onDraftChange'> & SelectionProps & { tab?: Tab }) {
   const path = `/projects/${encodeURIComponent(projectId)}/integrations/inbox`, requester = useRef(request), version = useRef(0), pending = useRef(false), revision = useRef(0), keys = useRef(new Map<string, string>());
   requester.current = request;
   const [status, setStatus] = useState<Row | null>(null), [accounts, setAccounts] = useState<Row[]>([]), [accountId, setAccountId] = useState(''), [platform, setPlatform] = useState(''), [conversationStatus, setConversationStatus] = useState('active');
@@ -264,16 +325,19 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
   const [deleteTarget, setDeleteTarget] = useState<Row | null>(null), [confirming, setConfirming] = useState<Row | null>(null);
   const [privateReplyTarget, setPrivateReplyTarget] = useState<Row | null>(null), [privateDraft, setPrivateDraft] = useState('');
   const [commentEdit, setCommentEdit] = useState<Row | null>(null);
-  const [triage, setTriage] = useState<{ accountId: string; states: Record<string, Row>; error: string }>({ accountId: '', states: {}, error: '' }), [triageFilter, setTriageFilter] = useState('active'), [userId, setUserId] = useState(''), [assignees, setAssignees] = useState<Row[]>([]);
-  const states = triage.accountId === accountId ? triage.states : {}, triageError = triage.accountId === accountId ? triage.error : '';
+  const [triage, setTriage] = useState<{ accountId: string; kind: string; states: Record<string, Row>; error: string }>({ accountId: '', kind: '', states: {}, error: '' }), [triageFilter, setTriageFilter] = useState('active'), [userId, setUserId] = useState(''), [assignees, setAssignees] = useState<Row[]>([]);
+  const triageKind = triageKinds[tab], triageScoped = triage.accountId === accountId && triage.kind === triageKind, states = triageScoped ? triage.states : {}, triageError = triageScoped ? triage.error : '';
   const access = useRef(readOnly);
+  // One item's internal notes, scoped by account, kind and resource so another item's notes are never shown.
+  const notesFor = (kind: string, resourceId: string, defaultOpen = false) => <ItemNotes key={JSON.stringify([accountId, kind, resourceId])} path={path} request={requester.current} accountId={accountId} kind={kind} resourceId={resourceId} readOnly={readOnly} role={role} userId={userId} busy={!!busy} defaultOpen={defaultOpen} run={action} onNotice={setNotice}/>;
   const openingTemplate = openingTemplates.find(item => JSON.stringify([item.name, item.language || item.languageCode]) === openingTemplateKey);
   const canReply = tab === 'mentions' ? false : tab === 'messages' ? capabilities.reply : tab === 'comments' ? capabilities.commentReply : capabilities.reviewReply;
   const messageLimit = privateMessageLimit(capabilities, account?.platform || '', attachmentUrl);
   const selectedTemplate = templates.find(item => JSON.stringify([item.name, item.language || item.languageCode]) === templateKey);
   const supported = accounts.filter(item => !!item.capabilities?.[tab] && (!platform || item.platform === platform));
-  const visibleRows = historyFilter ? rows : rows.filter(row => conversationMatches(row, search) && (tab !== 'messages' || triageVisible(states[triageKey(row)], triageFilter)));
-  const triageHidden = tab === 'messages' && !historyFilter && !visibleRows.length && rows.some(row => conversationMatches(row, search));
+  // Comments tab rows are posts; its comments are filtered inside the open thread instead.
+  const visibleRows = historyFilter ? rows : rows.filter(row => conversationMatches(row, search) && (tab === 'comments' || triageVisible(states[triageKey(row, triageKind)], triageFilter)));
+  const triageHidden = tab !== 'comments' && !historyFilter && !visibleRows.length && rows.some(row => conversationMatches(row, search));
   const threadRows = detail?.parent && focusedComment ? [{ ...detail.parent, depth: 0 }, ...commentsWithDepth(detail.comments || [], 1)] : commentsWithDepth(detail?.comments || []);
   const retainedButtonReply = account?.platform === 'whatsapp' && selected ? [...keys.current.keys()].map(signature => JSON.parse(signature)).find(([scope, suffix, body]) => scope === path && suffix === 'conversations/' + encodeURIComponent(selected.id) + '/reply' && body.accountId === accountId && Array.isArray(body.buttons))?.[2] : undefined;
   const buttonScope = useRef({ key: '', generation: 0 });
@@ -327,13 +391,15 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
   // Teammates a conversation can be assigned to; the directory is for editors and above, so viewers skip it.
   useEffect(() => { setAssignees([]); if (readOnly) return; let closed = false; requester.current(`/projects/${encodeURIComponent(projectId)}/assignees`).then(result => { if (!closed && Array.isArray(result?.members)) setAssignees(result.members.filter((member: Row) => typeof member?.id === 'string' && typeof member.name === 'string')); }, () => {}); return () => { closed = true; }; }, [projectId, readOnly]);
   useEffect(() => { let closed = false; requester.current('/session').then(session => { if (!closed && typeof session?.user?.id === 'string') setUserId(session.user.id); }, () => {}); return () => { closed = true; }; }, []);
+  // States for the loaded items of this tab's kind: listed conversations, reviews and mentions, or the open post's comments.
   useEffect(() => {
-    if (tab !== 'messages' || !accountId || !rows.length) return;
+    const kind = triageKind, ids = tab === 'comments' ? threadRows.filter(row => typeof row.id === 'string' && row.id).map(row => row.id) : rows.map(row => triageKey(row, kind));
+    if (!accountId || !ids.length) return;
     const generation = version.current, scope = accountId; let closed = false;
-    const store = (change: (previous: Record<string, Row>) => Record<string, Row>, error = '') => setTriage(previous => ({ accountId: scope, states: change(previous.accountId === scope ? previous.states : {}), error }));
-    loadItemStates(requester.current, path, scope, 'conversation', rows.map(triageKey)).then(found => { if (!closed && generation === version.current) store(previous => mergeTriage(previous, found)); }, failure => { if (!closed && generation === version.current) store(previous => previous, failure.message || 'The local triage service did not respond.'); });
+    const store = (change: (previous: Record<string, Row>) => Record<string, Row>, error = '') => setTriage(previous => ({ accountId: scope, kind, states: change(previous.accountId === scope && previous.kind === kind ? previous.states : {}), error }));
+    loadItemStates(requester.current, path, scope, kind, ids).then(found => { if (!closed && generation === version.current) store(previous => mergeTriage(previous, found)); }, failure => { if (!closed && generation === version.current) store(previous => previous, failure.message || 'The local triage service did not respond.'); });
     return () => { closed = true; };
-  }, [rows, accountId, tab]);
+  }, [tab === 'comments' ? detail : rows, accountId, tab]);
   useEffect(() => {
     if (!accountId || tab === 'mentions') return;
     const generation = version.current; let closed = false, checking = false, cursor: number | undefined;
@@ -385,23 +451,23 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
     await switchSelection(() => action('Loading connections', async generation => { const result = await requester.current(path + '/accounts'); if (generation !== version.current) return; setStatus(result); setAccounts(result.accounts || []); if (accountId && !result.accounts?.some((item: Row) => item.id === accountId && item.capabilities?.[tab])) { setAccountId(''); setRows([]); resetSelection(); } }));
   }
   async function changeTriage(item: Row, change: Row) {
-    const resourceId = triageKey(item), current = states[resourceId], scope = accountId;
-    if (readOnly || tab !== 'messages' || !scope || !current) return;
+    const kind = triageKind, resourceId = triageKey(item, kind), current = states[resourceId], scope = accountId, noun = kind.charAt(0).toUpperCase() + kind.slice(1);
+    if (readOnly || !scope || current?.kind !== kind) return;
     if (change.status === 'snoozed' && !validSnooze(change.snoozedUntil)) { setError('Choose a snooze time in the future and within the next year.'); return; }
-    const store = (found: Record<string, Row>) => setTriage(previous => ({ accountId: scope, states: { ...(previous.accountId === scope ? previous.states : {}), ...found }, error: '' }));
+    const store = (found: Record<string, Row>) => setTriage(previous => ({ accountId: scope, kind, states: { ...(previous.accountId === scope && previous.kind === kind ? previous.states : {}), ...found }, error: '' }));
     await action('Updating triage status', async generation => {
       let result;
-      try { result = await requester.current(path + '/item-states', 'PATCH', { accountId: scope, kind: 'conversation', resourceId, expectedUpdatedAt: current.updatedAt ?? null, ...change }); }
+      try { result = await requester.current(path + '/item-states', 'PATCH', { accountId: scope, kind, resourceId, expectedUpdatedAt: current.updatedAt ?? null, ...change }); }
       catch (failure) {
         if ((failure as Row).code !== 'INBOX_STATE_CHANGED') throw failure;
-        const fresh = await loadItemStates(requester.current, path, scope, 'conversation', [resourceId]); if (generation === version.current) store(fresh);
-        throw new Error('This conversation’s triage changed elsewhere. Its latest status is shown; choose again to apply your change.');
+        const fresh = await loadItemStates(requester.current, path, scope, kind, [resourceId]); if (generation === version.current) store(fresh);
+        throw new Error(`This ${kind}’s triage changed elsewhere. Its latest status is shown; choose again to apply your change.`);
       }
       if (generation !== version.current) return;
       const state = result?.state;
-      if (state?.accountId !== scope || state.kind !== 'conversation' || state.resourceId !== resourceId) throw new Error('The triage response could not be read. Refresh the conversations before changing it again.');
+      if (state?.accountId !== scope || state.kind !== kind || state.resourceId !== resourceId) throw new Error(`The triage response could not be read. Refresh the ${kind}s before changing it again.`);
       store({ [resourceId]: state });
-      setNotice(change.assigneeId !== undefined ? change.assigneeId ? change.assigneeId === userId ? 'Conversation assigned to you.' : `Conversation assigned to ${assignees.find(member => member.id === change.assigneeId)?.name || 'a teammate'}.` : 'Conversation unassigned.' : change.status === 'snoozed' ? `Conversation snoozed until ${when(state.snoozedUntil)}.` : ({ open: 'Conversation marked open.', pending: 'Conversation marked pending.', resolved: 'Conversation resolved.' } as Record<string, string>)[change.status] || 'Triage status updated.');
+      setNotice(change.assigneeId !== undefined ? change.assigneeId ? change.assigneeId === userId ? `${noun} assigned to you.` : `${noun} assigned to ${assignees.find(member => member.id === change.assigneeId)?.name || 'a teammate'}.` : `${noun} unassigned.` : change.status === 'snoozed' ? `${noun} snoozed until ${when(state.snoozedUntil)}.` : ({ open: `${noun} marked open.`, pending: `${noun} marked pending.`, resolved: `${noun} resolved.` } as Record<string, string>)[change.status] || 'Triage status updated.');
     });
   }
   async function searchHistory(event: React.FormEvent<HTMLFormElement>) {
@@ -619,7 +685,7 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
   function commentMessage(item: Row, selected: Row, depth = 0): ConversationMessage {
     const edit = commentEdit;
     return { id: item.id, author: (item.from?.name || item.from?.username || 'Social account') + (item.from?.isOwner ? ' · Your account' : ''), time: when(item.createdTime), dateTime: item.createdTime, visibility: 'public', content: <Text preserveWhitespace>{item.message || 'Comment without text'}</Text>,
-      status: `${item.isHidden ? 'Hidden · ' : ''}${item.likeCount ?? 'Unknown'} likes${item.privateReplyStatus ? ` · Private reply: ${item.privateReplyStatus === 'sent' ? 'accepted' : item.privateReplyStatus === 'consumed' ? 'already used' : 'needs reconciliation'}` : ''}`,
+      status: [`${item.isHidden ? 'Hidden · ' : ''}${item.likeCount ?? 'Unknown'} likes${item.privateReplyStatus ? ` · Private reply: ${item.privateReplyStatus === 'sent' ? 'accepted' : item.privateReplyStatus === 'consumed' ? 'already used' : 'needs reconciliation'}` : ''}`, triageLabel(states[item.id], userId), waitingFor(states[item.id]?.waitingSince)].filter(Boolean).join(' · '),
       actions: <Stack gap={2}><Inline gap={2}>
         {!readOnly && canReply && item.canReply !== false && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => prepareReply(item)}>Reply</Button>}
         {!readOnly && capabilities.commentEdit && account?.platform === 'reddit' && item.from?.isOwner === true && item.editVersion && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => { if (edit?.id !== item.id) switchSelection(() => { setReplyTarget(null); setPrivateReplyTarget(null); setMessage(''); setCommentEdit({ ...item, accountId, postId: selected.id, content: item.message || '', confirmed: '' }); setError(''); setNotice(''); }); }}>Edit comment</Button>}
@@ -629,7 +695,7 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
         {!readOnly && capabilities.commentLike && item.canLike && (account?.platform === 'linkedin' ? <LinkedInCommentReaction key={JSON.stringify([projectId, accountId, selected.id, item.id])} comment={item} busy={!!busy} onChange={commentAction}/> : <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => commentAction(item.isLiked ? 'unlike' : 'like', item)}>{item.isLiked ? 'Unlike' : 'Like'}</Button>)}
         {!readOnly && capabilities.commentDelete && item.canDelete && <Button variant="danger" size="sm" disabled={!!busy} onClick={() => setConfirming({ kind: 'delete', comment: item })}>Delete</Button>}
         {link(item.url) && <Link href={link(item.url)!} target="_blank" variant="standalone">Open comment</Link>}
-      </Inline>{edit && edit.id === item.id && edit.accountId === accountId && edit.postId === selected.id && !readOnly && <Form aria-label="Edit your Reddit comment" busy={!!busy} onSubmit={() => { const review = JSON.stringify([accountId, selected.id, edit.id, edit.editVersion, edit.message, edit.content]); if (edit.confirmed === review) return editComment({ accountId, postId: selected.id, commentId: edit.id, content: edit.content, expectedCommentVersion: edit.editVersion, confirmEdit: true }); }}>
+      </Inline><Disclosure variant="plain" summary="Comment triage"><TriageControls key={accountId + ':' + item.id} kind="comment" state={states[item.id]} error={triageError} readOnly={readOnly} busy={!!busy} userId={userId} members={assignees} onChange={change => changeTriage(item, change)}/></Disclosure>{notesFor('comment', item.id)}{edit && edit.id === item.id && edit.accountId === accountId && edit.postId === selected.id && !readOnly && <Form aria-label="Edit your Reddit comment" busy={!!busy} onSubmit={() => { const review = JSON.stringify([accountId, selected.id, edit.id, edit.editVersion, edit.message, edit.content]); if (edit.confirmed === review) return editComment({ accountId, postId: selected.id, commentId: edit.id, content: edit.content, expectedCommentVersion: edit.editVersion, confirmEdit: true }); }}>
         <Heading level={6} size="sm">Edit your Reddit comment</Heading><Text>Posting as {account?.name || accountId}. Review the original and replacement text.</Text>
         <Blockquote source="Before"><Text preserveWhitespace>{edit.message || 'Comment without text'}</Text></Blockquote>
         <Field label="After"><Textarea required maxLength={10000} rows={4} value={edit.content} onChange={event => setCommentEdit({ ...edit, content: event.target.value, confirmed: '' })}/></Field>
@@ -641,6 +707,7 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
       replies: depth < 12 && Array.isArray(item.replies) && item.replies.length ? item.replies.map((reply: Row) => commentMessage(reply, selected, depth + 1)) : undefined };
   }
   const noun = tab === 'comments' ? 'posts' : tab, lastInbound = (detail?.messages || []).reduce((latest: number, item: Row) => item.direction === 'incoming' ? Math.max(latest, Date.parse(item.createdAt) || 0) : latest, 0);
+  const shownComments = triageComments(detail?.comments || [], row => triageVisible(states[row.id], triageFilter));
   const listEmpty = loaded ? <EmptyState title={search ? 'No matching items on these pages' : `No ${tab === 'comments' ? 'commented posts' : tab} returned`} description={pagination?.hasMore ? 'More results are available below.' : 'Refresh after new activity or choose another account.'}/> : `Choose an account, then load ${noun}.`;
   const loadMore = pagination?.hasMore ? <LoadMore hasMore busy={busy === 'Loading ' + tab} shown={rows.length} itemLabel={noun} label={`Load more ${noun}`} unavailableReason={pagination.nextCursor ? undefined : 'The provider has more results but supplied no next page. Narrow the account or platform filter.'} onLoadMore={() => loadList(pagination.nextCursor)}/> : undefined;
   const publicReply = replyTarget && !readOnly && <Card as="section" headingLevel={tab === 'reviews' ? 3 : 4} title={tab === 'reviews' ? 'Public review reply' : 'Public comment reply'}><Form aria-label={tab === 'reviews' ? 'Public review reply' : 'Public comment reply'} busy={!!busy} onSubmit={(_, event) => reply(event)}><Blockquote><Text preserveWhitespace>{replyTarget.text || replyTarget.message || 'Reply to the selected post'}</Text></Blockquote><Field label="Your public reply"><Textarea required rows={4} maxLength={10000} value={message} onChange={event => setMessage(event.target.value)}/></Field>{tab === 'reviews' && (replyTarget.hasReply || replyTarget.reply) && <Checkbox required checked={confirmReplace} onChange={event => setConfirmReplace(event.target.checked)} label="I approve updating or adding this review’s provider reply. Google replaces the existing owner reply."/>}<FormActions><Button variant="primary" type="submit">Send public reply</Button><Button variant="secondary" onClick={() => { setReplyTarget(null); setMessage(''); }}>Cancel</Button></FormActions></Form></Card>;
@@ -648,7 +715,7 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
   return <Stack gap={4}>
     <Inline justify="between" align="center"><Stack gap={1}><Heading level={2} size="md">Unified inbox</Heading><Text tone="muted">Manage private messages, public comments, reviews and LinkedIn organization mentions from your connected accounts.</Text></Stack><Button variant="secondary" disabled={!!busy} onClick={loadAccounts}>Refresh connections</Button></Inline>
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
-    {tab === 'messages' && triageError && <Alert tone="warning" title="Triage status could not be loaded.">{triageError} Conversations are listed without a triage status, and the triage filter does not hide them.</Alert>}
+    {triageError && <Alert tone="warning" title="Triage status could not be loaded.">{triageError} {triageKind.charAt(0).toUpperCase() + triageKind.slice(1)}s are listed without a triage status, and the triage filter does not hide them.</Alert>}
     {status && !connected && <Alert tone="warning">Configure Zernio and map this project’s profile in Integrations settings to load its inbox.</Alert>}
     {tab !== 'mentions' && status?.webhookConfigured === false && <Alert tone="info">Configure inbox webhooks in Integrations settings to receive activity updates. You can refresh provider lists manually now.</Alert>}
     {tab === 'reviews' && <Stack as="section" aria-label="Review filters" gap={2}><FeatureControls>
@@ -663,7 +730,7 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
       <Field label="Connected account"><Select value={accountId} disabled={!!busy || !connected} onChange={event => { const value = event.target.value; if (value !== accountId) switchSelection(() => { resetList(); setAccountId(value); }); }}><Option value="">Choose an account</Option>{supported.map(item => <Option key={item.id} value={item.id}>{accountLabel(item)}</Option>)}</Select></Field>
       {tab === 'messages' && capabilities.acceptRequest && <Field label="Conversation folder"><Select value={folder} disabled={!!busy} onChange={event => { const value = event.target.value; if (value !== folder) switchSelection(() => { resetList(); setFolder(value); }); }}><Option value="inbox">Inbox</Option><Option value="requests">Message requests</Option></Select></Field>}
       {tab === 'messages' && <Field label="Conversation status"><Select value={conversationStatus} disabled={!!busy} onChange={event => { const value = event.target.value; if (value !== conversationStatus) switchSelection(() => { resetList(); setConversationStatus(value); }); }}><Option value="active">Active</Option><Option value="archived">Archived</Option></Select></Field>}
-      {tab === 'messages' && <Field label="Triage status" description={historyFilter ? 'History results show every triage status.' : undefined}><Select value={triageFilter} disabled={!!historyFilter} onChange={event => setTriageFilter(event.target.value)}>{triageFilters.map(([value, label]) => <Option key={value} value={value}>{label}</Option>)}</Select></Field>}
+      <Field label="Triage status" description={historyFilter ? 'History results show every triage status.' : undefined}><Select value={triageFilter} disabled={!!historyFilter} onChange={event => setTriageFilter(event.target.value)}>{triageFilters.map(([value, label]) => <Option key={value} value={value}>{label}</Option>)}</Select></Field>
       <Field label={`Search loaded ${noun}`}><Input type="search" disabled={!!historyFilter} value={search} onChange={event => setSearch(event.target.value)} placeholder={tab === 'messages' ? 'Name, identity or recent message…' : 'Text, author or location…'}/></Field>
     </FeatureControls>
       <Inline><Button variant="primary" disabled={!!busy || !accountId || !connected} onClick={() => loadList('', true)}>Load {tab}</Button></Inline>
@@ -688,6 +755,7 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
       detail={selected && <Stack gap={4}>
         <Stack gap={2}><Text tone="muted">{title(selected.platform || account?.platform)} · {selected.participantId} · {selected.status || 'active'}</Text><Inline gap={2}><Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openItem(selected)}>Refresh thread</Button>{link(selected.url) && <Link href={link(selected.url)!} target="_blank" variant="standalone">Open in platform</Link>}{!readOnly && capabilities.read && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => conversationAction('read')}>Mark read</Button>}{!readOnly && capabilities.archive && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => conversationAction('status')}>{selected.status === 'archived' ? 'Reopen' : 'Archive'}</Button>}{!readOnly && capabilities.typing && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => sendTyping()}>Send typing indicator</Button>}{!readOnly && capabilities.deleteStoredConversation && <Button variant="danger" size="sm" disabled={!!busy || !selected.deleteVersion} onClick={prepareStoredDelete}>Delete stored copy</Button>}</Inline></Stack>
         <TriageControls key={accountId + ':' + triageKey(selected)} state={states[triageKey(selected)]} error={triageError} readOnly={readOnly} busy={!!busy} userId={userId} members={assignees} onChange={change => changeTriage(selected, change)}/>
+        {notesFor('conversation', triageKey(selected), true)}
         {typingReview && account?.platform === 'whatsapp' && <ReviewConfirm title="Request a typing indicator" reviewKey={typingReview} acknowledgements={[]} confirmLabel="Confirm typing request" cancelLabel="Cancel typing request" busy={!!busy} disabledReason={readOnly ? 'Your role can view this inbox but cannot send.' : undefined} onConfirm={() => sendTyping(true)} onCancel={() => setTypingReview('')}><Text>WhatsApp may also mark the latest inbound message as read. This request is for the currently reviewed conversation; the indicator is temporary and may not be displayed.</Text></ReviewConfirm>}
         {deleteTarget && !readOnly && deleteTarget.id === selected.id && deleteTarget.accountId === accountId && <ReviewConfirm tone="danger" title="Delete Zernio’s stored conversation copy" reviewKey={JSON.stringify([deleteTarget.id, deleteTarget.accountId, deleteTarget.deleteVersion])} acknowledgements={[{ id: 'delete', label: 'I reviewed this account, participant and latest messages and want to delete Zernio’s stored copy.' }]} confirmLabel="Confirm stored-copy deletion" busy={!!busy} disabledReason={deleteTarget.deleteVersion !== selected.deleteVersion ? 'The latest messages changed. Cancel and review the refreshed conversation again.' : undefined} onConfirm={() => submitStoredDelete(true)} onCancel={() => setDeleteTarget(null)}><Stack gap={2}><Text>This permanently deletes Zernio’s stored messages and unlinks its provider contact channel. The native platform thread, provider contact record and this app’s local contact remain. Synchronization can import the thread again.</Text><Text>New messages may arrive after this review and before the provider deletes the stored conversation; those messages may also be removed.</Text></Stack></ReviewConfirm>}
         {!readOnly && selected.controlActions?.length > 0 && <Disclosure summary={`Change who answers · ${selected.threadControl === 'app' ? 'This app' : selected.threadControl === 'ai_agent' ? 'Business agent' : selected.threadControl === 'other' ? 'Another app' : 'Owner not reported'}`}><Stack gap={3}>
@@ -711,13 +779,13 @@ function ZernioInbox({ projectId, request, readOnly = false, initialChannel, ini
       list={<SelectableList label="Commented posts" selectedId={selected?.id} onSelect={id => { const item = visibleRows.find(row => row.id === id); if (item) openItem(item); }} emptyMessage={listEmpty} footer={loadMore} items={visibleRows.map(item => ({ id: item.id, title: item.content || item.text || 'Post without a text caption', preview: `${title(item.platform || account?.platform)}${item.createdTime ? ` · ${when(item.createdTime)}` : ''}`, meta: `${item.commentCount ?? 'Unknown'} comments`, disabled: !!busy }))}/>}
       detail={selected && <Stack gap={4}>
         <Stack gap={2}><Text preserveWhitespace>{selected.content || selected.text || selected.id}</Text><Inline gap={2}><Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openItem(selected, '', focusedComment)}>Refresh comments</Button>{focusedComment && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openItem(selected)}>Back to post</Button>}{!readOnly && canReply && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => prepareReply({ id: '', message: selected.content })}>Reply to post</Button>}{link(selected.permalink || selected.url) && <Link href={link(selected.permalink || selected.url)!} target="_blank" variant="standalone">Open post</Link>}</Inline></Stack>
-        <ConversationThread label={focusedComment ? 'Comment replies' : 'Post comments'} headingLevel={5} readOnly={readOnly} emptyMessage="No comments returned on this page." messages={(detail?.parent && focusedComment ? [{ ...detail.parent, replies: detail.comments || [] }] : detail?.comments || []).map((item: Row) => commentMessage(item, selected))}/>
+        <ConversationThread label={focusedComment ? 'Comment replies' : 'Post comments'} headingLevel={5} readOnly={readOnly} emptyMessage={detail?.comments?.length ? 'No comments with this triage status on this page.' : 'No comments returned on this page.'} messages={(detail?.parent && focusedComment ? [{ ...detail.parent, replies: shownComments }] : shownComments).map((item: Row) => commentMessage(item, selected))}/>
         {detail?.pagination?.hasMore && <LoadMore hasMore busy={busy === 'Loading comments'} itemLabel="comments" label="Load more comments" unavailableReason={detail.pagination.nextCursor ? undefined : 'The provider has more comments but supplied no next page.'} onLoadMore={() => openItem(selected, detail.pagination.nextCursor, focusedComment)}/>}
         {privateReplyTarget && !readOnly && privateReplyTarget.accountId === accountId && privateReplyTarget.postId === selected?.id && <PrivateCommentReply key={accountId + ':' + privateReplyTarget.postId + ':' + privateReplyTarget.id + ':' + privateReplyTarget.privateReplyVersion} target={privateReplyTarget} current={threadRows.find(item => item.id === privateReplyTarget.id)} busy={!!busy} onSend={sendPrivateCommentReply} onDraftChange={setPrivateDraft} onCancel={() => setPrivateReplyTarget(null)}/>}
         {publicReply}
       </Stack>}/> : <>
-      <Stack as="section" gap={3} aria-label={tab === 'mentions' ? 'LinkedIn mentions' : 'Reviews'}>{visibleRows.map(item => tab === 'mentions' ? <Disclosure key={item.id} summary={`Read mention · ${item.authorName || item.authorUsername || 'LinkedIn author'} · ${when(item.publishedAt)}`}><Stack gap={2}><Text preserveWhitespace>{item.content || 'Mention without text'}</Text><Text size="sm" tone="muted">{item.accountUsername || account?.name || 'Connected LinkedIn account'}</Text>{link(item.permalink, true) ? <Inline><Link href={link(item.permalink, true)!} target="_blank" variant="standalone">Open post on LinkedIn</Link></Inline> : <Text tone="muted">Post link unavailable</Text>}</Stack></Disclosure> : <Card as="article" key={item.id} title={`${item.reviewer?.name || 'Reviewer'} · ${item.rating ? `${item.rating}/5` : item.recommendationType || 'Review'}`} description={`${item.locationName || item.accountUsername || title(item.platform)} · ${when(item.created)}`}><Stack gap={3}><Text preserveWhitespace>{item.text || 'Review without text'}</Text>{item.reply && <Blockquote source="Your public reply"><Text preserveWhitespace>{item.reply.text}</Text></Blockquote>}<Inline gap={2}>{!readOnly && canReply && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => prepareReply(item)}>{item.hasReply || item.reply ? 'Manage reply' : 'Reply'}</Button>}{!readOnly && capabilities.reviewDeleteReply && item.reply && <Button variant="danger" size="sm" disabled={!!busy} onClick={() => setConfirming({ kind: 'review', review: item })}>Remove reply</Button>}{link(item.reviewUrl) && <Link href={link(item.reviewUrl)!} target="_blank" variant="standalone">Open review</Link>}</Inline></Stack></Card>)}</Stack>
-      {loaded && !visibleRows.length && listEmpty}{loadMore}{publicReply}
+      <Stack as="section" gap={3} aria-label={tab === 'mentions' ? 'LinkedIn mentions' : 'Reviews'}>{visibleRows.map(item => tab === 'mentions' ? <Disclosure key={item.id} summary={[`Read mention · ${item.authorName || item.authorUsername || 'LinkedIn author'} · ${when(item.publishedAt)}`, triageLabel(states[item.id], userId)].filter(Boolean).join(' · ')}><Stack gap={2}><Text preserveWhitespace>{item.content || 'Mention without text'}</Text><Text size="sm" tone="muted">{item.accountUsername || account?.name || 'Connected LinkedIn account'}</Text>{link(item.permalink, true) ? <Inline><Link href={link(item.permalink, true)!} target="_blank" variant="standalone">Open post on LinkedIn</Link></Inline> : <Text tone="muted">Post link unavailable</Text>}<TriageControls key={accountId + ':' + item.id} kind="mention" state={states[item.id]} error={triageError} readOnly={readOnly} busy={!!busy} userId={userId} members={assignees} onChange={change => changeTriage(item, change)}/>{notesFor('mention', item.id)}</Stack></Disclosure> : <Card as="article" key={item.id} title={`${item.reviewer?.name || 'Reviewer'} · ${item.rating ? `${item.rating}/5` : item.recommendationType || 'Review'}`} description={[`${item.locationName || item.accountUsername || title(item.platform)} · ${when(item.created)}`, triageLabel(states[item.id], userId), waitingFor(states[item.id]?.waitingSince)].filter(Boolean).join(' · ')}><Stack gap={3}><Text preserveWhitespace>{item.text || 'Review without text'}</Text>{item.reply && <Blockquote source="Your public reply"><Text preserveWhitespace>{item.reply.text}</Text></Blockquote>}<Inline gap={2}>{!readOnly && canReply && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => prepareReply(item)}>{item.hasReply || item.reply ? 'Manage reply' : 'Reply'}</Button>}{!readOnly && capabilities.reviewDeleteReply && item.reply && <Button variant="danger" size="sm" disabled={!!busy} onClick={() => setConfirming({ kind: 'review', review: item })}>Remove reply</Button>}{link(item.reviewUrl) && <Link href={link(item.reviewUrl)!} target="_blank" variant="standalone">Open review</Link>}</Inline><TriageControls key={accountId + ':' + item.id} kind="review" state={states[item.id]} error={triageError} readOnly={readOnly} busy={!!busy} userId={userId} members={assignees} onChange={change => changeTriage(item, change)}/>{notesFor('review', item.id)}</Stack></Card>)}</Stack>
+      {loaded && !visibleRows.length && (triageHidden ? <EmptyState title={`No ${tab} with this triage status`} description={`Choose another triage status, or load more ${tab}.`}/> : listEmpty)}{loadMore}{publicReply}
     </>}
     <ConfirmDialog open={!!confirming} onOpenChange={open => { if (!open) setConfirming(null); }} danger={confirming?.kind !== 'hide'} title={confirming?.kind === 'review' ? 'Remove your public reply to this review?' : confirming?.kind === 'hide' ? 'Hide this public comment from other people?' : 'Delete this public comment?'} description={confirming?.kind === 'review' ? 'The review itself remains.' : confirming?.kind === 'hide' ? 'You can unhide it later from this thread.' : 'This cannot be undone.'} confirmLabel={confirming?.kind === 'review' ? 'Remove reply' : confirming?.kind === 'hide' ? 'Hide comment' : 'Delete comment'} onConfirm={() => confirming?.kind === 'review' ? deleteReviewReply(confirming.review) : confirming ? commentAction(confirming.kind, confirming.comment) : undefined}/>
   </Stack>;

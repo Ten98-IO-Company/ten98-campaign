@@ -4,7 +4,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { createStore } from '../server/database.ts';
 import { handleCalendar } from '../server/calendar.ts';
 import { getSmsStatus } from '../server/direct-providers.ts';
-import { assertProviderPath, pathSegment, zernioClient } from '../server/provider-core.ts';
+import { assertProviderPath, pathSegment, providerRequest, zernioClient } from '../server/provider-core.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
 
 // ten98-campaign#33: an ID placed in a provider path must reach the intended endpoint as one segment, or be refused
@@ -87,4 +87,21 @@ test('Twilio status reads refuse a traversal message ID before sending', async t
     await assert.rejects(getSmsStatus({ env, providerId: id }), error => error.status === 400, id);
   }
   assert.equal(calls.length, 0);
+});
+
+test('provider requests are sent to a fixed origin for an allowed host, and nothing else is sent', async t => {
+  const origins = ['https://zernio.com', 'https://www.googleapis.com', 'https://oauth2.googleapis.com', 'https://googleads.googleapis.com', 'https://login.microsoftonline.com', 'https://clientcenter.api.bingads.microsoft.com', 'https://campaign.api.bingads.microsoft.com', 'https://reporting.api.bingads.microsoft.com', 'https://api.twilio.com', 'https://api.cloudflare.com'];
+  const sent = [], original = globalThis.fetch;
+  globalThis.fetch = async (target, options) => { sent.push({ target, options }); return Response.json({ ok: true }); };
+  t.after(() => { globalThis.fetch = original; });
+  for (const origin of origins) {
+    await providerRequest(`${origin}/v1/resource?x=1`);
+    const { target, options } = sent.at(-1);
+    assert.equal(typeof target, 'string'); assert.equal(new URL(target).origin, origin); assert.equal(new URL(target).pathname + new URL(target).search, '/v1/resource?x=1'); assert.equal(options.redirect, 'error');
+  }
+  const count = sent.length;
+  for (const url of ['https://zernio.com.attacker.example/x', 'https://attacker.example/x', 'http://zernio.com/x', 'https://zernio.com:8443/x', 'https://user:pass@zernio.com/x', 'https://ZERNIO.com.evil/x']) {
+    await assert.rejects(providerRequest(url), error => error.code === 'INVALID_PROVIDER', url);
+  }
+  assert.equal(sent.length, count, 'A refused endpoint sends nothing.');
 });
