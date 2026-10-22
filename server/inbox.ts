@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { IntegrationError, fail, reportObject as plain, operation, redact, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 import { sql } from 'drizzle-orm';
@@ -668,11 +668,49 @@ async function itemStates(context: ProviderRecord): Promise<void> {
   send(200, { state: itemStateView(row, now()) });
 }
 
+// Internal team notes on an inbox item (#41 change 3). They stay in Campaign: never sent to the provider, scoped to this
+// project and its current profile like the triage state. Viewers read them; editors add them; the author or an owner or
+// administrator deletes one.
+async function itemNotes(context: ProviderRecord, noteId?: string): Promise<void> {
+  const { req, url, project, role, user, send, body = {} } = context, profileId = project.zernioProfileId;
+  if (!valid(profileId)) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
+  const kindOf = (value: any): string => { if (!ITEM_KINDS.has(value)) fail(400, 'INVALID_INBOX_FILTER', 'Choose a conversation, comment, review or mention.'); return value; };
+  const view = (row: ProviderRecord) => ({ id: row.id, authorId: row.author_id, authorName: row.author_name ?? 'Former team member', body: row.body, createdAt: row.created_at });
+  if (noteId !== undefined) {
+    if (req.method !== 'DELETE') fail(405, 'METHOD_NOT_ALLOWED', 'Delete a note with DELETE.');
+    if (!WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this inbox action.');
+    await context.assertProjectMapping(profileId);
+    const own = ['owner', 'admin'].includes(role) ? sql`` : sql` AND author_id=${user.id}`;
+    const removed = await context.db.execute(sql`DELETE FROM inbox_item_notes WHERE id=${id(noteId)} AND project_id=${project.id} AND profile_id=${profileId}${own}`);
+    if (!removed.rowCount) fail(404, 'INBOX_NOTE_NOT_FOUND', 'This note was not found, or only its author or an administrator can delete it.');
+    send(200, { deleted: true }); return;
+  }
+  if (req.method === 'GET') {
+    if ([...url.searchParams.keys()].some(name => !['accountId', 'kind', 'resourceId'].includes(name))) fail(400, 'INVALID_INBOX_FILTER', 'Request notes by accountId, kind and resourceId only.');
+    const accountId = id(url.searchParams.get('accountId')), kind = kindOf(url.searchParams.get('kind')), resourceId = id(url.searchParams.get('resourceId'));
+    await context.assertProjectMapping(profileId);
+    const rows = (await context.db.execute(sql`SELECT n.id,n.author_id,u.name AS author_name,n.body,n.created_at FROM inbox_item_notes n LEFT JOIN users u ON u.id=n.author_id
+      WHERE n.project_id=${project.id} AND n.profile_id=${profileId} AND n.account_id=${accountId} AND n.kind=${kind} AND n.resource_id=${resourceId} ORDER BY n.created_at, n.id LIMIT 500`)).rows as ProviderRecord[];
+    send(200, { notes: rows.map(view) }); return;
+  }
+  if (req.method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', 'Read notes with GET or add one with POST.');
+  if (!WRITERS.has(role)) fail(403, 'WRITE_PERMISSION_REQUIRED', 'Editing permission is required for this inbox action.');
+  fields(body, ['accountId', 'kind', 'resourceId', 'body']);
+  const text = typeof body.body === 'string' ? body.body.trim() : '';
+  if (!text || text.length > 4000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) fail(400, 'INVALID_INBOX_NOTE', 'Write a note of 1 to 4,000 characters.');
+  const note = { id: randomUUID(), accountId: id(body.accountId), kind: kindOf(body.kind), resourceId: id(body.resourceId), createdAt: new Date().toISOString() };
+  await context.assertProjectMapping(profileId);
+  await context.db.execute(sql`INSERT INTO inbox_item_notes(id,project_id,profile_id,account_id,kind,resource_id,author_id,body,created_at) VALUES(${note.id},${project.id},${profileId},${note.accountId},${note.kind},${note.resourceId},${user.id},${text},${note.createdAt})`);
+  send(200, { note: { id: note.id, authorId: user.id, authorName: user.name || user.id, body: text, createdAt: note.createdAt } });
+}
+
 export async function handleInbox(context: ProviderRecord): Promise<boolean> {
   const { req, url, project, role, send, body = {} } = context, prefix = `/api/projects/${encodeURIComponent(project.id)}/integrations/inbox`;
   if (url.pathname !== prefix && !url.pathname.startsWith(prefix + '/')) return false;
   const path = url.pathname.slice(prefix.length).replace(/^\//, '');
   const route = !['conversations/search', 'conversations/start', 'conversations/recipients'].includes(path) && path.match(/^conversations\/([^/]+)(?:\/(messages|reply|read|status|thread-control|accept|typing|delete))?$/), messageAction = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/(edit|delete|react|unreact)$/), media = path.match(/^conversations\/([^/]+)\/messages\/([^/]+)\/attachments\/(0|[1-9]\d?)$/), action = path.match(/^(comments|reviews)\/(reply|private-reply|edit|hide|unhide|delete|like|unlike|moderate|delete-reply)$/);
+  const noteRoute = path.match(/^item-notes(?:\/([^/]+))?$/);
+  if (noteRoute) { try { await itemNotes(context, noteRoute[1] === undefined ? undefined : decodedId(noteRoute[1])); } catch (error: any) { if (!(error instanceof IntegrationError)) throw error; send(error.status, { error: { code: error.code, message: error.message } }); } return true; }
   if (path === 'item-states') { try { await itemStates(context); } catch (error: any) { if (!(error instanceof IntegrationError)) throw error; send(error.status, { error: { code: error.code, message: error.message } }); } return true; }
   if (!['status', 'accounts', 'updates', 'conversations', 'conversations/search', 'conversations/start', 'conversations/recipients', 'comments', 'comments/thread', 'reviews', 'mentions'].includes(path) && !route && !messageAction && !media && !action || action && (action[1] === 'reviews' && !['reply', 'delete-reply'].includes(action[2]) || action[1] === 'comments' && action[2] === 'delete-reply')) { send(404, { error: { code: 'INBOX_ROUTE_NOT_FOUND', message: 'This inbox action was not found.' } }); return true; }
   try {

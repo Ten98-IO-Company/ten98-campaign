@@ -536,6 +536,21 @@ export const inboxItemState = pgTable('inbox_item_state', {
   index('inbox_item_state_assignee').on(t.assignee_id, t.project_id, t.profile_id, t.waiting_since),
   index('inbox_item_state_waiting').on(t.project_id, t.profile_id, t.waiting_since).where(sql`${t.waiting_since} IS NOT NULL`),
 ]);
+export const inboxItemNotes = pgTable('inbox_item_notes', {
+  id: text('id').primaryKey(),
+  project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  profile_id: text('profile_id').notNull(),
+  account_id: text('account_id').notNull(),
+  kind: text('kind').notNull(),
+  resource_id: text('resource_id').notNull(),
+  author_id: text('author_id').references(() => users.id, { onDelete: 'set null' }),
+  body: text('body').notNull(),
+  created_at: text('created_at').notNull(),
+}, t => [
+  check('inbox_item_notes_kind_check', sql`${t.kind} IN ('conversation','comment','review','mention')`),
+  check('inbox_item_notes_body_check', sql`char_length(${t.body}) BETWEEN 1 AND 4000`),
+  index('inbox_item_notes_item').on(t.project_id, t.profile_id, t.account_id, t.kind, t.resource_id, t.created_at),
+]);
 
 // Zernio provider state and receipts (zernio-*.ts, integrations.ts)
 export const zernioContactLinks = pgTable('zernio_contact_links', {
