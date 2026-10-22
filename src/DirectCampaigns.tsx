@@ -1,10 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, AudienceSummary, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, ContentPreview, DataTable, DateTimeField, DescriptionList, Disclosure, EmptyState, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Inline, Input, List, ListItem, LoadMore, OperationResults, Option, ReviewConfirm, SandboxedPreview, Select, Stack, StatusLine, Tabs, Text, Textarea, type OperationStatus } from '@ten98/ui';
+import { Alert, AudienceSummary, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, ContentPreview, CopyButton, DataTable, DateTimeField, DescriptionList, Disclosure, EmptyState, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Inline, Input, List, ListItem, LoadMore, OperationResults, Option, ReviewConfirm, SandboxedPreview, Select, Stack, StatusLine, Tabs, Text, Textarea, type OperationStatus } from '@ten98/ui';
 import WhatsAppTemplate, { templateRestriction, templatePreviewText } from './WhatsAppTemplate';
 
 // Provider deliverability reports that are not a recipient's own suppression, such as a Cloudflare policy block (#77).
 type DeliverabilityAlert = { provider: string; kind: string; contacts: number; expiresAt: string | null };
 const emailProviderName = (provider: string) => ({ cloudflare: 'Cloudflare', ses: 'Amazon SES' }[provider] || provider);
+const emailProviderConsole = (provider: string) => ({ cloudflare: 'Cloudflare Email Sending', ses: 'the Amazon SES console' }[provider] || provider);
+// SES `undetermined` feedback is a bounce SES could not classify; other kinds are sender-side policy blocks.
+const deliverabilityCopy = (alert: DeliverabilityAlert) => alert.kind === 'undetermined' ? { title: `${emailProviderName(alert.provider)} could not classify bounces for ${alert.contacts} ${alert.contacts === 1 ? 'contact' : 'contacts'}`, body: `Check the bounce details in ${emailProviderConsole(alert.provider)}. Each one counts toward the repeated-bounce limit for that contact.` } : { title: `${emailProviderName(alert.provider)} reports a ${alert.kind} block for ${alert.contacts} ${alert.contacts === 1 ? 'contact' : 'contacts'}`, body: `It may concern your sending account, not the recipients, so they were not suppressed. Check ${emailProviderConsole(alert.provider)}.` };
+// The status reports a null email provider when Amazon SES and Cloudflare are both configured and none is chosen (EMAIL_PROVIDER_REQUIRED).
+const emailProviderChoice = 'Amazon SES and Cloudflare are both configured. Choose which one sends email under Amazon SES email in Integrations.';
 const deliverabilityAlerts = (status: any): DeliverabilityAlert[] => (Array.isArray(status?.deliverabilityAlerts) ? status.deliverabilityAlerts : []).filter((row: any) => typeof row?.provider === 'string' && typeof row.kind === 'string' && Number.isSafeInteger(row.contacts) && row.contacts > 0 && (row.expiresAt === null || typeof row.expiresAt === 'string'));
 
 type Row = { id: string; [key: string]: any };
@@ -38,6 +43,7 @@ const testSendErrors: Record<string, string> = {
   TEST_SEND_UNSUPPORTED: 'Test sends are available for email and SMS drafts only.',
   CAMPAIGN_LOCKED: 'Only a draft can send a test. Refresh the campaign to see its current status.',
   INTEGRATION_NOT_CONFIGURED: 'Configure this sending provider in Integrations before sending a test.',
+  EMAIL_PROVIDER_REQUIRED: emailProviderChoice,
   PUBLIC_URL_REQUIRED: 'Sending needs a public address. The instance operator must set APP_URL to this app’s public HTTPS address.',
   TEST_SEND_LIMIT: 'This project has sent 10 tests in the last hour. Try again later.',
 };
@@ -92,7 +98,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   }, [path, detail?.campaign?.id, detail?.campaign?.status]);
   async function action(label: string, run: (generation: number) => Promise<void>) {
     if (pending.current) return; const generation = version.current; pending.current = true; actionVersion.current++; setBusy(label); setError(''); setNotice('');
-    try { await run(generation); } catch (failure) { if (generation === version.current) setError((failure as Error).message || 'This action could not be completed.'); }
+    try { await run(generation); } catch (failure) { if (generation === version.current) setError((failure as any)?.code === 'EMAIL_PROVIDER_REQUIRED' ? emailProviderChoice : (failure as Error).message || 'This action could not be completed.'); }
     finally { if (generation === version.current) { pending.current = false; setBusy(''); } }
   }
   function acceptCampaign(campaign: Row, generation: number) {
@@ -216,7 +222,8 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   return <Stack gap={6}>
     <Inline justify="between" align="center"><Stack gap={1}><Heading level={2}>Direct campaigns</Heading><Text tone="muted">Manage permission-based email, SMS and approved WhatsApp template campaigns with one contact list.</Text></Stack><Button variant="secondary" disabled={!!busy} onClick={() => action('Refreshing campaigns', async generation => { await load(generation); })}>Refresh lists</Button></Inline>
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
-    {deliverabilityAlerts(status).map(alert => <Alert key={alert.provider + ':' + alert.kind} tone="warning" title={`${emailProviderName(alert.provider)} reports a ${alert.kind} block for ${alert.contacts} ${alert.contacts === 1 ? 'contact' : 'contacts'}`}>It may concern your sending account, not the recipients, so they were not suppressed. Check {emailProviderName(alert.provider)} Email Sending.{alert.expiresAt ? ` The provider lists it until ${new Date(alert.expiresAt).toLocaleString()}.` : ''}</Alert>)}
+    {deliverabilityAlerts(status).map(alert => { const copy = deliverabilityCopy(alert); return <Alert key={alert.provider + ':' + alert.kind} tone="warning" title={copy.title}>{copy.body}{alert.expiresAt ? ` The provider lists it until ${new Date(alert.expiresAt).toLocaleString()}.` : ''}</Alert>; })}
+    {status?.emailProvider === 'ses' && typeof status.sesWebhookUrl === 'string' && status.sesWebhookUrl && <Disclosure summary="Amazon SES feedback webhook"><Stack gap={2}><Field label="SNS subscription URL" description="Subscribe the SNS topic of your SES configuration set to this URL over HTTPS so bounces and complaints update your contacts."><Input readOnly value={status.sesWebhookUrl}/></Field><Inline><CopyButton value={status.sesWebhookUrl} label="Copy webhook URL" messages={{ copied: 'Webhook URL copied.' }}/></Inline></Stack></Disclosure>}
     {status?.accountError && <Alert tone="warning" variant="inline">WhatsApp accounts could not be loaded: {status.accountError}. Email and SMS remain available when configured.</Alert>}
     {status?.publicCallbacks === false && <Alert tone="warning" title="Sending needs a public address">Before sending, the instance operator must set APP_URL to this app’s public HTTPS address and restart the service. Unsubscribe links and delivery updates need that address. Drafts and contacts can be saved now.</Alert>}
     <Tabs label="Direct campaign sections" value={tab} onValueChange={setTab} keepMounted={false} items={[{ value: 'campaigns', label: <>Campaigns <Badge>{campaigns.length}</Badge></>, content: <Stack gap={6}>
@@ -226,7 +233,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
       {(!readOnly || editingId) && <Card as="section" title={current ? current.name : 'New direct campaign'} description={<>{current ? statusLabel(current.status) : 'Draft'}{current?.scheduledAt ? ` · ${when(current.scheduledAt)}` : ''}</>} actions={current && !readOnly && <Button variant="secondary" disabled={!!busy} onClick={() => { openDraft({ ...current, id: '', name: current.name + ' copy' }); setDetail(null); }}>Duplicate as draft</Button>}><Stack gap={6}>
         <Form {...{ ref: formRef }} onSubmit={(_, event) => save(event)}><Stack as="fieldset" gap={4} disabled={!!busy || readOnly || !editable}>
           <FormGrid><Field label="Campaign name" required><Input required maxLength={120} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })}/></Field><Field label="Channel"><Select value={draft.channel} onChange={event => setDraft({ ...draft, channel: event.target.value as Channel })}>{channels.map(channel => <Option value={channel} key={channel}>{labels[channel]}</Option>)}</Select></Field></FormGrid>
-          {status && (status.providers?.[draft.channel] ? <StatusLine tone="success">{labels[draft.channel]} provider configured.</StatusLine> : <Alert tone="warning" variant="inline">{labels[draft.channel]} sending is not configured. You can save drafts and contacts while the provider is being set up.</Alert>)}
+          {status && (draft.channel === 'email' && status.emailProvider === null ? <Alert tone="warning" variant="inline">{emailProviderChoice} You can save drafts and contacts meanwhile.</Alert> : status.providers?.[draft.channel] ? <StatusLine tone="success">{draft.channel === 'email' && status.emailProvider ? `Email sends through ${emailProviderName(status.emailProvider)}.` : `${labels[draft.channel]} provider configured.`}</StatusLine> : <Alert tone="warning" variant="inline">{labels[draft.channel]} sending is not configured. You can save drafts and contacts while the provider is being set up.</Alert>)}
           {draft.channel === 'email' ? <>
             <Alert tone="info" variant="inline" title="Transactional email">This sender is for account notices, receipts and other expected service messages. Marketing newsletters and promotional email need a marketing provider.</Alert>
             <Field label="Email subject" required><Input required maxLength={200} value={draft.subject} onChange={event => setDraft({ ...draft, subject: event.target.value })}/></Field>

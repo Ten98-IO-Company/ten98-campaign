@@ -5,7 +5,8 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { AudienceSummary } from '@ten98/ui';
+import * as ui from '@ten98/ui';
+const { AudienceSummary } = ui;
 
 const source = await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8');
 const templateSource = await readFile(new URL('../src/WhatsAppTemplate.tsx', import.meta.url), 'utf8');
@@ -16,6 +17,8 @@ const campaignBody = compile(section('function campaignBody(', 'const when ='));
 const templateRestriction = compile(section('function templateRestriction(', 'export function templatePreviewText(', templateSource));
 const templatePreviewText = compile(section('function templatePreviewText(', 'export function templateParameter(', templateSource));
 const templateParameter = compile(section('function templateParameter(', 'export default function WhatsAppTemplate(', templateSource));
+const helper = name => source.match(new RegExp(`^const ${name} = [^\n]+;$`, 'm'))[0].replace(`const ${name} = `, '').replace(/;$/, '');
+const emailProviderChoice = compile(helper('emailProviderChoice'));
 const blankDraft = { name: 'Launch notice', channel: 'email', subject: 'Receipt for {{name}}', text: 'Your receipt', html: '<p>Receipt</p>', accountId: 'wa-account', templateName: 'receipt', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [] };
 
 test('audience readiness renders the real library summary with app counts and preserves unknowns', async () => {
@@ -215,9 +218,10 @@ test('a draft test send posts a confirmed request under a new key per click, wit
 });
 
 test('test send errors are readable for each server code and fall back to the server message', () => {
-  const testSendErrors = compile('(' + section('const testSendErrors', '\nconst testSendError =').replace(/^const testSendErrors[^=]*= /, '').replace(/;\s*$/, '') + ')');
+  const testSendErrors = compile('(' + section('const testSendErrors', '\nconst testSendError =').replace(/^const testSendErrors[^=]*= /, '').replace(/;\s*$/, '') + ')', { emailProviderChoice });
   const testSendError = compile(section('const testSendError =', '\n').replace(/^const testSendError = /, '').replace(/;\s*$/, ''), { testSendErrors });
-  for (const code of ['SEND_CONFIRMATION_REQUIRED', 'INVALID_TEST_RECIPIENT', 'INVALID_TEST_SEND', 'TEST_SEND_UNSUPPORTED', 'CAMPAIGN_LOCKED', 'INTEGRATION_NOT_CONFIGURED', 'PUBLIC_URL_REQUIRED', 'TEST_SEND_LIMIT']) {
+  assert.equal(testSendError({ code: 'EMAIL_PROVIDER_REQUIRED', message: 'Server text' }), emailProviderChoice);
+  for (const code of ['SEND_CONFIRMATION_REQUIRED', 'INVALID_TEST_RECIPIENT', 'INVALID_TEST_SEND', 'TEST_SEND_UNSUPPORTED', 'CAMPAIGN_LOCKED', 'INTEGRATION_NOT_CONFIGURED', 'EMAIL_PROVIDER_REQUIRED', 'PUBLIC_URL_REQUIRED', 'TEST_SEND_LIMIT']) {
     const message = testSendError({ code, message: code }); assert.ok(message.length > 20 && !message.includes(code), code);
   }
   assert.match(testSendError({ code: 'TEST_SEND_LIMIT' }), /10 tests/);
@@ -236,13 +240,59 @@ test('the test send is offered only on writable email and SMS drafts, behind a c
 });
 
 test('provider deliverability alerts show as a warning that names the provider and does not claim recipients were suppressed', async () => {
-  const text = await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8');
-  const helper = name => text.match(new RegExp(`^const ${name} = [^\n]+;$`, 'm'))[0].replace(`const ${name} = `, '').replace(/;$/, '');
-  const emailProviderName = compile(helper('emailProviderName')), deliverabilityAlerts = compile(helper('deliverabilityAlerts'));
+  const emailProviderName = compile(helper('emailProviderName')), emailProviderConsole = compile(helper('emailProviderConsole')), deliverabilityAlerts = compile(helper('deliverabilityAlerts'));
+  const deliverabilityCopy = compile(helper('deliverabilityCopy'), { emailProviderName, emailProviderConsole });
   assert.equal(emailProviderName('cloudflare'), 'Cloudflare'); assert.equal(emailProviderName('ses'), 'Amazon SES');
-  const status = { deliverabilityAlerts: [{ provider: 'cloudflare', kind: 'policy', channel: 'email', contacts: 2, firstSeenAt: 'x', lastSeenAt: 'y', expiresAt: null }, { provider: 'cloudflare', kind: 'policy', contacts: 0, expiresAt: null }, { provider: 7 }, null] };
-  assert.deepEqual(deliverabilityAlerts(status).map(row => [row.provider, row.kind, row.contacts]), [['cloudflare', 'policy', 2]], 'Malformed or empty groups are not shown.');
+  const status = { deliverabilityAlerts: [{ provider: 'cloudflare', kind: 'policy', channel: 'email', contacts: 2, firstSeenAt: 'x', lastSeenAt: 'y', expiresAt: null }, { provider: 'ses', kind: 'undetermined', contacts: 3, expiresAt: null }, { provider: 'cloudflare', kind: 'policy', contacts: 0, expiresAt: null }, { provider: 7 }, null] };
+  assert.deepEqual(deliverabilityAlerts(status).map(row => [row.provider, row.kind, row.contacts]), [['cloudflare', 'policy', 2], ['ses', 'undetermined', 3]], 'Malformed or empty groups are not shown.');
   assert.deepEqual(deliverabilityAlerts({}), []); assert.deepEqual(deliverabilityAlerts(null), []);
-  assert.match(text, /\{deliverabilityAlerts\(status\)\.map\(alert => <Alert key=\{alert\.provider \+ ':' \+ alert\.kind\} tone="warning" title=\{`\$\{emailProviderName\(alert\.provider\)\} reports a \$\{alert\.kind\} block for /);
-  assert.match(text, /It may concern your sending account, not the recipients, so they were not suppressed\./);
+  assert.deepEqual(deliverabilityCopy({ provider: 'cloudflare', kind: 'policy', contacts: 2 }), { title: 'Cloudflare reports a policy block for 2 contacts', body: 'It may concern your sending account, not the recipients, so they were not suppressed. Check Cloudflare Email Sending.' });
+  assert.deepEqual(deliverabilityCopy({ provider: 'ses', kind: 'policy', contacts: 1 }), { title: 'Amazon SES reports a policy block for 1 contact', body: 'It may concern your sending account, not the recipients, so they were not suppressed. Check the Amazon SES console.' });
+  const undetermined = deliverabilityCopy({ provider: 'ses', kind: 'undetermined', contacts: 3 });
+  assert.equal(undetermined.title, 'Amazon SES could not classify bounces for 3 contacts');
+  assert.match(undetermined.body, /Check the bounce details in the Amazon SES console\./); assert.doesNotMatch(undetermined.body, /policy|not suppressed/);
+  assert.equal(deliverabilityCopy({ provider: 'ses', kind: 'undetermined', contacts: 1 }).title, 'Amazon SES could not classify bounces for 1 contact');
+  assert.match(source, /\{deliverabilityAlerts\(status\)\.map\(alert => \{ const copy = deliverabilityCopy\(alert\); return <Alert key=\{alert\.provider \+ ':' \+ alert\.kind\} tone="warning" title=\{copy\.title\}>\{copy\.body\}/);
+});
+
+// Renders the real @ten98/ui components for a JSX expression taken from the component source.
+async function renderSnippet(pattern, names, scope) {
+  const jsx = source.match(pattern)?.[0]; assert.ok(jsx, String(pattern));
+  const { code } = await transformWithOxc(`const render = (${Object.keys(scope).join(', ')}) => (<>${jsx}</>);`, 'Snippet.tsx', { jsx: { runtime: 'classic' } });
+  return new Function('React', ...names, `${code}; return render;`)(React, ...names.map(name => ui[name]))(...Object.values(scope));
+}
+const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : React.isValidElement(node) ? [node, ...nodes(node.props.children)] : [];
+
+test('the email channel names the provider that sends, or asks for a choice when both are configured', async () => {
+  const emailProviderName = compile(helper('emailProviderName'));
+  const names = ['Alert', 'StatusLine'], labels = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
+  const show = (status, channel = 'email') => renderSnippet(/\{status && \(draft\.channel === 'email' && status\.emailProvider === null[\s\S]*?<\/Alert>\)\}/, names, { status, draft: { channel }, labels, emailProviderName, emailProviderChoice }).then(renderToStaticMarkup);
+  assert.match(await show({ providers: { email: true }, emailProvider: 'ses' }), /Email sends through Amazon SES\./);
+  assert.match(await show({ providers: { email: true }, emailProvider: 'cloudflare' }), /Email sends through Cloudflare\./);
+  const both = await show({ providers: { email: false }, emailProvider: null });
+  assert.ok(both.includes(emailProviderChoice)); assert.doesNotMatch(both, /sends through|provider configured/);
+  assert.match(await show({ providers: { email: false }, emailProvider: 'cloudflare' }), /Email sending is not configured/);
+  assert.match(await show({ providers: { sms: true }, emailProvider: null }, 'sms'), /SMS provider configured\./, 'The email choice does not affect other channels.');
+});
+
+test('the Amazon SES feedback webhook URL is shown with a copy action only when SES sends email', async () => {
+  const names = ['CopyButton', 'Disclosure', 'Field', 'Inline', 'Input', 'Stack'], url = 'https://campaign.example.test/api/webhooks/ses/sns';
+  const show = status => renderSnippet(/\{status\?\.emailProvider === 'ses'[\s\S]*?<\/Disclosure>\}/, names, { status });
+  const tree = await show({ emailProvider: 'ses', sesWebhookUrl: url }), found = nodes(tree);
+  assert.equal(found.find(node => node.type === ui.CopyButton)?.props.value, url);
+  assert.equal(found.find(node => node.type === ui.Input)?.props.value, url); assert.equal(found.find(node => node.type === ui.Input).props.readOnly, true);
+  assert.match(found.find(node => node.type === ui.Field).props.description, /SNS topic .* over HTTPS/);
+  assert.match(renderToStaticMarkup(tree), /Amazon SES feedback webhook/);
+  for (const status of [{ emailProvider: 'cloudflare', sesWebhookUrl: url }, { emailProvider: null, sesWebhookUrl: url }, { emailProvider: 'ses' }, { emailProvider: 'ses', sesWebhookUrl: '' }, null]) assert.equal(renderToStaticMarkup(await show(status)), '');
+});
+
+test('a send refused for EMAIL_PROVIDER_REQUIRED shows the provider choice, other failures keep the server message', async () => {
+  async function run(failure) {
+    const errors = [], context = { pending: { current: false }, version: { current: 1 }, actionVersion: { current: 0 }, setBusy() {}, setNotice() {}, setError: value => errors.push(value), emailProviderChoice };
+    await compile(section('async function action(', '\n  function acceptCampaign('), context)('Sending campaign', async () => { throw failure; });
+    return errors.filter(Boolean);
+  }
+  assert.deepEqual(await run(Object.assign(new Error('Server text'), { status: 409, code: 'EMAIL_PROVIDER_REQUIRED' })), [emailProviderChoice]);
+  assert.deepEqual(await run(Object.assign(new Error('Configure this sending provider in Integrations first.'), { code: 'INTEGRATION_NOT_CONFIGURED' })), ['Configure this sending provider in Integrations first.']);
+  assert.deepEqual(await run(new Error('')), ['This action could not be completed.']);
 });
