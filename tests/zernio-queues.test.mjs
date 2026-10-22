@@ -224,7 +224,7 @@ test('queue enqueue requires inline review of the exact saved post and queue sna
   const projectPath = '/projects/one', approvalRequired = true;
   const enqueueReviewKey = new Function('projectPath', 'approvalRequired', `return (${stripTypeScriptTypes(source.slice(keyStart, enqueueStart))});`)(projectPath, approvalRequired);
   let item = { post: { id: 'post-one', content: 'Reviewed caption', accounts: ['facebook-one'], queueId: 'queue-one', queueVersion: 'v1' }, status: 'approved', assets: [] }, queue = { _id: 'queue-one', name: 'Weekly launch', active: true, version: 'v1', slots: [{ dayOfWeek: 1, time: '09:00' }] }, enqueueReviews = {}, calls = 0;
-  const start = source.indexOf('    <Stack as="section" gap={3}><Heading level={3} size="sm">Saved posts ready for queues'), end = source.indexOf("\n    <ConfirmDialog open={confirming?.kind === 'reshuffle'}", start);
+  const start = source.indexOf('    <Stack as="section" gap={3}><Heading level={3} size="sm">Saved posts ready for queues'), end = source.indexOf('\n    {confirmDialog}', start);
   const { code } = await transformWithOxc(`const render = () => (${source.slice(start, end).trim()});`, 'QueueEnqueueReview.tsx', { jsx: { runtime: 'classic' } });
   const review = value => { enqueueReviews = typeof value === 'function' ? value(enqueueReviews) : value; };
   function render(loaded = true, localPosts = [item]) { const context = { React, ...designSystem, loaded, localPosts, queues: [queue], approvalRequired, enqueueReviewKey, enqueueReviews, setEnqueueReviews: review, canWrite: true, busy: false, onOpenApprovals: null, onEditPost: null, enqueue() {} }; return new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)); }
