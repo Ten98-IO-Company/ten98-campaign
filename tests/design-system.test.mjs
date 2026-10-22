@@ -9,14 +9,14 @@ import { AppField } from '@ten98/ui/app';
 const source = name => readFile(new URL('../src/' + name, import.meta.url), 'utf8');
 
 test('Campaign imports shared suite components and styles instead of defining duplicate primitives', async () => {
-  const [main, composer, details, styles] = await Promise.all(['main.tsx', 'AdComposer.tsx', 'AdDetails.tsx', 'styles.css'].map(source));
+  const [main, composer, details] = await Promise.all(['main.tsx', 'AdComposer.tsx', 'AdDetails.tsx'].map(source));
   assert.match(main, /AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppStat as Stat, AppSelect.*from '@ten98\/ui\/app'/);
   assert.doesNotMatch(main, /^function (?:Icon|Empty|Stat|Field)\(/m);
   assert.match(composer, /import \{ AppField \} from '@ten98\/ui\/app'/);
   assert.doesNotMatch(composer, /^function Field\(/m);
   assert.match(details, /import \{ AppField \} from '@ten98\/ui\/app'/);
-  assert.match(styles, /@import '@ten98\/ui\/app-tokens\.css';/);
-  assert.match(styles, /@import '@ten98\/ui\/app\.css';/);
+  assert.match(main, /^import '@ten98\/ui\/app-tokens\.css';$/m);
+  assert.match(main, /^import '@ten98\/ui\/app\.css';$/m); assert.match(main, /^import '@ten98\/ui\/product\.css';$/m);
 });
 
 test('shared Campaign fields retain native labels, required markers and editable textarea defaults', () => {
@@ -51,15 +51,9 @@ test('AdDetails keeps provider values as uncontrolled defaults and preserves num
 });
 
 
-test('Campaign stylesheets keep only overrides for markup it still renders', async () => {
-  const styles = await source('styles.css');
-  // Map hosts are the library EmbedHost now, so the app sheet carries no map rules.
-  assert.doesNotMatch(styles, /ooh-map|integration-map-preview/, 'map sizing comes from EmbedHost');
-  assert.match(styles, /:root\{[^}]*color:var\(--color-text\);background:var\(--color-canvas\)[^}]*--border:var\(--color-border\);--text:var\(--color-text\)\}/, 'the page and the aliases the kept rules use resolve to semantic tokens');
-  // Every class left in the app sheets belongs to markup Campaign renders itself or through the library components it uses.
-  const rendered = ['auth-shell', 'auth-form', 'eyebrow', 'brand', 'auth-footnote', 'or-divider', 'field', 'required', 't98-review-table'];
-  const classes = new Set([...styles.replace(/^@import .*$/gm, '').matchAll(/\.([a-zA-Z][\w-]*)/g)].map(match => match[1]));
-  for (const name of classes) assert.ok(rendered.includes(name), name + ' is rendered by Campaign or a library component it uses');
+test('Campaign ships no stylesheet of its own', async () => {
+  // @ten98/ui 0.20 owns the page base, tables, fields and the sign-in card, so the app sheet is gone.
+  await assert.rejects(source('styles.css'), { code: 'ENOENT' });
   // The unified inbox and direct campaigns render only @ten98/ui components, so they no longer ship stylesheets of their own.
   await assert.rejects(source('inbox.css'), { code: 'ENOENT' });
   await assert.rejects(source('direct-campaigns.css'), { code: 'ENOENT' });

@@ -3,7 +3,10 @@ import { createRoot } from 'react-dom/client';
 import { AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppStat as Stat, AppSelect } from '@ten98/ui/app';
 import { ActivityFeed, Avatar, Badge as UiBadge, BarList, DescriptionList, FileField, Image, ResourceCard, DataTable, type DataColumn, Grid, Meter, ProportionBar, SegmentedControl, Select as UiSelect, SelectableList, Stack, Switch, Text } from '@ten98/ui';
 import { AccountMenu, Alert, Card, EmptyState, PageHeader, Progress, SectionNav, ToastProvider, useToast, ConfirmDialog, useConfirmDialog, Dialog, Disclosure, FormGrid, Link, AppShell, AppStateScreen, AppTopbar, AuthErrorBoundary, AuthStory, Button, DangerZoneFlow, FirstUserSetupFlow, FormActions, type IconName, Inline, OidcProviderButtons, ProjectCreateFlow, SearchField, SidebarNav, type SidebarNavGroup, SidebarStatus, SignInFlow, StatusLine, WorkspaceCreateFlow, WorkspaceOnboarding, WorkspaceProjectSwitcher } from '@ten98/ui';
-import './styles.css';
+// Library sheets only: @ten98/ui owns the page base, tables, fields and the sign-in card.
+import '@ten98/ui/app-tokens.css';
+import '@ten98/ui/app.css';
+import '@ten98/ui/product.css';
 import AdComposer from './AdComposer';
 import SocialAnalytics from './SocialAnalytics';
 import TeamSettings from './TeamSettings';
@@ -467,10 +470,10 @@ function App() {
     const workspaceId = workspace!.id, userId = state!.user.id;
     await run(async () => { await api(`/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`, 'DELETE'); window.location.reload(); });
   }
-  if (!session) return <AppStateScreen state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading Campaign…'}/>;
+  if (!session) return <AppStateScreen surface="card" state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading Campaign…'}/>;
   if (inviteToken && !(inviteSignIn && !session.user)) return <AcceptInvitation key={inviteToken + ':' + (session.user?.id || '')} token={inviteToken} signedInEmail={session.user?.email} request={api} onAccepted={() => { window.location.assign('/'); }} onSignIn={() => { setInviteSignIn(true); if (session.user) run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); }); }}/>;
   if (!session.user) return <Auth session={session} inviteToken={inviteToken} error={error} busy={busy} onSubmit={async values => { await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
-  if (!state) return <AppStateScreen state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading your campaigns…'} onRetry={error ? () => run(() => reload()) : undefined}/>;
+  if (!state) return <AppStateScreen surface="card" state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading your campaigns…'} onRetry={error ? () => run(() => reload()) : undefined}/>;
   if (!state.projectId || !project) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} label="Workspace access" email={state.user.email} subheading="No project access yet." help="Ask a workspace owner for an invitation, refresh after access is granted, or create your own workspace." error={error || undefined} busy={busy} onSubmit={({ name }) => createWorkspace(name)} onRefresh={() => run(() => reload(''))} signOut={{ onClick: () => run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); setState(null); }) }}><AccountSettings request={api} onChanged={() => { run(() => reload('')); }}/></WorkspaceOnboarding>;
   const campaigns = filtered(state.campaigns).filter(c => tab === 'all' || c.status === tab);
   const currencyCampaigns = state.campaigns.filter(c => (c.currency || 'AED') === currency);
@@ -583,7 +586,7 @@ function takeAuthError(location: Pick<Location, 'pathname' | 'search' | 'hash'>,
 let startupAuthError = takeAuthError(window.location, window.history);
 // Campaign adapter: the host-held setup token, sample opt-in and invitation continuation stay app-owned.
 function Auth({ session, inviteToken = '', error, busy, onSubmit }: { session: any; inviteToken?: string; error: string; busy: boolean; onSubmit: (data: any) => void }) {
-  const frame = { brand: <Brand product="Campaign" href="/"/>, label: 'Campaign sign in', eyebrow: 'YOUR WORKSPACE', error: error || startupAuthError || undefined, busy, busyLabel: 'Signing in…',
+  const frame = { surface: 'card' as const, brand: <Brand product="Campaign" href="/"/>, label: 'Campaign sign in', eyebrow: 'YOUR WORKSPACE', error: error || startupAuthError || undefined, busy, busyLabel: 'Signing in…',
     aside: <AuthStory label="Campaign overview" eyebrow="CAMPAIGN MANAGEMENT" title="Plan. Publish." emphasis="Measure." lead="Manage social posts, advertising and campaign assets." channels={[{ icon: 'send', label: 'Social' }, { icon: 'target', label: 'Advertising' }, { icon: 'billboard', label: 'Out of home' }]} footnote="ten98 Campaign"/> };
   if (session.setupRequired) return <FirstUserSetupFlow {...frame} title="Create owner account" description="Create the owner account for this app." submitLabel="Create owner account" tokenLength={{ min: 32, max: 512 }} tokenHint="Ask the person running this app for the setup token." passwordPolicy={{ minLength: 12, maxLength: 128, hint: 'Use at least 12 characters.' }} sampleOptIn={{ label: 'Include a sample project to explore', defaultChecked: true }} onSubmit={({ name, token, email, password, sample }) => onSubmit({ name, token, email, password, sample })}/>;
   const oidcHref = '/api/auth/oidc/start' + (inviteToken ? '?invite=' + encodeURIComponent(inviteToken) : '');
