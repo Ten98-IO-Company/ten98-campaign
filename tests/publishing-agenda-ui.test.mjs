@@ -6,12 +6,13 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
 
 const source = await readFile(new URL('../src/PublishingAgenda.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace('export default ', ''), 'PublishingAgenda.tsx', { jsx: { runtime: 'classic' } });
 const { PublishingAgenda } = ui;
-const Agenda = new Function('React', ...Object.keys(ui), code + '; return CampaignPublishingAgenda;')(React, ...Object.values(ui));
+const Agenda = new Function('React', 'PLATFORM_RULES', ...Object.keys(ui), code + '; return CampaignPublishingAgenda;')(React, PLATFORM_RULES, ...Object.values(ui));
 const appSource = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
 const overlay = new Function(stripTypeScriptTypes(appSource.match(/^function calendarOverlayEvents\([^\r\n]+\}$/m)[0]) + '; return calendarOverlayEvents;')();
 const postLabel = post => post.content || 'Media post';
@@ -44,8 +45,8 @@ test('the real expanded schedules retain account captions, timezone instants, or
     assert.equal(shared.type, PublishingAgenda);
     assert.equal(shared.props.timezoneLabel, 'America/New_York');
     assert.deepEqual(entries.map(entry => [entry.id, entry.title, entry.dateTime, entry.details]), [
-      ['post:post:first', 'Shared caption', '2026-11-01T05:30:00Z', 'facebook · First account'],
-      ['post:post:second', 'Second caption', '2026-11-01T10:30:00+04:00', 'facebook · Second account'],
+      ['post:post:first', 'Shared caption', '2026-11-01T05:30:00Z', 'Facebook · First account'],
+      ['post:post:second', 'Second caption', '2026-11-01T10:30:00+04:00', 'Facebook · Second account'],
     ]);
     assert.match(entries[0].when, /Nov 1, 01:30 AM EDT/);
     assert.match(entries[1].when, /Nov 1, 01:30 AM EST/);

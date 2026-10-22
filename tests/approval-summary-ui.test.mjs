@@ -6,6 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { approvalGate as gate, readableApprovalSummary } from '../src/approval-status.ts';
 
 const app = (await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
@@ -50,11 +51,11 @@ test('the sidebar, post cards and agenda consume the loaded summary without thei
 test('agenda list and month grid entries name the approval status only when it is supplied', async () => {
   const source = await readFile(new URL('../src/PublishingAgenda.tsx', import.meta.url), 'utf8');
   const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace('export default ', ''), 'PublishingAgenda.tsx', { jsx: { runtime: 'classic' } });
-  const Agenda = new Function('React', ...Object.keys(ui), code + '; return CampaignPublishingAgenda;')(React, ...Object.values(ui));
+  const Agenda = new Function('React', 'PLATFORM_RULES', ...Object.keys(ui), code + '; return CampaignPublishingAgenda;')(React, PLATFORM_RULES, ...Object.values(ui));
   const month = new Date(2026, 10, 1), post = { id: 'post', status: 'scheduled', content: 'Launch' };
   const props = { posts: [{ id: 'post', post, content: 'Launch', scheduledAt: new Date(2026, 10, 3, 9).toISOString() }], googleEvents: [], month, canWrite: true, postLabel: row => row.content, onSelect() {} };
   const list = renderToStaticMarkup(React.createElement(Agenda, { ...props, postApprovals: { post: 'Changed since approval' } }));
-  assert.match(list, /scheduled · Changed since approval/);
+  assert.match(list, /Scheduled · Changed since approval/);
   const grid = renderToStaticMarkup(React.createElement(Agenda, { ...props, view: 'month', onMonthChange() {}, postApprovals: { post: 'Awaiting approval' } }));
   assert.match(grid, /Launch · Awaiting approval/);
   assert.doesNotMatch(renderToStaticMarkup(React.createElement(Agenda, props)), /approval/i, 'Without required approval nothing extra is shown.');
