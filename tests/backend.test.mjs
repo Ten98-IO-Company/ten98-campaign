@@ -17,7 +17,8 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
   let ownerCookie, viewerCookie;
   const request = async (path, { method = 'GET', body, cookie = ownerCookie, headers = {} } = {}) => {
     const response = await fetch(base + path, { method, headers: { ...(method !== 'GET' ? { Origin: origin } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers }, ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'manual' });
-    return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
+    const text = await response.text();
+    return { status: response.status, data: response.headers.get('content-type')?.includes('json') ? JSON.parse(text) : text, location: response.headers.get('location'), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   };
   try {
     assert.equal((await request('/api/session')).data.setupRequired, true);
@@ -97,14 +98,14 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request(`/api/projects/${projectId}`, { method: 'PATCH', body: { zernioProfileId: 'still-unavailable' }, cookie: viewerCookie })).status, 404);
     const digest = value => createHmac('sha256', app.config.sessionSecret).update(value).digest('hex');
     await app.sql.run('INSERT INTO oidc_flows VALUES(?,?,?,?,?)', digest('test-state'), digest('test-browser'), 'verifier', 'nonce', Date.now() + 60000);
-    assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=wrong-browser' })).status, 400);
+    assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=wrong-browser' })).location, origin + '/?auth_error=OIDC_SIGN_IN_FAILED');
     assert.equal((await app.sql.get('SELECT count(*) AS count FROM oidc_flows')).count, 1);
     await app.sql.run('UPDATE oidc_flows SET expires_at=0');
-    assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).status, 400);
+    assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).location, origin + '/?auth_error=OIDC_SIGN_IN_FAILED');
     await app.sql.run('UPDATE oidc_flows SET expires_at=?', Date.now() + 60000);
-    assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).status, 400);
+    assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).location, origin + '/?auth_error=OIDC_SIGN_IN_FAILED');
     assert.equal((await app.sql.get('SELECT count(*) AS count FROM oidc_flows')).count, 0);
-    assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).status, 400);
+    assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).location, origin + '/?auth_error=OIDC_SIGN_IN_FAILED');
     await app.sql.run('UPDATE sessions SET expires_at=0');
     assert.equal((await request('/api/state')).status, 401);
     for (let i = 0; i < 10; i++) await request('/api/auth/login', { method: 'POST', body: { email: 'absent@example.com', password: 'bad' } });
