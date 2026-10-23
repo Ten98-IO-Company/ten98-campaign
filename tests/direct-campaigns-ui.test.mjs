@@ -320,14 +320,13 @@ test('a send refused for EMAIL_PROVIDER_REQUIRED shows the provider choice, othe
   assert.deepEqual(await run(new Error('')), ['This action could not be completed.']);
 });
 
-test('Save and check audience validates the clicked button’s form, saves the draft, then previews the audience', async () => {
+test('Save and check audience validates the form through its ref, saves the draft, then previews the audience', async () => {
   const saveDraft = section('async function saveDraft(', '  async function save(');
   async function run(valid = true) {
     const requests = [], notices = [], previews = [], reported = [];
-    const context = { readOnly: false, editable: true, draft: blankDraft, audienceMode: 'all', editingId: 'campaign-1', path: '/projects/a/direct', version: { current: 1 }, campaignBody, selectedTemplate: null, templateRestriction, action: async (_, perform) => perform(1), acceptCampaign() {}, setEditingId() {}, setNotice: value => notices.push(value), setError() {}, setPreview: value => previews.push(value), requester: { current: async (path, method, body) => { requests.push([path, method, body]); return path.endsWith('/preview') ? { previewToken: 'review', audience: { eligible: 2 } } : { campaign: { id: 'campaign-1', status: 'draft' } }; } } };
+    const context = { formRef: { current: { reportValidity: () => { reported.push(true); return valid; } } }, readOnly: false, editable: true, draft: blankDraft, audienceMode: 'all', editingId: 'campaign-1', path: '/projects/a/direct', version: { current: 1 }, campaignBody, selectedTemplate: null, templateRestriction, action: async (_, perform) => perform(1), acceptCampaign() {}, setEditingId() {}, setNotice: value => notices.push(value), setError() {}, setPreview: value => previews.push(value), requester: { current: async (path, method, body) => { requests.push([path, method, body]); return path.endsWith('/preview') ? { previewToken: 'review', audience: { eligible: 2 } } : { campaign: { id: 'campaign-1', status: 'draft' } }; } } };
     context.saveDraft = compile(saveDraft, context);
-    // The ui Form replaces a consumer ref with its own, so the handler reads the form from the click.
-    await compile(section('async function checkAudience(', '  async function openCampaign('), context)({ currentTarget: { form: { reportValidity: () => { reported.push(true); return valid; } } } });
+    await compile(section('async function checkAudience(', '  async function openCampaign('), context)();
     return { requests, notices, previews, reported };
   }
   const checked = await run();
@@ -336,7 +335,8 @@ test('Save and check audience validates the clicked button’s form, saves the d
   assert.equal(checked.previews[0].result.previewToken, 'review'); assert.match(checked.notices.at(-1), /Audience and content checked/);
   const invalid = await run(false); assert.deepEqual(invalid.reported, [true]); assert.equal(invalid.requests.length, 0, 'An invalid form is not saved or previewed.');
   assert.match(source, /<Button variant="secondary" disabled=\{[^}]*\} onClick=\{checkAudience\}>Save and check audience<\/Button>/);
-  assert.doesNotMatch(source, /formRef/, 'No handler depends on a ref the ui Form overrides.');
+  assert.match(source, /formRef = useRef<HTMLFormElement>\(null\)/);
+  assert.match(source, /<Form ref=\{formRef\} onSubmit=\{\(_, event\) => save\(event\)\}>/, 'The ui Form forwards the consumer ref to the native form.');
 });
 
 test('the test send is disabled with a reason and an Open integrations action when the channel has no provider', async () => {
