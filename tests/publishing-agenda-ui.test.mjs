@@ -98,7 +98,7 @@ test('the month view groups posts and Google events by local day, counts the mon
   const originalTimezone = process.env.TZ;
   process.env.TZ = 'Asia/Dubai';
   try {
-    const scheduled = { id: 'scheduled', status: 'scheduled', content: 'Launch caption', scheduledAt: '2026-10-14T20:30:00Z' }, published = { id: 'published', status: 'published', content: 'Done', scheduledAt: '2026-10-02T08:00:00Z', accounts: ['a', 'b'] }, outside = { id: 'outside', status: 'scheduled', content: 'November', scheduledAt: '2026-11-01T08:00:00Z' };
+    const scheduled = { id: 'scheduled', status: 'scheduled', externalId: 'remote', content: 'Launch caption', scheduledAt: '2026-10-14T20:30:00Z' }, published = { id: 'published', status: 'published', content: 'Done', scheduledAt: '2026-10-02T08:00:00Z', accounts: ['a', 'b'] }, outside = { id: 'outside', status: 'scheduled', content: 'November', scheduledAt: '2026-11-01T08:00:00Z' };
     const allDay = { id: 'holiday', summary: 'Holiday', start: { date: '2026-09-30' }, end: { date: '2026-10-02' } }, timed = { id: 'meeting', summary: 'Review', start: { dateTime: '2026-10-20T06:00:00Z' }, end: { dateTime: '2026-10-20T07:00:00Z' } };
     const selected = [], months = [], views = [], created = [];
     const props = { posts: [scheduled, published, outside].flatMap(post => postScheduleEntries(post)), googleEvents: [allDay, timed], month: new Date(2026, 9, 1), canWrite: true, postLabel, onSelect: post => selected.push(post.id), onCreateDay: day => created.push(day), view: 'month', onViewChange: view => views.push(view), onMonthChange: month => months.push([month.getFullYear(), month.getMonth()]) };
@@ -106,16 +106,16 @@ test('the month view groups posts and Google events by local day, counts the mon
     assert.ok(grid, 'The month view renders the shared CalendarMonth.'); assert.equal(find(element, ofType(PublishingAgenda)), undefined);
     assert.deepEqual(grid.props.month, { year: 2026, month: 10 });
     assert.deepEqual([...grid.props.days.keys()].sort(), ['2026-10-01', '2026-10-02', '2026-10-15', '2026-10-20'], 'A 20:30 UTC post lands on the next Dubai day; the all-day event keeps its exclusive end.');
-    assert.deepEqual(grid.props.days.get('2026-10-15').map(entry => entry.label), ['Launch caption']);
+    assert.deepEqual(grid.props.days.get('2026-10-15').map(entry => entry.label), ['Launch caption · Scheduled'], 'Grid entries name their status (#124).');
     assert.equal(grid.props.days.get('2026-10-20')[0].onSelect, undefined, 'Google events are plain text in the grid.');
     grid.props.days.get('2026-10-15')[0].onSelect(); assert.deepEqual(selected, ['scheduled']);
     grid.props.onPrev(); grid.props.onNext(); assert.deepEqual(months, [[2026, 8], [2026, 10]]);
-    grid.props.onCreateDay('2026-10-09'); assert.deepEqual(created, ['2026-10-09']);
+    assert.equal(grid.props.onCreateDay, undefined, 'No per-day Create buttons (#124): a focused day creates with Enter or N.'); assert.deepEqual(created, []);
     const html = renderToStaticMarkup(element);
     assert.match(html, /<strong[^>]*>1<\/strong> scheduled/); assert.match(html, /<strong[^>]*>1<\/strong> published/, 'Two account copies of one post count once.'); assert.match(html, /<strong[^>]*>2<\/strong> Google events/);
     find(element, ofType(ui.SegmentedControl)).props.onValueChange('list'); assert.deepEqual(views, ['list']);
     const readOnly = find(Agenda({ ...props, canWrite: false }), ofType(ui.CalendarMonth));
-    assert.equal(readOnly.props.onCreateDay, undefined); assert.match(String(readOnly.props.createDisabledReason), /Read only/);
+    assert.equal(readOnly.props.onCreateDay, undefined); assert.equal(readOnly.props.createDisabledReason, undefined); assert.match(renderToStaticMarkup(Agenda({ ...props, canWrite: false })), /Read only/);
   } finally { if (originalTimezone === undefined) delete process.env.TZ; else process.env.TZ = originalTimezone; }
 });
 
