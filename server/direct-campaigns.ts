@@ -44,9 +44,12 @@ function validate(raw: any) {
   if (data.channel === 'email' && (!data.subject || !data.text)) fail(400, 'INVALID_CAMPAIGN', 'Email needs a subject and plain text content.');
   if (/[\r\n]/.test(data.subject)) fail(400, 'INVALID_CAMPAIGN', 'Email subjects must fit on one line.');
   if (data.channel === 'sms' && (!data.text || data.text.length > 1500)) fail(400, 'INVALID_CAMPAIGN', 'SMS needs message text of at most 1,500 characters.');
-  if (data.channel === 'whatsapp' && (!data.accountId || !data.templateName || !data.templateLanguage)) fail(400, 'INVALID_CAMPAIGN', 'Choose a WhatsApp account, approved template and language.');
   for (const value of [data.subject, data.text, data.html]) if (/\{\{.*?\}\}/.test(value.replace(/\{\{(name|email|phone|company)\}\}/g, ''))) fail(400, 'INVALID_PERSONALIZATION', 'Supported personalization fields are name, email, phone and company.');
   return data;
+}
+// A WhatsApp draft saves before its account and template are chosen (#136); preview and send need all three.
+function requireWhatsAppTemplate(campaign: any) {
+  if (campaign.channel === 'whatsapp' && (!campaign.accountId || !campaign.templateName || !campaign.templateLanguage)) fail(400, 'INVALID_CAMPAIGN', 'Choose a WhatsApp account, approved template and language.');
 }
 function exclusion(contact: any, channel: string) {
   if (!contact) return 'Contact no longer exists';
@@ -296,7 +299,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       send(200, { campaign: await decorate(saved) }); return true;
     }
     if (method !== 'POST') return false;
-    if (action === 'preview') { if (campaign.channel === 'whatsapp') { const result = await listWhatsAppTemplates({ env: { ...env }, project, accountId: campaign.accountId, assertMapping: () => context.assertProjectMapping(project.zernioProfileId) }), approved = result.templates.find((template: any) => template.name === campaign.templateName && template.language === campaign.templateLanguage); if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template.'); validateWhatsAppTemplate(campaign, approved); } send(200, await preview(campaign)); return true; }
+    if (action === 'preview') { requireWhatsAppTemplate(campaign); if (campaign.channel === 'whatsapp') { const result = await listWhatsAppTemplates({ env: { ...env }, project, accountId: campaign.accountId, assertMapping: () => context.assertProjectMapping(project.zernioProfileId) }), approved = result.templates.find((template: any) => template.name === campaign.templateName && template.language === campaign.templateLanguage); if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template.'); validateWhatsAppTemplate(campaign, approved); } send(200, await preview(campaign)); return true; }
     // A test send renders the draft for one recipient: the signed-in user's own email address, or one project contact with
     // recorded SMS consent. It creates no delivery and leaves the draft unchanged; its receipt keeps a retried key from
     // sending twice, and a project gets 10 per hour.
@@ -321,6 +324,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     }
     if (['send', 'schedule'].includes(action)) {
       if (campaign.status !== 'draft') { send(200, { campaign: await decorate(campaign), deliveries: await deliveries(id) }); return true; }
+      requireWhatsAppTemplate(campaign);
       if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Review the audience and confirm provider charges before sending.');
       if (campaign.channel === 'email' && body.transactionalConfirmed !== true) fail(400, 'TRANSACTIONAL_CONFIRMATION_REQUIRED', 'Confirm this message is transactional and contains no marketing content.');
       if (campaign.channel === 'email') requireEmailProvider(env);

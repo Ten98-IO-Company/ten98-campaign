@@ -232,6 +232,24 @@ test('Cloudflare temporary suppressions expire without withdrawing consent, and 
   } finally { await f.close(); }
 });
 
+// ten98-campaign#136: a WhatsApp draft saves before an account or template is chosen; preview and send require them.
+test('a WhatsApp draft saves without an account or template, and preview and send ask for them', pg, async t => {
+  const f = await fixture(t);
+  try {
+    await f.person();
+    const created = await f.request(f.path + '/campaigns', 'POST', { name: 'WhatsApp order update', channel: 'whatsapp' });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const id = created.data.campaign.id;
+    assert.equal((await f.request(f.path + `/campaigns/${id}`, 'PATCH', { name: 'WhatsApp order update', channel: 'whatsapp', contactIds: [] })).status, 200, 'Editing the draft still saves.');
+    for (const action of ['preview', 'send']) {
+      const result = await f.request(f.path + `/campaigns/${id}/${action}`, 'POST', { confirmed: true });
+      assert.deepEqual([result.status, result.data.error?.code], [400, 'INVALID_CAMPAIGN'], `${action}: ${JSON.stringify(result.data)}`);
+      assert.match(result.data.error.message, /Choose a WhatsApp account, approved template and language/);
+    }
+    assert.equal(f.calls.some(call => call.url.includes('/whatsapp/')), false, 'Nothing reaches the provider for an incomplete draft.');
+  } finally { await f.close(); }
+});
+
 test('direct schedules reject normalized dates and invalid clock times without queuing recipients', pg, async t => {
   const f = await fixture(t);
   try {
