@@ -30,11 +30,17 @@ function approvalsModule(states = {}) {
   const helpers = { adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits, reviewKeyAction: () => null, PostVariantPreview: () => null, PLATFORM_RULES };
   return new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(helpers), ...ui.map(([name]) => name), approvalsCode + '; return { ContentApprovals, AdSpendReviews };')(React, () => {}, value => ({ current: value }), useState, ...Object.values(helpers), ...ui.map(([, value]) => value));
 }
+const { code: policyCode } = await transformWithOxc((await read('ApprovalPolicy.tsx')).replace(/^import .*;\n/gm, '').replace('export default function', 'function'), 'ApprovalPolicy.tsx', { jsx: { runtime: 'classic' } });
+function policyModule(states = {}) {
+  let index = 0;
+  const useState = initial => { const current = index++; return [Object.hasOwn(states, current) ? states[current] : initial, () => {}]; };
+  return new Function('React', 'useEffect', 'useState', ...ui.map(([name]) => name), policyCode + '; return { ApprovalPolicy };')(React, () => {}, useState, ...ui.map(([, value]) => value));
+}
 
-test('the ad spend switch sits beside the post approval switch and posts only its own flag', async () => {
+test('in Settings the ad spend switch sits beside the post approval switch and posts only its own flag', async () => {
   for (const [role, shown] of [['owner', true], ['admin', true], ['editor', false], ['viewer', false]]) {
     const calls = [], request = async (...args) => { calls.push(args); return { requireApproval: true, requireAdApproval: true }; };
-    const tree = approvalsModule({ 0: { requireApproval: true, requireAdApproval: false, posts: [] } }).ContentApprovals({ projectId: 'project /1', role, request, onChanged: async () => {} });
+    const tree = policyModule({ 0: { requireApproval: true, requireAdApproval: false } }).ApprovalPolicy({ projectId: 'project /1', role, request, onChanged: async () => {} });
     const switches = nodes(tree).filter(node => typeof node.props?.onCheckedChange === 'function' && typeof node.props.label === 'string');
     const spend = switches.find(node => node.props.label === 'Require approval before activating ads or raising budgets');
     assert.equal(Boolean(spend), shown, role); if (!shown) continue;
@@ -42,11 +48,21 @@ test('the ad spend switch sits beside the post approval switch and posts only it
     assert.equal(spend.props.checked, false); assert.equal(spend.props.disabled, false);
     spend.props.onCheckedChange(true); await tick();
     assert.deepEqual(calls, [['/projects/project%20%2F1/approvals/policy', 'POST', { requireAdApproval: true }]], 'Only the changed flag is sent; the post setting keeps its stored value.');
-    assert.match(html(tree.props.children[0]), /Ad spend approval is <strong[^>]*>optional<\/strong>/);
+    assert.match(html(tree), /Ad spend approval is <strong[^>]*>optional<\/strong>/);
   }
-  const busy = approvalsModule({ 0: { requireApproval: false, requireAdApproval: true, posts: [] }, 1: 'policy' }).ContentApprovals({ projectId: 'p', role: 'owner', request: async () => assert.fail('A busy page sends nothing.') });
+  const busy = policyModule({ 0: { requireApproval: false, requireAdApproval: true }, 1: 'policy' }).ApprovalPolicy({ projectId: 'p', role: 'owner', request: async () => assert.fail('A busy page sends nothing.') });
   const locked = nodes(busy).find(node => node.props.label === 'Require approval before activating ads or raising budgets');
   assert.equal(locked.props.checked, true); assert.equal(locked.props.disabled, true, 'The switch shares the page busy lock.');
+});
+
+test('the review queue shows the policy read-only and links owners and administrators to Settings', () => {
+  for (const [role, linked] of [['owner', true], ['admin', true], ['editor', false], ['viewer', false]]) {
+    const opened = [], tree = approvalsModule({ 0: { requireApproval: true, requireAdApproval: false, posts: [] } }).ContentApprovals({ projectId: 'p', role, request: async () => assert.fail('Rendering sends nothing.'), onOpenSettings: () => opened.push(role) });
+    assert.equal(nodes(tree).filter(node => typeof node.props?.onCheckedChange === 'function').length, 0, 'No policy switch on the queue.');
+    assert.match(html(tree.props.children[0]), /Publishing approval is <strong[^>]*>required<\/strong>/);
+    const link = nodes(tree).find(node => node.type === designSystem.Button && text(node.props.children) === 'Change approval settings');
+    assert.equal(Boolean(link), linked, role); if (link) { link.props.onClick(); assert.deepEqual(opened, [role]); }
+  }
 });
 
 const review = (extra = {}) => ({ id: 'spend-review', status: 'pending', kind: 'ad_spend', consumed: false, requestedBy: { id: 'editor', name: 'Casey Editor' }, requestedAt: '2030-01-01T09:00:00.000Z', reviewedBy: null, reviewedAt: null, note: null, selfApproved: false, snapshot: { subjectId: 'spend-set', platform: 'facebook', action: 'ads/adset-budget', amount: 2500, currency: 'AED', currentAmount: 2000, activates: false }, ...extra });
@@ -147,9 +163,9 @@ test('an OOH booking held back by ad spend approval explains itself, and a missi
 });
 
 test('changing the ad spend setting is confirmed first, and an expired approval reads as needing re-approval', async () => {
-  const source = await read('ContentApprovals.tsx');
-  assert.match(source, /<AdSpendPolicySwitch label="Require approval before activating ads or raising budgets"/);
-  const wrapper = source.slice(source.indexOf('function AdSpendPolicySwitch('), source.indexOf('function AdSpendReviews('));
+  const source = await read('ContentApprovals.tsx'), policySource = await read('ApprovalPolicy.tsx');
+  assert.match(policySource, /<AdSpendPolicySwitch label="Require approval before activating ads or raising budgets"/);
+  const wrapper = policySource.slice(policySource.indexOf('function AdSpendPolicySwitch('), policySource.indexOf('export default function ApprovalPolicy('));
   assert.ok(wrapper.includes('const [confirm, dialog] = useConfirmDialog();')); assert.match(wrapper, /voids every unused ad spend approval and pending ad spend request/);
   assert.match(wrapper, /if \(await confirm\(\{[^]*?\}\)\) onCheckedChange\(next\);/, 'The page handler runs only after confirmation.');
   assert.ok(source.includes('}, [path, required]);'), 'The ad spend list reloads when the setting changes, so voided reviews show as rejected.');
