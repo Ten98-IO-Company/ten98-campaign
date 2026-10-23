@@ -11,7 +11,7 @@ type Row = Record<string, any>;
 const source = await readFile(new URL('../src/OfflineActivations.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, ''), 'OfflineActivations.tsx', { jsx: { runtime: 'classic' } });
 const library = ui as unknown as Record<string, unknown>;
-const module = new Function('React', 'useEffect', 'useRef', 'useState', 'ACTIVATION_TYPES', 'ACTIVATION_TYPE_LABELS', 'CONSENT_CHANNELS', 'CONSENT_LABELS', 'consentPrompt', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink, leadBody, LeadCapture };')(React, useEffect, useRef, useState, ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentPrompt, ...Object.values(library));
+const module = new Function('React', 'useEffect', 'useRef', 'useState', 'ACTIVATION_TYPES', 'ACTIVATION_TYPE_LABELS', 'CONSENT_CHANNELS', 'CONSENT_LABELS', 'consentPrompt', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink, leadBody, LeadCapture, rollUp, ResultsSummary };')(React, useEffect, useRef, useState, ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentPrompt, ...Object.values(library));
 const html = (props: Row) => renderToStaticMarkup(React.createElement(module.OfflineActivations, { projectId: 'p1', brand: 'Brand launch', campaigns: [], activations: [], request: async () => ({}), onChanged() {}, ...props }));
 const campaigns = [{ id: 'c1', name: 'Winter field push', currency: 'GBP' }, { id: 'c2', name: 'Spring sampling', currency: 'AED' }];
 const activation = (id: string, startAt: string, extra: Row = {}) => ({ id, name: id, type: 'roadshow', campaignId: 'c1', status: 'planned', startAt, endAt: new Date(Date.parse(startAt) + 8 * 3600000).toISOString(), location: 'City Centre Mall', budget: 1200, spent: 300, reached: 0, materials: [], teamIds: [], ...extra });
@@ -60,6 +60,18 @@ test('lead capture shows the consent wording first, starts unticked, and sends o
   assert.ok(markup.indexOf('Ask first') < markup.indexOf('Mobile number'), 'Consent comes before personal details.');
   assert.match(html({ campaigns, activations: [activation('First stop', '2026-11-07T10:00:00Z'), activation('Called off', '2026-11-08T10:00:00Z', { status: 'cancelled' })] }), /aria-label="Capture leads at First stop"/);
   assert.doesNotMatch(html({ campaigns, activations: [activation('Called off', '2026-11-08T10:00:00Z', { status: 'cancelled' })] }), /Capture leads/, 'Cancelled activations take no leads.');
+});
+
+test('results roll up reached, leads, visits, spend and cost per lead, and never add up mixed currencies', () => {
+  const rows = [activation('A', '2026-11-07T10:00:00Z', { reached: 300, spent: 400, budget: 1000 }), activation('B', '2026-11-08T10:00:00Z', { reached: 50, spent: 200, budget: 500 })];
+  const results = { A: { leads: 10, clicks: 40, qrScans: 12 }, B: { leads: 2, clicks: 0, qrScans: 3 } };
+  assert.deepEqual(module.rollUp(rows, results), { reached: 350, leads: 12, visits: 55, budget: 1500, spent: 600, costPerLead: 50 });
+  assert.equal(module.rollUp(rows, {}).costPerLead, null);
+  const markup = renderToStaticMarkup(React.createElement(module.ResultsSummary, { rows, results, currency: 'GBP' }));
+  for (const text of ['350', '12', '55', '£600', 'of £1,500 planned', '£50']) assert.ok(markup.includes(text), text);
+  const mixed = renderToStaticMarkup(React.createElement(module.ResultsSummary, { rows, results, currency: null }));
+  assert.match(mixed, /Choose one campaign/); assert.doesNotMatch(mixed, /£|AED/);
+  assert.match(renderToStaticMarkup(React.createElement(module.ResultsSummary, { rows, results: null, currency: 'GBP' })), /Loading/, 'Leads are never shown as 0 while loading.');
 });
 
 test('the page is built from @ten98/ui only', () => {
