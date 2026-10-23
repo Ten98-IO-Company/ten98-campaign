@@ -63,26 +63,35 @@ async function lockedRole(tx: Executor, workspaceId: string, userId: string): Pr
 
 export async function handleInvitations(context: ProviderRecord) {
   const { req, url, body = {}, user, auth, config, send, workspaceAccess, establish } = context, db: Database = context.db;
-  const publicRoute = url.pathname.match(/^\/api\/invitations\/([^/]+)$/), teamRoute = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/invitations(?:\/([^/]+))?$/);
-  if (!publicRoute && !teamRoute) return false;
-  if (publicRoute) {
-    if (!['GET', 'POST'].includes(req.method)) fail(405, 'This invitation action is unavailable.');
-    await auth.limit('invitation:' + req.method + ':' + (auth.clientAddress(req) || 'local'), req.method === 'GET' ? 120 : 30);
-    const token = publicRoute[1], invite = await find(db, token), existing = await account(db, invite.email), signedIn = user && existing && user.id === existing.id && user.email === invite.email;
-    if (req.method === 'GET') {
+  // Clients POST { token } to /inspect and /accept. The token-in-path GET/POST routes remain for clients from before that move.
+  const bodyAction = req.method === 'POST' ? url.pathname.match(/^\/api\/invitations\/(inspect|accept)$/)?.[1] : undefined;
+  const publicRoute = bodyAction ? null : url.pathname.match(/^\/api\/invitations\/([^/]+)$/), teamRoute = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/invitations(?:\/([^/]+))?$/);
+  if (!bodyAction && !publicRoute && !teamRoute) return false;
+  if (bodyAction || publicRoute) {
+    if (!bodyAction && !['GET', 'POST'].includes(req.method)) fail(405, 'This invitation action is unavailable.');
+    const inspect = bodyAction ? bodyAction === 'inspect' : req.method === 'GET';
+    await auth.limit('invitation:' + (inspect ? 'GET' : 'POST') + ':' + (auth.clientAddress(req) || 'local'), inspect ? 120 : 30);
+    let token = publicRoute ? publicRoute[1] : '', details: ProviderRecord = body;
+    if (bodyAction) {
+      object(body, inspect ? ['token'] : ['token', 'name', 'password']);
+      ({ token, ...details } = body);
+      if (typeof token !== 'string') fail(404, 'This invitation is unavailable.');
+    }
+    const invite = await find(db, token), existing = await account(db, invite.email), signedIn = user && existing && user.id === existing.id && user.email === invite.email;
+    if (inspect) {
       send(200, { invitation: { email: invite.email, role: invite.role, workspaceName: invite.workspace_name, expiresAt: new Date(invite.expires_at).toISOString() }, accountExists: Boolean(existing), requiresSignIn: Boolean(existing && !signedIn) });
       return true;
     }
-    object(body, ['name', 'password']);
+    object(details, ['name', 'password']);
     if (user && !signedIn) fail(403, `Sign out and sign in as ${invite.email} to accept this invitation.`);
     if (existing && !signedIn) fail(401, 'Sign in with the invited account before accepting this invitation.');
     let name: string | undefined, hash: string | undefined;
     if (!existing) {
       if (typeof establish !== 'function') fail(500, 'The invitation sign-in service is unavailable.');
-      if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 120 || /[\u0000-\u001f\u007f]/.test(body.name)) fail(400, 'Enter your name using at most 120 characters.');
-      if (typeof body.password !== 'string' || body.password.length < 12 || body.password.length > 128) fail(400, 'Use a password between 12 and 128 characters.');
-      name = body.name.trim(); hash = await hashPassword(body.password);
-    } else if (Object.keys(body).length) fail(400, 'Accept with your existing account. Invitation links cannot change your name or password.');
+      if (typeof details.name !== 'string' || !details.name.trim() || details.name.length > 120 || /[\u0000-\u001f\u007f]/.test(details.name)) fail(400, 'Enter your name using at most 120 characters.');
+      if (typeof details.password !== 'string' || details.password.length < 12 || details.password.length > 128) fail(400, 'Use a password between 12 and 128 characters.');
+      name = details.name.trim(); hash = await hashPassword(details.password);
+    } else if (Object.keys(details).length) fail(400, 'Accept with your existing account. Invitation links cannot change your name or password.');
     // Lock order: workspace → invitation → email; the invitation row lock makes acceptance single use.
     const accepted = await db.transaction(async tx => {
       const current = await lockInvitation(tx, token, invite.workspace_id);
@@ -124,7 +133,7 @@ export async function handleInvitations(context: ProviderRecord) {
       await tx.execute(sql`INSERT INTO workspace_invitations (id, workspace_id, email, role, inviter_id, token_hash, created_at, expires_at) VALUES (${id}, ${workspaceId}, ${mail}, ${requested}, ${user.id}, ${digest(token)}, ${now}, ${expires})`);
       return publicInvitation({ id, email: mail, role: requested, workspace_name: (await first(tx.execute(sql`SELECT name FROM workspaces WHERE id = ${workspaceId}`)))!.name, created_at: now, expires_at: expires });
     });
-    send(201, { invitation: invite, url: `${config.appUrl}/?invite=${token}` }); return true;
+    send(201, { invitation: invite, url: `${config.appUrl}/#invite=${token}` }); return true;
   }
   if (req.method === 'DELETE' && teamRoute[2]) {
     await db.transaction(async tx => {

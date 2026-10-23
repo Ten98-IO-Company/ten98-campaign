@@ -69,7 +69,7 @@ async function pendingInvitation(t) {
   await pool.query("UPDATE memberships SET role = 'admin' WHERE user_id = 'second'");
   const created = await request(`/workspaces/${workspaceId}/invitations`, { method: 'POST', body: { email: 'invitee@example.test', role: 'editor' }, cookie: second.cookie });
   assert.equal(created.status, 201);
-  const token = new URL(created.data.url).searchParams.get('invite'), id = created.data.invitation.id;
+  const token = new URL(created.data.url).hash.slice('#invite='.length), id = created.data.invitation.id;
   const member = (target, role) => request(`/workspaces/${workspaceId}/members/${target}`, role ? { method: 'PATCH', body: { role }, cookie: first.cookie } : { method: 'DELETE', cookie: first.cookie });
   const accept = () => request('/invitations/' + token, { method: 'POST', body: { name: 'Invitee', password: 'invitee fixture password' } });
   const invitation = async () => (await pool.query('SELECT accepted_at, revoked_at FROM workspace_invitations WHERE id = $1', [id])).rows[0];

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, verify } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { handleIntegration } from '../server/integrations.ts';
 import { providerRequest, zernioClient, scopedAccounts, adAccounts, remotePostModel, remoteRestrictionPayload, savePostSnapshot, operation } from '../server/provider-core.ts';
 import { createStore } from '../server/database.ts';
@@ -243,14 +244,15 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
     assert.equal(ambiguousSends, 1, 'A fresh action key must not bypass an uncertain publication.');
 
     const racePost = await store.create(project.id, 'posts', { content: 'Submit exactly once', platforms: ['instagram'], assetId: creative.id });
-    let reads = 0; let raceSends = 0; let releaseSecond;
-    const secondReady = new Promise(resolve => { releaseSecond = resolve; });
+    let raceSends = 0; let releaseSecond;
+    const secondReady = new Promise(resolve => { releaseSecond = resolve; }), submission = new AsyncLocalStorage();
+    // Hold the second submission's scope read, whichever request reaches its read first, until the first has published.
     provider = async url => {
-      if (url.pathname.endsWith('/accounts')) { if (++reads === 2) await secondReady; return { accounts: [account] }; }
+      if (url.pathname.endsWith('/accounts')) { if (submission.getStore() === 'second') await secondReady; return { accounts: [account] }; }
       raceSends++; return { post: { _id: 'race-remote', status: 'publishing', platforms: [{ accountId: 'account-a' }] } };
     };
     const firstSubmission = invoke('social/publish', { method: 'POST', body: { postId: racePost.id }, key: 'race-first-01' });
-    const secondSubmission = invoke('social/publish', { method: 'POST', body: { postId: racePost.id }, key: 'race-second-01' });
+    const secondSubmission = submission.run('second', () => invoke('social/publish', { method: 'POST', body: { postId: racePost.id }, key: 'race-second-01' }));
     assert.equal((await firstSubmission).status, 200); releaseSecond();
     assert.equal((await secondSubmission).data.error.code, 'POST_ALREADY_SUBMITTED');
     assert.equal(raceSends, 1, 'Re-read the post after asynchronous scope checks to prevent stale-snapshot duplicate publication.');

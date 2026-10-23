@@ -49,9 +49,14 @@ test('OOH shared reviews render and submit only their exact booking while native
   assert.doesNotMatch(renderToStaticMarkup(render({ mode: 'connection', role: 'viewer', isOperator: true })), /Approve project inventory/);
   assert.equal((html.match(/class="t98-card t98-review-summary"/g) || []).length, 2);
   assert.match(html, /Cancellation can incur charges and does not guarantee a refund/);
-  const selection = nodes.find(node => node.type === Checkbox && node.props['aria-label'] === 'Select Unrelated selected screen');
-  assert.equal(selection.props.checked, true); assert.equal(selection.props.disabled, false);
-  selection.props.onChange({ target: { checked: false } }); assert.deepEqual(states[3], []);
+  // Inventory selection is the shared DataTable's controlled selection over the numeric screen IDs; no interim Checkbox column.
+  const table = nodes.find(node => node.type === DataTable && node.props.ariaLabel === 'Approved Broadsign inventory');
+  assert.equal(table.props.selectable, true); assert.deepEqual(table.props.selectedKeys, ['303']);
+  assert.deepEqual(table.props.columns.map(column => column.key), ['screen', 'location', 'resolution']);
+  assert.equal(nodes.some(node => node.type === Checkbox && !node.props.required), false);
+  table.props.onSelectionChange([]); assert.deepEqual(states[3], []);
+  table.props.onSelectionChange(['303', '999']); assert.deepEqual(states[3], [303], 'Keys map back to screen IDs, and unknown keys are dropped.');
+  table.props.onSelectionChange([]); assert.deepEqual(states[3], []);
   for (const [title, booking, endpoint] of [['Review paid booking', draft, 'submit'], ['Review cancellation request', live, 'cancel']]) {
     const form = nodes.find(node => isForm(node) && elements(node.props.children).some(child => child.type === ReviewSummary && child.props.title === title));
     const review = elements(form).find(node => node.type === ReviewSummary), rendered = renderToStaticMarkup(review);
@@ -71,9 +76,12 @@ test('OOH shared reviews render and submit only their exact booking while native
   assert.match(states[5], /Cancellation outcome uncertain/); assert.equal(states[6], '');
   states[4] = true; const busy = elements(render());
   assert.ok(busy.filter(isFieldset).slice(1).every(node => node.props.disabled));
+  busy.find(node => node.type === DataTable).props.onSelectionChange(['303']); assert.deepEqual(states[3], [], 'Selection does not change while an action runs.');
   const writes = calls.filter(call => call.method === 'POST').length;
   await busy.find(node => isForm(node) && elements(node).some(child => child.type === ReviewSummary)).props.onSubmit({ preventDefault() {} });
   assert.equal(calls.filter(call => call.method === 'POST').length, writes, 'The original action guard blocks a busy review handler.');
-  states[4] = false; assert.equal(elements(render({ role: 'viewer' })).filter(node => node.type === ReviewSummary).length, 0);
+  states[4] = false; const viewer = elements(render({ role: 'viewer' }));
+  assert.equal(viewer.filter(node => node.type === ReviewSummary).length, 0);
+  assert.equal(viewer.find(node => node.type === DataTable).props.selectable, false, 'A viewer cannot select screens.');
   states[8] = true; assert.equal(elements(render()).find(isFieldset).props.disabled, true);
 });

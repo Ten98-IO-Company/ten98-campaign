@@ -55,8 +55,8 @@ test('browser-pass copy: connection empty states, disabled-control reasons, resu
   assert.match(appSource, /<DataTable ariaLabel="Campaign results"[^\r\n]*?emptyTitle=\{state\.campaigns\.length \? 'No campaigns match this search' : 'No campaign results yet'\} emptyDescription=/);
   assert.match(appSource, /\{canWrite && p\.source !== 'broadsign' \? 'Edit booking' : 'View booking'\}/, 'The OOH card names the editor it opens.');
   assert.match(appSource, /providerManaged \|\| modal\.type === 'ad-details' \|\| !canWrite \? 'View '/, 'Read-only editors are titled View.');
-  // Select has no width option, so an inner row sizes the reporting currency select to its content.
-  assert.match(appSource, /<Inline><UiSelect aria-label="Reporting currency"[^\r\n]*?\/><\/Inline><\/Inline>/);
+  // The reporting currency select sizes to its options beside the summary instead of filling the row.
+  assert.match(appSource, /<\/Text><UiSelect width="auto" aria-label="Reporting currency"[^\r\n]*?\/><\/Inline>/);
 });
 
 test('dashboard counts daily-campaign spend without adding daily budgets to total allocations or inventing missing metrics', () => {

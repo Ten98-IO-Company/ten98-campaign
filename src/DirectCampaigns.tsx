@@ -50,7 +50,7 @@ const testSendErrors: Record<string, string> = {
 const testSendError = (failure: any) => (typeof failure?.code === 'string' && Object.hasOwn(testSendErrors, failure.code) ? testSendErrors[failure.code] : failure?.message) || 'The test could not be sent. Try again.';
 
 export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations }: Props) {
-  const path = `/projects/${encodeURIComponent(projectId)}/direct`, requester = useRef(request), version = useRef(0), csvRead = useRef(0), pending = useRef(false), actionVersion = useRef(0);
+  const path = `/projects/${encodeURIComponent(projectId)}/direct`, requester = useRef(request), version = useRef(0), csvRead = useRef(0), pending = useRef(false), actionVersion = useRef(0), formRef = useRef<HTMLFormElement>(null);
   requester.current = request;
   const [tab, setTab] = useState('campaigns'), [status, setStatus] = useState<any>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [contacts, setContacts] = useState<Row[]>([]);
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [editingId, setEditingId] = useState(''), [draft, setDraft] = useState<Draft>(blank), [audienceMode, setAudienceMode] = useState('all');
@@ -116,9 +116,8 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
     acceptCampaign(result.campaign, generation); setEditingId(result.campaign.id); setNotice('Campaign draft saved. No messages have been sent.'); return result.campaign as Row;
   }
   async function save(event: React.FormEvent<HTMLFormElement>) { event.preventDefault(); await action('Saving draft', async generation => { await saveDraft(generation); }); }
-  // The library Form keeps its own ref on <form>, so the clicked button supplies the form for native validity reporting.
-  async function checkAudience(event: React.MouseEvent<HTMLButtonElement>) {
-    if (!event.currentTarget.form?.reportValidity()) return;
+  async function checkAudience() {
+    if (!formRef.current?.reportValidity()) return;
     if (draft.channel === 'whatsapp' && (!selectedTemplate || templateRestriction(selectedTemplate))) { setError(selectedTemplate ? templateRestriction(selectedTemplate) : 'Load the approved template and check its values before reviewing the audience.'); return; }
     await action('Checking audience', async generation => {
       const campaign = await saveDraft(generation); if (!campaign || generation !== version.current) return;
@@ -235,7 +234,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
         <DataTable searchable={false} sortable={false} pagination={false} ariaLabel="Direct campaigns" rows={campaigns} rowKey={campaign => campaign.id} emptyState={<EmptyState title="No direct campaigns yet" description="Create a draft, choose eligible contacts, and check the audience before sending."/>} columns={[{ key: 'name', header: 'Campaign', rowHeader: true, render: campaign => <Text as="strong" weight="semibold">{campaign.name}</Text> }, { key: 'channel', header: 'Channel', render: campaign => labels[campaign.channel as Channel] || campaign.channel }, { key: 'status', header: 'Status', render: campaign => statusLabel(campaign.status) }, { key: 'scheduledAt', header: 'Planned time', render: campaign => when(campaign.scheduledAt) }]} rowActionsLabel="Actions" rowActions={campaign => <Inline gap={2}><Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openCampaign(campaign)}>{campaign.status === 'draft' && !readOnly ? 'Edit draft' : 'View campaign'}</Button>{onOpenReplies && ['sms', 'whatsapp'].includes(campaign.channel) && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openReplies(campaign)}>Open replies</Button>}</Inline>}/>
       </Card>
       {(!readOnly || editingId) && <Card as="section" title={current ? current.name : 'New direct campaign'} description={<>{current ? statusLabel(current.status) : 'Draft'}{current?.scheduledAt ? ` · ${when(current.scheduledAt)}` : ''}</>} actions={current && !readOnly && <Button variant="secondary" disabled={!!busy} onClick={() => { openDraft({ ...current, id: '', name: current.name + ' copy' }); setDetail(null); }}>Duplicate as draft</Button>}><Stack gap={6}>
-        <Form onSubmit={(_, event) => save(event)}><Stack as="fieldset" gap={4} disabled={!!busy || readOnly || !editable}>
+        <Form ref={formRef} onSubmit={(_, event) => save(event)}><Stack as="fieldset" gap={4} disabled={!!busy || readOnly || !editable}>
           <FormGrid><Field label="Campaign name" required><Input required maxLength={120} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })}/></Field><Field label="Channel"><Select value={draft.channel} onChange={event => setDraft({ ...draft, channel: event.target.value as Channel })}>{channels.map(channel => <Option value={channel} key={channel}>{labels[channel]}</Option>)}</Select></Field></FormGrid>
           {status && (draft.channel === 'email' && status.emailProvider === null ? <Alert tone="warning" variant="inline" actions={editable && !readOnly ? integrationsAction : undefined}>{emailProviderChoice} You can save drafts and contacts meanwhile.</Alert> : status.providers?.[draft.channel] ? <StatusLine tone="success">{draft.channel === 'email' && status.emailProvider ? `Email sends through ${emailProviderName(status.emailProvider)}.` : `${labels[draft.channel]} provider configured.`}</StatusLine> : <Alert tone="warning" variant="inline">{labels[draft.channel]} sending is not configured. You can save drafts and contacts while the provider is being set up.</Alert>)}
           {draft.channel === 'email' ? <>

@@ -49,7 +49,7 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request(`/api/projects/${projectId}/campaigns`, { method: 'POST', body: { name: 'Attack' }, cookie: viewerCookie })).status, 404);
     assert.equal((await request(`/api/workspaces/${workspaceId}/members`, { method: 'POST', body: { email: 'viewer@example.com', role: 'viewer' } })).status, 404, 'People join by invitation only.');
     const invited = await request(`/api/workspaces/${workspaceId}/invitations`, { method: 'POST', body: { email: 'viewer@example.com', role: 'viewer' } });
-    assert.equal((await request('/api/invitations/' + new URL(invited.data.url).searchParams.get('invite'), { method: 'POST', body: {}, cookie: viewerCookie })).status, 200);
+    assert.equal((await request('/api/invitations/' + new URL(invited.data.url).hash.slice('#invite='.length), { method: 'POST', body: {}, cookie: viewerCookie })).status, 200);
     assert.equal((await request(`/api/workspaces/${workspaceId}/members`)).data.members.length, 2);
     assert.equal((await request(`/api/workspaces/${workspaceId}/members`, { cookie: viewerCookie })).status, 403);
     assert.equal((await request(`/api/state?projectId=${projectId}`, { cookie: viewerCookie })).status, 200);

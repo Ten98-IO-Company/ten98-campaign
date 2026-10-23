@@ -14,7 +14,7 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     const response = await fetch(base + path, { method, headers: { ...(method !== 'GET' && originHeader ? { Origin: originHeader } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0], cookieHeader: response.headers.get('set-cookie') };
   }
-  const token = result => new URL(result.data.url).searchParams.get('invite');
+  const token = result => new URL(result.data.url).hash.slice('#invite='.length);
   try {
     const setup = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Workspace owner', email: 'collaboration-owner@example.test', password: ownerPassword, sample: false } });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
@@ -84,5 +84,35 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     assert.equal(JSON.stringify(list.data).includes(inviteToken), false); assert.equal(JSON.stringify(list.data).includes(token(existingInvitation)), false); assert.equal(JSON.stringify(list.data).includes('token_hash'), false);
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: newPassword }, cookie: null })).status, 401);
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: ownerPassword }, cookie: null })).status, 200);
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});
+
+test('HTTP invitation links use #invite=, and inspect, accept and invitation sign-in start take the token in a POST body', { skip: postgresSkip }, async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'ten98-invite-transport-')), origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir, env: {}, appUrl: origin });
+  await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); });
+  const base = `http://127.0.0.1:${app.server.address().port}`; let ownerCookie;
+  async function request(path, { method = 'GET', body, cookie = ownerCookie, originHeader = origin } = {}) {
+    const response = await fetch(base + path, { method, redirect: 'manual', headers: { ...(method !== 'GET' && originHeader ? { Origin: originHeader } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
+  }
+  try {
+    const setup = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Workspace owner', email: 'transport-owner@example.test', password: 'fixture owner personal password', sample: false } });
+    assert.equal(setup.status, 201); ownerCookie = setup.cookie;
+    const workspaceId = (await request('/api/state')).data.workspaces[0].id;
+    const created = await request(`/api/workspaces/${workspaceId}/invitations`, { method: 'POST', body: { email: 'transport@example.test', role: 'editor' } }), link = new URL(created.data.url);
+    assert.equal(created.status, 201); assert.equal(link.origin + link.pathname + link.search, origin + '/'); assert.match(link.hash, /^#invite=[A-Za-z0-9_-]{43}$/);
+    const token = link.hash.slice('#invite='.length);
+    assert.equal((await request('/api/invitations/inspect', { method: 'POST', body: { token }, cookie: null, originHeader: null })).status, 403, 'The body routes need the app origin like other POSTs.');
+    const inspected = await request('/api/invitations/inspect', { method: 'POST', body: { token }, cookie: null });
+    assert.equal(inspected.status, 200); assert.equal(inspected.data.invitation.email, 'transport@example.test');
+    assert.equal((await request('/api/invitations/inspect', { cookie: null })).status, 404, 'Inspection by GET needs the token in the path.');
+    // Invitation sign-in start answers with JSON (here: identity sign-in is not configured) instead of a redirect.
+    const started = await request('/api/auth/oidc/start', { method: 'POST', body: { token }, cookie: null });
+    assert.equal(started.status, 400); assert.equal(started.data.error, 'Identity sign-in is unavailable.');
+    assert.equal((await request('/api/auth/oidc/start', { method: 'POST', body: { token, returnTo: 'https://other.example.test' }, cookie: null })).status, 400);
+    assert.equal((await request('/api/auth/oidc/start', { method: 'POST', body: { token }, cookie: null, originHeader: 'https://other.example.test' })).status, 403);
+    const accepted = await request('/api/invitations/accept', { method: 'POST', body: { token, name: 'Transport colleague', password: 'transport colleague password' }, cookie: null });
+    assert.equal(accepted.status, 200); assert.equal(accepted.data.created, true); assert.equal(accepted.data.workspaceId, workspaceId); assert.ok(accepted.cookie);
+    assert.equal((await request('/api/invitations/inspect', { method: 'POST', body: { token }, cookie: null })).status, 410);
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
