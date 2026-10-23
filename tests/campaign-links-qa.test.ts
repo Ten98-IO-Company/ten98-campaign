@@ -3,6 +3,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import * as UI from '@ten98/ui';
 
 type Row = Record<string, unknown>;
 type Run = (generation: number) => Promise<void>;
@@ -33,4 +36,27 @@ test('#114 a destination that already has an active link says so, shows that lin
   }
   const created = await createWith([existing], { link: { id: 'new-link', name: 'Duplicate test' } });
   assert.deepEqual([created.selections, created.cleared], [['new-link'], 1]); assert.match(created.notices[0], /^Short link created\./);
+});
+
+function saveWith(allowedWebsiteOrigins: string, response: () => Row, changes: Row = {}) {
+  const calls: unknown[] = [], fieldErrors: string[] = [], formErrors: string[] = [], focused: string[] = [], focusOrigins = { current: false };
+  const save = compile(section('async function saveSettings(', '  async function loadAnalytics('), { readOnly: false, canManageSettings: true, canChangeDomain: false, settings: { shortBaseUrl: 'https://go.example.com' }, settingsForm: { shortBaseUrl: 'https://go.example.com', allowedWebsiteOrigins }, setOriginsError: (value: string) => { if (value) fieldErrors.push(value); }, originsRef: { current: { focus: () => focused.push('origins') } }, focusOrigins,
+    action: async (_label: string, work: Run) => { try { await work(1); } catch (failure) { formErrors.push((failure as Error).message); } }, requester: { current: async (...args: unknown[]) => { calls.push(args); return response(); } }, path, version: { current: 1 }, setSettings() {}, setSettingsForm() {}, setNotice() {}, ...changes });
+  return save(event).then(() => ({ calls: calls.length, fieldErrors, formErrors, focused, deferredFocus: focusOrigins.current }));
+}
+
+test('#113 a refused website origin shows at the origins field with focus, not as an off-screen page alert', async () => {
+  const refused = 'Use a public HTTPS domain without credentials or private addresses.', reject = (message: string, status = 400) => () => { throw Object.assign(new Error(message), { status }); };
+  assert.deepEqual(await saveWith('http://127.0.0.1:4101', reject(refused)), { calls: 1, fieldErrors: [refused], formErrors: [], focused: [], deferredFocus: true }, 'Focus moves to the field once the fieldset re-enables.');
+  assert.deepEqual(await saveWith('http://127.0.0.1:4101', reject(refused), { canChangeDomain: true }), { calls: 1, fieldErrors: [refused], formErrors: [], focused: [], deferredFocus: true }, 'An unchanged short address cannot be the refused value.');
+  const many = Array.from({ length: 11 }, (_, index) => `https://site${index}.example.com`).join('\n');
+  assert.deepEqual(await saveWith(many, () => assert.fail('Too many origins are never sent.')), { calls: 0, fieldErrors: ['Use at most 10 website origins.'], formErrors: [], focused: ['origins'], deferredFocus: false });
+  const domain = await saveWith('https://www.example.com', reject(refused), { canChangeDomain: true, settingsForm: { shortBaseUrl: 'https://10.0.0.1', allowedWebsiteOrigins: 'https://www.example.com' } });
+  assert.deepEqual([domain.fieldErrors, domain.formErrors], [[], [refused]], 'With a changed short address the refused value is ambiguous, so it stays form-level.');
+  const role = await saveWith('https://www.example.com', reject('Only workspace administrators can change tracking settings.', 403));
+  assert.deepEqual([role.fieldErrors, role.formErrors], [[], ['Only workspace administrators can change tracking settings.']]);
+  assert.match(source, /<Field label="Websites allowed to send analytics \(one origin per line\)" description="[^"]*public HTTPS[^"]*Local http:\/\/ and localhost sites cannot send analytics\.[^"]*" error=\{originsError \|\| undefined\}><Textarea ref=\{originsRef\}/);
+  assert.match(source, /useEffect\(\(\) => \{ if \(focusOrigins\.current && !busy\) \{ focusOrigins\.current = false; originsRef\.current\?\.focus\(\); \} \}, \[busy, originsError\]\);/);
+  const html = renderToStaticMarkup(React.createElement(UI.Field, { label: 'Websites allowed to send analytics (one origin per line)', description: 'Hint', error: refused }, React.createElement(UI.Textarea)));
+  assert.match(html, /<textarea[^>]*aria-invalid="true"/); assert.match(html, /role="alert"[^>]*>Use a public HTTPS domain/);
 });
