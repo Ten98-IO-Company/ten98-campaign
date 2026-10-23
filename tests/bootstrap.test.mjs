@@ -59,8 +59,7 @@ test('host proof gates setup, failed claims roll back, and competing claims cons
   } finally { await second.close(); await first.close(); await rm(dataDir, { recursive: true, force: true }); }
 });
 
-// The SQLite claimed-state backfill for pre-claim installations moves into the import (#25 step 4); a claimed
-// PostgreSQL installation must keep login working and never reopen setup.
+// A claimed installation must keep login working and never reopen setup.
 test('claimed installations preserve login, invent no operator history, and never reopen setup after account deletion', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-existing-')), password = 'existing installation password', { pool, db } = await testDatabase(t);
   await pool.query('INSERT INTO users VALUES ($1, $2, $3, $4)', ['existing', 'Existing owner', 'existing@example.test', await hashPassword(password)]);
