@@ -177,6 +177,8 @@ export function createWebhookService({ db, storeFor = createStore, contacts = cr
     if (!draining) draining = drain(options).finally(() => { draining = undefined; });
     return draining;
   }
+  // Cursor paging by `sequence > after` assumes one app instance: only this process's single-flight drain inserts updates,
+  // so sequences commit in order. Several instances would need a commit-ordered cursor (#35).
   async function updates(projectId: string, { accountId, after, limit = 100 }: { accountId?: any; after?: any; limit?: number } = {}) {
     if (!validId(accountId)) throw new HttpError(400, 'A valid account is required.');
     const project = await first(db.execute(sql`SELECT zernio_profile_id FROM projects WHERE id=${projectId}`)), profileId = project?.zernio_profile_id || '';

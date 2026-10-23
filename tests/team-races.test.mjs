@@ -159,3 +159,28 @@ test('project assignees list editors and above for editors, without email addres
   const listed = (await request(`/projects/${projectId}/assignees`, { cookie: editor })).data.members.map(member => member.id);
   assert.ok(!listed.includes('outsider') && !listed.includes('viewer'), JSON.stringify(listed));
 });
+
+// ten98-campaign#35: a project PATCH merges into the row as it is when the write runs, not as the request first read it.
+test('two parallel project edits of different fields both persist', { skip: postgresSkip }, async t => {
+  const { pool, request, workspaceId, first, second } = await owners(t);
+  const projectId = (await pool.query('SELECT id FROM projects WHERE workspace_id = $1', [workspaceId])).rows[0].id;
+  // Both requests read the project before either writes; the gate holds both writes until both are waiting.
+  const gate = await blockWrites(pool, 'projects');
+  const edits = [request(`/projects/${projectId}`, { method: 'PATCH', body: { name: 'Renamed project' }, cookie: first.cookie }), request(`/projects/${projectId}`, { method: 'PATCH', body: { color: '#123456' }, cookie: second.cookie })];
+  await gate.waiting(2); await gate.release();
+  assert.deepEqual((await Promise.all(edits)).map(result => result.status), [200, 200]);
+  assert.deepEqual((await pool.query('SELECT name, color FROM projects WHERE id = $1', [projectId])).rows[0], { name: 'Renamed project', color: '#123456' });
+});
+
+// ten98-campaign#35: the member list orders names by code point, whatever the database collation.
+test('the member list orders names the same way under any database collation', { skip: postgresSkip }, async t => {
+  const { pool, request, workspaceId, first } = await owners(t);
+  for (const [id, name] of [['u-lower-b', 'beta'], ['u-upper-b', 'Beta'], ['u-umlaut', 'Ärger'], ['u-lower-a', 'alpha'], ['u-same-1', 'Zed'], ['u-same-2', 'Zed']]) {
+    await pool.query('INSERT INTO users VALUES ($1, $2, $3, NULL)', [id, name, `${id}@example.test`]);
+    await pool.query("INSERT INTO memberships VALUES ($1, $2, 'viewer')", [workspaceId, id]);
+  }
+  const members = (await request(`/workspaces/${workspaceId}/members`, { cookie: first.cookie })).data.members;
+  // Byte order, as SQLite's BINARY collation gave: uppercase before lowercase, non-ASCII last, ties by ID.
+  assert.deepEqual(members.map(member => member.name), ['Beta', 'First', 'Second', 'Zed', 'Zed', 'alpha', 'beta', 'Ärger']);
+  assert.deepEqual(members.filter(member => member.name === 'Zed').map(member => member.id), ['u-same-1', 'u-same-2']);
+});

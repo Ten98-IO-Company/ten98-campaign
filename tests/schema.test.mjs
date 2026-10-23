@@ -35,6 +35,19 @@ test('int8 values parse to numbers and refuse to lose precision', () => {
 });
 
 // Needs a disposable PostgreSQL server: TEST_DATABASE_URL must name a role allowed to create databases.
+// ten98-campaign#35: the app pool's statement_timeout must not cancel a long migration, and must not leak lifted.
+test('migrations run without the pool statement timeout, which the connection gets back afterwards', { skip: !process.env.TEST_DATABASE_URL && 'TEST_DATABASE_URL is not set', timeout: 60000 }, async () => {
+  const admin = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL }), name = `campaign_timeout_${randomBytes(6).toString('hex')}`;
+  await admin.connect(); await admin.query(`CREATE DATABASE ${name}`);
+  const url = new URL(process.env.TEST_DATABASE_URL); url.pathname = `/${name}`;
+  // One connection with a 1 ms limit: the baseline migration alone takes far longer.
+  const pool = new pg.Pool({ connectionString: url.href, max: 1, statement_timeout: 1 });
+  try {
+    assert.deepEqual(await migrate(pool), (await migrationSources()).map(source => source.version));
+    assert.equal((await pool.query('SHOW statement_timeout')).rows[0].statement_timeout, '1ms', 'The pooled connection keeps its own limit.');
+  } finally { await pool.end(); await admin.query(`DROP DATABASE ${name} WITH (FORCE)`); await admin.end(); }
+});
+
 test('migrations build exactly the Drizzle schema on PostgreSQL, once, and keep JSON text and insertion order', { skip: !process.env.TEST_DATABASE_URL && 'TEST_DATABASE_URL is not set', timeout: 60000 }, async () => {
   const admin = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL }), name = `campaign_schema_${randomBytes(6).toString('hex')}`;
   await admin.connect(); await admin.query(`CREATE DATABASE ${name}`);

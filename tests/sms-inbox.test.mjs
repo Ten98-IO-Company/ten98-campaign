@@ -65,6 +65,27 @@ test('verified campaign replies persist once, preserve raw signature checks and 
   } finally { await f.close(); }
 });
 
+// ten98-campaign#54 item 5: each conversation finds its contact by phone, not by reading every contact in the project.
+test('the SMS conversation list reads each conversation contact by phone, not the whole contact list', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const contact = await f.contacts.save('a', { name: 'Alex', phone: '+12025550123', consents: { sms: true }, consentSource: 'Explicit signup record' });
+    await f.contacts.import('a', { csv: ['email', ...Array.from({ length: 300 }, (_, index) => `other-${index}@example.test`)].join('\n'), consents: {}, consentSource: 'Fixture' });
+    const draft = await f.request('direct/campaigns', 'POST', { name: 'Service notice', channel: 'sms', text: 'Your appointment is confirmed.', contactIds: [contact.id] }), id = draft.data.campaign.id;
+    const preview = await f.request(`direct/campaigns/${id}/preview`, 'POST', {}); await f.request(`direct/campaigns/${id}/send`, 'POST', { confirmed: true, previewToken: preview.data.previewToken }); await f.direct.processPending();
+    const driver = (await import('pg')).default, query = driver.Client.prototype.query; let rows = 0;
+    // Pool queries use pg's callback form and transactions the promise form; count direct_contacts rows either way.
+    driver.Client.prototype.query = function (...args) {
+      const text = typeof args[0] === 'string' ? args[0] : args[0]?.text || '', count = value => { if (/FROM direct_contacts\b/.test(text)) rows += value?.rows?.length || 0; }, done = args.at(-1);
+      if (typeof done === 'function') args[args.length - 1] = (error, value) => { if (!error) count(value); return done(error, value); };
+      const result = query.apply(this, args); if (result?.then) result.then(count, () => {}); return result;
+    };
+    let listed; try { listed = await f.request('sms-inbox/conversations'); } finally { driver.Client.prototype.query = query; }
+    assert.equal(listed.data.conversations[0].contactId, contact.id);
+    assert.ok(rows < 10, `Listing one conversation read ${rows} contact rows; the whole list is 301.`);
+  } finally { await f.close(); }
+});
+
 test('a campaign acknowledgement cannot replace the sender established by its signed delivery callback', pg, async t => {
   const f = await fixture(t);
   try {

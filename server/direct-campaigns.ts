@@ -184,8 +184,11 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     const result = await syncEmailSuppressions({ env: { ...env }, assertMapping }), domain = env.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase();
     const suppressed = (result.suppressions || []).filter((row: any) => (!row.expiresAt || Date.parse(row.expiresAt) > Date.now()) && (row.scope?.type !== 'sending_domain' || row.scope.value.toLowerCase() === domain));
     const policy: { contactId: string; expiresAt: string | null }[] = [];
+    // The first row for an address wins, as the search it replaces did: Cloudflare can list one address under two scopes.
+    const byEmail = new Map<string, any>();
+    for (const row of suppressed) { const key = String(row.email).toLowerCase(); if (!byEmail.has(key)) byEmail.set(key, row); }
     for (const contact of await contacts.list(projectId)) {
-      const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (!match) continue;
+      const match: any = contact.email && byEmail.get(contact.email); if (!match) continue;
       const [outcome] = classifyEmailFeedback({ provider: 'cloudflare', email: match.email, reason: match.reason, expiresAt: match.expiresAt }, { transient: feedbackRules });
       // Only a policy row alerts; any other row, including a reason the classifier does not recognise, suppresses (fail safe).
       if (outcome?.action === 'deliverability-alert') policy.push({ contactId: contact.id, expiresAt: match.expiresAt });

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import { createApp } from '../server/index.ts';
+import pgDriver from 'pg';
 import { postgresSkip, testApp } from './postgres.mjs';
 
 const pg = { skip: postgresSkip };
@@ -498,6 +499,19 @@ test('attachment preflight cannot outlive current account, recipient, project ac
       const before = f.writes().length, result = await f.request(route, 'POST', { accountId: 'ig', attachmentUrl: mode === 'expiry' ? asset.deliveryUrl : `https://cdn.example.com/${mode}.pdf`, attachmentType: 'file' });
       assert.ok([403, 409, 422].includes(result.status), `${mode}: ${JSON.stringify(result.data)}`); assert.equal(f.writes().length, before, `${mode} must stop before an external send.`);
     }
+    // ten98-campaign#54 item 5: the hosted-file check reads assets by delivery URL, not the project's whole asset collection.
+    await f.app.sql.run("INSERT INTO records (id, project_id, collection, data) SELECT 'asset-' || n, ?, 'assets', json_build_object('id', 'asset-' || n, 'deliveryUrl', 'https://cdn.example.com/other-' || n) FROM generate_series(1, 300) n", f.projectId);
+    let rows = 0; const query = pgDriver.Client.prototype.query;
+    // Pool queries use pg's callback form and transactions the promise form; count rows from records either way.
+    pgDriver.Client.prototype.query = function (...args) {
+      const text = typeof args[0] === 'string' ? args[0] : args[0]?.text || '', count = value => { if (/"records"/.test(text)) rows += value?.rows?.length || 0; }, done = args.at(-1);
+      if (typeof done === 'function') args[args.length - 1] = (error, value) => { if (!error) count(value); return done(error, value); };
+      const result = query.apply(this, args); if (result?.then) result.then(count, () => {}); return result;
+    };
+    const expired = await f.app.store.create(f.projectId, 'assets', { name: 'Expired inbox PDF', source: 'zernio', url: 'https://media.zernio.com/temp/expired.pdf', deliveryUrl: 'https://media.zernio.com/temp/expired.pdf', deliverySource: 'zernio', deliveryUploadedAt: new Date(Date.now() - 86400000).toISOString(), deliveryExpiresAt: new Date(Date.now() - 1000).toISOString() });
+    try { mode = ''; const result = await f.request(route, 'POST', { accountId: 'ig', attachmentUrl: expired.deliveryUrl, attachmentType: 'file' }); assert.equal(result.data.error?.code, 'ATTACHMENT_EXPIRED', JSON.stringify(result.data)); }
+    finally { pgDriver.Client.prototype.query = query; }
+    assert.ok(rows < 20, `The attachment check read ${rows} asset rows; loading every asset reads more than 300.`);
   } finally { await f.close(); }
 });
 
