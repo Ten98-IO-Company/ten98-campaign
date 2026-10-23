@@ -22,6 +22,43 @@ test('the shared API client rejects unreadable receipts without treating a poten
   assert.equal((await client(Response.json({ saved: true }))('/test')).saved, true);
 });
 
+test('a 401 while signed in ends the session once, without a per-surface error, and sign-in failures stay form errors', async () => {
+  const appSource = source(), start = appSource.indexOf('async function api('), end = appSource.indexOf('\nconst money =', start);
+  const unauthorized = () => Response.json({ error: 'Sign in to continue.' }, { status: 401 });
+  const client = handler => { const ended = []; return { ended, api: runInNewContext(stripTypeScriptTypes(appSource.slice(start, end)) + '; api', { fetch: async () => unauthorized(), DOMException, endSession: handler === undefined ? () => ended.push(1) : handler }) }; };
+  const signedIn = client();
+  await assert.rejects(signedIn.api('/projects/p/approvals'), error => error.name === 'AbortError' && error.message === 'Your session ended. Sign in again.');
+  assert.equal(signedIn.ended.length, 1, 'The app returns to the sign-in screen.');
+  await assert.rejects(signedIn.api('/auth/login', 'POST', {}), error => error.name !== 'AbortError' && error.status === 401 && error.message === 'Sign in to continue.');
+  assert.equal(signedIn.ended.length, 1, 'A failed sign-in is shown by the sign-in form.');
+  const signedOut = client(null);
+  await assert.rejects(signedOut.api('/invitations/x/accept', 'POST', {}), error => error.status === 401, 'Without a signed-in session a 401 is an ordinary error.');
+  // run() ignores AbortError, so no surface shows "Sign in to continue."; the startup reload ignores it too.
+  assert.match(appSource, /else if \(activeProject\.current === requestProject && \(err as Error\)\.name !== 'AbortError'\) setError/);
+  assert.match(appSource, /\.catch\(e => \{ if \(e\.name !== 'AbortError'\) setError\(e\.message\); \}\)/);
+});
+
+test('browser-pass copy: connection empty states, disabled-control reasons, results empty state and editor labels', async () => {
+  const appSource = source(), declaration = appSource.match(/^function ConnectionEmpty\([^\r\n]+$/m)[0];
+  const { code } = await transformWithOxc(declaration, 'ConnectionEmpty.tsx', { jsx: { runtime: 'classic' } });
+  const ConnectionEmpty = new Function('React', 'Card', 'EmptyState', 'Button', code + '; return ConnectionEmpty;')(React, Card, (await import('@ten98/ui')).EmptyState, Button);
+  let opened = 0; const html = renderToStaticMarkup(React.createElement(ConnectionEmpty, { subject: 'provider updates', onSettings: () => opened++ }));
+  assert.match(html, /Connect Zernio to use provider updates/); assert.match(html, />Open integrations</); assert.doesNotMatch(html, /Connect your/);
+  for (const subject of (appSource.match(/subject="[^"]+"/g) || [])) assert.match(subject, /^subject="(?:the |[a-z]|WhatsApp|Google)/, subject);
+  assert.doesNotMatch(appSource, /Open Integrations/, 'Button and prose casing is consistent within the shell.');
+  assert.match(appSource, /\{!connected && <Text tone="muted" size="sm">Connect Zernio in Integrations to load channels\.<\/Text>\}<Button[^\r\n]*?disabled=\{busy \|\| !connected\}[^\r\n]*?>Load channels<\/Button>/);
+  assert.match(appSource, /'Drive assets synced'\)\}>Sync Drive<\/Button>\}>\{driveSyncReason && <Text tone="muted" size="sm">\{driveSyncReason\}<\/Text>\}/);
+  const reason = new Function('canWrite', 'remote', appSource.match(/const driveSyncReason = ([^\r\n]+);/)[1].replace(/^/, 'return ') + ';');
+  assert.match(reason(false, {}), /Viewers/); assert.equal(reason(true, {}), '', 'No reason before the status loads.');
+  assert.match(reason(true, { status: { drive: { configured: false } } }), /Configure Google Drive/); assert.match(reason(true, { status: { drive: { configured: true, mapped: false } } }), /Map a Drive folder/);
+  assert.equal(reason(true, { status: { drive: { configured: true, mapped: true } } }), '');
+  assert.match(appSource, /<DataTable ariaLabel="Campaign results"[^\r\n]*?emptyTitle=\{state\.campaigns\.length \? 'No campaigns match this search' : 'No campaign results yet'\} emptyDescription=/);
+  assert.match(appSource, /\{canWrite && p\.source !== 'broadsign' \? 'Edit booking' : 'View booking'\}/, 'The OOH card names the editor it opens.');
+  assert.match(appSource, /providerManaged \|\| modal\.type === 'ad-details' \|\| !canWrite \? 'View '/, 'Read-only editors are titled View.');
+  // Select has no width option, so an inner row sizes the reporting currency select to its content.
+  assert.match(appSource, /<Inline><UiSelect aria-label="Reporting currency"[^\r\n]*?\/><\/Inline><\/Inline>/);
+});
+
 test('dashboard counts daily-campaign spend without adding daily budgets to total allocations or inventing missing metrics', () => {
   const appSource = source(), start = appSource.search(/  const (?:currencyCampaigns|currentCurrency) =/), end = appSource.indexOf('  const activeCampaigns =', start);
   assert.ok(start > 0 && end > start);
@@ -53,7 +90,11 @@ test('post labels show a platform caption when shared content is empty and ident
   const label = runInNewContext(stripTypeScriptTypes(declaration) + '; postLabel');
   assert.equal(label({ content: 'Shared caption', platforms: ['twitter'], platformOverrides: { twitter: { content: 'Custom caption' } } }), 'Shared caption');
   assert.equal(label({ content: '', platforms: ['instagram', 'twitter'], platformOverrides: { twitter: { content: 'Custom caption' } } }), 'Custom caption');
-  assert.equal(label({ content: '', platforms: ['instagram'], platformOverrides: { instagram: { mediaItems: [] } } }), 'Media post');
+  assert.equal(label({ content: '', platforms: ['instagram'], platformOverrides: { instagram: { mediaItems: [] } } }), 'Empty draft', 'A draft with no caption or media is not called a media post.');
+  assert.equal(label({ content: ' ', platforms: ['linkedin'] }), 'Empty draft');
+  assert.equal(label({ content: '', platforms: ['instagram'], assetId: 'asset-a' }), 'Media post');
+  assert.equal(label({ content: '', platforms: ['instagram'], platformOverrides: { instagram: { mediaItems: [{ url: 'https://cdn.example/a.jpg' }] } } }), 'Media post');
+  assert.equal(label({ content: '', accountOverrides: { page: { assetId: 'asset-b' } } }), 'Media post');
   assert.equal(label({ content: '', platforms: ['facebook'], accountOverrides: { page: { platform: 'facebook', content: 'Account-only caption' } } }), 'Account-only caption');
 });
 
@@ -237,7 +278,10 @@ test('Settings keeps its two existing columns and renders scoped receipt recover
 test('post card publishing asks once and names every destination before calling the unchanged publish action', () => {
   const appSource = source();
   assert.doesNotMatch(appSource, /onClick=\{\(\) => publish\(p\)\}/, 'A card click never publishes directly.');
-  assert.match(appSource, /title=\{!connected \? 'Connect Zernio in Settings' : ''\} onClick=\{\(\) => setPublishing\(p\)\}>/);
+  assert.match(appSource, /disabled=\{busy \|\| !connected\} onClick=\{\(\) => setPublishing\(p\)\}>/);
+  // A disabled Publish says why in visible text rather than a hover-only title.
+  assert.doesNotMatch(appSource, /Connect Zernio in Settings/);
+  assert.match(appSource, /\(!approval \|\| approval\.publishable\) && !connected && <Text tone="muted" size="sm">Connect Zernio in Integrations to publish this post\.<\/Text>\}<FormActions>/);
   const dialog = appSource.match(/<ConfirmDialog open=\{!!publishing\}[^\r\n]+?<\/ConfirmDialog>/)?.[0]; assert.ok(dialog);
   assert.match(dialog, /onConfirm=\{async \(\) => \{ const post = publishing; if \(post\) await publish\(post\); setPublishing\(null\); \}\}/);
   assert.match(dialog, /Accounts:<\/Text> \{postRecipients\(publishing, remote\.accounts\?\.accounts \|\| \[\]\)\}/);
