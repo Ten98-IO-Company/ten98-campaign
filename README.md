@@ -31,7 +31,7 @@ Installation, configuration and guides are in the [wiki](https://github.com/Ten9
 
 - Questions and ideas: [Discussions](https://github.com/Ten98-IO-Company/ten98-campaign/discussions)
 - Bugs and feature requests: [Issues](https://github.com/Ten98-IO-Company/ten98-campaign/issues)
-- Roadmap: [Ten98 Project](https://github.com/orgs/Ten98-IO-Company/projects/1)
+- Roadmap: [Ten98 Campaign Project](https://github.com/orgs/Ten98-IO-Company/projects/2)
 - Releases: [GitHub Releases](https://github.com/Ten98-IO-Company/ten98-campaign/releases)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) · [Code of Conduct](https://github.com/Ten98-IO-Company/.github/blob/main/CODE_OF_CONDUCT.md)
 
