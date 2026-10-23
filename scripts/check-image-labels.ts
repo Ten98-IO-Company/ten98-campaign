@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 // `APP_VERSION=… APP_REVISION=…` environment variables to expect them instead of the defaults.
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
 const dockerfile = readFileSync('Dockerfile', 'utf8');
-const argDefault = name => dockerfile.match(new RegExp(String.raw`^ARG ${name}=(\S+)\s*$`, 'm'))?.[1];
+const argDefault = (name: string) => dockerfile.match(new RegExp(String.raw`^ARG ${name}=(\S+)\s*$`, 'm'))?.[1];
 assert.equal(argDefault('APP_VERSION'), pkg.version, 'Dockerfile ARG APP_VERSION default must equal package.json version.');
 assert.ok(argDefault('APP_REVISION'), 'Dockerfile must give ARG APP_REVISION a default so builds without build args still work.');
 
@@ -21,7 +21,7 @@ const expected = {
 };
 const image = process.argv[2];
 if (image) {
-  const labels = JSON.parse(execFileSync('docker', ['image', 'inspect', '--format', '{{json .Config.Labels}}', image], { encoding: 'utf8' }));
+  const labels: Record<string, string> | null = JSON.parse(execFileSync('docker', ['image', 'inspect', '--format', '{{json .Config.Labels}}', image], { encoding: 'utf8' }));
   for (const [key, value] of Object.entries(expected)) assert.equal(labels?.[key], value, `Image label ${key}`);
 }
 console.log(image ? 'Dockerfile defaults and image OCI labels passed.' : 'Dockerfile OCI label defaults match package.json.');
