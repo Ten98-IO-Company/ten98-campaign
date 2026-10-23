@@ -416,8 +416,8 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
       <Stack gap={2}>
         <Field label="Caption"><Textarea value={content} maxLength={100000} onChange={event => setContent(event.target.value)} placeholder="Write your post…"/></Field>
         {usage.length > 0 && <Inline gap={3}>{usage.map(row => <Text key={row.platform} size="sm" numeric tone={row.tone === 'error' ? 'danger' : row.tone === 'warning' ? 'warning' : 'muted'}>{`${row.label} ${row.count.toLocaleString()}/${row.limit.toLocaleString()}`}</Text>)}</Inline>}
-        {problems.map(item => <Text key={item.platform + ':' + item.message} size="sm" tone="danger">{`${PLATFORM_RULES[item.platform]?.label || item.platform}: ${item.message}`}</Text>)}
-        {usage.filter(row => row.tone === 'warning' && row.message).map(row => <Text key={'warning:' + row.platform} size="sm" tone="warning">{`${row.label}: ${row.message}`}</Text>)}
+        {problems.map(item => { const label = PLATFORM_RULES[item.platform]?.label || item.platform; return <Text key={item.platform + ':' + item.message} size="sm" tone="danger">{item.message.includes(label) ? item.message : `${label}: ${item.message}`}</Text>; })}
+        {usage.filter(row => row.tone === 'warning' && row.message).map(row => <Text key={'warning:' + row.platform} size="sm" tone="warning">{row.message!.includes(row.label) ? row.message : `${row.label}: ${row.message}`}</Text>)}
         {!!platforms.length && <Disclosure variant="plain" summary="Customize per network" defaultOpen={customised}>
           <Tabs label="Platform customisation" value={selected} onValueChange={setActivePlatform} keepMounted={false} items={platforms.map(platform => ({ value: platform, label: <>{PLATFORM_RULES[platform]?.label || platform}{checks.errors.some((item: any) => item.platform === platform) && <> <Badge tone="danger">Needs a fix</Badge></>}{Object.keys(overrides[platform] || {}).some(key => key !== 'options' || Object.keys(overrides[platform]?.options || {}).length) && <> <Badge>Custom</Badge></>}</>, content: platform === selected ? panel : undefined }))}/>
         </Disclosure>}
