@@ -8,5 +8,5 @@
     "types": ["node"],
     "allowJs": true, "checkJs": false
   },
-  "include": ["server/**/*.ts", "shared/**/*.ts", "tests/**/*.ts"]
+  "include": ["server/**/*.ts", "shared/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"]
 }

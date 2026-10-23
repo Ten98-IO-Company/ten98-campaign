@@ -34,6 +34,18 @@ function respond(res: ServerResponse, status: number, body?: string, headers: Re
   res.writeHead(status, { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', ...headers });
   res.end(body);
 }
+// A browser that follows a disabled or unknown short link gets a small page instead of JSON (#116). Every word is fixed
+// text, so nothing from the request reaches the page; its policy allows only the inline style.
+const LINK_PAGES: Record<number, { title: string; message: string }> = {
+  404: { title: "This link isn't available", message: 'Check the address, or ask whoever shared it for a current link.' },
+  410: { title: 'This link is no longer active', message: 'Whoever shared it has disabled it. Ask them for a current link.' },
+};
+const LINK_PAGE_POLICY = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const wantsPage = (req: IncomingMessage) => /\btext\/html\b/i.test(String(req.headers.accept || ''));
+function linkPage(res: ServerResponse, status: 404 | 410) {
+  const { title, message } = LINK_PAGES[status];
+  respond(res, status, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${title}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif;color:#1f1d2b;background:#f7f6fb}main{max-width:32rem;padding:2rem}h1{font-size:1.5rem;margin:0 0 .5rem}p{margin:0;color:#4a4760}@media (prefers-color-scheme:dark){body{color:#f2f1f7;background:#17161f}p{color:#c4c1d6}}</style></head><body><main><h1>${title}</h1><p>${message}</p></main></body></html>`, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': LINK_PAGE_POLICY });
+}
 async function eventBody(req: IncomingMessage) {
   if (!(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) fail(415, 'Send JSON events.');
   if (Number(req.headers['content-length']) > 2048) { req.resume(); fail(413, 'This event is too large.'); }
@@ -152,7 +164,7 @@ export function createLinks({ db, appUrl }: { db: Database; appUrl: string }) {
   }
   async function publicHandle({ req, res, url }: { req: IncomingMessage; res: ServerResponse; url: URL }) {
     const challenge = url.pathname.match(/^\/s\/domain-check\/([A-Za-z0-9_-]{32})$/), redirect = url.pathname.match(/^\/s\/([A-Za-z0-9_-]{12})$/), script = url.pathname.match(/^\/t\/([A-Za-z0-9_-]{32})\.js$/), ingest = url.pathname.match(/^\/api\/tracking\/([A-Za-z0-9_-]{32})\/events$/);
-    if (!challenge && !redirect && !script && !ingest) { if (/^\/(?:s|t|api\/tracking)(?:\/|$)/.test(url.pathname)) { respond(res, 404, 'This public link is unavailable.'); return true; } return false; }
+    if (!challenge && !redirect && !script && !ingest) { if (/^\/(?:s|t|api\/tracking)(?:\/|$)/.test(url.pathname)) { if (/^\/s\//.test(url.pathname) && wantsPage(req)) linkPage(res, 404); else respond(res, 404, 'This public link is unavailable.'); return true; } return false; }
     try {
       if (challenge) {
         if (req.method !== 'GET') fail(405, 'Use GET for the domain check.');
@@ -163,8 +175,10 @@ export function createLinks({ db, appUrl }: { db: Database; appUrl: string }) {
       if (redirect) {
         if (!['GET', 'HEAD'].includes(req.method!)) fail(405, 'Use GET for short links.');
         const row = await first(db.execute(sql`SELECT * FROM campaign_links WHERE code=${redirect[1]}`));
-        if (!row || !hostMatches(req, appOrigin) && !hostMatches(req, row.short_origin)) fail(404, 'This short link is unavailable.');
-        if (row.archived) fail(410, 'This short link has been archived.');
+        const missing = !row || !hostMatches(req, appOrigin) && !hostMatches(req, row.short_origin);
+        if ((missing || row.archived) && wantsPage(req)) { linkPage(res, missing ? 404 : 410); return true; }
+        if (missing) fail(404, 'This short link is unavailable.');
+        if (row.archived) fail(410, 'This short link is no longer active.');
         if (req.method === 'GET' && req.headers.dnt !== '1' && req.headers['sec-gpc'] !== '1') { await cleanup(); const qr = url.searchParams.get('source') === 'qr'; await db.execute(sql`INSERT INTO campaign_link_daily VALUES(${row.id},${day()},${qr ? 0 : 1},${qr ? 1 : 0}) ON CONFLICT(link_id,day) DO UPDATE SET clicks=campaign_link_daily.clicks+excluded.clicks,qr_scans=campaign_link_daily.qr_scans+excluded.qr_scans`); }
         respond(res, 302, undefined, { Location: row.destination }); return true;
       }

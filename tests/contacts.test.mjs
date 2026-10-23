@@ -210,3 +210,18 @@ test('destination lookups read only the matching contacts, not the whole project
   assert.equal((await contacts.list('a')).find(row => row.email === 'person-7@example.test').consents.email, false, 'The lookups still apply their effect.');
   await assert.rejects(contacts.save('a', { email: 'person-10@example.test', phone: '+12025550011' }), /different contacts/);
 });
+
+// ten98-campaign#135: re-importing a consented contact with no permissions ticked merges the row and keeps the contact's
+// existing permissions and evidence; an empty consent source from the form grants and removes nothing.
+test('a CSV re-import of a consented contact merges and keeps its consent when no permission is ticked', pg, async t => {
+  const { contacts } = await fixture(t);
+  const dana = await contacts.save('a', { name: 'Dana', email: 'dana@example.test', phone: '+971501112222', consents: { email: true, sms: true }, consentSource: 'Signup form' });
+  for (const dryRun of [true, false]) {
+    const result = await contacts.import('a', { csv: 'name,email\nDana Again,dana@example.test', dryRun, consents: {}, consentSource: '' });
+    assert.deepEqual([result.created, result.updated, result.skipped, result.errors], [0, 1, 0, []], JSON.stringify(result.errors));
+  }
+  const merged = await contacts.get('a', dana.id);
+  assert.equal(merged.name, 'Dana Again');
+  assert.deepEqual([merged.consents.email, merged.consents.sms, merged.consentSource], [true, true, 'Signup form']);
+  assert.deepEqual(merged.consentEvidence, dana.consentEvidence, 'The original evidence is kept.');
+});
