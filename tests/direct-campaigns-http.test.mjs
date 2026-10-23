@@ -183,6 +183,18 @@ test('Cloudflare email enforces transactional purpose, reports true receipts, ap
 
 // ten98-campaign#77: Cloudflare lists soft bounces and some hard bounces with an expiry. Campaign holds those contacts only
 // until then and keeps their consent; a `policy` row (undefined by Cloudflare, possibly sender-side) raises an alert instead.
+// Cloudflare can list one address under two scopes; the first listed row decides, as the original search did (#97 review).
+test('an address Cloudflare lists twice takes the reason of its first row', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const twice = await f.person({ email: 'twice@example.com', phone: '+12025550141' });
+    f.setSuppressions([{ id: 'd1', email: twice.email, reason: 'complaint', scope: { type: 'account' }, expires_at: null }, { id: 'd2', email: twice.email, reason: 'hard_bounce', scope: { type: 'sending_domain', value: 'example.com' }, expires_at: null }]);
+    const draft = await f.draft({ channel: 'email', subject: 'Service', text: 'Service', contactIds: [twice.id] });
+    assert.equal((await f.request(f.path + `/campaigns/${draft.id}/refresh`, 'POST', {})).status, 200);
+    assert.equal((await f.request(f.path + '/contacts')).data.contacts.find(item => item.id === twice.id).suppression.email.reason, 'complaint');
+  } finally { await f.close(); }
+});
+
 test('Cloudflare temporary suppressions expire without withdrawing consent, and policy rows alert instead of suppressing', pg, async t => {
   const f = await fixture(t), { pool } = f.app.database;
   try {
