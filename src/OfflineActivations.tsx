@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, Select, Stack, Text, Textarea } from '@ten98/ui';
-import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, type ActivationType } from '../shared/offline-activations.ts';
+import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentPrompt, type ActivationType, type ConsentChannel } from '../shared/offline-activations.ts';
 
 type Row = { id: string; [key: string]: any };
 type Material = { label: string; done: boolean };
-type Props = { projectId: string; campaigns: Row[]; activations: Row[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; readOnly?: boolean; onChanged: () => Promise<void> | void };
+type Props = { projectId: string; brand: string; campaigns: Row[]; activations: Row[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; readOnly?: boolean; onChanged: () => Promise<void> | void };
 type Draft = { name: string; type: ActivationType; campaignId: string; status: string; startAt: string; endAt: string; location: string; notes: string; ownerId: string; teamIds: string[]; materials: Material[]; budget: string; spent: string; reached: string; promoCode: string };
 
 const STATUS_LABELS: Record<string, string> = { planned: 'Planned', completed: 'Completed', cancelled: 'Cancelled' };
@@ -37,6 +37,34 @@ export function TrackingLink({ link }: { link: Row }) {
     </Stack>
   </Inline>;
 }
+type Lead = { name: string; email: string; phone: string; channels: ConsentChannel[] };
+const blankLead = (): Lead => ({ name: '', email: '', phone: '', channels: [] });
+export function leadBody(lead: Lead) {
+  if (!lead.channels.length) throw new Error('Tick at least one channel the person agreed to. Without an opt-in nothing is saved.');
+  return { ...Object.fromEntries((['name', 'email', 'phone'] as const).filter(key => lead[key].trim()).map(key => [key, lead[key].trim()])), consents: Object.fromEntries(CONSENT_CHANNELS.map(channel => [channel, lead.channels.includes(channel)])) };
+}
+const channelList = (channels: ConsentChannel[]) => channels.map(channel => CONSENT_LABELS[channel].toLowerCase());
+// Phone-sized form staff use at the stop or door: consent wording first, every channel unticked, then only contact details.
+export function LeadCapture({ brand, activation, request, path, onClose }: { brand: string; activation: Row; request: Props['request']; path: string; onClose: () => void }) {
+  const [lead, setLead] = useState<Lead>(blankLead), [saved, setSaved] = useState(0), [message, setMessage] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
+  async function save() {
+    try {
+      const result = await request(`${path}/${encodeURIComponent(activation.id)}/leads`, 'POST', leadBody(lead)), refused = channelList(result.refused || []);
+      setSaved(count => count + 1); setLead(blankLead());
+      setMessage({ tone: 'success', text: `Lead saved with ${channelList(result.recorded).join(' and ')} consent.${refused.length ? ` Not ${refused.join(' or ')}: this person opted out earlier.` : ''}` });
+    } catch (failure) { setMessage({ tone: 'danger', text: (failure as Error).message || 'The lead could not be saved.' }); }
+  }
+  return <Dialog open onOpenChange={next => { if (!next) onClose(); }} eyebrow={activation.name} title="Capture a lead" description={saved ? `${saved} saved this session.` : undefined} onSubmit={save}
+    footer={<Inline gap={2} justify="end"><Button variant="secondary" onClick={onClose}>Done</Button><Button type="submit">Save lead</Button></Inline>}>
+    <Stack gap={3}>
+      {message && <Alert tone={message.tone} variant="inline">{message.text}</Alert>}
+      <CheckboxGroup legend={`Ask first: “${consentPrompt(brand)}…”`} description="Tick only what the person says yes to. Nothing is saved without at least one." value={lead.channels} onValueChange={channels => setLead(current => ({ ...current, channels: channels as ConsentChannel[] }))} options={CONSENT_CHANNELS.map(channel => ({ value: channel, label: CONSENT_LABELS[channel] }))}/>
+      <Field label="Name"><Input autoComplete="off" maxLength={120} value={lead.name} onChange={event => setLead(current => ({ ...current, name: event.target.value }))}/></Field>
+      <Field label="Email" description="Needed for email consent."><Input type="email" inputMode="email" autoComplete="off" maxLength={254} value={lead.email} onChange={event => setLead(current => ({ ...current, email: event.target.value }))}/></Field>
+      <Field label="Mobile number" description="International format, for example +447700900123. Needed for text message or WhatsApp."><Input type="tel" inputMode="tel" autoComplete="off" maxLength={16} value={lead.phone} onChange={event => setLead(current => ({ ...current, phone: event.target.value }))}/></Field>
+    </Stack>
+  </Dialog>;
+}
 export function blankDraft(campaignId = ''): Draft { return { name: '', type: 'roadshow', campaignId, status: 'planned', startAt: '', endAt: '', location: '', notes: '', ownerId: '', teamIds: [], materials: [], budget: '', spent: '', reached: '', promoCode: '' }; }
 export function draftFrom(activation: Row): Draft { return { ...blankDraft(), ...Object.fromEntries(Object.keys(blankDraft()).filter(key => activation[key] !== undefined).map(key => [key, ['budget', 'spent', 'reached'].includes(key) ? String(activation[key] || '') : activation[key]])), startAt: localInput(activation.startAt), endAt: localInput(activation.endAt) } as Draft; }
 export function activationBody(draft: Draft) {
@@ -44,11 +72,11 @@ export function activationBody(draft: Draft) {
   return { name: draft.name, type: draft.type, campaignId: draft.campaignId, status: draft.status, startAt: instant(draft.startAt), endAt: instant(draft.endAt), location: draft.location, notes: draft.notes, ownerId: draft.ownerId, teamIds: draft.teamIds, materials: draft.materials, budget: amount(draft.budget, 'Planned budget'), spent: amount(draft.spent, 'Actual spend'), reached: amount(draft.reached, 'People reached', true), promoCode: draft.promoCode.trim() };
 }
 
-export default function OfflineActivations({ projectId, campaigns, activations, request, readOnly = false, onChanged }: Props) {
+export default function OfflineActivations({ projectId, brand, campaigns, activations, request, readOnly = false, onChanged }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/activations`, requester = useRef(request); requester.current = request;
   const [filter, setFilter] = useState(''), [members, setMembers] = useState<Row[]>([]), [editing, setEditing] = useState<Row | 'new' | null>(null), [draft, setDraft] = useState<Draft>(blankDraft()), [dirty, setDirty] = useState(false);
   const [link, setLink] = useState<Row | null>(null), [landing, setLanding] = useState(''), [linkError, setLinkError] = useState(''), [linking, setLinking] = useState(false);
-  const [material, setMaterial] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [removing, setRemoving] = useState<Row>();
+  const [material, setMaterial] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [removing, setRemoving] = useState<Row>(), [capturing, setCapturing] = useState<Row | null>(null);
   useEffect(() => { if (readOnly) return; let current = true; requester.current(`/projects/${encodeURIComponent(projectId)}/assignees`).then(result => { if (current) setMembers(result.members || []); }, () => { if (current) setMembers([]); }); return () => { current = false; }; }, [projectId, readOnly]);
   const campaignOf = (id: string) => campaigns.find(campaign => campaign.id === id), memberName = (id: string) => members.find(member => member.id === id)?.name || '';
   const rows = activations.filter(activation => !filter || activation.campaignId === filter).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
@@ -100,7 +128,7 @@ export default function OfflineActivations({ projectId, campaigns, activations, 
           { key: 'spent', header: 'Spend', numeric: true, sortValue: activation => Number(activation.spent) || 0, render: activation => { const currency = campaignOf(activation.campaignId)?.currency || 'AED'; return `${money(activation.spent, currency)} of ${money(activation.budget, currency)}`; } },
           { key: 'status', header: 'Status', render: activation => <Badge tone={activation.status === 'completed' ? 'success' : activation.status === 'cancelled' ? 'neutral' : 'info'}>{STATUS_LABELS[activation.status] || activation.status}</Badge> },
         ]}
-        rowActionsLabel="Actions" rowActions={activation => <Button variant="secondary" size="sm" onClick={() => open(activation)} aria-label={`${editable ? 'Edit' : 'View'} ${activation.name}`}>{editable ? 'Edit' : 'View'}</Button>}/>
+        rowActionsLabel="Actions" rowActions={activation => <Inline gap={2}>{editable && activation.status !== 'cancelled' && <Button size="sm" onClick={() => setCapturing(activation)} aria-label={`Capture leads at ${activation.name}`}>Capture leads</Button>}<Button variant="secondary" size="sm" onClick={() => open(activation)} aria-label={`${editable ? 'Edit' : 'View'} ${activation.name}`}>{editable ? 'Edit' : 'View'}</Button></Inline>}/>
     </Stack>
     <Dialog open={!!editing} onOpenChange={next => { if (!next) setEditing(null); }} dirty={dirty} size="wide" eyebrow={campaignOf(draft.campaignId)?.name || 'Field activity'} title={editing === 'new' ? 'New activation' : editable ? 'Edit activation' : 'Activation'} onSubmit={editable ? save : undefined}
       footer={editable ? <Inline gap={2} justify="end">{current && <Button variant="ghost" onClick={() => setRemoving(current)}>Delete</Button>}<Button variant="secondary" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit">{current ? 'Save activation' : 'Plan activation'}</Button></Inline> : undefined}>
@@ -138,6 +166,7 @@ export default function OfflineActivations({ projectId, campaigns, activations, 
         </Stack>}
       </Stack>
     </Dialog>
+    {capturing && <LeadCapture brand={brand} activation={capturing} request={request} path={path} onClose={() => { setCapturing(null); void onChanged(); }}/>}
     {removing && <ConfirmDialog open onOpenChange={next => { if (!next) setRemoving(undefined); }} title={`Delete “${removing.name}”?`} description="Its plan, checklist and spend are removed. Contacts captured there stay in Contacts." confirmLabel="Delete" danger onConfirm={() => remove(removing)}/>}
   </Card>;
 }
