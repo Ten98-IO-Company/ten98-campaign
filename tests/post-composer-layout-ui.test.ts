@@ -75,16 +75,16 @@ test('connected accounts are the destinations; platform boxes appear only withou
   const view = mount({ ...base, accounts });
   const picker = view.find(node => node.type === ui.DestinationPicker)!;
   assert.deepEqual(picker.props.accounts.map((row: any) => row.id), ['fb-a', 'ig-a'], 'Every connected account is offered before any platform is chosen.');
-  assert.equal(view.find(node => node.type === ui.CheckboxGroup), undefined);
+  assert.equal(view.find(node => node.type === ui.MultiCombobox), undefined);
   view.pick(['ig-a']); assert.deepEqual(view.snapshot().platforms, ['instagram']); assert.deepEqual(view.snapshot().accounts, ['ig-a']);
   view.pick(['ig-a', 'fb-a']); assert.deepEqual(view.snapshot().platforms, ['instagram', 'facebook']);
   view.pick(['fb-a']); assert.deepEqual(view.snapshot().platforms, ['facebook'], 'Removing the last account of a network removes the network.');
   view.button('Select all')!.props.onClick(); view.paint(); assert.deepEqual(view.snapshot().accounts, ['fb-a', 'ig-a']);
   const empty = mount({ ...base, accounts: [] });
-  assert.ok(empty.find(node => node.type === ui.CheckboxGroup), 'Without accounts the platform boxes allow a platform draft.');
+  assert.ok(empty.find(node => node.type === ui.MultiCombobox), 'Without accounts the platform choice allows a platform draft.');
   assert.match(empty.html(), /No social accounts connected/);
   const kept = mount({ ...base, accounts, post: { content: 'Saved', platforms: ['linkedin', 'facebook'], accounts: ['fb-a'], mediaItems: [] } });
-  assert.ok(kept.find(node => node.type === ui.CheckboxGroup), 'A saved platform without a connected account stays removable.');
+  assert.ok(kept.find(node => node.type === ui.MultiCombobox), 'A saved platform without a connected account stays removable.');
   kept.pick(['fb-a', 'ig-a']); assert.deepEqual(kept.snapshot().platforms, ['linkedin', 'facebook', 'instagram'], 'Adding an account keeps the saved platforms.');
 });
 
@@ -213,6 +213,19 @@ test('the editor wires Schedule to save then the post card publish path, with th
   assert.equal(gate(null, true, { id: 'p', sample: true }), 'Sample posts cannot be published.');
   assert.equal(gate({ p: { publishable: false, reason: 'Waiting for approval.' } }, true, { id: 'p' }), 'Waiting for approval.');
   assert.equal(gate({ p: { publishable: true, reason: '' } }, true, { id: 'p' }), undefined);
+});
+
+test('on narrow screens the footer stays one row and the To row stays short, so the caption is not hidden', () => {
+  const hosted = mount({ ...base, accounts: [], actionsHost: {} });
+  assert.equal(hosted.button('Cancel'), undefined, 'In the editor dialog its close button cancels; the footer keeps Save draft and the primary only.');
+  assert.ok(hosted.button('Save draft'));
+  const platformsField = hosted.find(node => node.type === ui.MultiCombobox && node.props.label === 'Post to')!;
+  assert.ok(platformsField, 'Without accounts the platforms are one combobox, not 14 checkboxes.');
+  assert.equal(hosted.find(node => node.type === ui.CheckboxGroup), undefined);
+  platformsField.props.onValuesChange([{ value: 'linkedin', label: 'LinkedIn' }]); hosted.paint();
+  assert.deepEqual(hosted.snapshot().platforms, ['linkedin']);
+  assert.deepEqual(hosted.find(node => node.type === ui.MultiCombobox)!.props.values.map((option: any) => option.value), ['linkedin']);
+  assert.ok(mount({ ...base, accounts: [] }).button('Cancel'), 'Outside the dialog footer Cancel stays.');
 });
 
 test('the Schedule step lives in the footer menu: one confirm, one Cancel, and the preview stays in place', async () => {
