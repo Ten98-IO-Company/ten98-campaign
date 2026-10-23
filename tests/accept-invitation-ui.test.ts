@@ -6,22 +6,25 @@ import { transformWithOxc } from 'vite';
 import { InvitationAcceptFlow } from '@ten98/ui';
 import { AppBrand } from '@ten98/ui/app';
 
+type Call = [path: string, method?: string, body?: unknown];
+type Props = { token: string; request: (path: string, method?: string, body?: unknown) => Promise<unknown>; onAccepted: (result: unknown) => void; onSignIn: () => void };
+
 // Evaluate Campaign's real AcceptInvitation adapter with hooks mocked by call order.
 const source = await readFile(new URL('../src/AcceptInvitation.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .*?;\r?\n/gm, '').replace('export default function', 'function'), 'AcceptInvitation.tsx', { jsx: { runtime: 'classic' } });
 
-function view(props) {
-  const state = [], refs = [], effects = []; let index = 0, refIndex = 0;
-  const useState = value => { const slot = index++; if (!(slot in state)) state[slot] = value; return [state[slot], next => { state[slot] = typeof next === 'function' ? next(state[slot]) : next; }]; };
-  const useRef = value => { const slot = refIndex++; if (!(slot in refs)) refs[slot] = { current: value }; return refs[slot]; };
-  const AcceptInvitation = new Function('React', 'useState', 'useRef', 'useEffect', 'InvitationAcceptFlow', 'Brand', code + '; return AcceptInvitation;')(React, useState, useRef, effect => { effects.push(effect); }, InvitationAcceptFlow, AppBrand);
-  const render = () => { index = 0; refIndex = 0; return AcceptInvitation(props); };
+function view(props: Props) {
+  const state: unknown[] = [], refs: { current: unknown }[] = [], effects: (() => void)[] = []; let index = 0, refIndex = 0;
+  const useState = (value: unknown) => { const slot = index++; if (!(slot in state)) state[slot] = value; return [state[slot], (next: unknown) => { state[slot] = typeof next === 'function' ? next(state[slot]) : next; }]; };
+  const useRef = (value: unknown) => { const slot = refIndex++; if (!(slot in refs)) refs[slot] = { current: value }; return refs[slot]; };
+  const AcceptInvitation = new Function('React', 'useState', 'useRef', 'useEffect', 'InvitationAcceptFlow', 'Brand', code + '; return AcceptInvitation;')(React, useState, useRef, (effect: () => void) => { effects.push(effect); }, InvitationAcceptFlow, AppBrand);
+  const render = (): React.ReactElement<any> => { index = 0; refIndex = 0; return AcceptInvitation(props); };
   return { render, effects };
 }
 
 test('the invitation screen inspects and accepts with the token in POST bodies, never in a request path', async () => {
-  const token = 'Ab_-'.repeat(10) + 'xyz', calls = [], accepted = [];
-  const request = async (path, method, body) => {
+  const token = 'Ab_-'.repeat(10) + 'xyz', calls: Call[] = [], accepted: unknown[] = [];
+  const request = async (path: string, method?: string, body?: unknown) => {
     calls.push([path, method, body]);
     return path === '/invitations/inspect' ? { invitation: { email: 'new@example.test', role: 'editor', workspaceName: 'Studio', expiresAt: '2026-11-01T00:00:00.000Z' }, accountExists: false, requiresSignIn: false } : { created: true };
   };
