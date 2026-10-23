@@ -1,15 +1,25 @@
+import { sql } from 'drizzle-orm';
 import { HttpError, type PublicUser } from './auth.ts';
-import type { Store } from './database.ts';
+import type { Executor, Store } from './database.ts';
 import type { ProviderRecord } from './provider-core.ts';
 import { ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, activationTag, consentWording, type ActivationType } from '../shared/offline-activations.ts';
 
 type Contacts = { capture: (projectId: string, person: { name?: string; email?: string; phone?: string }, requested: string[], source: string, tag: string) => Promise<ProviderRecord> };
-type Context = { req: { method?: string }; url: URL; project: { id: string; name: string }; role: string; user: PublicUser; body: ProviderRecord; store: Store; send: (status: number, body: unknown) => void };
+type Context = { req: { method?: string }; url: URL; project: { id: string; name: string }; role: string; user: PublicUser; body: ProviderRecord; store: Store; db: Executor; send: (status: number, body: unknown) => void };
 function fail(status: number, message: string): never { throw new HttpError(status, message); }
 const optional = (value: unknown, label: string, max: number) => { if (value === undefined || value === '') return undefined; if (typeof value !== 'string' || value.length > max) fail(400, `${label} must be text of at most ${max} characters.`); return value.trim() || undefined; };
 
+// Per activation: contacts captured there (by tag) and its tracking link's visits and QR scans. People reached and spend
+// are on the activation itself.
+async function results(db: Executor, store: Store, projectId: string) {
+  const leads = new Map((await db.execute(sql`SELECT tag, count(*)::int AS count FROM direct_contacts c, json_array_elements_text(CASE WHEN json_typeof(c.data->'tags') = 'array' THEN c.data->'tags' ELSE '[]'::json END) AS tag WHERE c.project_id = ${projectId} AND tag LIKE 'offline:%' GROUP BY tag`)).rows.map((row: any) => [row.tag, row.count]));
+  const visits = new Map((await db.execute(sql`SELECT d.link_id, SUM(d.clicks)::int AS clicks, SUM(d.qr_scans)::int AS "qrScans" FROM campaign_link_daily d JOIN campaign_links l ON l.id = d.link_id WHERE l.project_id = ${projectId} GROUP BY d.link_id`)).rows.map((row: any) => [row.link_id, row]));
+  return Object.fromEntries((await store.list(projectId, 'activations')).map(activation => { const link: any = activation.linkId && visits.get(activation.linkId); return [activation.id, { leads: leads.get(activationTag(activation.id)) || 0, clicks: link?.clicks || 0, qrScans: link?.qrScans || 0 }]; }));
+}
+
 // Field routes below an activation; the activation record itself uses the generic project record routes.
-export async function handleActivations({ req, url, project, role, user, body, store, send }: Context, contacts: Contacts, limit: (key: string, maximum: number) => Promise<void>): Promise<boolean> {
+export async function handleActivations({ req, url, project, role, user, body, store, db, send }: Context, contacts: Contacts, limit: (key: string, maximum: number) => Promise<void>): Promise<boolean> {
+  if (url.pathname === `/api/projects/${encodeURIComponent(project.id)}/activations/results` && req.method === 'GET') { send(200, { results: await results(db, store, project.id) }); return true; }
   const route = url.pathname.match(/^\/api\/projects\/[^/]+\/activations\/([^/]+)\/leads$/);
   if (!route || req.method !== 'POST') return false;
   if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'Your workspace role is view only.');

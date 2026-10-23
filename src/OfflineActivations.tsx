@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, Select, Stack, Text, Textarea } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, MetricCard, MetricGrid, Select, Stack, Text, Textarea } from '@ten98/ui';
 import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentPrompt, type ActivationType, type ConsentChannel } from '../shared/offline-activations.ts';
 
 type Row = { id: string; [key: string]: any };
@@ -29,13 +29,30 @@ export function trackingDestination(landing: string, activation: Row, campaignNa
 }
 export function TrackingLink({ link }: { link: Row }) {
   return <Inline gap={3} align="start">
-    <Image src={link.qrSvgUrl} alt={'QR code for ' + link.name} fit="contain" aspect="square" rounded/>
+    <Image src={link.qrSvgUrl} alt={'QR code for ' + link.name} fit="contain" width={144} height={144}/>
     <Stack gap={1}>
       <Text as="strong" weight="semibold">{link.shortUrl}</Text>
       <Text tone="muted" size="sm">{`${(link.clicks || 0).toLocaleString()} link visits · ${(link.qrScans || 0).toLocaleString()} QR scans`}</Text>
       <Inline gap={2}><CopyButton value={link.shortUrl} label="Copy link" messages={{ copied: 'Short link copied.' }}/><Link href={link.qrSvgUrl} download={`${link.name} QR.svg`}>Download QR</Link></Inline>
     </Stack>
   </Inline>;
+}
+type Result = { leads: number; clicks: number; qrScans: number };
+// Totals for the activations shown; spend only adds up within one currency.
+export function rollUp(rows: Row[], results: Record<string, Result>) {
+  const total = { reached: 0, leads: 0, visits: 0, budget: 0, spent: 0 };
+  for (const row of rows) { const result = results[row.id]; total.reached += row.reached || 0; if (row.status !== 'cancelled') total.budget += row.budget || 0; total.spent += row.spent || 0; if (result) { total.leads += result.leads; total.visits += result.clicks + result.qrScans; } }
+  return { ...total, costPerLead: total.leads ? total.spent / total.leads : null };
+}
+export function ResultsSummary({ rows, results, currency }: { rows: Row[]; results: Record<string, Result> | null; currency: string | null }) {
+  const total = rollUp(rows, results || {}), pending = results === null;
+  return <MetricGrid list label="Field results" minItemWidth="sm">
+    <MetricCard label="People reached" value={total.reached.toLocaleString()} hint="Counted by the team"/>
+    {pending ? <MetricCard label="Leads" unavailable="Loading…"/> : <MetricCard label="Leads" value={total.leads.toLocaleString()} hint="Contacts with consent"/>}
+    {pending ? <MetricCard label="Link and QR visits" unavailable="Loading…"/> : <MetricCard label="Link and QR visits" value={total.visits.toLocaleString()}/>}
+    {currency ? <MetricCard label="Spend" value={money(total.spent, currency)} hint={`of ${money(total.budget, currency)} planned`}/> : <MetricCard label="Spend" unavailable="Choose one campaign"/>}
+    {currency && total.costPerLead !== null && !pending ? <MetricCard label="Cost per lead" value={money(total.costPerLead, currency)}/> : <MetricCard label="Cost per lead" unavailable={currency ? 'No leads yet' : 'Choose one campaign'}/>}
+  </MetricGrid>;
 }
 type Lead = { name: string; email: string; phone: string; channels: ConsentChannel[] };
 const blankLead = (): Lead => ({ name: '', email: '', phone: '', channels: [] });
@@ -76,9 +93,10 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
   const path = `/projects/${encodeURIComponent(projectId)}/activations`, requester = useRef(request); requester.current = request;
   const [filter, setFilter] = useState(''), [members, setMembers] = useState<Row[]>([]), [editing, setEditing] = useState<Row | 'new' | null>(null), [draft, setDraft] = useState<Draft>(blankDraft()), [dirty, setDirty] = useState(false);
   const [link, setLink] = useState<Row | null>(null), [landing, setLanding] = useState(''), [linkError, setLinkError] = useState(''), [linking, setLinking] = useState(false);
-  const [material, setMaterial] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [removing, setRemoving] = useState<Row>(), [capturing, setCapturing] = useState<Row | null>(null);
+  const [material, setMaterial] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [removing, setRemoving] = useState<Row>(), [capturing, setCapturing] = useState<Row | null>(null), [results, setResults] = useState<Record<string, Result> | null>(null);
   useEffect(() => { if (readOnly) return; let current = true; requester.current(`/projects/${encodeURIComponent(projectId)}/assignees`).then(result => { if (current) setMembers(result.members || []); }, () => { if (current) setMembers([]); }); return () => { current = false; }; }, [projectId, readOnly]);
-  const campaignOf = (id: string) => campaigns.find(campaign => campaign.id === id), memberName = (id: string) => members.find(member => member.id === id)?.name || '';
+  useEffect(() => { let current = true; requester.current(`${path}/results`).then(result => { if (current) setResults(result.results || {}); }, () => { if (current) setResults({}); }); return () => { current = false; }; }, [path, activations]);
+  const campaignOf = (id: string) => campaigns.find(campaign => campaign.id === id);
   const rows = activations.filter(activation => !filter || activation.campaignId === filter).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
   const change = (patch: Partial<Draft>) => { setDraft(current => ({ ...current, ...patch })); setDirty(true); };
   function open(activation: Row | 'new') { setDraft(activation === 'new' ? blankDraft(filter || campaigns[0]?.id || '') : draftFrom(activation)); setEditing(activation); setDirty(false); setMaterial(''); setError(''); setNotice(''); setLink(null); setLanding(''); setLinkError('');
@@ -110,27 +128,29 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
   function addMaterial() { const label = material.trim(); if (!label || draft.materials.length >= 30) return; change({ materials: [...draft.materials, { label, done: false }] }); setMaterial(''); }
   const editable = !readOnly, current = editing && editing !== 'new' ? editing : null;
   const peopleOptions = members.map(member => ({ value: member.id, label: member.name }));
-  return <Card as="section" title="Field activity" description="Roadshow stops, door-to-door areas, events, street teams and sampling, planned against a campaign.">
+  return <Card as="section">
     <Stack gap={3}>
+      <Text tone="muted" size="sm">Roadshow stops, door-to-door areas, events, street teams and sampling, planned against a campaign.</Text>
       {notice && <Alert tone="success" variant="inline" onDismiss={() => setNotice('')}>{notice}</Alert>}
       {error && !editing && <Alert tone="danger" variant="inline" onDismiss={() => setError('')}>{error}</Alert>}
       <Inline justify="between" align="center">
         <Select width="auto" aria-label="Campaign" value={filter} onChange={event => setFilter(event.target.value)} options={[{ value: '', label: 'All campaigns' }, ...campaigns.map(campaign => ({ value: campaign.id, label: campaign.name }))]}/>
         {editable && <Button disabled={!campaigns.length} onClick={() => open('new')}>New activation</Button>}
       </Inline>
-      <DataTable searchable={false} pagination={false} ariaLabel="Field activations" rows={rows} rowKey={activation => activation.id}
+      <DataTable searchable={false} sortable={false} pagination={false} responsive="stack" ariaLabel="Field activations" rows={rows} rowKey={activation => activation.id}
         emptyState={<EmptyState title={campaigns.length ? 'No field activity planned' : 'Create a campaign first'} description={campaigns.length ? 'Plan a roadshow stop, door-to-door area, event, street team or sampling shift.' : 'Activations belong to a campaign, so their spend and leads roll up into it.'}/>}
         columns={[
-          { key: 'name', header: 'Activation', rowHeader: true, sortValue: activation => activation.name, render: activation => <Stack gap={0}><Text as="strong" weight="semibold">{activation.name}</Text><Text tone="muted" size="sm">{ACTIVATION_TYPE_LABELS[activation.type as ActivationType] || activation.type}{filter ? '' : ' · ' + (campaignOf(activation.campaignId)?.name || 'Campaign removed')}</Text></Stack> },
-          { key: 'startAt', header: 'When', sortValue: activation => String(activation.startAt), render: when },
-          { key: 'location', header: 'Where', wrap: true, render: activation => activation.location },
-          { key: 'ownerId', header: 'Owner', render: activation => memberName(activation.ownerId) || (activation.ownerId ? 'Team member' : '—') },
-          { key: 'spent', header: 'Spend', numeric: true, sortValue: activation => Number(activation.spent) || 0, render: activation => { const currency = campaignOf(activation.campaignId)?.currency || 'AED'; return `${money(activation.spent, currency)} of ${money(activation.budget, currency)}`; } },
+          { key: 'name', header: 'Activation', rowHeader: true, render: activation => <Stack gap={0}><Text as="strong" weight="semibold">{activation.name}</Text><Text tone="muted" size="sm">{ACTIVATION_TYPE_LABELS[activation.type as ActivationType] || activation.type}{filter ? '' : ' · ' + (campaignOf(activation.campaignId)?.name || 'Campaign removed')}</Text></Stack> },
+          { key: 'startAt', header: 'When', render: when },
+          { key: 'location', header: 'Where', wrap: true, minWidth: 'sm', render: activation => activation.location },
+          { key: 'spent', header: 'Spend', numeric: true, render: activation => { const currency = campaignOf(activation.campaignId)?.currency || 'AED'; return `${money(activation.spent, currency)} of ${money(activation.budget, currency)}`; } },
+          { key: 'results', header: 'Leads', numeric: true, render: activation => results?.[activation.id] ? results[activation.id].leads.toLocaleString() : '—' },
           { key: 'status', header: 'Status', render: activation => <Badge tone={activation.status === 'completed' ? 'success' : activation.status === 'cancelled' ? 'neutral' : 'info'}>{STATUS_LABELS[activation.status] || activation.status}</Badge> },
         ]}
         rowActionsLabel="Actions" rowActions={activation => <Inline gap={2}>{editable && activation.status !== 'cancelled' && <Button size="sm" onClick={() => setCapturing(activation)} aria-label={`Capture leads at ${activation.name}`}>Capture leads</Button>}<Button variant="secondary" size="sm" onClick={() => open(activation)} aria-label={`${editable ? 'Edit' : 'View'} ${activation.name}`}>{editable ? 'Edit' : 'View'}</Button></Inline>}/>
+      {rows.length > 0 && <ResultsSummary rows={rows} results={results} currency={filter ? campaignOf(filter)?.currency || 'AED' : new Set(rows.map(row => campaignOf(row.campaignId)?.currency || 'AED')).size === 1 ? campaignOf(rows[0].campaignId)?.currency || 'AED' : null}/>}
     </Stack>
-    <Dialog open={!!editing} onOpenChange={next => { if (!next) setEditing(null); }} dirty={dirty} size="wide" eyebrow={campaignOf(draft.campaignId)?.name || 'Field activity'} title={editing === 'new' ? 'New activation' : editable ? 'Edit activation' : 'Activation'} onSubmit={editable ? save : undefined}
+    <Dialog open={!!editing} onOpenChange={next => { if (!next) setEditing(null); }} dirty={dirty} size="wide" eyebrow={campaignOf(draft.campaignId)?.name} title={editing === 'new' ? 'New activation' : editable ? 'Edit activation' : 'Activation'} onSubmit={editable ? save : undefined}
       footer={editable ? <Inline gap={2} justify="end">{current && <Button variant="ghost" onClick={() => setRemoving(current)}>Delete</Button>}<Button variant="secondary" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit">{current ? 'Save activation' : 'Plan activation'}</Button></Inline> : undefined}>
       <Stack gap={3}>
         {error && <Alert tone="danger" variant="inline">{error}</Alert>}

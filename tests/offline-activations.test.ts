@@ -102,3 +102,26 @@ test('staff capture leads at an activation with explicit per-channel consent, an
   assert.deepEqual([statuses.slice(0, 120).every(status => status === 400), statuses[120]], [true, 429]);
   assert.equal((await request(leads, 'POST', { email: 'still-fine@example.test', consents: { email: true } }, editor.cookie)).status, 201, 'Each staff member has their own allowance.');
 });
+
+test('activation results count leads by tag and link visits and scans, and the calendar plan shows activations as timed events', { skip: postgresSkip }, async t => {
+  const { app, request, owner, project } = await start(t);
+  const campaignId = (await request(project + '/campaigns', 'POST', { name: 'Winter field push', channel: 'offline' }, owner)).body.record.id;
+  const mall = (await request(project + '/activations', 'POST', stop(campaignId), owner)).body.record;
+  const station = (await request(project + '/activations', 'POST', { ...stop(campaignId), name: 'Station flyering', type: 'street_team', status: 'cancelled' }, owner)).body.record;
+  const link = (await request(project + '/links', 'POST', { name: 'Mall stop', destination: 'https://shop.example.com/winter?utm_medium=offline', campaignId }, owner)).body.link;
+  await request(project + '/activations/' + mall.id, 'PATCH', { linkId: link.id }, owner);
+  await app.sql.run('INSERT INTO campaign_link_daily VALUES(?,?,?,?),(?,?,?,?)', link.id, '2026-11-07', 40, 12, link.id, '2026-11-08', 5, 3);
+  for (const [email, consents] of [['a@example.test', { email: true }], ['b@example.test', { email: true }]] as const) assert.equal((await request(`${project}/activations/${mall.id}/leads`, 'POST', { email, consents }, owner)).status, 201);
+  await request(project + '/direct/contacts', 'POST', { email: 'manual@example.test', tags: ['offline:not-ours'] }, owner);
+
+  const results = await request(project + '/activations/results', 'GET', undefined, owner);
+  assert.equal(results.status, 200, JSON.stringify(results.body));
+  assert.deepEqual(results.body.results, { [mall.id]: { leads: 2, clicks: 45, qrScans: 15 }, [station.id]: { leads: 0, clicks: 0, qrScans: 0 } });
+
+  const { calendarPlan } = await import('../server/calendar.ts');
+  const { createStore } = await import('../server/database.ts');
+  const plan = await calendarPlan(createStore(app.database.db), (await request('/state', 'GET', undefined, owner)).body.projectId);
+  const field = plan.filter((event: any) => event.extendedProperties.private.ten98Collection === 'activations');
+  assert.deepEqual(field.map((event: any) => [event.summary, event.start, event.end]), [['Field · Mall roadshow — Saturday', { dateTime: mall.startAt }, { dateTime: mall.endAt }]], 'Cancelled activations stay off the calendar.');
+  assert.match(field[0].description, /Roadshow stop · City Centre Mall, atrium/);
+});
