@@ -44,3 +44,5 @@ Report vulnerabilities privately through [GitHub private vulnerability reporting
 - Licence: [MIT](LICENSE). Third-party components and their licences: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - Zernio, Twilio, Cloudflare, Google, Microsoft, Broadsign and OpenRouter are independently operated services. Provider accounts, API access, message charges, media spending and model usage remain subject to their providers' terms and charges. The MIT licence covers this application's source code, not those services.
 - Provided "as is", without warranty, as stated in the licence.
+- Ten98 and the Ten98 logo are trademarks of Ten98 Technologies Ltd. The MIT licence covers the code, not the name or logo: forks must use their own name and branding.
+- The hosted apps at *.ten98.io are covered by the Ten98 privacy policy (https://ten98.io/legal/privacy). Self-hosted installs are run by their operator and send no data to Ten98.
