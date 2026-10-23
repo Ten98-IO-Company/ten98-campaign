@@ -5,7 +5,7 @@ import { resolve, relative, extname, sep, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { oidcEndpoint, workspaceRoles as roles, mayManageWorkspaceMember } from '@ten98/runtime';
-import { assertSchema, closeDatabase, createStore, collections, getDatabase, type Connection, type Database, type Executor, type Store } from './database.ts';
+import { assertSchema, closeDatabase, createStore, collections, getDatabase, type Connection, type Executor, type Store } from './database.ts';
 import { createAuth, sessionSecret, bootstrapToken, hashPassword, HttpError, lockWorkspace, memberRole, publicUser, type AuthConfig, type PublicUser } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
 import { seedSample } from './seed.ts';
@@ -268,7 +268,7 @@ export async function createApp(options: AppOptions = {}) {
         if (memberRoute && ['GET', 'PATCH', 'DELETE'].includes(req.method!)) {
           const role = await workspaceAccess(memberRoute[1], user.id);
           if (!['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
-          if (req.method === 'GET' && !memberRoute[2]) return send(200, { members: (await db.execute(sql`SELECT u.id,u.id AS "userId",u.name,u.email,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=${memberRoute[1]} ORDER BY u.name`)).rows });
+          if (req.method === 'GET' && !memberRoute[2]) return send(200, { members: (await db.execute(sql`SELECT u.id,u.id AS "userId",u.name,u.email,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=${memberRoute[1]} ORDER BY u.name COLLATE "C", u.id`)).rows });
           if (!memberRoute[2] || req.method === 'GET') throw new HttpError(404, 'Team route not found.');
           const requested = req.method === 'DELETE' ? null : choice(body.role, roles, 'Role');
           // The workspace row lock serialises team changes, so parallel demotions cannot remove the last owner;
@@ -313,7 +313,7 @@ export async function createApp(options: AppOptions = {}) {
           // administrator-only team route.
           if (projectRoute[2] === 'assignees' && req.method === 'GET') {
             if (!['owner', 'admin', 'editor'].includes(role)) throw new HttpError(403, 'Editing permission is required to assign work.');
-            return send(200, { members: (await db.execute(sql`SELECT u.id,u.name,m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=${project.workspaceId} AND m.role IN ('owner','admin','editor') ORDER BY u.name, u.id`)).rows });
+            return send(200, { members: (await db.execute(sql`SELECT u.id,u.name,m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=${project.workspaceId} AND m.role IN ('owner','admin','editor') ORDER BY u.name COLLATE "C", u.id`)).rows });
           }
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
           const requestRevision = integrationSettings.revision;
@@ -367,8 +367,14 @@ export async function createApp(options: AppOptions = {}) {
           }
           if (!projectRoute[2] && req.method === 'PATCH') {
             if ((Object.hasOwn(body, 'zernioProfileId') || Object.hasOwn(body, 'driveFolderId')) && (!user.isOperator || !['owner', 'admin'].includes(role))) throw new HttpError(403, 'Only an instance operator with workspace administration access can map provider connections.');
-            const updated = projectInput({ ...project, ...body }); await checkProfileMapping(db, updated.zernioProfileId, project.id);
-            await profileWrite(db.execute(sql`UPDATE projects SET name=${updated.name},color=${updated.color},zernio_profile_id=${updated.zernioProfileId},drive_folder_id=${updated.driveFolderId} WHERE id=${project.id}`));
+            // Merge into the row as it is now, under its lock, so a parallel PATCH of another field is not overwritten (#35).
+            const updated = await db.transaction(async tx => {
+              const current = await first<ProviderRecord>(tx.execute(sql`SELECT ${projectFields} FROM projects p WHERE p.id=${project.id} FOR UPDATE`));
+              if (!current) throw new HttpError(404, 'Project not found.');
+              const next = projectInput({ ...current, ...body }); await checkProfileMapping(tx, next.zernioProfileId, project.id);
+              await profileWrite(tx.execute(sql`UPDATE projects SET name=${next.name},color=${next.color},zernio_profile_id=${next.zernioProfileId},drive_folder_id=${next.driveFolderId} WHERE id=${project.id}`));
+              return next;
+            });
             await store.activity(project.id, 'Project settings updated.'); return send(200, { project: { ...project, ...updated } });
           }
           const [collection, id, extra] = (projectRoute[2] || '').split('/');
@@ -420,7 +426,7 @@ export async function createApp(options: AppOptions = {}) {
   } };
 }
 const PROFILE_MAPPED = 'This Zernio profile is already mapped to another project. Use one profile per project for publishing and analytics.';
-async function checkProfileMapping(db: Database, profileId: string | null, projectId = ''): Promise<void> { if (profileId && (await db.execute(sql`SELECT id FROM projects WHERE zernio_profile_id=${profileId} AND id<>${projectId}`)).rowCount) throw new HttpError(409, PROFILE_MAPPED); }
+async function checkProfileMapping(db: Executor, profileId: string | null, projectId = ''): Promise<void> { if (profileId && (await db.execute(sql`SELECT id FROM projects WHERE zernio_profile_id=${profileId} AND id<>${projectId}`)).rowCount) throw new HttpError(409, PROFILE_MAPPED); }
 // A parallel mapping can pass checkProfileMapping too; the projects_zernio_profile unique index then refuses the write.
 async function profileWrite(write: Promise<unknown>): Promise<void> {
   try { await write; } catch (error: any) { const cause = error?.cause ?? error; if (cause?.code === '23505' && cause?.constraint === 'projects_zernio_profile') throw new HttpError(409, PROFILE_MAPPED); throw error; }

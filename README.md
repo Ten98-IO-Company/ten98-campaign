@@ -4,7 +4,7 @@ Plan, publish and measure your campaigns across social, advertising, out-of-home
 
 Campaign is an open-source campaign manager for marketing teams who want one place to run social publishing, online ads, out-of-home media, direct messaging, digital assets and campaign planning, on their own server. Workspaces keep each team's projects, people and provider connections separate.
 
-![Campaign ads manager](https://raw.githubusercontent.com/wiki/Ten98-IO-Company/ten98-campaign/images/ads-verification.png)
+![Campaign ads manager](https://raw.githubusercontent.com/wiki/Ten98-IO-Company/ten98-campaign/images/ads-manager.png)
 
 ## Why Campaign
 
@@ -22,10 +22,10 @@ Campaign is an open-source campaign manager for marketing teams who want one pla
 
 Installation, configuration and guides are in the [wiki](https://github.com/Ten98-IO-Company/ten98-campaign/wiki):
 
-- [Install and run](https://github.com/Ten98-IO-Company/ten98-campaign/wiki/Install-and-Run)
-- [Deployment and operations](https://github.com/Ten98-IO-Company/ten98-campaign/wiki/Deployment-and-Operations)
-- [Integration settings](https://github.com/Ten98-IO-Company/ten98-campaign/wiki/Integration-Settings)
-- [Features](https://github.com/Ten98-IO-Company/ten98-campaign/wiki/Features)
+- [Development](https://github.com/Ten98-IO-Company/ten98-campaign/wiki/Development): run it locally, run the tests and contribute code.
+- [Deployment](https://github.com/Ten98-IO-Company/ten98-campaign/wiki/Deployment): self-host it in production and upgrade.
+- [Configuration](https://github.com/Ten98-IO-Company/ten98-campaign/wiki/Configuration): settings, providers and environment.
+- [Features](https://github.com/Ten98-IO-Company/ten98-campaign/wiki/Features): what each feature does and its limits.
 
 ## Community
 
