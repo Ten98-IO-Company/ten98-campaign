@@ -43,7 +43,8 @@ test('the sidebar, post cards and agenda consume the loaded summary without thei
   assert.match(app, /useEffect\(\(\) => \{ setApprovalSummary\(null\); \}, \[state\?\.projectId\]\);/, 'Switching projects clears the previous project summary.');
   assert.match(app, /useEffect\(\(\) => \{ if \(state\?\.projectId\) void loadApprovalSummary\(state\.projectId\); \}, \[state\]\);/, 'Every reload, including after approval changes, refreshes the summary.');
   assert.match(app, /const approvalsBadge = approvalBadge\(approvalSummary\);/, 'The badge counts post and ad spend reviews from the loaded summary.');
-  assert.match(app, /p\.label === 'Approvals' && approvalsBadge \? \{ badge: approvalsBadge\.count, badgeLabel: approvalsBadge\.label \} : \{\}/);
+  assert.match(app, /entry\.id === 'planner' && approvalsBadge \? \{ badge: approvalsBadge\.count, badgeLabel: approvalsBadge\.label \} : \{\}/, 'Planner, which holds Approvals, carries the badge.');
+  assert.match(app, /tab\.page === 'Approvals' && approvalsBadge \? approvalsBadge\.count : undefined/, 'The Approvals tab shows the same count.');
   assert.match(app, /disabled=\{busy \|\| !connected\} onClick=\{\(\) => setPublishing\(p\)\}>/, 'An approved post keeps the unchanged publish confirmation.');
   assert.match(app, /approvalGate\(approvalSummary, p\.id\)/); assert.match(app, />Open approvals<\/Button>/);
   assert.match(app, /<CampaignPublishingAgenda posts=\{calendarPosts\} googleEvents=\{calendarOverlay\}[^\r\n]*postApprovals=\{approvalSummary\?\.requireApproval \? Object\.fromEntries\(Object\.keys\(approvalSummary\.statuses\)\.map\(id => \[id, approvalGate\(approvalSummary, id\)!\.label\]\)\) : undefined\}/);
