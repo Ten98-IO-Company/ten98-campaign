@@ -101,6 +101,38 @@ test('redirects count QR-tagged and ordinary requests separately, excluding HEAD
   } finally { await f.close(); }
 });
 
+// ten98-campaign#116: a browser following a disabled or unknown short link gets a small page; other clients keep JSON.
+test('disabled and unknown short links show browsers a fixed page and keep JSON for other clients', { skip: postgresSkip }, async t => {
+  const f = await fixture(t); try {
+    const link = (await f.api('', 'POST', { name: 'Visit', destination: 'https://example.com/offer', campaignId: 'campaign-one' })).data.link, path = '/s/' + link.code;
+    assert.equal((await f.api('/' + link.id, 'PATCH', { archived: true })).status, 200);
+    const browser = { Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' };
+    const policy = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+    const page = async (target, status, title) => {
+      const response = await f.request(target, 'GET', undefined, browser);
+      assert.equal(response.status, status, target); assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+      assert.equal(response.headers.get('content-security-policy'), policy); assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff'); assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+      assert.ok(response.text.startsWith('<!doctype html><html lang="en">')); assert.ok(response.text.includes(`<title>${title}</title>`) && response.text.includes(`<h1>${title}</h1>`));
+      assert.doesNotMatch(response.text, /<script|<link|<img|src=|href=/, 'The page loads nothing.');
+      return response.text;
+    };
+    const disabled = await page(path, 410, 'This link is no longer active');
+    assert.equal(disabled.includes(link.code), false, 'The page repeats nothing from the request.');
+    await page('/s/AAAAAAAAAAAA', 404, "This link isn't available");
+    const malformed = await page('/s/%3Cscript%3Ealert(1)%3C%2Fscript%3E', 404, "This link isn't available");
+    assert.equal(malformed.includes('alert'), false);
+    const head = await f.request(path, 'HEAD', undefined, browser); assert.equal(head.status, 410); assert.equal(head.text, '');
+    // API and other non-HTML clients keep the JSON error.
+    for (const headers of [{}, { Accept: 'application/json' }]) {
+      const gone = await f.request(path, 'GET', undefined, headers), missing = await f.request('/s/AAAAAAAAAAAA', 'GET', undefined, headers);
+      assert.equal(gone.status, 410); assert.equal(gone.headers.get('content-type'), 'application/json; charset=utf-8'); assert.deepEqual(gone.data, { error: 'This short link is no longer active.' });
+      assert.equal(missing.status, 404); assert.deepEqual(missing.data, { error: 'This short link is unavailable.' });
+    }
+    assert.equal((await f.request(path)).headers.get('content-security-policy'), null, 'Only the page carries its own policy.');
+  } finally { await f.close(); }
+});
+
 test('website intake uses exact origins, strips query/hash, deduplicates IDs and stores no visitor identity', { skip: postgresSkip }, async t => {
   const f = await fixture(t); try {
     const settings = (await f.api('/settings', 'PUT', { allowedWebsiteOrigins: ['https://www.example.com'] })).data.settings, endpoint = '/api/tracking/' + settings.siteToken + '/events', body = { eventId: randomUUID(), name: 'pageview', path: '/landing?email=private@example.com#secret' }, headers = { Origin: 'https://www.example.com' };
