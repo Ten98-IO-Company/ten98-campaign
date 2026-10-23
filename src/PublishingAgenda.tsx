@@ -10,6 +10,8 @@ type CalendarFilters = { channel?: string; status?: string; campaign?: string; g
 type DayEntry = CalendarEntry & { network?: string; snippet?: string; status?: string; tone?: Tone; campaign?: Row; event?: Row };
 type Props = {
   posts: ScheduledPost[];
+  /** All post records. A published post without a schedule entry in `posts` is placed on its `publishedAt`. */
+  records?: Row[];
   /** The app has already removed verified Google copies of these posts. */
   googleEvents: Row[];
   month: Date;
@@ -56,7 +58,10 @@ function statusTone(status: string | undefined, approval: string | undefined): T
 // The same campaign keeps the same decorative colour across views and reloads.
 const campaignPalette = (id: string) => badgePalettes[[...id].reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) >>> 0, 0) % badgePalettes.length];
 
-export default function CampaignPublishingAgenda({ posts, googleEvents, month, accounts = [], campaigns = [], canWrite, postLabel, onSelect, onCreateDay, googleEventActions, actions, view = 'list', onViewChange, onMonthChange, weekStart, onWeekChange, filters = {}, onFiltersChange, postApprovals }: Props) {
+export default function CampaignPublishingAgenda({ posts: scheduled, records = [], googleEvents, month, accounts = [], campaigns = [], canWrite, postLabel, onSelect, onCreateDay, googleEventActions, actions, view = 'list', onViewChange, onMonthChange, weekStart, onWeekChange, filters = {}, onFiltersChange, postApprovals }: Props) {
+  // Posts published immediately (and the sample post) have no planned time, so schedules skip them.
+  const placed = new Set(scheduled.map(entry => entry.post.id));
+  const posts: ScheduledPost[] = [...scheduled, ...records.filter(post => !placed.has(post.id) && Number.isFinite(Date.parse(post.publishedAt))).map(post => ({ id: post.id, post, platform: post.platforms?.[0] || '', content: post.content || '', scheduledAt: post.publishedAt }))];
   const monthStart = new Date(month.getFullYear(), month.getMonth(), 1), monthEnd = new Date(month.getFullYear(), month.getMonth() + 1, 1);
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   // Days before today offer no creation: a post cannot be planned in the past.

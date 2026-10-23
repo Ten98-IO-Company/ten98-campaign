@@ -128,3 +128,16 @@ test('channel, status, campaign and Google filters apply to the week, month and 
   assert.deepEqual(changes.slice(2), [{ status: 'draft' }, { googleHidden: true }]);
   assert.equal(find(Agenda({ ...props, onFiltersChange: undefined, view: 'week' }), ofType(ui.AppliedFilters)), undefined, 'Filters need the app handler.');
 });
+
+test('#139: a published post without a planned time is placed on its publish time and counted as published', () => {
+  const selected: unknown[] = [], sample = { id: 'sample', status: 'published', content: 'Sample caption', platforms: ['instagram'], publishedAt: new Date(2099, 9, 15, 9).toISOString() };
+  const planned = entry('planned', at(16, 9), { status: 'published', publishedAt: at(14, 9) });
+  const props = { ...base, posts: [planned], records: [sample, planned.post, { id: 'undated', status: 'draft' }], onMonthChange() {}, onSelect: (post: unknown) => selected.push(post) };
+  const grid = find(Agenda({ ...props, view: 'month' }), ofType(ui.CalendarMonth))!;
+  assert.deepEqual([...grid.props!.days.keys()].sort(), ['2099-10-15', '2099-10-16'], 'A post that already has a schedule entry is not added twice.');
+  assert.match(grid.props!.days.get('2099-10-15')[0].label, /^Instagram · Sample caption · Published$/);
+  grid.props!.days.get('2099-10-15')[0].onSelect(); assert.equal(selected[0], sample);
+  const list = find(Agenda(props), ofType(ui.PublishingAgenda))!;
+  assert.deepEqual(list.props!.entries.map((item: { id: string; dateTime: string }) => [item.id, item.dateTime]), [['post:sample', sample.publishedAt], ['post:planned', planned.scheduledAt]]);
+  assert.match(html({ ...props, view: 'month' }), /<strong[^>]*>2<\/strong> published/);
+});
