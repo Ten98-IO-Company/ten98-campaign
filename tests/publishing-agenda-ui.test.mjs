@@ -98,7 +98,7 @@ test('the month view groups posts and Google events by local day, counts the mon
   const originalTimezone = process.env.TZ;
   process.env.TZ = 'Asia/Dubai';
   try {
-    const scheduled = { id: 'scheduled', status: 'scheduled', content: 'Launch caption', scheduledAt: '2026-10-14T20:30:00Z' }, published = { id: 'published', status: 'published', content: 'Done', scheduledAt: '2026-10-02T08:00:00Z', accounts: ['a', 'b'] }, outside = { id: 'outside', status: 'scheduled', content: 'November', scheduledAt: '2026-11-01T08:00:00Z' };
+    const scheduled = { id: 'scheduled', status: 'scheduled', externalId: 'remote', content: 'Launch caption', scheduledAt: '2026-10-14T20:30:00Z' }, published = { id: 'published', status: 'published', content: 'Done', scheduledAt: '2026-10-02T08:00:00Z', accounts: ['a', 'b'] }, outside = { id: 'outside', status: 'scheduled', content: 'November', scheduledAt: '2026-11-01T08:00:00Z' };
     const allDay = { id: 'holiday', summary: 'Holiday', start: { date: '2026-09-30' }, end: { date: '2026-10-02' } }, timed = { id: 'meeting', summary: 'Review', start: { dateTime: '2026-10-20T06:00:00Z' }, end: { dateTime: '2026-10-20T07:00:00Z' } };
     const selected = [], months = [], views = [], created = [];
     const props = { posts: [scheduled, published, outside].flatMap(post => postScheduleEntries(post)), googleEvents: [allDay, timed], month: new Date(2026, 9, 1), canWrite: true, postLabel, onSelect: post => selected.push(post.id), onCreateDay: day => created.push(day), view: 'month', onViewChange: view => views.push(view), onMonthChange: month => months.push([month.getFullYear(), month.getMonth()]) };

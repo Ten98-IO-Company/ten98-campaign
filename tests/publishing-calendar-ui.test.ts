@@ -21,7 +21,8 @@ const find = (node: Node, match: (node: NonNullable<Node>) => boolean) => findAl
 const ofType = (type: unknown) => (node: NonNullable<Node>) => node.type === type;
 const text = (node: Node): string => node == null || typeof node === 'boolean' ? '' : typeof node !== 'object' ? String(node) : children(node).map(text).join(' ');
 const at = (day: number, hour: number, month = 9) => new Date(2099, month, day, hour).toISOString();
-const entry = (id: string, scheduledAt: string, extra: Record<string, unknown> = {}) => { const post = { id, status: 'scheduled', content: id + ' caption', ...extra }; return { id, post, platform: 'facebook', content: post.content, scheduledAt }; };
+// Fixtures are submitted to the provider (externalId) unless a test says otherwise.
+const entry = (id: string, scheduledAt: string, extra: Record<string, unknown> = {}) => { const post = { id, status: 'scheduled', externalId: 'remote-' + id, content: id + ' caption', ...extra }; return { id, post, platform: 'facebook', content: post.content, scheduledAt }; };
 const base = { googleEvents: [], month: new Date(2099, 9, 1), canWrite: true, postLabel: (post: { content?: string }) => post.content || 'Media post', onSelect() {} };
 const days = (element: Node) => findAll(element, node => node.props?.role === 'group' && node.props?.tabIndex === 0);
 const key = (element: NonNullable<Node>, keyName: string, target?: object) => { let prevented = false; const currentTarget = {}; element.props!.onKeyDown({ key: keyName, target: target ?? currentTarget, currentTarget, preventDefault() { prevented = true; } }); return prevented; };
@@ -140,4 +141,24 @@ test('#139: a published post without a planned time is placed on its publish tim
   const list = find(Agenda(props), ofType(ui.PublishingAgenda))!;
   assert.deepEqual(list.props!.entries.map((item: { id: string; dateTime: string }) => [item.id, item.dateTime]), [['post:sample', sample.publishedAt], ['post:planned', planned.scheduledAt]]);
   assert.match(html({ ...props, view: 'month' }), /<strong[^>]*>2<\/strong> published/);
+});
+
+test('#140: a dated post not yet submitted to a provider is Planned, not Scheduled, and lists every destination', () => {
+  const draft = entry('draft', at(27, 9), { externalId: undefined, platforms: ['instagram', 'linkedin', 'twitter'] }), submitted = entry('submitted', at(28, 9));
+  draft.platform = 'instagram';
+  const changes: unknown[] = [], props = { ...base, posts: [draft, submitted], view: 'month', onMonthChange() {}, onFiltersChange: (filters: unknown) => changes.push(filters) };
+  const grid = find(Agenda(props), ofType(ui.CalendarMonth))!;
+  assert.equal(grid.props!.days.get('2099-10-27')[0].label, 'Instagram, LinkedIn, X · draft caption · Planned');
+  assert.equal(grid.props!.days.get('2099-10-28')[0].label, 'Facebook · submitted caption · Scheduled');
+  const markup = html(props);
+  assert.match(markup, /<strong[^>]*>1<\/strong> planned/); assert.match(markup, /<strong[^>]*>1<\/strong> scheduled/);
+  const list = find(Agenda({ ...props, view: 'list' }), ofType(ui.PublishingAgenda))!;
+  assert.equal(text(list.props!.entries[0].status), 'Planned'); assert.equal(list.props!.entries[0].details, 'Instagram, LinkedIn, X');
+  const week = find(Agenda({ ...props, view: 'week', weekStart: '2099-10-26', postApprovals: { draft: 'Awaiting approval' } }), node => node.type === ui.Badge && Boolean(node.props?.dot))!;
+  assert.deepEqual([text(week), week.props!.tone], ['Planned · Awaiting approval', 'warning']);
+  const select = (label: string) => find(Agenda(props), node => node.type === ui.Field && node.props?.label === label)!;
+  assert.deepEqual(find(select('Status'), ofType(ui.Select))!.props!.options.map((option: { value: string }) => option.value), ['', 'planned', 'scheduled']);
+  assert.deepEqual(find(select('Channel'), ofType(ui.Select))!.props!.options.map((option: { value: string }) => option.value), ['', 'facebook', 'instagram', 'linkedin', 'twitter']);
+  const filtered = (filters: Record<string, string>) => [...find(Agenda({ ...props, filters }), ofType(ui.CalendarMonth))!.props!.days.keys()];
+  assert.deepEqual(filtered({ status: 'planned' }), ['2099-10-27']); assert.deepEqual(filtered({ channel: 'linkedin' }), ['2099-10-27']); assert.deepEqual(filtered({ status: 'scheduled' }), ['2099-10-28']);
 });

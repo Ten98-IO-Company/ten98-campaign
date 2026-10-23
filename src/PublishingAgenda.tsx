@@ -48,12 +48,18 @@ const addDays = (date: Date, count: number) => new Date(date.getFullYear(), date
 const mondayOf = (date: Date) => addDays(date, -((date.getDay() + 6) % 7));
 const capital = (value: string) => value[0].toUpperCase() + value.slice(1);
 const networkName = (platform?: string) => platform ? PLATFORM_RULES[platform]?.label || platform : '';
+// The Publishing card's word: a dated post that no provider has received is planned, not scheduled.
+const postStatus = (post: Row): string | undefined => post.status === 'scheduled' && !post.externalId ? 'planned' : post.status;
+// An account copy names its own network; an ordinary post names every selected platform.
+const destinations = (entry: ScheduledPost) => entry.accountId || !entry.post.platforms?.length ? networkName(entry.platform) : entry.post.platforms.map(networkName).join(', ');
+const onChannel = (entry: ScheduledPost, channel: string) => entry.platform === channel || (!entry.accountId && Boolean(entry.post.platforms?.includes(channel)));
 // Failure outranks delivery, delivery outranks a missing approval; drafts and cancellations stay neutral.
 function statusTone(status: string | undefined, approval: string | undefined): Tone {
   if (status === 'failed' || status === 'partial') return 'danger';
   if (status === 'published') return 'success';
   if (!status || status === 'draft' || status === 'cancelled') return 'neutral';
-  return approval && approval !== 'Approved' ? 'warning' : 'info';
+  if (approval && approval !== 'Approved') return 'warning';
+  return status === 'planned' ? 'neutral' : 'info';
 }
 // The same campaign keeps the same decorative colour across views and reloads.
 const campaignPalette = (id: string) => badgePalettes[[...id].reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) >>> 0, 0) % badgePalettes.length];
@@ -71,27 +77,27 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
   const start = view === 'week' ? week : monthStart, end = view === 'week' ? addDays(week, 7) : monthEnd;
   const format = new Intl.DateTimeFormat('en', { timeZone: timezone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
   const approvalLabel = (post: Row) => postApprovals ? postApprovals[post.id] || 'Approval not requested' : undefined;
-  const statusText = (post: Row) => (post.status ? capital(post.status) : 'Status unavailable') + (postApprovals ? ' · ' + approvalLabel(post) : '');
+  const statusText = (post: Row) => (post.status ? capital(postStatus(post)!) : 'Status unavailable') + (postApprovals ? ' · ' + approvalLabel(post) : '');
   const campaignOf = (post: Row) => post.campaignId ? campaigns.find(campaign => String(campaign.id) === String(post.campaignId)) : undefined;
-  const statusBadge = (post: Row) => <Badge tone={statusTone(post.status, approvalLabel(post))} dot>{statusText(post)}</Badge>;
+  const statusBadge = (post: Row) => <Badge tone={statusTone(postStatus(post), approvalLabel(post))} dot>{statusText(post)}</Badge>;
   const timeOnly = new Intl.DateTimeFormat('en', { timeZone: timezone, hour: '2-digit', minute: '2-digit' });
   // Grid and week days, keyed by the browser-local date that the agenda's times also use.
   const days = new Map<string, DayEntry[]>(), addDay = (day: string, entry: DayEntry) => days.set(day, [...(days.get(day) || []), entry]);
   const rangePosts = posts.filter(entry => new Date(entry.scheduledAt) >= start && new Date(entry.scheduledAt) < end);
-  const visible = (entry: ScheduledPost) => (!filters.channel || entry.platform === filters.channel) && (!filters.status || entry.post.status === filters.status) && (!filters.campaign || String(entry.post.campaignId || '') === filters.campaign);
+  const visible = (entry: ScheduledPost) => (!filters.channel || onChannel(entry, filters.channel)) && (!filters.status || postStatus(entry.post) === filters.status) && (!filters.campaign || String(entry.post.campaignId || '') === filters.campaign);
   const shownPosts = rangePosts.filter(visible);
   // Month stats ported from zernio-dev/latewiz@28dd018 src/app/dashboard/calendar/page.tsx:88-105 (MIT), counting posts rather than account copies.
-  const countPosts = (status: string) => new Set(rangePosts.filter(entry => entry.post.status === status).map(entry => entry.post.id)).size;
+  const countPosts = (status: string) => new Set(rangePosts.filter(entry => postStatus(entry.post) === status).map(entry => entry.post.id)).size;
   const entries: (PublishingAgendaEntry & { order: number })[] = shownPosts.map(entry => ({
     id: `post:${entry.id}`, title: entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post)),
     dateTime: entry.scheduledAt, when: format.format(new Date(entry.scheduledAt)), order: Date.parse(entry.scheduledAt),
     status: statusBadge(entry.post),
-    details: [networkName(entry.platform), entry.accountId && (accounts.find(account => String(account._id || account.id) === entry.accountId)?.displayName || entry.accountId), campaignOf(entry.post)?.name].filter(Boolean).join(' · '),
+    details: [destinations(entry), entry.accountId && (accounts.find(account => String(account._id || account.id) === entry.accountId)?.displayName || entry.accountId), campaignOf(entry.post)?.name].filter(Boolean).join(' · '),
     actions: <Button variant="secondary" size="sm" onClick={() => onSelect(entry.post)}>{canWrite ? 'Open post' : 'View post'}</Button>,
   }));
   for (const entry of shownPosts) {
-    const snippet = entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post)), network = networkName(entry.platform), status = statusText(entry.post);
-    addDay(localDate(new Date(entry.scheduledAt)), { id: `post:${entry.id}`, label: [network, snippet, status].filter(Boolean).join(' · '), time: timeOnly.format(new Date(entry.scheduledAt)), onSelect: () => onSelect(entry.post), network, snippet, status, tone: statusTone(entry.post.status, approvalLabel(entry.post)), campaign: campaignOf(entry.post) });
+    const snippet = entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post)), network = destinations(entry), status = statusText(entry.post);
+    addDay(localDate(new Date(entry.scheduledAt)), { id: `post:${entry.id}`, label: [network, snippet, status].filter(Boolean).join(' · '), time: timeOnly.format(new Date(entry.scheduledAt)), onSelect: () => onSelect(entry.post), network, snippet, status, tone: statusTone(postStatus(entry.post), approvalLabel(entry.post)), campaign: campaignOf(entry.post) });
   }
   let googleCount = 0, googleHidden = 0;
   for (const event of googleEvents) {
@@ -135,8 +141,8 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
   const options = (values: (string | undefined)[], label: (value: string) => string) => [...new Set(values.filter((value): value is string => Boolean(value)))].map(value => ({ value, label: label(value) })).sort((left, right) => left.label.localeCompare(right.label));
   const filterRow = onFiltersChange && <Stack gap={2}>
     <Inline gap={3} align="end">
-      <Field label="Channel"><Select width="auto" value={filters.channel || ''} onChange={event => setFilters({ channel: event.target.value })} options={[{ value: '', label: 'All channels' }, ...options(posts.map(entry => entry.platform), networkName)]}/></Field>
-      <Field label="Status"><Select width="auto" value={filters.status || ''} onChange={event => setFilters({ status: event.target.value })} options={[{ value: '', label: 'All statuses' }, ...options(posts.map(entry => entry.post.status), capital)]}/></Field>
+      <Field label="Channel"><Select width="auto" value={filters.channel || ''} onChange={event => setFilters({ channel: event.target.value })} options={[{ value: '', label: 'All channels' }, ...options(posts.flatMap(entry => [entry.platform, ...entry.accountId ? [] : entry.post.platforms || []]), networkName)]}/></Field>
+      <Field label="Status"><Select width="auto" value={filters.status || ''} onChange={event => setFilters({ status: event.target.value })} options={[{ value: '', label: 'All statuses' }, ...options(posts.map(entry => postStatus(entry.post)), capital)]}/></Field>
       {campaigns.length > 0 && <Field label="Campaign"><Select width="auto" value={filters.campaign || ''} onChange={event => setFilters({ campaign: event.target.value })} options={[{ value: '', label: 'All campaigns' }, ...campaigns.map(campaign => ({ value: String(campaign.id), label: String(campaign.name || campaign.id) }))]}/></Field>}
       <Switch label="Google Calendar" checked={!filters.googleHidden} onCheckedChange={checked => setFilters({ googleHidden: !checked })}/>
     </Inline>
@@ -181,7 +187,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
 
   return <Card><Stack gap={4}>
     <Inline justify="between" align="center">
-      <Inline gap={4}><Text size="sm"><Text as="strong">{countPosts('scheduled')}</Text> scheduled</Text><Text size="sm"><Text as="strong">{countPosts('published')}</Text> published</Text><Text size="sm"><Text as="strong">{googleCount}</Text> Google events</Text></Inline>
+      <Inline gap={4}><Text size="sm"><Text as="strong">{countPosts('planned')}</Text> planned</Text><Text size="sm"><Text as="strong">{countPosts('scheduled')}</Text> scheduled</Text><Text size="sm"><Text as="strong">{countPosts('published')}</Text> published</Text><Text size="sm"><Text as="strong">{googleCount}</Text> Google events</Text></Inline>
       {onViewChange && <SegmentedControl label="Calendar view" value={view} onValueChange={value => (onViewChange as (view: string) => void)(value)} options={[...onWeekChange ? [{ value: 'week', label: 'Week' }] : [], { value: 'month', label: 'Month' }, { value: 'list', label: 'List' }]}/>}
     </Inline>
     {filterRow}

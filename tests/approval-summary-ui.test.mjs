@@ -53,7 +53,7 @@ test('agenda list and month grid entries name the approval status only when it i
   const source = await readFile(new URL('../src/PublishingAgenda.tsx', import.meta.url), 'utf8');
   const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace('export default ', ''), 'PublishingAgenda.tsx', { jsx: { runtime: 'classic' } });
   const Agenda = new Function('React', 'PLATFORM_RULES', ...Object.keys(ui), code + '; return CampaignPublishingAgenda;')(React, PLATFORM_RULES, ...Object.values(ui));
-  const month = new Date(2026, 10, 1), post = { id: 'post', status: 'scheduled', content: 'Launch' };
+  const month = new Date(2026, 10, 1), post = { id: 'post', status: 'scheduled', externalId: 'remote', content: 'Launch' };
   const props = { posts: [{ id: 'post', post, content: 'Launch', scheduledAt: new Date(2026, 10, 3, 9).toISOString() }], googleEvents: [], month, canWrite: true, postLabel: row => row.content, onSelect() {} };
   const list = renderToStaticMarkup(React.createElement(Agenda, { ...props, postApprovals: { post: 'Changed since approval' } }));
   assert.match(list, /Scheduled · Changed since approval/);
