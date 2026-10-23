@@ -371,3 +371,18 @@ test('Direct campaigns says email campaigns are transactional only, with the rea
   assert.doesNotMatch(source, /Manage permission-based email, SMS and approved WhatsApp template campaigns/, 'The intro no longer implies newsletters.');
   assert.match(source, /title="Transactional email only">[^<]*because the configured email provider is for transactional mail\./);
 });
+
+// ten98-campaign#137(b): the Marketing purpose is serialized, offered only while Amazon SES sends, and asks for marketing
+// permission on contacts instead of the transactional confirmation.
+test('the Marketing email purpose is offered only while Amazon SES sends, with a reason and Open integrations otherwise', () => {
+  assert.equal(campaignBody({ ...blankDraft, emailPurpose: 'marketing' }, 'all').emailPurpose, 'marketing');
+  assert.equal(campaignBody({ ...blankDraft, emailPurpose: 'other' }, 'all').emailPurpose, 'transactional', 'Anything else is sent as transactional.');
+  assert.equal(campaignBody({ ...blankDraft, channel: 'sms', emailPurpose: 'marketing' }, 'all').emailPurpose, undefined);
+  assert.match(source, /<Option value="marketing" disabled=\{!status\?\.marketingAvailable\}>Marketing<\/Option>/);
+  assert.match(source, /'Marketing email needs Amazon SES as the email sender\.'/);
+  assert.match(source, /\{!status\?\.marketingAvailable && editable && !readOnly && integrationsAction && <Inline>\{integrationsAction\}<\/Inline>\}/);
+  assert.match(source, /draft\.channel === 'email' && draft\.emailPurpose !== 'marketing' && <Checkbox label="This is an expected transactional message/, 'Marketing sends skip the transactional confirmation.');
+  assert.match(source, /draft\.emailPurpose === 'marketing' \? 'Marketing email' : 'Transactional email only'/);
+  assert.match(source, /<Checkbox label="Email marketing permission \(newsletters and promotions\) is recorded for this contact\." checked=\{contact\.consents\.emailMarketing\}/);
+  assert.match(source, /<Checkbox label="Email marketing permission is recorded for all applicable imported contacts\." checked=\{importConsent\.emailMarketing\}/);
+});

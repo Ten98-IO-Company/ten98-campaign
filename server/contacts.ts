@@ -9,6 +9,9 @@ import type { ProviderRecord } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const channels = ['email', 'sms', 'whatsapp'], own = (value: object, key: string) => Object.hasOwn(value, key);
+// Consent is recorded per channel, plus marketing email (#137): permission to send newsletters and promotions is separate
+// from permission for service email, but it uses the email address and is suppressed with it.
+const consentKeys = [...channels, 'emailMarketing'], channelOf = (key: string) => key === 'emailMarketing' ? 'email' : key;
 function fail(status: number, message: string): never { throw new HttpError(status, message); }
 const text = (value: unknown, label: string, max = 200): string => { if (typeof value !== 'string' || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) fail(400, `Enter a valid ${label}.`); return value.trim(); };
 const messengerId = (value: unknown, label: string) => { const id = text(value, label, 500); if (!id || /\s/.test(id)) fail(400, `Provide a valid Messenger ${label}.`); return id; };
@@ -92,23 +95,23 @@ export function createContacts({ db }: { db: Database }) {
     if (own(body, 'phone')) { result.phone = text(body.phone, 'phone number', 16); if (result.phone && !/^\+[1-9]\d{6,14}$/.test(result.phone)) fail(400, 'Use an international E.164 phone number, for example +971501234567.'); }
     if (!result.email && !result.phone && !result.identities?.length) fail(400, 'Provide an email address or international phone number.');
     if (own(body, 'tags')) { if (!Array.isArray(body.tags) || body.tags.length > 30) fail(400, 'Use at most 30 contact tags.'); result.tags = [...new Set(body.tags.map(tag => text(tag, 'contact tag', 50)).filter(Boolean))]; }
-    if (body.consents !== undefined && (!object(body.consents) || Object.entries(body.consents).some(([channel, granted]) => !channels.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use an explicit true or false consent for each supported channel.');
+    if (body.consents !== undefined && (!object(body.consents) || Object.entries(body.consents).some(([channel, granted]) => !consentKeys.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use an explicit true or false consent for each supported channel.');
     const source = own(body, 'consentSource') ? text(body.consentSource, 'consent source', 1000) : previous?.consentSource || '';
-    result.consents = { email: false, sms: false, whatsapp: false, ...previous?.consents, ...body.consents }; result.suppression = { ...previous?.suppression }; result.consentEvidence = { ...previous?.consentEvidence };
+    result.consents = { email: false, sms: false, whatsapp: false, emailMarketing: false, ...previous?.consents, ...body.consents }; result.suppression = { ...previous?.suppression }; result.consentEvidence = { ...previous?.consentEvidence };
     const now = new Date().toISOString();
-    for (const channel of channels) {
-      const destination = channel === 'email' ? result.email : result.phone, oldDestination = channel === 'email' ? previous?.email : previous?.phone;
+    for (const channel of consentKeys) {
+      const medium = channelOf(channel), destination = medium === 'email' ? result.email : result.phone, oldDestination = medium === 'email' ? previous?.email : previous?.phone;
       // A provider's temporary suppression belongs to the old address; it does not follow an edited destination.
-      if (previous && destination !== oldDestination && result.suppression[channel]?.expiresAt) delete result.suppression[channel];
-      if (destination) { const suppressed = await ledger(ex, projectId, channel, destination) || channel === 'sms' && await smsSuppression(destination, ex); if (suppressed) result.suppression[channel] = suppressed; }
-      if (!destination || previous && destination !== oldDestination || result.suppression[channel] && !result.suppression[channel].expiresAt) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
+      if (medium === channel && previous && destination !== oldDestination && result.suppression[channel]?.expiresAt) delete result.suppression[channel];
+      if (medium === channel && destination) { const suppressed = await ledger(ex, projectId, channel, destination) || channel === 'sms' && await smsSuppression(destination, ex); if (suppressed) result.suppression[channel] = suppressed; }
+      if (!destination || previous && destination !== oldDestination || result.suppression[medium] && !result.suppression[medium].expiresAt) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
       if (result.consents[channel]) {
         const newlyEnabled = previous?.consents?.[channel] !== true;
         if (!source || newlyEnabled && !own(body, 'consentSource')) fail(400, 'Record the source of explicit consent before enabling a channel.');
         if (body.consents?.[channel] === true && (newlyEnabled || !result.consentEvidence[channel])) result.consentEvidence[channel] = { source, at: now };
       } else delete result.consentEvidence[channel];
     }
-    const consentChanged = channels.some(channel => result.consents[channel] !== (previous?.consents?.[channel] === true)) || JSON.stringify(result.consentEvidence) !== JSON.stringify(previous?.consentEvidence || {});
+    const consentChanged = consentKeys.some(channel => result.consents[channel] === true !== (previous?.consents?.[channel] === true)) || JSON.stringify(result.consentEvidence) !== JSON.stringify(previous?.consentEvidence || {});
     result.consentSource = source; result.consentUpdatedAt = consentChanged ? now : previous?.consentUpdatedAt || null;
     result.hygiene = hygiene(result.email, result.email === previous?.email ? previous?.hygiene : undefined);
     return { ...result, id: previous?.id || randomUUID(), projectId, createdAt: previous?.createdAt || now, updatedAt: now };
@@ -171,7 +174,7 @@ export function createContacts({ db }: { db: Database }) {
   }
   async function importCsv(projectId: string, options: any) {
     if (!object(options) || Object.keys(options).some(key => !['csv', 'dryRun', 'consents', 'consentSource'].includes(key)) || options.dryRun !== undefined && typeof options.dryRun !== 'boolean') fail(400, 'Use CSV text, optional consent evidence and an optional dry-run flag.');
-    if (options.consents !== undefined && (!object(options.consents) || Object.entries(options.consents).some(([channel, granted]) => !channels.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use explicit channel consent flags.');
+    if (options.consents !== undefined && (!object(options.consents) || Object.entries(options.consents).some(([channel, granted]) => !consentKeys.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use explicit channel consent flags.');
     if (Object.values(options.consents || {}).some(Boolean) && (!options.consentSource || !text(options.consentSource, 'consent source', 1000))) fail(400, 'Record the source of explicit consent before importing opt-ins.');
     const entries = parseCsv(options.csv);
     return db.transaction(async tx => {
@@ -201,6 +204,8 @@ export function createContacts({ db }: { db: Database }) {
   function suppressRecord(ex: Executor, record: ProviderRecord, channel: string, reason: string, at: string) {
     if (!record.suppression[channel] || record.suppression[channel].expiresAt) record.suppression[channel] = { reason, at };
     record.consents[channel] = false; delete record.consentEvidence[channel]; record.updatedAt = at;
+    // Suppressing the address also ends marketing permission on it: an unsubscribe stops newsletters too.
+    if (channel === 'email') { record.consents.emailMarketing = false; delete record.consentEvidence.emailMarketing; }
     if (channel === 'email' && reason === 'hard-bounce') record.hardBounceAt ||= at;
     return persist(ex, record);
   }

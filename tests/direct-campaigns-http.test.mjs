@@ -164,7 +164,9 @@ test('Cloudflare email enforces transactional purpose, reports true receipts, ap
   const f = await fixture(t);
   try {
     const contact = await f.person();
-    assert.equal((await f.request(f.path + '/campaigns', 'POST', { name: 'Newsletter', channel: 'email', emailPurpose: 'marketing', subject: 'Sale', text: 'Sale' })).status, 400);
+    // A marketing draft saves, but Cloudflare cannot send it (#137): preview is refused until Amazon SES is the sender.
+    const newsletter = await f.request(f.path + '/campaigns', 'POST', { name: 'Newsletter', channel: 'email', emailPurpose: 'marketing', subject: 'Sale', text: 'Sale' }); assert.equal(newsletter.status, 201);
+    assert.equal((await f.request(f.path + `/campaigns/${newsletter.data.campaign.id}/preview`, 'POST', {})).data.error.code, 'MARKETING_PROVIDER_REQUIRED');
     const campaign = await f.draft({ channel: 'email', emailPurpose: 'transactional', subject: 'Receipt for {{name}}', text: 'Your requested receipt.', html: '<p>Hello {{name}}</p>' });
     assert.equal((await f.arm(campaign, 'send', { transactionalConfirmed: false })).status, 400);
     assert.equal((await f.arm(campaign)).status, 200); await f.app.direct.processPending();
