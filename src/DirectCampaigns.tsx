@@ -5,6 +5,8 @@ import { useFocusReturn, useRevealPanel } from './focus-return';
 
 // Provider deliverability reports that are not a recipient's own suppression, such as a Cloudflare policy block (#77).
 type DeliverabilityAlert = { provider: string; kind: string; contacts: number; expiresAt: string | null };
+// Every CSV row is created, merged or skipped; the count says how many rows were processed, with a correct plural (#135).
+const importNotice = (result: any) => { const created = result.created || 0, updated = result.updated || 0, skipped = result.skipped || 0, total = created + updated + skipped; return `Processed ${total} ${total === 1 ? 'row' : 'rows'}: ${created} created, ${updated} merged, ${skipped} skipped. Review contact hygiene before sending.`; };
 const emailProviderName = (provider: string) => ({ cloudflare: 'Cloudflare', ses: 'Amazon SES' }[provider] || provider);
 const emailProviderConsole = (provider: string) => ({ cloudflare: 'Cloudflare Email Sending', ses: 'the Amazon SES console' }[provider] || provider);
 // SES `undetermined` feedback is a bounce SES could not classify; other kinds are sender-side policy blocks.
@@ -195,7 +197,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
     await action(dryRun ? 'Checking import' : 'Importing contacts', async generation => {
       const result = await requester.current(path + '/contacts/import', 'POST', { csv, consents: importConsent, consentSource: importSource, ...(dryRun ? { dryRun: true } : {}) }); if (generation !== version.current) return;
       setImportResult({ ...result, dryRun }); if (dryRun) { setNotice('Import checked. No contact records have been changed.'); return; }
-      setNotice(`Processed ${result.imported || 0} rows: ${result.created || 0} created, ${result.updated || 0} merged, ${result.skipped || 0} skipped. Review contact hygiene before sending.`);
+      setNotice(importNotice(result));
       const people = await requester.current(path + '/contacts'); if (generation !== version.current) return; setContacts(people.contacts);
     });
   }
@@ -336,7 +338,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
           <Text tone="muted" size="sm">Leaving a permission unchecked grants no new permission. Contact addresses and CSV columns never imply consent.</Text>
           <FormActions><Button variant="secondary" type="submit" value="preview">Preview import</Button><Button variant="primary" type="submit" value="import">Import contacts</Button></FormActions>
         </Stack></Form>
-        {importResult && <Alert tone="info" title={importResult.dryRun ? 'Import preview · no records changed' : 'Import completed'}><Stack gap={2}><Text>{importResult.created || 0} {importResult.dryRun ? 'to create' : 'created'} · {importResult.updated || 0} {importResult.dryRun ? 'to merge' : 'merged'} · {importResult.skipped || 0} skipped</Text>{importResult.errors?.length > 0 && <List>{importResult.errors.map((item: any, index: number) => <ListItem key={index}>Row {item.row}: {item.error}</ListItem>)}</List>}</Stack></Alert>}</Stack></Card>
+        {importResult && <Alert tone="info" title={importResult.dryRun ? 'Import preview · no records changed' : 'Import completed'}><Stack gap={2}><Text>{importResult.created || 0} {importResult.dryRun ? 'to create' : 'created'} · {importResult.updated || 0} {importResult.dryRun ? 'to merge' : 'merged'} · {importResult.skipped || 0} skipped</Text>{importResult.dryRun && importResult.updated > 0 && <Text tone="muted" size="sm">Merging updates an existing contact's details from the file, such as name and company, and keeps the permissions and evidence already recorded.</Text>}{importResult.errors?.length > 0 && <List>{importResult.errors.map((item: any, index: number) => <ListItem key={index}>Row {item.row}: {item.error}</ListItem>)}</List>}</Stack></Alert>}</Stack></Card>
       </Grid>}
       {suppression && !readOnly && <Card as="section" id="contact-suppression" title={`Suppress ${contactName(contacts.find(item => item.id === suppression.id))}`} description="This blocks future messages on the selected channel. Imports and contact edits cannot remove the suppression."><Form onSubmit={(_, event) => suppress(event)}><Stack as="fieldset" gap={4} disabled={!!busy}>
         <Field label="Channel"><Select value={suppression.channel} onChange={event => setSuppression({ ...suppression, channel: event.target.value as Channel })}>{channels.map(channel => <Option key={channel} value={channel}>{labels[channel]}</Option>)}</Select></Field>
