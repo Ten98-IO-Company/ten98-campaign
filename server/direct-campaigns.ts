@@ -38,8 +38,8 @@ function validate(raw: any) {
   const allowed = ['name', 'channel', 'subject', 'text', 'html', 'emailPurpose', 'accountId', 'templateName', 'templateLanguage', 'templateComponents', 'contactIds', 'tags'];
   if (Object.keys(raw).some(key => !allowed.includes(key))) fail(400, 'INVALID_CAMPAIGN', 'Use only the campaign editor fields.');
   if (!channels.includes(raw.channel)) fail(400, 'INVALID_CAMPAIGN', 'Choose email, SMS or WhatsApp.');
-  const data = { name: text(raw.name, 'a campaign name', 120), channel: raw.channel, subject: text(raw.subject, 'a subject', 200, true), text: text(raw.text, 'message text', 100000, true), html: text(raw.html, 'HTML content', 200000, true), emailPurpose: 'transactional', accountId: text(raw.accountId, 'a WhatsApp account', 200, true), templateName: text(raw.templateName, 'a template name', 200, true), templateLanguage: text(raw.templateLanguage, 'a template language', 30, true), contactIds: list(raw.contactIds, 'Recipients'), tags: list(raw.tags, 'Tags', 30), templateComponents: raw.templateComponents ?? [] };
-  if (raw.emailPurpose !== undefined && raw.emailPurpose !== 'transactional') fail(400, 'TRANSACTIONAL_ONLY', 'Cloudflare permits transactional email only. Marketing email is not supported by this connection.');
+  const data = { name: text(raw.name, 'a campaign name', 120), channel: raw.channel, subject: text(raw.subject, 'a subject', 200, true), text: text(raw.text, 'message text', 100000, true), html: text(raw.html, 'HTML content', 200000, true), emailPurpose: raw.emailPurpose === 'marketing' && raw.channel === 'email' ? 'marketing' : 'transactional', accountId: text(raw.accountId, 'a WhatsApp account', 200, true), templateName: text(raw.templateName, 'a template name', 200, true), templateLanguage: text(raw.templateLanguage, 'a template language', 30, true), contactIds: list(raw.contactIds, 'Recipients'), tags: list(raw.tags, 'Tags', 30), templateComponents: raw.templateComponents ?? [] };
+  if (raw.emailPurpose !== undefined && !['transactional', 'marketing'].includes(raw.emailPurpose)) fail(400, 'INVALID_CAMPAIGN', 'Choose a transactional or marketing email purpose.');
   if (!Array.isArray(data.templateComponents) || JSON.stringify(data.templateComponents).length > 20000) fail(400, 'INVALID_CAMPAIGN', 'Use a template component array of at most 20 KB.');
   if (data.channel === 'email' && (!data.subject || !data.text)) fail(400, 'INVALID_CAMPAIGN', 'Email needs a subject and plain text content.');
   if (/[\r\n]/.test(data.subject)) fail(400, 'INVALID_CAMPAIGN', 'Email subjects must fit on one line.');
@@ -48,12 +48,19 @@ function validate(raw: any) {
   return data;
 }
 // A WhatsApp draft saves before its account and template are chosen (#136); preview and send need all three.
+// Marketing email is sent only through a provider that permits it: Amazon SES. Cloudflare Email Sending is transactional only.
+const marketingAvailable = (env: any) => emailProvider(env) === 'ses';
+function requireMarketingProvider(campaign: any, env: any) {
+  if (campaign.channel === 'email' && campaign.emailPurpose === 'marketing' && !marketingAvailable(env)) fail(409, 'MARKETING_PROVIDER_REQUIRED', 'Marketing email needs Amazon SES as the email sender. Set it up in Integrations.');
+}
 function requireWhatsAppTemplate(campaign: any) {
   if (campaign.channel === 'whatsapp' && (!campaign.accountId || !campaign.templateName || !campaign.templateLanguage)) fail(400, 'INVALID_CAMPAIGN', 'Choose a WhatsApp account, approved template and language.');
 }
-function exclusion(contact: any, channel: string) {
+function exclusion(contact: any, channel: string, purpose = 'transactional') {
   if (!contact) return 'Contact no longer exists';
   if (!contact.consents?.[channel]) return 'No recorded consent';
+  // Marketing email needs its own permission on top of email consent (#137).
+  if (channel === 'email' && purpose === 'marketing' && contact.consents?.emailMarketing !== true) return 'No recorded marketing permission';
   const suppression = activeSuppression(contact, channel); if (suppression) return `Suppressed: ${suppression.reason}`;
   if (!(channel === 'email' ? contact.email : contact.phone)) return channel === 'email' ? 'No email address' : 'No E.164 phone number';
   if (channel === 'email' && contact.hygiene?.disposable) return 'Disposable email address';
@@ -122,7 +129,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
   async function audience(campaign: any, ex: Executor = db) {
     const everyone = await contacts.list(campaign.projectId, ex), all = everyone.filter((contact: any) => (!campaign.contactIds.length || campaign.contactIds.includes(contact.id)) && (!campaign.tags.length || campaign.tags.some((tag: string) => contact.tags.includes(tag))));
     const eligible = [], exclusions = [];
-    for (const contact of all) { const reason = exclusion(contact, campaign.channel); if (reason) exclusions.push({ id: contact.id, name: contact.name || contact.email || contact.phone, reason }); else eligible.push(contact); }
+    for (const contact of all) { const reason = exclusion(contact, campaign.channel, campaign.emailPurpose); if (reason) exclusions.push({ id: contact.id, name: contact.name || contact.email || contact.phone, reason }); else eligible.push(contact); }
     if (campaign.contactIds.some((id: string) => !everyone.some((contact: any) => contact.id === id))) fail(400, 'CONTACT_NOT_FOUND', 'A selected contact does not belong to this project.');
     return { eligible, exclusions, total: all.length };
   }
@@ -244,7 +251,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           if (campaign.channel === 'email' && emailProvider(env) === 'cloudflare' && !(Date.parse(campaign.suppressionsSyncedAt) > Date.now() - 900000)) { await applyEmailSuppressions(campaign.projectId, assertMapping); campaign.suppressionsSyncedAt = new Date().toISOString(); await save(campaign); }
           const [delivery] = (await resultRows(db.execute(sql`SELECT data FROM direct_deliveries WHERE campaign_id = ${campaign.id} AND data->>'status' = 'pending' ORDER BY seq LIMIT 1`))).map(row => row.data);
           if (!delivery) { await finish(campaign); continue; }
-          const contact: any = await contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, campaign.channel);
+          const contact: any = await contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, campaign.channel, campaign.emailPurpose);
           if (reason || (campaign.channel === 'email' ? contact.email : contact.phone) !== delivery.recipient) { await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; current.status = 'suppressed'; current.error = reason || 'Contact address changed'; }); await finish(campaign); continue; }
           const rendered = content(campaign, contact);
           if (campaign.channel === 'sms') Object.assign(delivery, { smsAccountSid: currentEnv.TWILIO_ACCOUNT_SID, smsSender: currentEnv.TWILIO_MESSAGING_SERVICE_SID ? '' : currentEnv.TWILIO_FROM_NUMBER, smsMessagingServiceSid: currentEnv.TWILIO_MESSAGING_SERVICE_SID || '', message: rendered.text });
@@ -275,7 +282,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     const route = url.pathname.match(/^\/api\/projects\/[^/]+\/direct\/(status|templates|contacts|campaigns)(?:\/([^/]+))?(?:\/([^/]+))?$/);
     if (!route) return false;
     const [, kind, id, action] = route, method = req.method;
-    if (kind === 'status' && method === 'GET') { let accounts: any[] = [], accountError: any; if (env.ZERNIO_API_KEY && project.zernioProfileId) { try { accounts = await scopedAccounts(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping(project.zernioProfileId)), project.zernioProfileId); } catch (error: any) { accountError = error instanceof IntegrationError ? error.message : 'WhatsApp accounts could not be loaded.'; } } send(200, { providers: Object.fromEntries(channels.map(channel => [channel, ready(channel) && (channel !== 'whatsapp' || Boolean(project.zernioProfileId && !accountError))])), accounts: accounts.filter(account => account.platform === 'whatsapp').map(account => ({ id: account._id || account.id, name: account.displayName || account.username || 'WhatsApp Business' })), accountError, emailPolicy: 'transactional_only', emailProvider: emailProvider(env), sesWebhookUrl: `${appUrl}/api/webhooks/ses/sns`, deliverabilityAlerts: await deliverabilityAlerts(project.id), callbackUrl: `${appUrl}/api/webhooks/twilio/inbound`, publicCallbacks: appUrl.startsWith('https://') }); return true; }
+    if (kind === 'status' && method === 'GET') { let accounts: any[] = [], accountError: any; if (env.ZERNIO_API_KEY && project.zernioProfileId) { try { accounts = await scopedAccounts(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping(project.zernioProfileId)), project.zernioProfileId); } catch (error: any) { accountError = error instanceof IntegrationError ? error.message : 'WhatsApp accounts could not be loaded.'; } } send(200, { providers: Object.fromEntries(channels.map(channel => [channel, ready(channel) && (channel !== 'whatsapp' || Boolean(project.zernioProfileId && !accountError))])), accounts: accounts.filter(account => account.platform === 'whatsapp').map(account => ({ id: account._id || account.id, name: account.displayName || account.username || 'WhatsApp Business' })), accountError, emailPolicy: marketingAvailable(env) ? 'transactional_and_marketing' : 'transactional_only', marketingAvailable: marketingAvailable(env), emailProvider: emailProvider(env), sesWebhookUrl: `${appUrl}/api/webhooks/ses/sns`, deliverabilityAlerts: await deliverabilityAlerts(project.id), callbackUrl: `${appUrl}/api/webhooks/twilio/inbound`, publicCallbacks: appUrl.startsWith('https://') }); return true; }
     if (kind === 'templates' && method === 'GET') { send(200, await listWhatsAppTemplates({ env: { ...env }, project, accountId: url.searchParams.get('accountId'), assertMapping: () => context.assertProjectMapping(project.zernioProfileId) })); return true; }
     if (kind === 'contacts') {
       if (!id && method === 'GET') send(200, { contacts: await contacts.list(project.id) });
@@ -299,7 +306,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       send(200, { campaign: await decorate(saved) }); return true;
     }
     if (method !== 'POST') return false;
-    if (action === 'preview') { requireWhatsAppTemplate(campaign); if (campaign.channel === 'whatsapp') { const result = await listWhatsAppTemplates({ env: { ...env }, project, accountId: campaign.accountId, assertMapping: () => context.assertProjectMapping(project.zernioProfileId) }), approved = result.templates.find((template: any) => template.name === campaign.templateName && template.language === campaign.templateLanguage); if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template.'); validateWhatsAppTemplate(campaign, approved); } send(200, await preview(campaign)); return true; }
+    if (action === 'preview') { requireWhatsAppTemplate(campaign); requireMarketingProvider(campaign, env); if (campaign.channel === 'whatsapp') { const result = await listWhatsAppTemplates({ env: { ...env }, project, accountId: campaign.accountId, assertMapping: () => context.assertProjectMapping(project.zernioProfileId) }), approved = result.templates.find((template: any) => template.name === campaign.templateName && template.language === campaign.templateLanguage); if (!approved) fail(409, 'TEMPLATE_NOT_APPROVED', 'Choose a currently approved WhatsApp template.'); validateWhatsAppTemplate(campaign, approved); } send(200, await preview(campaign)); return true; }
     // A test send renders the draft for one recipient: the signed-in user's own email address, or one project contact with
     // recorded SMS consent. It creates no delivery and leaves the draft unchanged; its receipt keeps a retried key from
     // sending twice, and a project gets 10 per hour.
@@ -326,7 +333,8 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       if (campaign.status !== 'draft') { send(200, { campaign: await decorate(campaign), deliveries: await deliveries(id) }); return true; }
       requireWhatsAppTemplate(campaign);
       if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Review the audience and confirm provider charges before sending.');
-      if (campaign.channel === 'email' && body.transactionalConfirmed !== true) fail(400, 'TRANSACTIONAL_CONFIRMATION_REQUIRED', 'Confirm this message is transactional and contains no marketing content.');
+      requireMarketingProvider(campaign, env);
+      if (campaign.channel === 'email' && campaign.emailPurpose !== 'marketing' && body.transactionalConfirmed !== true) fail(400, 'TRANSACTIONAL_CONFIRMATION_REQUIRED', 'Confirm this message is transactional and contains no marketing content.');
       if (campaign.channel === 'email') requireEmailProvider(env);
       if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
       if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending so unsubscribe links and delivery callbacks can work.');

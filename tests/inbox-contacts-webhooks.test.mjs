@@ -40,7 +40,7 @@ test('signed incoming Messenger events create one identity contact and retain no
   assert.equal((await signed(f.service, payload)).status, 200); assert.equal((await signed(f.service, { ...payload, message: { ...payload.message, text: 'Another private body' } })).status, 409);
   assert.deepEqual(await f.service.processPending(), { processed: 1, pending: 0 });
   const [contact] = await f.contacts.list('project-a'); assert.ok(contact); assert.equal((await f.contacts.list('project-b')).length, 0, 'An externalId is not profile routing evidence.');
-  assert.equal(contact.email, ''); assert.equal(contact.phone, ''); assert.deepEqual(contact.consents, { email: false, sms: false, whatsapp: false }); assert.deepEqual(contact.consentEvidence, {});
+  assert.equal(contact.email, ''); assert.equal(contact.phone, ''); assert.deepEqual(contact.consents, { email: false, sms: false, whatsapp: false, emailMarketing: false }); assert.deepEqual(contact.consentEvidence, {});
   assert.equal(contact.identities[0].conversationId, 'facebook-thread-a');
   const update = await f.service.updates('project-a', { accountId: 'page-a', after: 0 }); assert.equal(update.updates.length, 1); assert.equal(update.updates[0].contactId, contact.id); assert.equal(JSON.stringify(update).includes('PRIVATE_'), false);
   assert.equal((await signed(f.service, payload)).status, 200); assert.deepEqual(await f.service.processPending(), { processed: 0, pending: 0 }); assert.equal(await count(f, 'webhook_inbox_updates'), 1);

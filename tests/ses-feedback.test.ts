@@ -212,3 +212,44 @@ test('SNS subscription is confirmed only for the configured topic, and the webho
   const closed = await fixture(t, {});
   assert.equal((await closed.sns(confirm(TOPIC))).status, 503);
 });
+
+// ten98-campaign#137(b): a Marketing email purpose sends only through Amazon SES, only to contacts with marketing
+// permission, always with a one-click unsubscribe (RFC 8058 headers and a footer link) that suppresses the address.
+test('marketing email reaches only marketing-consented contacts through SES, with a one-click unsubscribe', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  const add = async (email: string, consents: Fields) => { const result = await f.request(f.path + '/contacts', 'POST', { name: email, email, consents, consentSource: 'Newsletter signup form' }); assert.equal(result.status, 201, JSON.stringify(result.data)); return result.data.contact; };
+  const reader = await add('reader@example.com', { email: true, emailMarketing: true }), customer = await add('customer@example.com', { email: true });
+  assert.equal((await f.request(f.path + '/status')).data.marketingAvailable, true);
+  const created = await f.request(f.path + '/campaigns', 'POST', { name: 'Autumn newsletter', channel: 'email', emailPurpose: 'marketing', subject: 'Autumn offers', text: 'New this autumn.' });
+  assert.equal(created.status, 201, JSON.stringify(created.data)); assert.equal(created.data.campaign.emailPurpose, 'marketing');
+  const id = created.data.campaign.id, preview = (await f.request(f.path + `/campaigns/${id}/preview`, 'POST', {})).data;
+  assert.equal(preview.audience.eligible, 1);
+  assert.deepEqual(preview.audience.exclusions.map((row: Fields) => [row.id, row.reason]), [[customer.id, 'No recorded marketing permission']]);
+  // No transactional confirmation is asked of a marketing send.
+  assert.equal((await f.request(f.path + `/campaigns/${id}/send`, 'POST', { confirmed: true, previewToken: preview.previewToken })).status, 200);
+  await f.app.direct.processPending();
+  const sent = f.calls.filter(call => call.url.hostname === 'email.us-east-1.amazonaws.com').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(body => body.Destination.ToAddresses[0]), ['reader@example.com']);
+  const headers = Object.fromEntries(sent[0].Content.Simple.Headers.map((header: Fields) => [header.Name, header.Value]));
+  assert.match(headers['List-Unsubscribe'], /^<https:\/\/campaign\.example\.test\/api\/direct\/unsubscribe\/[^>]+>$/);
+  assert.equal(headers['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
+  const footer = sent[0].Content.Simple.Body.Text.Data.match(/Manage email preferences: (https:\/\/\S+)/)?.[1];
+  assert.equal(`<${footer}>`, headers['List-Unsubscribe'], 'The footer link is the one-click address.');
+  // The one-click POST suppresses the address and ends marketing permission.
+  assert.equal((await f.request(new URL(footer!).pathname, 'POST', {})).status, 200);
+  const after = await f.contact(reader.id);
+  assert.deepEqual([after.consents.email, after.consents.emailMarketing, after.suppression.email?.reason], [false, false, 'Unsubscribed']);
+});
+
+test('marketing email is refused while Cloudflare is the sender, but its draft still saves', { skip: postgresSkip }, async t => {
+  const f = await fixture(t, { EMAIL_PROVIDER: 'cloudflare' });
+  assert.equal((await f.request(f.path + '/status')).data.marketingAvailable, false);
+  const created = await f.request(f.path + '/campaigns', 'POST', { name: 'Autumn newsletter', channel: 'email', emailPurpose: 'marketing', subject: 'Autumn offers', text: 'New this autumn.' });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  for (const action of ['preview', 'send']) {
+    const result = await f.request(f.path + `/campaigns/${created.data.campaign.id}/${action}`, 'POST', { confirmed: true });
+    assert.deepEqual([result.status, result.data.error?.code], [409, 'MARKETING_PROVIDER_REQUIRED'], action);
+  }
+  assert.equal((await f.request(f.path + '/campaigns', 'POST', { name: 'Odd', channel: 'email', emailPurpose: 'promotional', subject: 'x', text: 'y' })).status, 400);
+  assert.equal(f.calls.length, 0);
+});
