@@ -157,7 +157,7 @@ function app(href = 'https://campaign.example/?view=overview&project=a', initial
 }
 
 test('all page URLs round-trip, preserve connection links, and reject sections from another page', () => {
-  assert.equal(Object.keys(pageRoutes).length, 16);
+  assert.equal(Object.keys(pageRoutes).length, 17);
   for (const [page, view] of Object.entries(pageRoutes)) for (const section of pageSections[page] || ['']) {
     const route = { page, section, projectId: 'project with spaces' }, url = new URL(navigationUrl(route, 'https://campaign.example/?invite=retain#main'), 'https://campaign.example');
     assert.equal(url.searchParams.get('invite'), 'retain'); assert.equal(url.hash, '#main');
@@ -186,6 +186,8 @@ test('seven work areas plus Settings give every page and section exactly one tab
   assert.equal(areaTab('Publishing', 'queues').label, 'Posts'); assert.equal(areaTab('Ads manager', 'shopping').label, 'Ads');
   assert.equal(areaTab('Direct campaigns', 'templates').label, 'WhatsApp templates'); assert.equal(areaTab('Analytics', 'accounts').label, 'Social accounts');
   assert.equal(areaOf(readNavigation('?view=assistant').page).label, 'Planner');
+  assert.deepEqual(areas.find(area => area.id === 'offline').tabs.map(tab => tab.label), ['Billboards', 'Field activity', 'Partners']);
+  assert.equal(areaTab(readNavigation('?view=activations').page, '').label, 'Field activity');
 });
 
 test('initial deep links verify membership before requesting a project and never retain a foreign project URL', async () => {
