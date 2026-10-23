@@ -160,6 +160,17 @@ test('a provider post keeps Save changes as its one action and edits its time in
   assert.ok(view.find(node => node.type === ui.DateTimeField), 'The planned time stays editable in the form.');
 });
 
+test('destinations span both panes, problems read "Network (Account): message" and the preview says whether its network is ready', () => {
+  const view = mount({ ...base, accounts, post: { content: 'Launch', platforms: ['instagram', 'facebook'], accounts: ['ig-a', 'fb-a'], mediaItems: [] } });
+  const panes = view.find(node => node.type === ui.Grid && node.props.columns === 2)!;
+  assert.equal(nodes(panes).some(node => node.type === ui.DestinationPicker), false, 'The To row sits above the two panes.');
+  assert.ok(view.find(node => node.type === ui.DestinationPicker));
+  assert.ok(view.find(node => node.type === ui.Text && node.props.tone === 'danger' && text(node) === 'Instagram (Brand gram): Instagram requires media.'));
+  const status = (platform: string) => { view.find(node => node.type === ui.SegmentedControl && node.props.label === 'Preview network')!.props.onValueChange(platform); view.paint(); const aside = view.find(node => node.props?.['aria-label'] === 'Post preview')!; return nodes(aside).filter(node => node.type === ui.Badge).map(node => [node.props.tone, text(node)]); };
+  assert.deepEqual(status('instagram'), [['danger', 'Needs a fix']]);
+  assert.deepEqual(status('facebook'), [['success', 'Ready']]);
+});
+
 test('without a social publishing connection the post check, file check and queues are disabled with a reason and Open integrations (#152)', async () => {
   const calls: string[] = [], opened: boolean[] = [];
   const offline = { ...base, onLoadAccounts: undefined, accounts, post: { content: 'Hi', platforms: ['facebook'], accounts: ['fb-a'], mediaItems: [{ type: 'image', url: 'https://cdn.example.test/a.jpg' }] }, onValidate: async () => { calls.push('validate'); return { valid: true }; }, onInspectMedia: async () => { calls.push('inspect'); return {}; }, onLoadQueues: async () => { calls.push('queues'); return { queues: [] }; }, onOpenIntegrations: () => opened.push(true) };
