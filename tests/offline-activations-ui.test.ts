@@ -30,6 +30,7 @@ test('the editor turns local times into instants and amounts into numbers, and r
 
 test('the list explains what to do first, sorts by start, and shows type, campaign, spend and status', () => {
   const empty = html({});
+  assert.equal((empty.match(/Field activity/g) || []).length, 0, 'The page header names the page; the card repeats no title.');
   assert.match(empty, /Create a campaign first/); assert.match(empty, /<button[^>]*disabled=""[^>]*>New activation/, 'No campaign means nothing to plan against.');
   assert.match(html({ campaigns }), /No field activity planned/);
   const markup = html({ campaigns, activations: [activation('Later stop', '2026-11-14T10:00:00Z', { type: 'door_to_door', status: 'completed' }), activation('First stop', '2026-11-07T10:00:00Z')] });
@@ -67,6 +68,7 @@ test('results roll up reached, leads, visits, spend and cost per lead, and never
   const results = { A: { leads: 10, clicks: 40, qrScans: 12 }, B: { leads: 2, clicks: 0, qrScans: 3 } };
   assert.deepEqual(module.rollUp(rows, results), { reached: 350, leads: 12, visits: 55, budget: 1500, spent: 600, costPerLead: 50 });
   assert.equal(module.rollUp(rows, {}).costPerLead, null);
+  assert.equal(module.rollUp([...rows, activation('C', '2026-11-09T10:00:00Z', { status: 'cancelled', budget: 800, spent: 50 })], results).budget, 1500, 'A cancelled activation no longer plans its budget; what it already spent still counts.');
   const markup = renderToStaticMarkup(React.createElement(module.ResultsSummary, { rows, results, currency: 'GBP' }));
   for (const text of ['350', '12', '55', '£600', 'of £1,500 planned', '£50']) assert.ok(markup.includes(text), text);
   const mixed = renderToStaticMarkup(React.createElement(module.ResultsSummary, { rows, results, currency: null }));
