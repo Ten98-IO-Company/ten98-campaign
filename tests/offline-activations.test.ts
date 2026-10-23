@@ -71,7 +71,8 @@ test('staff capture leads at an activation with explicit per-channel consent, an
   assert.equal(response.status, 201, JSON.stringify(response.body)); assert.deepEqual([response.body.recorded, response.body.refused], [['email', 'sms'], []]);
   assert.equal(JSON.stringify(response.body).includes('pat@example.test'), false, 'The staff phone gets no contact details back.');
   let contact = (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.email === 'pat@example.test');
-  assert.deepEqual(contact.consents, { email: true, sms: true, whatsapp: false }); assert.deepEqual(contact.tags, [tag]);
+  // Lead capture records the ticked channels only; it never grants marketing email permission (#165).
+  assert.deepEqual(contact.consents, { email: true, sms: true, whatsapp: false, emailMarketing: false }); assert.deepEqual(contact.tags, [tag]);
   for (const channel of ['email', 'sms']) assert.match(contact.consentEvidence[channel].source, /In person at Roadshow stop “Mall roadshow — Saturday” .* recorded by Erin\. Wording shown: “.*Brand launch.*”/);
 
   const before = await count();
