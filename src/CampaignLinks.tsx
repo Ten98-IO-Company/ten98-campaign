@@ -52,7 +52,10 @@ export default function CampaignLinks({ projectId, request, campaigns = [], dire
     try { destination = destinationWithUtm(draft); } catch (failure) { if (!(failure instanceof DestinationError)) throw failure; setDestinationError(failure.message); destinationRef.current?.focus(); return; }
     await action('Creating link', async generation => {
       try {
-        const body = { name: draft.name.trim(), destination, ...(draft.campaignId ? { campaignId: draft.campaignId } : {}) }, result = await requester.current(path, 'POST', body); if (generation !== version.current) return; acceptLink(result.link, generation); setSelected(result.link.id); setDraft(blank()); setNotice('Short link created. Its destination is fixed so existing posts and QR codes keep the same meaning.');
+        const body = { name: draft.name.trim(), destination, ...(draft.campaignId ? { campaignId: draft.campaignId } : {}) }, result = await requester.current(path, 'POST', body); if (generation !== version.current) return; acceptLink(result.link, generation); setSelected(result.link.id);
+        // For a destination and campaign that already have an active link, the server returns that link under its own name.
+        if (links.some(link => link.id === result.link.id) || result.link.name !== body.name) setNotice(`This destination and campaign already has an active link, “${result.link.name}”. No new link was created; use that link or its QR code.`);
+        else { setDraft(blank()); setNotice('Short link created. Its destination is fixed so existing posts and QR codes keep the same meaning.'); }
       } catch (failure) {
         // The server's destination checks (public domain, not another short link) name HTTPS or the destination.
         const { status, message } = failure as Error & { status?: number };
