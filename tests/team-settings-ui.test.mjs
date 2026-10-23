@@ -28,10 +28,19 @@ test('owners manage every role and invite by link; there is no direct add-accoun
   assert.match(html, /<h2[^>]*>Team access<\/h2>/); assert.match(html, /Create invitation link/);
   assert.deepEqual(tree.props.roles.map(option => option.value), ['owner', 'admin', 'editor', 'viewer']);
   assert.equal(tree.props.defaultInviteRole, 'editor');
-  assert.deepEqual(members.map(member => tree.props.assignableRoles(member).length), [4, 4, 4]);
+  assert.deepEqual(members.map(member => tree.props.assignableRoles(member).length), [0, 4, 4], 'The sole owner cannot change their own role.');
+  assert.doesNotMatch(html, /aria-label="Role for Olive Owner"/); assert.match(html, /You are the only owner, so your own role can change only after you make another member an owner\./);
   await tree.props.onInvite({ email: 'new@example.test', role: 'admin' });
   assert.deepEqual(ui.calls[0], ['/workspaces/workspace-1/invitations', 'POST', { email: 'new@example.test', role: 'admin' }]);
   assert.deepEqual(ui.render().props.inviteLink, { id: 'invite-2', url: 'https://campaign.example.test/?invite=token' });
+});
+
+test('an owner who shares ownership can still change their own role, and the sole-owner note is not shown', () => {
+  const ui = view('owner', 'owner-1');
+  ui.state[0] = [...members, { id: 'owner-2', name: 'Otto Owner', email: 'otto@example.test', role: 'owner' }];
+  const tree = ui.render(), html = renderToStaticMarkup(tree);
+  assert.deepEqual(ui.state[0].map(member => tree.props.assignableRoles(member).length), [4, 4, 4, 4]);
+  assert.match(html, /aria-label="Role for Olive Owner"/); assert.doesNotMatch(html, /You are the only owner/);
 });
 
 test('administrators only invite and manage editors and viewers', () => {

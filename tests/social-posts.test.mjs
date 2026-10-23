@@ -188,3 +188,13 @@ test('YouTube keywords normalize shared tags without silent truncation and enfor
   assert.equal(Object.hasOwn(buildPlatformEntry({ ...post, tags: ['launch'] }, 'youtube', 'channel'), 'tags'), false, 'Tags belong to the request root rather than the account target.');
   assert.throws(() => normalizePostVariants({ platformOverrides: { youtube: { options: { tags: ['launch'] } } } }), /not a supported option/);
 });
+
+test('generated platform option labels are sentence case and keep acronyms upper case', () => {
+  const labelOf = (platform, key) => PLATFORM_RULES[platform].options.find(option => option.key === key)?.label;
+  assert.equal(labelOf('instagram', 'muteAudio'), 'Mute audio'); assert.equal(labelOf('instagram', 'commentsEnabled'), 'Comments enabled'); assert.equal(labelOf('instagram', 'firstComment'), 'First comment');
+  assert.equal(labelOf('instagram', 'locationId'), 'Location ID'); assert.equal(labelOf('linkedin', 'reshareUrl'), 'Reshare URL'); assert.equal(labelOf('twitter', 'madeWithAi'), 'Made with AI'); assert.equal(labelOf('tiktok', 'isAdsOnly'), 'Only show in ads');
+  for (const [platform, rule] of Object.entries(PLATFORM_RULES)) for (const option of rule.options) {
+    const words = option.label.split(' ').slice(1).filter(word => /^[A-Z][a-z]/.test(word) && !/^(Reel|Instagram|Facebook|TikTok|LinkedIn|Pinterest|Discord|BCP)$/.test(word));
+    assert.deepEqual(words, [], `${platform}.${option.key} label "${option.label}" is sentence case`);
+  }
+});
