@@ -1,0 +1,84 @@
+// Regression tests for the Links issues found in the v0.21.1 end-to-end user test (#113, #114, #115).
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { stripTypeScriptTypes } from 'node:module';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import * as UI from '@ten98/ui';
+import { transformWithOxc } from 'vite';
+
+type Row = Record<string, unknown>;
+type Run = (generation: number) => Promise<void>;
+
+const source = await readFile(new URL('../src/CampaignLinks.tsx', import.meta.url), 'utf8');
+const section = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+// Evaluates one function from the real component with its hooks and helpers supplied as named values.
+const compile = (code: string, context: Record<string, unknown> = {}) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
+const event = { preventDefault() {} }, path = '/projects/project-a/links';
+const draft = { name: 'Duplicate test', destination: 'https://shop.example.com/billboard', campaignId: '', utm_source: '', utm_medium: '', utm_campaign: '', utm_content: '', utm_term: '' };
+
+function createWith(links: Row[], response: Row) {
+  const notices: string[] = [], selections: string[] = [], cleared: unknown[] = [];
+  const DestinationError = compile(source.match(/class DestinationError extends Error \{\}/)![0]);
+  const create = compile(section('async function create(', '  async function saveName('), { readOnly: false, draft, links, destinationWithUtm: () => draft.destination, DestinationError, setDestinationError() {}, destinationRef: { current: null }, focusDestination: { current: false }, action: async (_label: string, run: Run) => run(1), requester: { current: async () => response }, path, version: { current: 1 }, acceptLink() {}, setSelected: (value: string) => selections.push(value), setDraft: (value: unknown) => cleared.push(value), blank: () => ({}), setNotice: (value: string) => notices.push(value) });
+  return create(event).then(() => ({ notices, selections, cleared: cleared.length }));
+}
+
+test('#114 a destination that already has an active link says so, shows that link and keeps the form', async () => {
+  const existing = { id: 'old-link', name: 'Billboard Downtown QR' };
+  for (const links of [[existing], []]) {
+    // The server answers with the link it already has, under that link's name, whether or not this list has loaded it.
+    const result = await createWith(links, { link: existing });
+    assert.deepEqual(result.selections, ['old-link'], 'The existing link is shown.');
+    assert.equal(result.cleared, 0, 'Nothing was created, so the form keeps what was typed.');
+    assert.equal(result.notices.length, 1); assert.doesNotMatch(result.notices[0], /Short link created/);
+    assert.match(result.notices[0], /already has an active link, “Billboard Downtown QR”\. No new link was created/);
+  }
+  const created = await createWith([existing], { link: { id: 'new-link', name: 'Duplicate test' } });
+  assert.deepEqual([created.selections, created.cleared], [['new-link'], 1]); assert.match(created.notices[0], /^Short link created\./);
+});
+
+function saveWith(allowedWebsiteOrigins: string, response: () => Row, changes: Row = {}) {
+  const calls: unknown[] = [], fieldErrors: string[] = [], formErrors: string[] = [], focused: string[] = [], focusOrigins = { current: false };
+  const save = compile(section('async function saveSettings(', '  async function loadAnalytics('), { readOnly: false, canManageSettings: true, canChangeDomain: false, settings: { shortBaseUrl: 'https://go.example.com' }, settingsForm: { shortBaseUrl: 'https://go.example.com', allowedWebsiteOrigins }, setOriginsError: (value: string) => { if (value) fieldErrors.push(value); }, originsRef: { current: { focus: () => focused.push('origins') } }, focusOrigins,
+    action: async (_label: string, work: Run) => { try { await work(1); } catch (failure) { formErrors.push((failure as Error).message); } }, requester: { current: async (...args: unknown[]) => { calls.push(args); return response(); } }, path, version: { current: 1 }, setSettings() {}, setSettingsForm() {}, setNotice() {}, ...changes });
+  return save(event).then(() => ({ calls: calls.length, fieldErrors, formErrors, focused, deferredFocus: focusOrigins.current }));
+}
+
+test('#113 a refused website origin shows at the origins field with focus, not as an off-screen page alert', async () => {
+  const refused = 'Use a public HTTPS domain without credentials or private addresses.', reject = (message: string, status = 400) => () => { throw Object.assign(new Error(message), { status }); };
+  assert.deepEqual(await saveWith('http://127.0.0.1:4101', reject(refused)), { calls: 1, fieldErrors: [refused], formErrors: [], focused: [], deferredFocus: true }, 'Focus moves to the field once the fieldset re-enables.');
+  assert.deepEqual(await saveWith('http://127.0.0.1:4101', reject(refused), { canChangeDomain: true }), { calls: 1, fieldErrors: [refused], formErrors: [], focused: [], deferredFocus: true }, 'An unchanged short address cannot be the refused value.');
+  const many = Array.from({ length: 11 }, (_, index) => `https://site${index}.example.com`).join('\n');
+  assert.deepEqual(await saveWith(many, () => assert.fail('Too many origins are never sent.')), { calls: 0, fieldErrors: ['Use at most 10 website origins.'], formErrors: [], focused: ['origins'], deferredFocus: false });
+  const domain = await saveWith('https://www.example.com', reject(refused), { canChangeDomain: true, settingsForm: { shortBaseUrl: 'https://10.0.0.1', allowedWebsiteOrigins: 'https://www.example.com' } });
+  assert.deepEqual([domain.fieldErrors, domain.formErrors], [[], [refused]], 'With a changed short address the refused value is ambiguous, so it stays form-level.');
+  const role = await saveWith('https://www.example.com', reject('Only workspace administrators can change tracking settings.', 403));
+  assert.deepEqual([role.fieldErrors, role.formErrors], [[], ['Only workspace administrators can change tracking settings.']]);
+  assert.match(source, /<Field label="Websites allowed to send analytics \(one origin per line\)" description="[^"]*public HTTPS[^"]*Local http:\/\/ and localhost sites cannot send analytics\.[^"]*" error=\{originsError \|\| undefined\}><Textarea ref=\{originsRef\}/);
+  assert.match(source, /useEffect\(\(\) => \{ if \(focusOrigins\.current && !busy\) \{ focusOrigins\.current = false; originsRef\.current\?\.focus\(\); \} \}, \[busy, originsError\]\);/);
+  const html = renderToStaticMarkup(React.createElement(UI.Field, { label: 'Websites allowed to send analytics (one origin per line)', description: 'Hint', error: refused }, React.createElement(UI.Textarea)));
+  assert.match(html, /<textarea[^>]*aria-invalid="true"/); assert.match(html, /role="alert"[^>]*>Use a public HTTPS domain/);
+});
+
+test('#115 row actions name the link they act on, and so does the disable confirmation', async () => {
+  const start = source.indexOf('rowActions={item => ') + 'rowActions={item => '.length, end = source.indexOf('}/> : <EmptyState', start);
+  assert.ok(start > 20 && end > start);
+  const { code } = await transformWithOxc(`function Actions({ item, busy, readOnly, setSelected, setEditing, setArchiving, renameReturn }) { return ${source.slice(start, end)}; }`, 'LinkActions.tsx', { jsx: { runtime: 'classic' } });
+  const Actions = new Function('React', ...Object.keys(UI), code + '; return Actions;')(React, ...Object.values(UI));
+  const render = (item: Row) => renderToStaticMarkup(React.createElement(Actions, { item: { id: 'a', name: 'Billboard Downtown QR', shortUrl: 'https://go.example.com/s/abc', ...item }, busy: '', readOnly: false, setSelected() {}, setEditing() {}, setArchiving() {}, renameReturn: { current: null } }));
+  const html = render({});
+  assert.match(html, /role="group"[^>]*aria-label="Actions for Billboard Downtown QR"/, 'Copy link is announced within a group named for its link.');
+  for (const name of ['QR code for Billboard Downtown QR', 'Rename Billboard Downtown QR', 'Disable Billboard Downtown QR']) assert.match(html, new RegExp(`<button[^>]*aria-label="${name}"`), name);
+  assert.match(render({ archived: true }), /<button[^>]*aria-label="Restore Billboard Downtown QR"/);
+  assert.match(source, /<ConfirmDialog open=\{!!archiving\}[^\n]*title=\{archiving\?\.archived \? `Restore “\$\{archiving\.name\}” and its QR code\?` : `Disable “\$\{archiving\?\.name\}”\?`\}/);
+});
+
+test('#115 the rename and QR panels take focus when opened, which scrolls them into view, and rename returns focus to its row', () => {
+  assert.match(source, /\{editing && !readOnly && <Card key=\{editing\.id\} as="section"[^\n]*<Input autoFocus required maxLength=\{120\} value=\{editing\.name\}/, 'Each rename remounts the form, so its name field takes focus.');
+  assert.match(source, /\{chosen && <Card id="campaign-link-qr" tabIndex=\{-1\} as="section"/);
+  assert.match(source, /useEffect\(\(\) => \{ if \(selected\) document\.getElementById\('campaign-link-qr'\)\?\.focus\(\); \}, \[selected\]\);/);
+  assert.match(source, /onClick=\{event => \{ renameReturn\.current = event\.currentTarget; setEditing\(\{ id: item\.id, name: item\.name \}\); \}\}/);
+  assert.match(source, /useEffect\(\(\) => \{ const trigger = renameReturn\.current; if \(editing \|\| busy \|\| !trigger\) return; renameReturn\.current = null; if \(trigger\.isConnected\) trigger\.focus\(\); \}, \[editing, busy\]\);/, 'Focus returns to the Rename button once the form closes and the row is enabled again.');
+});
