@@ -11,7 +11,7 @@ type Row = Record<string, any>;
 const source = await readFile(new URL('../src/OfflineActivations.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, ''), 'OfflineActivations.tsx', { jsx: { runtime: 'classic' } });
 const library = ui as unknown as Record<string, unknown>;
-const module = new Function('React', 'useEffect', 'useRef', 'useState', 'ACTIVATION_TYPES', 'ACTIVATION_TYPE_LABELS', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft };')(React, useEffect, useRef, useState, ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, ...Object.values(library));
+const module = new Function('React', 'useEffect', 'useRef', 'useState', 'ACTIVATION_TYPES', 'ACTIVATION_TYPE_LABELS', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink };')(React, useEffect, useRef, useState, ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, ...Object.values(library));
 const html = (props: Row) => renderToStaticMarkup(React.createElement(module.OfflineActivations, { projectId: 'p1', campaigns: [], activations: [], request: async () => ({}), onChanged() {}, ...props }));
 const campaigns = [{ id: 'c1', name: 'Winter field push', currency: 'GBP' }, { id: 'c2', name: 'Spring sampling', currency: 'AED' }];
 const activation = (id: string, startAt: string, extra: Row = {}) => ({ id, name: id, type: 'roadshow', campaignId: 'c1', status: 'planned', startAt, endAt: new Date(Date.parse(startAt) + 8 * 3600000).toISOString(), location: 'City Centre Mall', budget: 1200, spent: 300, reached: 0, materials: [], teamIds: [], ...extra });
@@ -39,6 +39,16 @@ test('the list explains what to do first, sorts by start, and shows type, campai
   assert.match(markup, /Completed/); assert.match(markup, /aria-label="Edit First stop"/);
   const viewer = html({ campaigns, activations: [activation('First stop', '2026-11-07T10:00:00Z')], readOnly: true });
   assert.doesNotMatch(viewer, /New activation/); assert.match(viewer, /aria-label="View First stop"/);
+});
+
+test('each activation gets a tagged landing page, and its link shows the short address, QR code and counts', () => {
+  const stopRow = activation('Mall stop', '2026-11-07T10:00:00Z');
+  const url = new URL(module.trackingDestination(' https://shop.example.com/winter?ref=1 ', stopRow, 'Winter field push'));
+  assert.deepEqual(Object.fromEntries(url.searchParams), { ref: '1', utm_source: 'roadshow', utm_medium: 'offline', utm_campaign: 'Winter field push', utm_content: 'Mall stop' });
+  for (const bad of ['shop.example.com', 'http://shop.example.com', 'https://user:secret@shop.example.com']) assert.throws(() => module.trackingDestination(bad, stopRow, ''), /landing page|HTTPS/);
+  const markup = renderToStaticMarkup(React.createElement(module.TrackingLink, { link: { name: 'Mall stop', shortUrl: 'https://go.example.com/s/abc', qrSvgUrl: '/api/projects/p1/links/l1/qr.svg', clicks: 1200, qrScans: 85 } }));
+  assert.match(markup, /src="\/api\/projects\/p1\/links\/l1\/qr.svg"/); assert.match(markup, /alt="QR code for Mall stop"/);
+  assert.match(markup, /https:\/\/go.example.com\/s\/abc/); assert.match(markup, /1,200 link visits · 85 QR scans/); assert.match(markup, /download="Mall stop QR.svg"/);
 });
 
 test('the page is built from @ten98/ui only', () => {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Inline, Input, Select, Stack, Text, Textarea } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, Select, Stack, Text, Textarea } from '@ten98/ui';
 import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, type ActivationType } from '../shared/offline-activations.ts';
 
 type Row = { id: string; [key: string]: any };
@@ -20,6 +20,23 @@ export function when(activation: Row) {
   const sameDay = start.toDateString() === end.toDateString();
   return `${start.toLocaleDateString(undefined, day)}, ${start.toLocaleTimeString(undefined, time)} – ${sameDay ? '' : end.toLocaleDateString(undefined, day) + ', '}${end.toLocaleTimeString(undefined, time)}`;
 }
+// The landing page with UTM tags naming the activation, so web analytics and the short link agree on the source.
+export function trackingDestination(landing: string, activation: Row, campaignName = '') {
+  let url: URL; try { url = new URL(landing.trim()); } catch { throw new Error('Enter the landing page as a full address that starts with https://.'); }
+  if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Use a public HTTPS landing page without embedded credentials.');
+  for (const [key, value] of [['utm_source', activation.type], ['utm_medium', 'offline'], ['utm_campaign', campaignName], ['utm_content', activation.name]]) if (value) url.searchParams.set(key, value);
+  return url.href;
+}
+export function TrackingLink({ link }: { link: Row }) {
+  return <Inline gap={3} align="start">
+    <Image src={link.qrSvgUrl} alt={'QR code for ' + link.name} fit="contain" aspect="square" rounded/>
+    <Stack gap={1}>
+      <Text as="strong" weight="semibold">{link.shortUrl}</Text>
+      <Text tone="muted" size="sm">{`${(link.clicks || 0).toLocaleString()} link visits · ${(link.qrScans || 0).toLocaleString()} QR scans`}</Text>
+      <Inline gap={2}><CopyButton value={link.shortUrl} label="Copy link" messages={{ copied: 'Short link copied.' }}/><Link href={link.qrSvgUrl} download={`${link.name} QR.svg`}>Download QR</Link></Inline>
+    </Stack>
+  </Inline>;
+}
 export function blankDraft(campaignId = ''): Draft { return { name: '', type: 'roadshow', campaignId, status: 'planned', startAt: '', endAt: '', location: '', notes: '', ownerId: '', teamIds: [], materials: [], budget: '', spent: '', reached: '', promoCode: '' }; }
 export function draftFrom(activation: Row): Draft { return { ...blankDraft(), ...Object.fromEntries(Object.keys(blankDraft()).filter(key => activation[key] !== undefined).map(key => [key, ['budget', 'spent', 'reached'].includes(key) ? String(activation[key] || '') : activation[key]])), startAt: localInput(activation.startAt), endAt: localInput(activation.endAt) } as Draft; }
 export function activationBody(draft: Draft) {
@@ -30,12 +47,26 @@ export function activationBody(draft: Draft) {
 export default function OfflineActivations({ projectId, campaigns, activations, request, readOnly = false, onChanged }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/activations`, requester = useRef(request); requester.current = request;
   const [filter, setFilter] = useState(''), [members, setMembers] = useState<Row[]>([]), [editing, setEditing] = useState<Row | 'new' | null>(null), [draft, setDraft] = useState<Draft>(blankDraft()), [dirty, setDirty] = useState(false);
+  const [link, setLink] = useState<Row | null>(null), [landing, setLanding] = useState(''), [linkError, setLinkError] = useState(''), [linking, setLinking] = useState(false);
   const [material, setMaterial] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [removing, setRemoving] = useState<Row>();
   useEffect(() => { if (readOnly) return; let current = true; requester.current(`/projects/${encodeURIComponent(projectId)}/assignees`).then(result => { if (current) setMembers(result.members || []); }, () => { if (current) setMembers([]); }); return () => { current = false; }; }, [projectId, readOnly]);
   const campaignOf = (id: string) => campaigns.find(campaign => campaign.id === id), memberName = (id: string) => members.find(member => member.id === id)?.name || '';
   const rows = activations.filter(activation => !filter || activation.campaignId === filter).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
   const change = (patch: Partial<Draft>) => { setDraft(current => ({ ...current, ...patch })); setDirty(true); };
-  function open(activation: Row | 'new') { setDraft(activation === 'new' ? blankDraft(filter || campaigns[0]?.id || '') : draftFrom(activation)); setEditing(activation); setDirty(false); setMaterial(''); setError(''); setNotice(''); }
+  function open(activation: Row | 'new') { setDraft(activation === 'new' ? blankDraft(filter || campaigns[0]?.id || '') : draftFrom(activation)); setEditing(activation); setDirty(false); setMaterial(''); setError(''); setNotice(''); setLink(null); setLanding(''); setLinkError('');
+    if (activation !== 'new' && activation.linkId) request(`/projects/${encodeURIComponent(projectId)}/links`).then(result => setLink((result.links || []).find((row: Row) => row.id === activation.linkId) || null), () => setLinkError('The tracking link could not be loaded.'));
+  }
+  // Creates (or reuses) the campaign short link for this activation's tagged landing page and keeps it on the activation.
+  async function createLink(activation: Row) {
+    setLinkError(''); setLinking(true);
+    try {
+      const destination = trackingDestination(landing, activation, campaignOf(activation.campaignId)?.name);
+      const created = (await request(`/projects/${encodeURIComponent(projectId)}/links`, 'POST', { name: activation.name, destination, campaignId: activation.campaignId })).link;
+      await request(`${path}/${encodeURIComponent(activation.id)}`, 'PATCH', { linkId: created.id });
+      setLink(created); setEditing({ ...activation, linkId: created.id }); await onChanged();
+    } catch (failure) { setLinkError((failure as Error).message || 'The tracking link could not be created.'); }
+    finally { setLinking(false); }
+  }
   async function save() {
     setError('');
     try {
@@ -100,6 +131,11 @@ export default function OfflineActivations({ projectId, campaigns, activations, 
           {draft.materials.length ? draft.materials.map((item, index) => <Inline key={index} justify="between" align="center"><Checkbox label={item.label} checked={item.done} disabled={!editable} onChange={event => change({ materials: draft.materials.map((entry, at) => at === index ? { ...entry, done: event.target.checked } : entry) })}/>{editable && <Button variant="ghost" size="sm" aria-label={`Remove ${item.label}`} onClick={() => change({ materials: draft.materials.filter((_, at) => at !== index) })}>Remove</Button>}</Inline>) : <Text tone="muted" size="sm">No materials listed.</Text>}
           {editable && <Inline gap={2} align="end"><Field label="Add material"><Input maxLength={80} value={material} onChange={event => setMaterial(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addMaterial(); } }}/></Field><Button variant="secondary" disabled={!material.trim() || draft.materials.length >= 30} onClick={addMaterial}>Add</Button></Inline>}
         </Stack>
+        {current && <Stack gap={2}>
+          <Text as="strong" weight="semibold">Tracking</Text>
+          {linkError && <Alert tone="danger" variant="inline">{linkError}</Alert>}
+          {link ? <TrackingLink link={link}/> : current.linkId ? <Text tone="muted" size="sm">Loading the tracking link…</Text> : editable ? <Inline gap={2} align="end"><Field label="Landing page" description="Visits from this activation's short link and QR code are counted here and tagged utm_medium=offline."><Input type="url" placeholder="https://" value={landing} disabled={linking} onChange={event => setLanding(event.target.value)}/></Field><Button variant="secondary" disabled={!landing.trim() || linking} onClick={() => createLink(current)}>Create link and QR</Button></Inline> : <Text tone="muted" size="sm">No tracking link yet.</Text>}
+        </Stack>}
       </Stack>
     </Dialog>
     {removing && <ConfirmDialog open onOpenChange={next => { if (!next) setRemoving(undefined); }} title={`Delete “${removing.name}”?`} description="Its plan, checklist and spend are removed. Contacts captured there stay in Contacts." confirmLabel="Delete" danger onConfirm={() => remove(removing)}/>}
