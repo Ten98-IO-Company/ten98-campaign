@@ -40,12 +40,18 @@ test('migrations run without the pool statement timeout, which the connection ge
   const admin = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL }), name = `campaign_timeout_${randomBytes(6).toString('hex')}`;
   await admin.connect(); await admin.query(`CREATE DATABASE ${name}`);
   const url = new URL(process.env.TEST_DATABASE_URL); url.pathname = `/${name}`;
-  // One connection with a 1 ms limit: the baseline migration alone takes far longer.
-  const pool = new pg.Pool({ connectionString: url.href, max: 1, statement_timeout: 1 });
+  // A 100 ms limit leaves ample room for the quick statements that set and reset it, even on a slow runner. Holding the
+  // migration lock for 300 ms makes the migration's own lock wait outlast the limit, so it fails unless the limit is lifted.
+  const pool = new pg.Pool({ connectionString: url.href, max: 1, statement_timeout: 100 }), holder = new pg.Client({ connectionString: url.href });
+  await holder.connect(); await holder.query('SELECT pg_advisory_lock(109858, 1)');
+  const release = new Promise(resolve => setTimeout(resolve, 300)).then(() => holder.query('SELECT pg_advisory_unlock(109858, 1)'));
   try {
     assert.deepEqual(await migrate(pool), (await migrationSources()).map(source => source.version));
-    assert.equal((await pool.query('SHOW statement_timeout')).rows[0].statement_timeout, '1ms', 'The pooled connection keeps its own limit.');
-  } finally { await pool.end(); await admin.query(`DROP DATABASE ${name} WITH (FORCE)`); await admin.end(); }
+    await release;
+    // Probe the limit rather than read it: a half-second sleep is cancelled only once the limit is back. A connection left
+    // without it would let the sleep finish.
+    await assert.rejects(pool.query('SELECT pg_sleep(0.5)'), error => error.code === '57014', 'The pooled connection keeps its own limit.');
+  } finally { await release.catch(() => undefined); await holder.end(); await pool.end(); await admin.query(`DROP DATABASE ${name} WITH (FORCE)`); await admin.end(); }
 });
 
 test('migrations build exactly the Drizzle schema on PostgreSQL, once, and keep JSON text and insertion order', { skip: !process.env.TEST_DATABASE_URL && 'TEST_DATABASE_URL is not set', timeout: 60000 }, async () => {
