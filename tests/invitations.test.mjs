@@ -23,7 +23,7 @@ async function fixture(t) {
     } catch (error) { if (error instanceof HttpError) return { status: error.status, data: { error: error.message } }; throw error; }
   }
   const create = (email, role = 'editor', options = {}) => request('/workspaces/workspace-a/invitations', { method: 'POST', body: { email, role }, ...options });
-  const token = result => new URL(result.data.url).searchParams.get('invite');
+  const token = result => new URL(result.data.url).hash.slice('#invite='.length);
   const read = (result, options = {}) => request('/invitations/' + token(result), { user: null, ...options });
   const accept = (result, options = {}) => request('/invitations/' + token(result), { user: null, method: 'POST', body: { name: 'New colleague', password: 'a secure personal password' }, ...options });
   const one = async (sql, params) => (await pool.query(sql, params)).rows[0];
@@ -116,6 +116,33 @@ test('workspace invitations use hashed single-use links, enforce current authori
   assert.equal(JSON.stringify(list.data).includes('token_hash'), false); assert.equal(JSON.stringify(list.data).includes(token(replacement)), false);
   assert.equal((await request('/invitations/not-a-token', { user: null })).status, 404);
   assert.equal((await request('/workspaces/workspace-a/invitations', { user: null })).status, 401);
+});
+
+test('new invitation links carry the token in #invite=, and inspect and accept take it in a POST body beside the earlier path routes', { skip: postgresSkip }, async t => {
+  const { users, established, request, create, token, read } = await fixture(t);
+  const invitation = await create('fragment@example.test'), link = new URL(invitation.data.url);
+  assert.equal(link.pathname, '/'); assert.equal(link.search, ''); assert.match(link.hash, /^#invite=[A-Za-z0-9_-]{43}$/);
+  const inspect = (body, options = {}) => request('/invitations/inspect', { method: 'POST', user: null, body, ...options });
+  const accept = (body, options = {}) => request('/invitations/accept', { method: 'POST', user: null, body, ...options });
+  let result = await inspect({ token: token(invitation) });
+  assert.equal(result.status, 200); assert.equal(result.data.invitation.email, 'fragment@example.test'); assert.equal(result.data.accountExists, false);
+  assert.deepEqual(result, await read(invitation), 'The body and path inspections agree.');
+  assert.equal((await inspect({ token: token(invitation), name: 'Extra' })).status, 400);
+  for (const body of [{}, { token: 42 }, { token: 'not-a-token' }]) assert.equal((await inspect(body)).status, 404, JSON.stringify(body));
+  assert.equal((await accept({ token: token(invitation), name: 'Fragment', password: 'short' })).status, 400);
+  assert.equal((await accept({ token: token(invitation), name: 'Fragment', password: 'a secure personal password', isOperator: true })).status, 400);
+  result = await accept({ token: token(invitation), name: 'Fragment colleague', password: 'a secure personal password' });
+  assert.equal(result.status, 200); assert.equal(result.data.created, true); assert.equal(result.data.role, 'editor'); assert.deepEqual(established, [result.data.user.id]);
+  assert.equal((await accept({ token: token(invitation) })).status, 410); assert.equal((await read(invitation)).status, 410);
+  // An existing account accepts with only the token; the body cannot carry a name or password for it.
+  const existing = await create('existing@example.test', 'viewer');
+  assert.equal((await accept({ token: token(existing) })).status, 401);
+  assert.equal((await accept({ token: token(existing), password: 'overwrite attempt password' }, { user: users.existing })).status, 400);
+  result = await accept({ token: token(existing) }, { user: users.existing }); assert.equal(result.status, 200); assert.equal(result.data.role, 'viewer');
+  // Links issued before the move keep working through the token-in-path routes.
+  const legacy = await create('legacy@example.test');
+  assert.equal((await read(legacy)).status, 200);
+  assert.equal((await request('/invitations/' + token(legacy), { user: null, method: 'POST', body: { name: 'Legacy colleague', password: 'a secure personal password' } })).status, 200);
 });
 
 test('an invitation accepted twice at once joins once, and one new address invited to two workspaces creates one account', { skip: postgresSkip }, async t => {

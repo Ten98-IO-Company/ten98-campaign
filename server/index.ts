@@ -215,6 +215,10 @@ export async function createApp(options: AppOptions = {}) {
         if (path === '/api/auth/login' && req.method === 'POST') return send(200, { user: await auth.login(req, res, { email: email(body.email), password: loginPassword(body.password) }) });
         if (path === '/api/auth/logout' && req.method === 'POST') { await auth.logout(req, res); return send(200, { ok: true }); }
         if (path === '/api/auth/oidc/start' && req.method === 'GET') return await auth.oidcStart(req, res);
+        if (path === '/api/auth/oidc/start' && req.method === 'POST') {
+          if (Object.keys(body).some(key => key !== 'token') || (body.token !== undefined && typeof body.token !== 'string')) bad('Use a valid invitation link before signing in.');
+          return send(200, { authorizationUrl: await auth.oidcAuthorize(req, res, body.token ?? null) });
+        }
         if (path === '/api/auth/oidc/callback' && req.method === 'GET') return await auth.oidcCallback(req, res, url);
         const signedIn = await auth.user(req, res);
         if (await handleInvitations({ req, url, body, user: signedIn, db, auth, config, send, workspaceAccess, establish: (id: string, tx: Executor) => auth.establish(res, id, req, tx) })) return;

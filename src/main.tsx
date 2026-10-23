@@ -139,7 +139,7 @@ function Creative({ item, small = false }: { item: Row; small?: boolean }) { ret
 
 function App() {
   const [session, setSession] = useState<any>(null), [state, setState] = useState<State | null>(null), { toast } = useToast();
-  const inviteToken = new URLSearchParams(window.location.search).get('invite') || '', [inviteSignIn, setInviteSignIn] = useState(Boolean(startupAuthError));
+  const inviteToken = startupInvite, [inviteSignIn, setInviteSignIn] = useState(Boolean(startupAuthError));
   const [navigation, setNavigation] = useState(() => readNavigation(window.location.search)), [query, setQuery] = useState(''), [tab, setTab] = useState('all');
   const { page, section } = navigation;
   const adsView = page === 'Ads manager' ? section : 'campaigns', publishingView = page === 'Publishing' ? section : 'posts', insightsView = page === 'Analytics' ? section : 'summary', directView = page === 'Direct campaigns' ? section : 'campaigns';
@@ -494,7 +494,11 @@ function App() {
   }
   if (!session) return <AppStateScreen surface="card" state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading Campaign…'}/>;
   if (inviteToken && !(inviteSignIn && !session.user)) return <AcceptInvitation key={inviteToken + ':' + (session.user?.id || '')} token={inviteToken} signedInEmail={session.user?.email} request={api} onAccepted={() => { window.location.assign('/'); }} onSignIn={() => { setInviteSignIn(true); if (session.user) run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); }); }}/>;
-  if (!session.user) return <Auth session={session} inviteToken={inviteToken} error={error} busy={busy} onSubmit={async values => { await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
+  if (!session.user) return <Auth session={session} inviteToken={inviteToken} error={error} busy={busy} onOidcStart={() => run(async () => {
+    const { authorizationUrl } = await api('/auth/oidc/start', 'POST', { token: inviteToken });
+    if (typeof authorizationUrl !== 'string' || !/^https?:\/\//.test(authorizationUrl)) throw new Error('Single sign-on could not be started. Try again.');
+    window.location.assign(authorizationUrl);
+  })} onSubmit={async values => { await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
   if (!state) return <AppStateScreen surface="card" state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading your campaigns…'} onRetry={error ? () => run(() => reload()) : undefined}/>;
   if (!state.projectId || !project) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} label="Workspace access" email={state.user.email} subheading="No project access yet." help="Ask a workspace owner for an invitation, refresh after access is granted, or create your own workspace." error={error || undefined} busy={busy} onSubmit={({ name }) => createWorkspace(name)} onRefresh={() => run(() => reload(''))} signOut={{ onClick: signOut }}><AccountSettings request={api} onChanged={() => { run(() => reload('')); }}/></WorkspaceOnboarding>;
   const campaigns = filtered(state.campaigns).filter(c => tab === 'all' || c.status === tab);
@@ -589,7 +593,7 @@ function App() {
 }
 function Select({ label, name, value, options }: { label: string; name: string; value: string; options: (string | string[])[] }) { return <AppSelect label={label} name={name} value={value} options={options.map(o => typeof o === 'string' ? [o, title(o)] : [o[0], o[1]])}/>; }
 function ConnectionEmpty({ onSettings, subject }: { onSettings: () => void; subject: string }) { return <Card><EmptyState icon="link" title={'Connect Zernio to use ' + subject} description="Configure Zernio in Integrations and map this project to your brand’s profile." action={<Button variant="primary" onClick={onSettings}>Open integrations</Button>}/></Card>; }
-// Identity sign-in failures return as /?auth_error=<CODE> (plus any held invite). Only a known code selects a message, so
+// Identity sign-in failures return as /?auth_error=<CODE> (plus any held #invite=). Only a known code selects a message, so
 // query text is never shown. The code is read once at startup and removed from the address; the invitation stays.
 const oidcSignInErrors: Record<string, string> = {
   OIDC_INVITE_EMAIL_MISMATCH: 'This invitation is for a different email address. Sign in with the identity that uses the invited email.',
@@ -607,13 +611,24 @@ function takeAuthError(location: Pick<Location, 'pathname' | 'search' | 'hash'>,
   return Object.hasOwn(oidcSignInErrors, code) ? oidcSignInErrors[code] : oidcSignInErrors.OIDC_SIGN_IN_FAILED;
 }
 let startupAuthError = takeAuthError(window.location, window.history);
+// Invitation links carry the token in #invite= (older links: ?invite=). It is read once at startup into memory and
+// removed from the address and this history entry; a fragment holding it is dropped whole.
+function takeInvite(location: Pick<Location, 'pathname' | 'search' | 'hash'>, history: Pick<History, 'state' | 'replaceState'>) {
+  const params = new URLSearchParams(location.search), token = new URLSearchParams(location.hash.slice(1)).get('invite') ?? params.get('invite');
+  if (token === null) return '';
+  params.delete('invite'); const query = params.toString();
+  history.replaceState(history.state, '', location.pathname + (query ? '?' + query : ''));
+  return token;
+}
+const startupInvite = takeInvite(window.location, window.history);
 // Campaign adapter: the host-held setup token, sample opt-in and invitation continuation stay app-owned.
-function Auth({ session, inviteToken = '', error, busy, onSubmit }: { session: any; inviteToken?: string; error: string; busy: boolean; onSubmit: (data: any) => void }) {
+function Auth({ session, inviteToken = '', error, busy, onSubmit, onOidcStart }: { session: any; inviteToken?: string; error: string; busy: boolean; onSubmit: (data: any) => void; onOidcStart?: () => void }) {
   const frame = { surface: 'card' as const, brand: <Brand product="Campaign" href="/"/>, label: 'Campaign sign in', eyebrow: 'YOUR WORKSPACE', error: error || startupAuthError || undefined, busy, busyLabel: 'Signing in…',
     aside: <AuthStory label="Campaign overview" eyebrow="CAMPAIGN MANAGEMENT" title="Plan. Publish." emphasis="Measure." lead="Manage social posts, advertising and campaign assets." channels={[{ icon: 'send', label: 'Social' }, { icon: 'target', label: 'Advertising' }, { icon: 'billboard', label: 'Out of home' }]} footnote="ten98 Campaign"/> };
   if (session.setupRequired) return <FirstUserSetupFlow {...frame} title="Create owner account" description="Create the owner account for this app." submitLabel="Create owner account" tokenLength={{ min: 32, max: 512 }} tokenHint="Ask the person running this app for the setup token." passwordPolicy={{ minLength: 12, maxLength: 128, hint: 'Use at least 12 characters.' }} sampleOptIn={{ label: 'Include a sample project to explore', defaultChecked: true }} onSubmit={({ name, token, email, password, sample }) => onSubmit({ name, token, email, password, sample })}/>;
-  const oidcHref = '/api/auth/oidc/start' + (inviteToken ? '?invite=' + encodeURIComponent(inviteToken) : '');
-  return <SignInFlow {...frame} title="Sign in" description="Use your account to access your workspaces." notice={session.sessionEnded ? { tone: 'warning', text: 'Your session ended. Sign in again.' } : undefined} submitLabel="Sign in" passwordPolicy={{ maxLength: 128 }} onSubmit={({ email, password }) => { startupAuthError = ''; onSubmit({ email, password }); }} providers={session.oidcEnabled ? <OidcProviderButtons providers={[{ id: 'sso', name: 'Organization single sign-on', href: oidcHref }]} dividerLabel="or continue with"/> : undefined}/>;
+  // Invitation sign-in starts with a POST that carries the token; plain sign-in stays a link.
+  const sso = inviteToken ? { id: 'sso', name: 'Organization single sign-on' } : { id: 'sso', name: 'Organization single sign-on', href: '/api/auth/oidc/start' };
+  return <SignInFlow {...frame} title="Sign in" description="Use your account to access your workspaces." notice={session.sessionEnded ? { tone: 'warning', text: 'Your session ended. Sign in again.' } : undefined} submitLabel="Sign in" passwordPolicy={{ maxLength: 128 }} onSubmit={({ email, password }) => { startupAuthError = ''; onSubmit({ email, password }); }} providers={session.oidcEnabled ? <OidcProviderButtons providers={[sso]} onStart={onOidcStart} dividerLabel="or continue with"/> : undefined}/>;
 }
 
 createRoot(document.getElementById('root')!).render(<AuthErrorBoundary fallback={{ brand: <Brand product="Campaign"/>, title: 'Page unavailable', message: 'This screen could not load. Reload the app to try again.', retryLabel: 'Reload app' }}><ToastProvider><App/></ToastProvider></AuthErrorBoundary>);

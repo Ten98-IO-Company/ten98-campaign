@@ -95,11 +95,18 @@ function oidcFixture(t, db, config) {
   };
   const auth = createAuth(db, config, { openidClient: async () => client });
   fixture.auth = auth;
+  const flowOf = (authorize, res) => {
+    const set = [].concat(res.headers['Set-Cookie']), browser = set.find(value => value.startsWith('ten98_oidc_') && !value.startsWith('ten98_oidc_invite_')), invite = set.find(value => value.startsWith('ten98_oidc_invite_'));
+    return { state: authorize.searchParams.get('state'), cookie: browser.split(';')[0], inviteCookie: invite, authorize };
+  };
   fixture.start = async (query = '') => {
     const res = response(); await auth.oidcStart({ url: '/api/auth/oidc/start' + query, headers: {}, socket: { remoteAddress: '127.0.0.1' } }, res); signInRedirectError(res);
-    assert.equal(res.status, 302); const authorize = new URL(res.headers.Location), set = [].concat(res.headers['Set-Cookie']);
-    const browser = set.find(value => value.startsWith('ten98_oidc_') && !value.startsWith('ten98_oidc_invite_')), invite = set.find(value => value.startsWith('ten98_oidc_invite_'));
-    return { state: authorize.searchParams.get('state'), cookie: browser.split(';')[0], inviteCookie: invite, authorize };
+    assert.equal(res.status, 302); return flowOf(new URL(res.headers.Location), res);
+  };
+  // The POST start: the invitation token comes as an argument (the route's body), and the address is returned, not redirected to.
+  fixture.startPost = async (token) => {
+    const res = response(), href = await auth.oidcAuthorize({ url: '/api/auth/oidc/start', headers: {}, socket: { remoteAddress: '127.0.0.1' } }, res, token);
+    assert.equal(res.status, null); return flowOf(new URL(href), res);
   };
   fixture.callback = async (flow, query = '', cookie = [flow.cookie, flow.inviteCookie?.split(';')[0]].filter(Boolean).join('; ')) => {
     const res = response(), url = new URL(config.appUrl + '/api/auth/oidc/callback?state=' + encodeURIComponent(flow.state) + '&code=fixture-code' + query);
@@ -125,7 +132,7 @@ test('OIDC invitation continuation is browser-bound, single-use and origin-fixed
   for (const table of ['oidc_return_targets', 'oidc_flows']) for (const stored of (await db.$client.query(`SELECT * FROM ${table}`)).rows) for (const value of Object.values(stored)) assert.ok(!String(value).includes(invite), `${table} stores the raw invitation token`);
   await assert.rejects(oidc.callback({ ...flow, cookie: 'ten98_oidc=wrong-browser' }), error => error.status === 400); assert.equal(oidc.exchanges, 0); assert.equal(await count(db, 'oidc_return_targets'), 1);
   const accepted = await oidc.callback(flow, '&invite=' + 'B'.repeat(43) + '&returnTo=https%3A%2F%2Fattacker.example');
-  assert.equal(accepted.status, 302); assert.equal(accepted.headers.Location, appUrl + '/?invite=' + invite); assert.equal(accepted.ended, true); assert.equal(oidc.exchanges, 1);
+  assert.equal(accepted.status, 302); assert.equal(accepted.headers.Location, appUrl + '/#invite=' + invite); assert.equal(accepted.ended, true); assert.equal(oidc.exchanges, 1);
   assert.ok([].concat(accepted.headers['Set-Cookie']).some(value => /^ten98_oidc_invite_[0-9a-f]{16}=; Path=\/api\/auth\/oidc\/callback;.*Max-Age=0/.test(value)), 'the continuation cookie is cleared');
   assert.equal(await count(db, 'oidc_flows'), 0); assert.equal(await count(db, 'oidc_return_targets'), 0);
   await assert.rejects(oidc.callback(flow), error => error.status === 400); assert.equal(oidc.exchanges, 1);
@@ -210,7 +217,7 @@ test('an invitation for another email or an unverified email does not provision 
   // Allowlisted or not, a usable invitation names the address it was issued to.
   for (const email of ['someone@example.test', 'allowed@example.test']) {
     oidc.claims = invitedIdentity(config, email);
-    await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_INVITE_EMAIL_MISMATCH' && !error.location.includes('invitee') && error.location.includes('&invite='));
+    await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_INVITE_EMAIL_MISMATCH' && !error.location.includes('invitee') && error.location === config.appUrl + '/?auth_error=OIDC_INVITE_EMAIL_MISMATCH#invite=' + token);
   }
   oidc.claims = invitedIdentity(config, 'invitee@example.test', { email_verified: false });
   await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_EMAIL_UNVERIFIED');
@@ -231,8 +238,28 @@ test('an expired, revoked or no-longer-authorized invitation falls back to the O
   // An allowlisted email still gets its own workspace and resumes the (now unusable) invitation in the browser as before.
   oidc.claims = invitedIdentity(config, 'allowed@example.test'); await db.$client.query("UPDATE workspace_invitations SET email = 'allowed@example.test'");
   const fallback = await oidc.callback(await oidc.start('?invite=' + expired));
-  assert.equal(fallback.headers.Location, config.appUrl + '/?invite=' + expired);
+  assert.equal(fallback.headers.Location, config.appUrl + '/#invite=' + expired);
   assert.deepEqual((await memberships(db, 'allowed@example.test')).map(row => row.role), ['owner']); assert.equal(await accepted(db, expired), null);
+});
+
+test('invitation sign-in starts from a POST body, keeps the token out of the provider address and resumes it only in #invite=', pg, async t => {
+  const { db } = await testDatabase(t), config = oidcConfig('oidc-post-start-fixture-secret-32-characters'), token = await seedInvitation(db), oidc = oidcFixture(t, db, config);
+  // A malformed token is an ordinary error for the sign-in screen, not a redirect.
+  for (const value of ['https://attacker.example/redirect', '../escape', 'short']) await assert.rejects(oidc.startPost(value), error => error.status === 400 && /invitation link/.test(error.message));
+  assert.equal(await count(db, 'oidc_flows'), 0);
+  const mismatch = await oidc.startPost(token);
+  assert.equal(mismatch.authorize.origin, config.oidcIssuer); assert.equal(mismatch.authorize.href.includes(token), false);
+  assert.match(mismatch.inviteCookie, new RegExp(`^ten98_oidc_invite_[0-9a-f]{16}=\\d+\\.${token}; Path=/api/auth/oidc/callback; HttpOnly; SameSite=Lax; Max-Age=600; Secure$`));
+  oidc.claims = invitedIdentity(config, 'someone@example.test');
+  await assert.rejects(oidc.callback(mismatch), error => error.location === config.appUrl + '/?auth_error=OIDC_INVITE_EMAIL_MISMATCH#invite=' + token);
+  oidc.claims = invitedIdentity(config, 'invitee@example.test');
+  const signedIn = await oidc.callback(await oidc.startPost(token));
+  assert.equal(signedIn.headers.Location, config.appUrl + '/'); assert.ok(await accepted(db, token));
+  assert.deepEqual(await memberships(db, 'invitee@example.test'), [{ workspaceId: 'team', role: 'editor' }]);
+  // An already linked identity signs in without using a second invitation, which the app reopens from the fragment.
+  const later = await seedInvitation(db, { token: 'L'.repeat(43), email: 'invitee@example.test' });
+  assert.equal((await oidc.callback(await oidc.startPost(later))).headers.Location, config.appUrl + '/#invite=' + later);
+  assert.equal((await oidc.callback(await oidc.startPost(null))).headers.Location, config.appUrl + '/');
 });
 
 test('two parallel OIDC callbacks for one invitation provision one account and one membership', pg, async t => {

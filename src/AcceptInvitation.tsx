@@ -4,20 +4,20 @@ import { AppBrand as Brand } from '@ten98/ui/app';
 
 type Invite = { email: string; role: string; workspaceName: string; expiresAt: string };
 type Props = { token: string; signedInEmail?: string; request: (path: string, method?: string, body?: unknown) => Promise<any>; onAccepted: (result: any) => void | Promise<void>; onSignIn: (email?: string) => void };
-// Campaign adapter: the token stays in memory, and the server decides whether the invited account must sign in first.
+// Campaign adapter: the token stays in memory and travels only in POST bodies, and the server decides whether the invited account must sign in first.
 export default function AcceptInvitation({ token, signedInEmail, request, onAccepted, onSignIn }: Props) {
   const [details, setDetails] = useState<{ invitation: Invite; accountExists: boolean; requiresSignIn: boolean } | null>(null), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [error, setError] = useState('');
-  const version = useRef(0), path = '/invitations/' + encodeURIComponent(token);
+  const version = useRef(0);
   useEffect(() => {
     const generation = ++version.current; setDetails(null); setLoading(true); setError('');
-    request(path).then(result => { if (generation === version.current) setDetails(result); }).catch(err => { if (generation === version.current) setError((err as Error).message || 'This invitation could not be opened.'); }).finally(() => { if (generation === version.current) setLoading(false); });
+    request('/invitations/inspect', 'POST', { token }).then(result => { if (generation === version.current) setDetails(result); }).catch(err => { if (generation === version.current) setError((err as Error).message || 'This invitation could not be opened.'); }).finally(() => { if (generation === version.current) setLoading(false); });
     return () => { version.current++; };
   }, [token]);
   async function accept(values: { name?: string; password?: string }) {
     if (busy || !details) return;
     const generation = version.current, body = details.accountExists ? {} : { name: values.name, password: values.password };
     setBusy(true); setError('');
-    try { const result = await request(path, 'POST', body); if (generation === version.current) await onAccepted(result); }
+    try { const result = await request('/invitations/accept', 'POST', { token, ...body }); if (generation === version.current) await onAccepted(result); }
     catch (err) { if (generation === version.current) { if ((err as Error & { status?: number }).status === 401) setDetails(previous => previous ? { ...previous, accountExists: true, requiresSignIn: true } : previous); setError((err as Error).message || 'The invitation could not be accepted.'); } }
     finally { if (generation === version.current) setBusy(false); }
   }
