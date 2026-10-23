@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { renderToStaticMarkup } from 'react-dom/server';
 
 // Issue #129: the inbox loads on view, offers views by state, separates "All caught up" from "No matches", shows one
 // banner per affected account and answers j/k/e/r. The actual components run with ordered hook stubs and a stub transport.
@@ -119,9 +120,32 @@ test('each account the provider could not read gets its own banner with Reconnec
   assert.deepEqual(opened, ['Integrations', 'Integrations']);
 });
 
-test('an inbox that is not set up shows a single banner', async () => {
-  const { tree, calls } = await open({ status: { configured: false, mapped: false, webhookConfigured: false, accounts: [] } });
-  assert.equal(find(tree, ui.Alert).length, 1); assert.equal(listReads(calls).length, 0);
+// #129 visual direction §6: with nothing connected the page is one empty state; the inbox controls wait for an account.
+test('an inbox without a connected account shows only Connect social accounts, which opens Integrations', async () => {
+  for (const status of [{ configured: false, mapped: false, webhookConfigured: false, accounts: [] }, { configured: true, mapped: true, webhookConfigured: true, accounts: [] }]) {
+    const opened: string[] = [];
+    const { tree, calls } = await open({ status, props: { onOpenIntegrations: () => opened.push('Integrations') } });
+    const empty = find(tree, ui.EmptyState);
+    assert.deepEqual(empty.map(state => state.props.title), ['Connect social accounts'], JSON.stringify(status));
+    assert.equal(typeof empty[0].props.description, 'string', 'One muted line.');
+    const buttons = find(tree, ui.Button);
+    assert.deepEqual(buttons.map(button => text(button.props.children)), ['Open integrations'], 'The only control opens Integrations.');
+    buttons[0].props.onClick(); assert.deepEqual(opened, ['Integrations']);
+    for (const control of [ui.SegmentedControl, ui.Select, ui.Input, ui.Popover, ui.Disclosure, ui.DetailWorkspace, ui.Alert]) assert.equal(find(tree, control).length, 0, control.name + ' waits for an account.');
+    assert.equal(listReads(calls).length, 0);
+  }
+});
+
+// The page header is the h1 and names the page, so the inbox starts at h2 and each heading nests at most one level deeper.
+const headings = (tree: any) => [...renderToStaticMarkup(tree).matchAll(/<h([1-6])[^>]*>(.*?)<\/h\1>/g)].map(([, level, name]) => ({ level: Number(level), name: name.replace(/<[^>]+>/g, '') }));
+test('inbox headings start below the page heading, nest in order and never repeat', async () => {
+  for (const options of [{}, { conversations: [] }]) {
+    const found = headings((await open(options)).tree), names = found.map(({ name }) => name), summary = found.map(({ level, name }) => `h${level} ${name}`).join(', ');
+    assert.equal(names.includes('Unified inbox'), false, 'The page header already names the page: ' + summary);
+    assert.equal(new Set(names).size, names.length, 'No heading text repeats: ' + summary);
+    assert.equal(found[0].level, 2, summary);
+    found.forEach(({ level }, index) => assert.ok(index === 0 || level <= found[index - 1].level + 1, 'No heading skips a level: ' + summary));
+  }
 });
 
 test('j and k open the next and previous conversation, e marks it done and r moves to the reply', async () => {
