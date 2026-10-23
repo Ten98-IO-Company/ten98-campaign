@@ -36,7 +36,7 @@ function mount(name: string, globals: Record<string, unknown> = {}) {
 const accounts = [{ id: 'ig', platform: 'instagram', name: 'Studio IG', capabilities: { messages: true, reply: true } }, { id: 'tg', platform: 'telegram', name: 'Support TG', capabilities: { messages: true, reply: true } }];
 const rows = [{ id: 'a', participantName: 'Ada', lastMessage: 'Hello' }, { id: 'b', participantName: 'Ben', lastMessage: 'Price?' }, { id: 'c', participantName: 'Cy', lastMessage: 'Thanks' }, { id: 'd', participantName: 'Di', lastMessage: 'Later' }];
 const triage = [{ resourceId: 'a', status: 'open', assigneeId: 'me', updatedAt: null }, { resourceId: 'b', status: 'pending', assigneeId: null, updatedAt: null }, { resourceId: 'c', status: 'resolved', assigneeId: null, updatedAt: null }, { resourceId: 'd', status: 'snoozed', assigneeId: 'me', updatedAt: null }];
-function transport(calls: any[][], { conversations = rows, states = triage, meta, status = {} }: { conversations?: any[]; states?: any[]; meta?: any; status?: any } = {}) {
+function transport(calls: any[][], { conversations = rows, states = triage, meta, status = {}, pagination = {} }: { conversations?: any[]; states?: any[]; meta?: any; status?: any; pagination?: any } = {}) {
   return async (...args: any[]) => {
     calls.push(args); const [target, method, body] = args, url = new URL(target, 'https://app.test'), route = url.pathname;
     if (route.endsWith('/integrations/inbox/status')) return { configured: true, mapped: true, webhookConfigured: true, accounts, ...status };
@@ -46,13 +46,13 @@ function transport(calls: any[][], { conversations = rows, states = triage, meta
     if (route.endsWith('/item-states') && method === 'PATCH') return { state: { accountId: body.accountId, kind: body.kind, resourceId: body.resourceId, status: body.status ?? 'open', assigneeId: null, updatedAt: '2026-10-24T10:00:00.000Z' } };
     if (route.endsWith('/item-states')) return { states: url.searchParams.getAll('id').map(id => states.find(state => state.resourceId === id)).filter(Boolean).map(state => ({ accountId: url.searchParams.get('accountId'), kind: url.searchParams.get('kind'), ...state })) };
     if (route.endsWith('/item-notes')) return { notes: [] };
-    if (route.endsWith('/conversations')) return { conversations, pagination: {}, ...(meta ? { meta } : {}) };
+    if (route.endsWith('/conversations')) return { conversations, pagination, ...(meta ? { meta } : {}) };
     if (route.endsWith('/integrations/inbox/comments')) return { posts: [{ id: 'post-1', content: 'Launch post', commentCount: 2 }], pagination: {} };
     if (/\/conversations\/[^/]+\/messages$/.test(route)) return { conversation: {}, messages: [], pagination: {} };
     throw new Error('Unexpected request ' + target);
   };
 }
-async function open(options: { conversations?: any[]; states?: any[]; meta?: any; status?: any; props?: any } = {}) {
+async function open(options: { conversations?: any[]; states?: any[]; meta?: any; status?: any; pagination?: any; props?: any } = {}) {
   const calls: any[][] = [], h = mount('ZernioInbox');
   const props = { projectId: 'project-a', request: transport(calls, options), role: 'editor', tab: 'messages', onDraftChange() {}, onSwitch: (change: () => unknown) => change(), ...options.props };
   const step = async (rounds = 8) => { for (let round = 0; round < rounds; round++) { h.render(props); h.flush(); await settle(); } return h.render(props); };
@@ -83,10 +83,20 @@ test('a WhatsApp campaign link still loads only its own account, and an unavaila
 test('views by state: Open, Mine, Unassigned, Snoozed and Done filter the loaded conversations', async () => {
   const { h, props, step } = await open();
   const views = () => find(h.render(props), ui.SegmentedControl, control => control.label === 'View')[0];
-  assert.deepEqual(views().props.options.map((option: any) => option.label), ['Open', 'Mine', 'Unassigned', 'Snoozed', 'Done']);
+  assert.deepEqual(views().props.options.map((option: any) => option.value), ['active', 'mine', 'unassigned', 'snoozed', 'resolved']);
   for (const [view, expected] of [['mine', ['a']], ['unassigned', ['b']], ['snoozed', ['d']], ['resolved', ['c']], ['active', ['a', 'b']]] as const) {
     views().props.onValueChange(view); assert.deepEqual(shown(await step(1)), expected, view);
   }
+});
+
+test('the View switcher is sized to its content and counts each view once every page and state is loaded', async () => {
+  const { tree } = await open();
+  const sized = find(tree, ui.Inline, inline => React.isValidElement(inline.children) && inline.children.type === ui.SegmentedControl && (inline.children.props as any).label === 'View');
+  assert.equal(sized.length, 1, 'An Inline row keeps the control at its content width instead of the column width.');
+  const labels = (view: any) => find(view, ui.SegmentedControl, control => control.label === 'View')[0].props.options.map((option: any) => option.label);
+  assert.deepEqual(labels(tree), ['Open 2', 'Mine 1', 'Unassigned 1', 'Snoozed 1', 'Done 1'], 'Each count is what that view lists.');
+  assert.deepEqual(labels((await open({ conversations: [] })).tree), ['Open 0', 'Mine 0', 'Unassigned 0', 'Snoozed 0', 'Done 0']);
+  assert.deepEqual(labels((await open({ pagination: { hasMore: true, nextCursor: 'next' } })).tree), ['Open', 'Mine', 'Unassigned', 'Snoozed', 'Done'], 'More pages mean the counts are not known yet.');
 });
 
 test('an empty view says All caught up, while a search with no results says No matches and clears its filters', async () => {

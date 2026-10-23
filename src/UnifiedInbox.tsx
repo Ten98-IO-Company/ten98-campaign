@@ -786,6 +786,10 @@ function ZernioInbox({ projectId, request, readOnly = false, role, initialChanne
   ];
   // "All caught up" means the view is empty; "No matches" means a search or filter hides items and offers to clear it.
   const viewName = triageFilters.find(([value]) => value === triageFilter)?.[1] || 'this view';
+  // Each view's count is how many loaded items it lists, known once every page and the items' triage states are loaded.
+  // Comments are triaged inside the open post, so the post list has no per-view counts.
+  const viewCounts: Record<string, number> | null = tab !== 'comments' && loaded && !historyFilter && !pagination?.hasMore && (!rows.length || triageScoped && !triageError)
+    ? Object.fromEntries(triageFilters.map(([value]) => [value, rows.filter(row => triageVisible(states[triageKey(row, triageKind)], value, userId)).length])) : null;
   const listEmpty = !loaded ? <EmptyState title={accountId ? `${noun.charAt(0).toUpperCase() + noun.slice(1)} not loaded` : 'No account chosen'} description={accountId ? 'Refresh to try again.' : supported.length ? `Choose an account to see its ${noun}.` : `Connect an account that supports ${tab} in Integrations.`}/>
     : historyFilter || appliedInboxFilters.length || Object.keys(reviewFilters).length ? <EmptyState title="No matches" description={pagination?.hasMore ? 'Nothing on the loaded pages matches. Load more, or clear the filters.' : 'Nothing matches these filters.'} action={<Button variant="secondary" size="sm" disabled={!!busy} onClick={clearInboxFilters}>Clear filters</Button>}/>
     : <EmptyState title={tab === 'comments' ? 'No commented posts' : triageFilter === 'active' ? 'All caught up' : `Nothing in ${viewName}`} description={pagination?.hasMore ? 'More results are available below.' : tab === 'comments' ? 'Posts with comments appear here.' : triageFilter === 'active' ? `No open ${noun} need attention.` : `No ${noun} in this view.`}/>;
@@ -812,7 +816,8 @@ function ZernioInbox({ projectId, request, readOnly = false, role, initialChanne
       <Field label="Sort direction"><Select value={reviewFilters.sortOrder || 'desc'} disabled={!!busy} onChange={event => changeReviewFilter('sortOrder', event.target.value)}><Option value="desc">Highest or newest first</Option><Option value="asc">Lowest or oldest first</Option></Select></Field>
     </FeatureControls></Stack>}
     <Stack as="section" aria-label="Inbox scope" gap={3}>
-      <SegmentedControl label="View" value={triageFilter} onValueChange={setTriageFilter} options={triageFilters.map(([value, label]) => ({ value, label, disabled: !!historyFilter }))}/>
+      {/* The Inline row keeps the control at its content width. A narrow-screen Select waits for the status-view rail (ten98-design-system#139). */}
+      <Inline><SegmentedControl label="View" value={triageFilter} onValueChange={setTriageFilter} options={triageFilters.map(([value, label]) => ({ value, label: viewCounts ? `${label} ${viewCounts[value]}` : label, disabled: !!historyFilter }))}/></Inline>
       {historyFilter && <Text size="sm" tone="muted">History results show every triage status.</Text>}
       <FeatureControls>
       <Field label="Connected account"><Select value={accountId} disabled={!!busy || !connected} onChange={event => { const value = event.target.value; if (value !== accountId) switchSelection(() => { resetList(); setAccountId(value); }); }}><Option value="">Choose an account</Option>{supported.map(item => <Option key={item.id} value={item.id}>{accountLabel(item)}</Option>)}</Select></Field>

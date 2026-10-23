@@ -1061,7 +1061,7 @@ test('the triage filter hides reviews and mentions by status, and filters commen
   assert.deepEqual(ids(triageComments(thread, () => true)), ids(thread));
   assert.ok(source.includes("const shownComments = triageComments(detail?.comments || [], row => triageVisible(states[row.id], triageFilter, userId));"));
   assert.ok(source.includes('replies: shownComments }] : shownComments).map((item: Row) => commentMessage(item, selected))'));
-  assert.match(source, /^      <SegmentedControl label="View" value=\{triageFilter\} onValueChange=\{setTriageFilter\} options=\{triageFilters\.map/m, 'The views are offered on every tab.');
+  assert.match(source, /^      <Inline><SegmentedControl label="View" value=\{triageFilter\} onValueChange=\{setTriageFilter\} options=\{triageFilters\.map/m, 'The views are offered on every tab.');
 });
 
 test('review, mention and comment rows show their triage label, with waiting time except on mentions', async () => {
