@@ -19,6 +19,7 @@ const templatePreviewText = compile(section('function templatePreviewText(', 'ex
 const templateParameter = compile(section('function templateParameter(', 'export default function WhatsAppTemplate(', templateSource));
 const helper = name => source.match(new RegExp(`^const ${name} = [^\n]+;$`, 'm'))[0].replace(`const ${name} = `, '').replace(/;$/, '');
 const emailProviderChoice = compile(helper('emailProviderChoice'));
+const sendErrors = compile('(' + section('const testSendErrors', '\nconst testSendError =').replace(/^const testSendErrors[^=]*= /, '').replace(/;\s*$/, '') + ')', { emailProviderChoice });
 const blankDraft = { name: 'Launch notice', channel: 'email', subject: 'Receipt for {{name}}', text: 'Your receipt', html: '<p>Receipt</p>', accountId: 'wa-account', templateName: 'receipt', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [] };
 
 test('audience readiness renders the real library summary with app counts and preserves unknowns', async () => {
@@ -281,7 +282,7 @@ test('the email provider choice offers a working Open integrations button wherev
   const make = new Function('React', 'Button', `${code}; return make;`)(React, ui.Button), opened = [], action = make(() => opened.push('Integrations'));
   assert.equal(make(undefined), undefined, 'Without the prop there is no button.');
   action.props.onClick(); assert.deepEqual(opened, ['Integrations']);
-  const button = /<button[^>]*>Open integrations<\/button>/, html = (pattern, scope) => renderSnippet(pattern, ['Alert', 'StatusLine'], { emailProviderChoice, integrationsAction: action, ...scope }).then(renderToStaticMarkup);
+  const button = /<button[^>]*>Open integrations<\/button>/, html = (pattern, scope) => renderSnippet(pattern, ['Alert', 'StatusLine'], { emailProviderChoice, testSendErrors: sendErrors, integrationsAction: action, ...scope }).then(renderToStaticMarkup);
   const warning = scope => html(/\{status && \(draft\.channel === 'email' && status\.emailProvider === null[\s\S]*?<\/Alert>\)\}/, { status: { providers: { email: false }, emailProvider: null }, draft: { channel: 'email' }, labels: {}, emailProviderName: String, editable: true, readOnly: false, ...scope });
   assert.match(await warning({}), button);
   assert.doesNotMatch(await warning({ editable: false }), button, 'A campaign that is no longer a draft has a disabled form, so no dead button.');
@@ -290,6 +291,9 @@ test('the email provider choice offers a working Open integrations button wherev
     const show = error => html(pattern, { error, shownTest: { error } });
     assert.match(await show(emailProviderChoice), button, String(pattern)); assert.doesNotMatch(await show('Server text'), button, 'Other failures do not link to Integrations.');
   }
+  const testFailure = error => html(/\{shownTest\?\.error && <Alert[\s\S]*?<\/Alert>\}/, { shownTest: { error } });
+  assert.match(await testFailure(sendErrors.INTEGRATION_NOT_CONFIGURED), button, 'A test refused for a missing provider links to Integrations.');
+  assert.doesNotMatch(await testFailure(sendErrors.TEST_SEND_LIMIT), button);
   const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
   assert.match(main, /<DirectCampaigns [^>]*onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\}/);
 });
@@ -314,4 +318,38 @@ test('a send refused for EMAIL_PROVIDER_REQUIRED shows the provider choice, othe
   assert.deepEqual(await run(Object.assign(new Error('Server text'), { status: 409, code: 'EMAIL_PROVIDER_REQUIRED' })), [emailProviderChoice]);
   assert.deepEqual(await run(Object.assign(new Error('Configure this sending provider in Integrations first.'), { code: 'INTEGRATION_NOT_CONFIGURED' })), ['Configure this sending provider in Integrations first.']);
   assert.deepEqual(await run(new Error('')), ['This action could not be completed.']);
+});
+
+test('Save and check audience validates the clicked button’s form, saves the draft, then previews the audience', async () => {
+  const saveDraft = section('async function saveDraft(', '  async function save(');
+  async function run(valid = true) {
+    const requests = [], notices = [], previews = [], reported = [];
+    const context = { readOnly: false, editable: true, draft: blankDraft, audienceMode: 'all', editingId: 'campaign-1', path: '/projects/a/direct', version: { current: 1 }, campaignBody, selectedTemplate: null, templateRestriction, action: async (_, perform) => perform(1), acceptCampaign() {}, setEditingId() {}, setNotice: value => notices.push(value), setError() {}, setPreview: value => previews.push(value), requester: { current: async (path, method, body) => { requests.push([path, method, body]); return path.endsWith('/preview') ? { previewToken: 'review', audience: { eligible: 2 } } : { campaign: { id: 'campaign-1', status: 'draft' } }; } } };
+    context.saveDraft = compile(saveDraft, context);
+    // The ui Form replaces a consumer ref with its own, so the handler reads the form from the click.
+    await compile(section('async function checkAudience(', '  async function openCampaign('), context)({ currentTarget: { form: { reportValidity: () => { reported.push(true); return valid; } } } });
+    return { requests, notices, previews, reported };
+  }
+  const checked = await run();
+  assert.deepEqual(checked.reported, [true], 'Native validity is reported on the form.');
+  assert.deepEqual(checked.requests.map(([path, method]) => [path, method]), [['/projects/a/direct/campaigns/campaign-1', 'PATCH'], ['/projects/a/direct/campaigns/campaign-1/preview', 'POST']]);
+  assert.equal(checked.previews[0].result.previewToken, 'review'); assert.match(checked.notices.at(-1), /Audience and content checked/);
+  const invalid = await run(false); assert.deepEqual(invalid.reported, [true]); assert.equal(invalid.requests.length, 0, 'An invalid form is not saved or previewed.');
+  assert.match(source, /<Button variant="secondary" disabled=\{[^}]*\} onClick=\{checkAudience\}>Save and check audience<\/Button>/);
+  assert.doesNotMatch(source, /formRef/, 'No handler depends on a ref the ui Form overrides.');
+});
+
+test('the test send is disabled with a reason and an Open integrations action when the channel has no provider', async () => {
+  const [, ready, reason] = source.match(/const testProviderReady = (.+?), testProviderReason = (.+);\n/);
+  const check = (status, channel = 'email') => compile(`() => [${ready}, ${reason}]`, { status, current: { channel }, labels: { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' }, emailProviderChoice })();
+  assert.equal(check({ providers: { email: true }, emailProvider: 'ses' })[0], true);
+  assert.equal(check(null)[0], true, 'An unknown status leaves the check to the server.');
+  assert.deepEqual(check({ providers: { email: false }, emailProvider: 'cloudflare' }), [false, 'Set up Email sending in Integrations to send a test.']);
+  assert.deepEqual(check({ providers: { email: false }, emailProvider: null }), [false, emailProviderChoice]);
+  assert.deepEqual(check({ providers: { sms: false } }, 'sms'), [false, 'Set up SMS sending in Integrations to send a test.']);
+  assert.match(source, /<Button variant="secondary" disabled=\{!!busy \|\| !testProviderReady \|\|[^}]*\} onClick=\{\(\) => setConfirmingTest\(true\)\}>/);
+  const action = React.createElement(ui.Button, { variant: 'secondary', size: 'sm' }, 'Open integrations'), pattern = /\{!testProviderReady && <Inline[\s\S]*?<\/Inline>\}/;
+  const html = renderToStaticMarkup(await renderSnippet(pattern, ['Inline', 'Text'], { testProviderReady: false, testProviderReason: 'Set up Email sending in Integrations to send a test.', integrationsAction: action }));
+  assert.match(html, /Set up Email sending in Integrations to send a test\.[\s\S]*<button[^>]*>Open integrations<\/button>/);
+  assert.equal(renderToStaticMarkup(await renderSnippet(pattern, ['Inline', 'Text'], { testProviderReady: true, testProviderReason: '', integrationsAction: action })), '');
 });

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Card, ConfirmDialog, DescriptionList, Disclosure, EmptyState, Field, Inline, Link, Stack, Text, Textarea } from '@ten98/ui';
 
-type Props = { projectId: string; canWrite: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onSaved: (collection: string) => void; onOpenAdDraft?: (draft: Record<string, any>) => void };
+type Props = { projectId: string; canWrite: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onSaved: (collection: string) => void; onOpenAdDraft?: (draft: Record<string, any>) => void; onOpenIntegrations?: () => void };
 const label: Record<string, string> = { campaigns: 'Campaign draft', posts: 'Social post draft', placements: 'OOH booking draft', ads: 'Ad creative draft' };
 // Model and draft text keeps its line breaks without native pre-wrap markup.
 const lines = (text: unknown) => <Text preserveWhitespace>{String(text)}</Text>;
-export default function CampaignAgent({ projectId, canWrite, request, onSaved, onOpenAdDraft }: Props) {
+export default function CampaignAgent({ projectId, canWrite, request, onSaved, onOpenAdDraft, onOpenIntegrations }: Props) {
   const [status, setStatus] = useState<any>(null), [runs, setRuns] = useState<any[]>([]), [message, setMessage] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [confirming, setConfirming] = useState<any>(null);
   const key = useRef<{ input: string; value: string } | null>(null), active = useRef(true), path = `/projects/${projectId}/agent`;
   async function history() { const data = await request(path + '/history'); if (active.current) setRuns(data.runs); }
@@ -29,7 +29,7 @@ export default function CampaignAgent({ projectId, canWrite, request, onSaved, o
   }
   return <Stack gap={4}><Card as="section" title="Draft content" description="Prepare campaign plans, social posts and ads for review." headingLevel={2}><Stack gap={3}>
     <Stack as="form" gap={3} onSubmit={send}><Stack as="fieldset" gap={3} disabled={busy || !canWrite || !status?.configured}><Field label="Request"><Textarea required value={message} onChange={event => setMessage(event.target.value)} maxLength={12000} placeholder="Plan a two-week launch campaign using our approved assets. Suggest social drafts and a Google Search ad."/></Field><Text tone="muted" size="sm">Requests and selected project data are sent to OpenRouter. Review drafts before saving or opening the ad builder.</Text><Inline><Button type="submit" disabled={!message.trim()}>{busy ? 'Generating…' : 'Generate draft'}</Button></Inline></Stack></Stack>
-    {!status?.configured && status && <Alert tone="warning">An app administrator needs to configure OpenRouter and a model that supports tool calling in Integrations.</Alert>}{!canWrite && <Text tone="muted" size="sm">Your workspace role is view only.</Text>}
+    {!status?.configured && status && <Alert tone="warning" actions={onOpenIntegrations && <Button variant="secondary" size="sm" onClick={onOpenIntegrations}>Open integrations</Button>}>An app administrator needs to configure OpenRouter and a model that supports tool calling in Integrations.</Alert>}{!canWrite && <Text tone="muted" size="sm">Your workspace role is view only.</Text>}
     <Text size="sm" tone="muted">Model: {status?.model || 'Not configured'}</Text>
   </Stack></Card>{error && <Alert tone="danger">{error}</Alert>}
   <Stack gap={4}>{runs.map(item => <Card as="section" key={item.id} title={item.message} description={`${new Date(item.createdAt).toLocaleString()} · ${item.model}`} headingLevel={2} actions={<Badge>{item.status}</Badge>}><Stack gap={3}>{item.content && <Stack gap={0}>{lines(item.content)}</Stack>}{item.error && <Alert tone="warning">{item.error}</Alert>}
