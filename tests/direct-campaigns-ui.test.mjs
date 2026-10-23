@@ -353,3 +353,14 @@ test('the test send is disabled with a reason and an Open integrations action wh
   assert.match(html, /Set up Email sending in Integrations to send a test\.[\s\S]*<button[^>]*>Open integrations<\/button>/);
   assert.equal(renderToStaticMarkup(await renderSnippet(pattern, ['Inline', 'Text'], { testProviderReady: true, testProviderReason: '', integrationsAction: action })), '');
 });
+
+// ten98-campaign#136: "Save draft" works before a WhatsApp account or template is chosen; the server asks for them at
+// preview and send. Neither field may carry a required flag that native validation would enforce on save.
+test('a WhatsApp draft can be saved before its account and template are chosen', () => {
+  for (const label of ['Connected WhatsApp account', 'Approved template']) {
+    const start = source.indexOf(`<Field label="${label}"`), field = start < 0 ? undefined : source.slice(start, source.indexOf('</Field>', start));
+    assert.ok(field, label);
+    assert.doesNotMatch(field.split('<Option')[0], /\brequired\b/, `${label} must not block saving a draft.`);
+    assert.match(field, /description="Needed before preview and sending/);
+  }
+});
