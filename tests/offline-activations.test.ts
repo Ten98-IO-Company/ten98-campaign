@@ -59,3 +59,46 @@ test('offline activations are campaign records with validated plans, people and 
   assert.equal((await request(project + '/activations/' + activation.id, 'DELETE', undefined, owner)).status, 200);
   assert.equal((await request(project + '/campaigns/' + campaignId, 'DELETE', undefined, owner)).status, 200);
 });
+
+test('staff capture leads at an activation with explicit per-channel consent, and suppression and unticked boxes are respected', { skip: postgresSkip }, async t => {
+  const { app, request, owner, project, member } = await start(t);
+  const campaignId = (await request(project + '/campaigns', 'POST', { name: 'Winter field push', channel: 'offline' }, owner)).body.record.id;
+  const activation = (await request(project + '/activations', 'POST', stop(campaignId), owner)).body.record, leads = `${project}/activations/${activation.id}/leads`;
+  const editor = await member('editor', 'Erin'), viewer = await member('viewer', 'Vic'), count = async () => Number((await app.sql.get('SELECT count(*)::int AS n FROM direct_contacts')).n);
+  const tag = 'offline:' + activation.id.slice(0, 8);
+
+  let response = await request(leads, 'POST', { name: 'Pat Doe', email: 'pat@example.test', phone: '+447700900123', consents: { email: true, sms: true, whatsapp: false } }, editor.cookie);
+  assert.equal(response.status, 201, JSON.stringify(response.body)); assert.deepEqual([response.body.recorded, response.body.refused], [['email', 'sms'], []]);
+  assert.equal(JSON.stringify(response.body).includes('pat@example.test'), false, 'The staff phone gets no contact details back.');
+  let contact = (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.email === 'pat@example.test');
+  assert.deepEqual(contact.consents, { email: true, sms: true, whatsapp: false }); assert.deepEqual(contact.tags, [tag]);
+  for (const channel of ['email', 'sms']) assert.match(contact.consentEvidence[channel].source, /In person at Roadshow stop “Mall roadshow — Saturday” .* recorded by Erin\. Wording shown: “.*Brand launch.*”/);
+
+  const before = await count();
+  assert.equal((await request(leads, 'POST', { name: 'No thanks', email: 'nothanks@example.test', consents: { email: false } }, editor.cookie)).status, 400, 'Without an opt-in nothing is stored.');
+  assert.equal((await request(leads, 'POST', { email: 'x@example.test', consents: { sms: true } }, editor.cookie)).status, 400, 'SMS consent needs a phone number.');
+  assert.equal((await request(leads, 'POST', { email: 'x@example.test', consents: { email: true }, notes: 'lives at no. 4' }, editor.cookie)).status, 400, 'Only minimal fields are accepted.');
+  assert.equal((await request(leads, 'POST', { email: 'x@example.test', consents: { email: true } }, viewer.cookie)).status, 403);
+  assert.equal((await request(`${project}/activations/${campaignId}/leads`, 'POST', { email: 'x@example.test', consents: { email: true } }, editor.cookie)).status, 404);
+  assert.equal(await count(), before);
+
+  await request(`${project}/direct/contacts/${contact.id}/suppress`, 'POST', { channel: 'email', reason: 'Asked not to be contacted' }, owner);
+  response = await request(leads, 'POST', { email: 'pat@example.test', consents: { email: true } }, editor.cookie);
+  assert.equal(response.status, 409, 'A suppressed destination cannot be opted back in from the field.'); assert.match(response.body.error, /opted out/);
+  contact = (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.id === contact.id);
+  assert.equal(contact.consents.email, false); assert.equal(contact.consents.sms, true, 'An unticked box never withdraws an existing opt-in.');
+
+  const second = (await request(project + '/activations', 'POST', { ...stop(campaignId), name: 'Station flyering', type: 'street_team' }, owner)).body.record;
+  response = await request(`${project}/activations/${second.id}/leads`, 'POST', { name: 'Someone else', phone: '+447700900123', consents: { whatsapp: true } }, editor.cookie);
+  assert.equal(response.status, 201, JSON.stringify(response.body)); contact = (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.id === contact.id);
+  assert.deepEqual(contact.tags, [tag, 'offline:' + second.id.slice(0, 8)], 'Repeat meetings add the activation tag.'); assert.equal(contact.name, 'Pat Doe', 'A field entry does not rename a known contact.');
+
+  await request(project + '/activations/' + second.id, 'PATCH', { status: 'cancelled' }, owner);
+  assert.equal((await request(`${project}/activations/${second.id}/leads`, 'POST', { email: 'late@example.test', consents: { email: true } }, editor.cookie)).status, 409, 'Cancelled activations take no leads.');
+
+  // Rate limit per staff member, counting refused attempts too, so a stolen session cannot flood Contacts.
+  const busy = await member('editor', 'Bo'), statuses = [];
+  for (let attempt = 0; attempt < 121; attempt++) statuses.push((await request(leads, 'POST', { consents: {} }, busy.cookie)).status);
+  assert.deepEqual([statuses.slice(0, 120).every(status => status === 400), statuses[120]], [true, 429]);
+  assert.equal((await request(leads, 'POST', { email: 'still-fine@example.test', consents: { email: true } }, editor.cookie)).status, 201, 'Each staff member has their own allowance.');
+});

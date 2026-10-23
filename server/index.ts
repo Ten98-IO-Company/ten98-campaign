@@ -25,6 +25,7 @@ import { createDirectCampaigns } from './direct-campaigns.ts';
 import { handleInbox } from './inbox.ts';
 import { createSmsInbox } from './sms-inbox.ts';
 import { createLinks } from './links.ts';
+import { handleActivations } from './activations.ts';
 import { ACTIVATION_TYPES } from '../shared/offline-activations.ts';
 import { normalizePostVariants, normalizeAccountVariants, normalizeMediaItems, normalizePostTags } from '../shared/social-posts.ts';
 import { validateQueueIntent } from './zernio-queues.ts';
@@ -376,6 +377,7 @@ export async function createApp(options: AppOptions = {}) {
           context.contacts = direct.contacts; context.webhooks = webhooks;
           if (projectRoute[2]?.startsWith('sms-inbox') && await smsInbox.handle(context)) return;
           if (projectRoute[2]?.startsWith('links') && await links.handle(context)) return;
+          if (projectRoute[2]?.startsWith('activations/') && await handleActivations(context, direct.contacts, auth.limit)) return;
           if (projectRoute[2]?.startsWith('integrations/inbox') && await handleInbox(context)) return;
           if (projectRoute[2]?.startsWith('direct/') && await direct.handle(context)) return;
           if (projectRoute[2]?.startsWith('operations') && await handleOperationRecovery(context)) return;
