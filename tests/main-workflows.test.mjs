@@ -42,8 +42,12 @@ test('browser-pass copy: connection empty states, disabled-control reasons, resu
   const appSource = source(), declaration = appSource.match(/^function ConnectionEmpty\([^\r\n]+$/m)[0];
   const { code } = await transformWithOxc(declaration, 'ConnectionEmpty.tsx', { jsx: { runtime: 'classic' } });
   const ConnectionEmpty = new Function('React', 'Card', 'EmptyState', 'Button', code + '; return ConnectionEmpty;')(React, Card, (await import('@ten98/ui')).EmptyState, Button);
-  let opened = 0; const html = renderToStaticMarkup(React.createElement(ConnectionEmpty, { subject: 'provider updates', onSettings: () => opened++ }));
-  assert.match(html, /Connect Zernio to use provider updates/); assert.match(html, />Open integrations</); assert.doesNotMatch(html, /Connect your/);
+  let opened = 0; const html = renderToStaticMarkup(React.createElement(ConnectionEmpty, { subject: 'ad activity', onSettings: () => opened++ }));
+  // Plain language: the job and where to do it, never the middleware or "provider".
+  assert.match(html, /Connect your accounts to use ad activity/); assert.match(html, /Settings › Connections/); assert.match(html, />Open Connections</);
+  assert.doesNotMatch(html, /Zernio|provider|Integrations/);
+  for (const subject of (appSource.match(/subject="[^"]+"/g) || [])) assert.doesNotMatch(subject, /provider|Zernio|queue|destination|tracking tag/, subject);
+  assert.match(appSource, /label=\{connected \? 'Accounts connected' : 'Connect your accounts'\} action=\{\{ label: 'Connections',/);
   for (const subject of (appSource.match(/subject="[^"]+"/g) || [])) assert.match(subject, /^subject="(?:the |[a-z]|WhatsApp|Google)/, subject);
   assert.doesNotMatch(appSource, /Open Integrations/, 'Button and prose casing is consistent within the shell.');
   for (const name of ['GoogleCalendar', 'UnifiedInbox']) assert.doesNotMatch(readFileSync(new URL(`../src/${name}.tsx`, import.meta.url), 'utf8'), /Open Integrations/, name + ' uses the same "Open integrations" casing.');
