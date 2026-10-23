@@ -141,16 +141,16 @@ export default function PostManagement({ request, post, canWrite, assets = [], c
     catch (err) { if (!held?.(err)) setError((err as Error).message); } finally { setBusy(false); }
   }
   async function update(values: Record<string, any>) {
-    if (ambiguousCopies) throw new Error('This provider post repeats an account across destinations. Edit it in Zernio until each destination can be selected safely.');
+    if (ambiguousCopies) throw new Error('This post repeats an account across destinations, so it cannot be edited here safely.');
     if (divergentCopies && !accountCopiesReady && !replaceVariants) throw new Error('Confirm replacing the different account copies before applying platform-wide versions.');
     setBusy(true); setError(''); setNotice('');
     try {
       const result = await requester.current('social/update', { postId: post.id, content: values.content, ...(values.tags !== undefined ? { tags: values.tags } : {}), mediaItems: values.mediaItems, assetId: values.assetId, platformOverrides: values.platformOverrides, ...(values.accountOverrides !== undefined ? { accountOverrides: values.accountOverrides } : {}), ...(replaceVariants ? { confirmReplaceVariants: true } : {}), mode: values.scheduledAt ? 'scheduled' : 'draft', ...(values.scheduledAt ? { scheduledAt: values.scheduledAt } : {}) });
-      setCurrent(result.post); setNotice(['Platform versions and schedule saved with Zernio.', ...(Array.isArray(result.validationWarnings) ? result.validationWarnings.filter((value: unknown) => typeof value === 'string') : [])].join(' ')); onChanged?.();
+      setCurrent(result.post); setNotice(['Platform versions and schedule saved.', ...(Array.isArray(result.validationWarnings) ? result.validationWarnings.filter((value: unknown) => typeof value === 'string') : [])].join(' ')); onChanged?.();
     } finally { setBusy(false); }
   }
   return <Card as="section" headingLevel={2} title="Provider post" description={`Status: ${current.providerStatus || current.status || 'Unknown'}`} actions={<Button type="button" disabled={busy} onClick={() => act('social/status?postId=' + encodeURIComponent(post.id), undefined, 'Provider status refreshed.')}>Refresh status</Button>}><Stack gap={4}>
-    {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}{busy && <StatusLine busy>Checking with Zernio…</StatusLine>}
+    {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}{busy && <StatusLine busy>Checking status…</StatusLine>}
     {current.providerDeletedAt ? <Alert tone="info">This unpublished provider record was cancelled. Its local receipt is retained. Create a new draft to publish it again.</Alert> : <>
       <Text tone="muted">Provider changes are checked against the connected accounts in this project. Destinations stay fixed; review each platform’s caption, media, options and timing before saving.</Text>
       {copies.length > 0 && <DataTable searchable={false} sortable={false} pagination={false} ariaLabel="Provider copies" rows={(copies as any[]).map((item, index) => ({ item, index }))} rowKey={({ item, index }) => accountId(item) + index} columns={[
@@ -159,7 +159,7 @@ export default function PostManagement({ request, post, canWrite, assets = [], c
         { key: 'published', header: 'Published copy', render: ({ item }) => liveUrl(item.platformPostUrl) ? <Link href={liveUrl(item.platformPostUrl)!} target="_blank" rel="noreferrer">Open post</Link> : 'Not reported' },
       ]}/>}
       {!editable && current.tags?.length > 0 && <Text tone="muted">Stored upload keyword tags: {current.tags.join(', ')}. Published-copy metadata requests have separate receipts; live values are unverified.</Text>}
-      {ambiguousCopies && <Text tone="warning">This post repeats an account across different destinations. Content editing is available in Zernio; this app keeps each received copy visible without selecting an ambiguous destination.</Text>}
+      {ambiguousCopies && <Text tone="warning">This post repeats an account across different destinations, so its content cannot be edited here. Each received copy stays visible.</Text>}
       {canWrite && editable && !ambiguousCopies ? <>
         {divergentCopies && !accountCopiesReady && <Checkbox checked={replaceVariants} onChange={event => setReplaceVariants(event.target.checked)} label="Some accounts on the same platform have different content. Apply these platform versions to all of those account copies."/>}
         <PostComposer key={current.updatedAt || current.id} post={current} assets={assets} campaigns={campaigns} accounts={providerAccounts} canWrite={canWrite} providerPost busy={busy} onShortenLinks={onShortenLinks} onSubmit={update} onCancel={onCancel} onValidate={values => requester.current('social/validate', values)} onInspectMedia={item => requester.current('social/validate-media', { url: item.url })} onLookupDestinations={(accountId, resource, params = {}) => requester.current(`publishing/accounts/${encodeURIComponent(accountId)}/${encodeURIComponent(resource)}?${new URLSearchParams(params)}`)} onTikTokInfo={(accountId, mediaType) => requester.current(`social/tiktok-creator-info?accountId=${encodeURIComponent(accountId)}&mediaType=${encodeURIComponent(mediaType)}`)}/>
