@@ -10,6 +10,10 @@ COPY server ./server
 COPY src ./src
 COPY shared ./shared
 COPY public ./public
+# The architecture check in `npm run build` inventories every source root, so the build stage needs tests and scripts too.
+# Neither reaches the final image.
+COPY tests ./tests
+COPY scripts ./scripts
 RUN npm run build && npm prune --omit=dev
 
 FROM node:24-alpine@sha256:6a1c190e17215d844926b0677f4bf87273ff7d5e54db06d3b5b5863ab0b09a3d

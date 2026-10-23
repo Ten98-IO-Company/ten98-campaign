@@ -5,5 +5,4 @@ data
 .env
 .env.*
 .git
-tests
 *.log

@@ -190,7 +190,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       // Only a policy row alerts; any other row, including a reason the classifier does not recognise, suppresses (fail safe).
       if (outcome?.action === 'deliverability-alert') policy.push({ contactId: contact.id, expiresAt: match.expiresAt });
       // Cloudflare refuses the address itself until the row expires, so an expiring row holds the contact until then.
-      else if (match.expiresAt) await contacts.suppressUntil(projectId, contact.id, 'email', match.reason, match.expiresAt);
+      else if (outcome?.expiresAt) await contacts.suppressUntil(projectId, contact.id, 'email', match.reason, outcome.expiresAt);
       else await contacts.suppress(projectId, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason);
     }
     await db.transaction(async tx => {
