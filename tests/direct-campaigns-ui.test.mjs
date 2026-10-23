@@ -266,11 +266,14 @@ const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : React.isValidE
 test('the email channel names the provider that sends, or asks for a choice when both are configured', async () => {
   const emailProviderName = compile(helper('emailProviderName'));
   const names = ['Alert', 'StatusLine'], labels = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
-  const show = (status, channel = 'email') => renderSnippet(/\{status && \(draft\.channel === 'email' && status\.emailProvider === null[\s\S]*?<\/Alert>\)\}/, names, { status, draft: { channel }, labels, emailProviderName, emailProviderChoice }).then(renderToStaticMarkup);
+  const show = (status, channel = 'email', integrationsAction) => renderSnippet(/\{status && \(draft\.channel === 'email' && status\.emailProvider === null[\s\S]*?<\/Alert>\)\}/, names, { status, draft: { channel }, labels, emailProviderName, emailProviderChoice, integrationsAction }).then(renderToStaticMarkup);
   assert.match(await show({ providers: { email: true }, emailProvider: 'ses' }), /Email sends through Amazon SES\./);
   assert.match(await show({ providers: { email: true }, emailProvider: 'cloudflare' }), /Email sends through Cloudflare\./);
   const both = await show({ providers: { email: false }, emailProvider: null });
-  assert.ok(both.includes(emailProviderChoice)); assert.doesNotMatch(both, /sends through|provider configured/);
+  assert.ok(both.includes(emailProviderChoice)); assert.doesNotMatch(both, /sends through|provider configured/); assert.doesNotMatch(both, /Open integrations/);
+  assert.match(await show({ providers: { email: false }, emailProvider: null }, 'email', React.createElement(ui.Button, { variant: 'secondary', size: 'sm' }, 'Open integrations')), /<button[^>]*>Open integrations<\/button>/);
+  assert.match(source, /const integrationsAction = onOpenIntegrations \? <Button variant="secondary" size="sm" onClick=\{onOpenIntegrations\}>Open integrations<\/Button> : undefined;/);
+  assert.match(source, /<Alert tone="danger" actions=\{error === emailProviderChoice \? integrationsAction : undefined\}>/, 'The provider-choice error links to Integrations too.');
   assert.match(await show({ providers: { email: false }, emailProvider: 'cloudflare' }), /Email sending is not configured/);
   assert.match(await show({ providers: { sms: true }, emailProvider: null }, 'sms'), /SMS provider configured\./, 'The email choice does not affect other channels.');
 });

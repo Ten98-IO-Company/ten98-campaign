@@ -14,7 +14,7 @@ const deliverabilityAlerts = (status: any): DeliverabilityAlert[] => (Array.isAr
 
 type Row = { id: string; [key: string]: any };
 type Channel = 'email' | 'sms' | 'whatsapp';
-type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string> };
+type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string>; onOpenIntegrations?: () => void };
 type Draft = { name: string; channel: Channel; subject: string; text: string; html: string; accountId: string; templateName: string; templateLanguage: string; templateComponents: any[]; contactIds: string[]; tags: string[] };
 const labels = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
 const channels: Channel[] = ['email', 'sms', 'whatsapp'];
@@ -49,7 +49,7 @@ const testSendErrors: Record<string, string> = {
 };
 const testSendError = (failure: any) => (typeof failure?.code === 'string' && Object.hasOwn(testSendErrors, failure.code) ? testSendErrors[failure.code] : failure?.message) || 'The test could not be sent. Try again.';
 
-export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText }: Props) {
+export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/direct`, requester = useRef(request), version = useRef(0), csvRead = useRef(0), pending = useRef(false), actionVersion = useRef(0), formRef = useRef<HTMLFormElement>(null);
   requester.current = request;
   const [tab, setTab] = useState('campaigns'), [status, setStatus] = useState<any>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [contacts, setContacts] = useState<Row[]>([]);
@@ -219,9 +219,10 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
 
   const deliveries: any[] = detail?.deliveries || [], deliveriesShown = deliveryLimit.id === current?.id ? deliveryLimit.count : 50, replies = !!onOpenReplies && ['sms', 'whatsapp'].includes(current?.channel);
   const testRecipients = smsTestContacts(contacts), testRecipient = testRecipients.find(person => person.id === testContactId), shownTest = testSend?.campaignId === current?.id ? testSend : null;
+  const integrationsAction = onOpenIntegrations ? <Button variant="secondary" size="sm" onClick={onOpenIntegrations}>Open integrations</Button> : undefined;
   return <Stack gap={6}>
     <Inline justify="between" align="center"><Stack gap={1}><Heading level={2}>Direct campaigns</Heading><Text tone="muted">Manage permission-based email, SMS and approved WhatsApp template campaigns with one contact list.</Text></Stack><Button variant="secondary" disabled={!!busy} onClick={() => action('Refreshing campaigns', async generation => { await load(generation); })}>Refresh lists</Button></Inline>
-    {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
+    {error && <Alert tone="danger" actions={error === emailProviderChoice ? integrationsAction : undefined}>{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
     {deliverabilityAlerts(status).map(alert => { const copy = deliverabilityCopy(alert); return <Alert key={alert.provider + ':' + alert.kind} tone="warning" title={copy.title}>{copy.body}{alert.expiresAt ? ` The provider lists it until ${new Date(alert.expiresAt).toLocaleString()}.` : ''}</Alert>; })}
     {status?.emailProvider === 'ses' && typeof status.sesWebhookUrl === 'string' && status.sesWebhookUrl && <Disclosure summary="Amazon SES feedback webhook"><Stack gap={2}><Field label="SNS subscription URL" description="Subscribe the SNS topic of your SES configuration set to this URL over HTTPS so bounces and complaints update your contacts."><Input readOnly value={status.sesWebhookUrl}/></Field><Inline><CopyButton value={status.sesWebhookUrl} label="Copy webhook URL" messages={{ copied: 'Webhook URL copied.' }}/></Inline></Stack></Disclosure>}
     {status?.accountError && <Alert tone="warning" variant="inline">WhatsApp accounts could not be loaded: {status.accountError}. Email and SMS remain available when configured.</Alert>}
@@ -233,7 +234,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
       {(!readOnly || editingId) && <Card as="section" title={current ? current.name : 'New direct campaign'} description={<>{current ? statusLabel(current.status) : 'Draft'}{current?.scheduledAt ? ` · ${when(current.scheduledAt)}` : ''}</>} actions={current && !readOnly && <Button variant="secondary" disabled={!!busy} onClick={() => { openDraft({ ...current, id: '', name: current.name + ' copy' }); setDetail(null); }}>Duplicate as draft</Button>}><Stack gap={6}>
         <Form {...{ ref: formRef }} onSubmit={(_, event) => save(event)}><Stack as="fieldset" gap={4} disabled={!!busy || readOnly || !editable}>
           <FormGrid><Field label="Campaign name" required><Input required maxLength={120} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })}/></Field><Field label="Channel"><Select value={draft.channel} onChange={event => setDraft({ ...draft, channel: event.target.value as Channel })}>{channels.map(channel => <Option value={channel} key={channel}>{labels[channel]}</Option>)}</Select></Field></FormGrid>
-          {status && (draft.channel === 'email' && status.emailProvider === null ? <Alert tone="warning" variant="inline">{emailProviderChoice} You can save drafts and contacts meanwhile.</Alert> : status.providers?.[draft.channel] ? <StatusLine tone="success">{draft.channel === 'email' && status.emailProvider ? `Email sends through ${emailProviderName(status.emailProvider)}.` : `${labels[draft.channel]} provider configured.`}</StatusLine> : <Alert tone="warning" variant="inline">{labels[draft.channel]} sending is not configured. You can save drafts and contacts while the provider is being set up.</Alert>)}
+          {status && (draft.channel === 'email' && status.emailProvider === null ? <Alert tone="warning" variant="inline" actions={integrationsAction}>{emailProviderChoice} You can save drafts and contacts meanwhile.</Alert> : status.providers?.[draft.channel] ? <StatusLine tone="success">{draft.channel === 'email' && status.emailProvider ? `Email sends through ${emailProviderName(status.emailProvider)}.` : `${labels[draft.channel]} provider configured.`}</StatusLine> : <Alert tone="warning" variant="inline">{labels[draft.channel]} sending is not configured. You can save drafts and contacts while the provider is being set up.</Alert>)}
           {draft.channel === 'email' ? <>
             <Alert tone="info" variant="inline" title="Transactional email">This sender is for account notices, receipts and other expected service messages. Marketing newsletters and promotional email need a marketing provider.</Alert>
             <Field label="Email subject" required><Input required maxLength={200} value={draft.subject} onChange={event => setDraft({ ...draft, subject: event.target.value })}/></Field>
