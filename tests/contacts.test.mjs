@@ -183,3 +183,30 @@ test('Messenger contact and identity writes are atomic standalone and inside the
   assert.equal((await contacts.findMessenger('a', incoming.accountId, incoming.participantId)).id, valid.id, 'A savepoint rollback preserves the caller transaction for valid subsequent work.');
   await pool.query('DELETE FROM projects WHERE id = $1', ['a']); assert.equal((await pool.query('SELECT COUNT(*) AS count FROM direct_contact_messenger_identities')).rows[0].count, 0);
 });
+
+// ten98-campaign#54 item 5: webhook opt-outs and opt-ins, suppressions and contact saves look a contact up by its email or
+// phone instead of reading every contact in the project. Counts the direct_contacts rows each operation reads.
+test('destination lookups read only the matching contacts, not the whole project', pg, async t => {
+  const { pool, contacts } = await fixture(t);
+  const csv = ['email,phone', ...Array.from({ length: 300 }, (_, index) => `person-${index}@example.test,+1202555${String(index).padStart(4, '0')}`)].join('\n');
+  assert.equal((await contacts.import('a', { csv, consents: { email: true, sms: true }, consentSource: 'Fixture signup' })).created, 300);
+  const pg = (await import('pg')).default, original = pg.Client.prototype.query;
+  let read = 0;
+  // Pool queries use pg's callback form and transactions the promise form; count direct_contacts rows either way.
+  pg.Client.prototype.query = function (...args) {
+    const text = typeof args[0] === 'string' ? args[0] : args[0]?.text || '', count = value => { if (/FROM direct_contacts/.test(text)) read += value?.rows?.length || 0; }, done = args.at(-1);
+    if (typeof done === 'function') args[args.length - 1] = (error, value) => { if (!error) count(value); return done(error, value); };
+    const result = original.apply(this, args); if (result?.then) result.then(count, () => {});
+    return result;
+  };
+  t.after(() => { pg.Client.prototype.query = original; });
+  const measure = async run => { read = 0; await run(); await new Promise(resolve => setImmediate(resolve)); return read; };
+  assert.ok(await measure(() => contacts.suppressDestination('a', 'email', 'person-7@example.test', 'Unsubscribed')) <= 2, 'A destination suppression reads the matching contact only.');
+  assert.ok(await measure(() => contacts.suppressSmsGlobally('+12025550008', 'Recipient opted out')) <= 2);
+  assert.ok(await measure(() => contacts.liftSmsOptOut('+12025550008')) <= 2, 'A START reads only the contacts holding that number.');
+  assert.ok(await measure(() => contacts.save('a', { email: 'person-9@example.test', name: 'Nine' })) <= 4, 'Saving by destination reads the matching contact, not the project.');
+  assert.ok(await measure(() => contacts.save('a', { email: 'new-person@example.test' })) <= 4);
+  assert.deepEqual((await contacts.byDestination('a', { phone: '+12025550009' })).map(row => row.email), ['person-9@example.test']);
+  assert.equal((await contacts.list('a')).find(row => row.email === 'person-7@example.test').consents.email, false, 'The lookups still apply their effect.');
+  await assert.rejects(contacts.save('a', { email: 'person-10@example.test', phone: '+12025550011' }), /different contacts/);
+});

@@ -22,7 +22,7 @@ export function createSmsInbox({ db, env, appUrl, contacts = createContacts({ db
   const changeMessage = (id: string, change: (record: any) => unknown) => db.transaction(async tx => { const entry = await readMessage(id, tx, true); if (!entry) return null; if (await change(entry.record) !== false) await putMessage(entry.record, tx); return entry.record; });
   const suppression = async (projectId: string, recipient: string): Promise<any> => await contacts.smsSuppression(recipient) || (await resultRows(db.execute(sql`SELECT reason FROM direct_contact_suppressions WHERE project_id = ${projectId} AND channel = 'sms' AND target_hash = ${digest(recipient)}`)))[0];
   async function conversationView(row: any) {
-    const data = row.data, contact = (await contacts.list(row.project_id)).find((item: any) => item.phone === row.recipient), block = await suppression(row.project_id, row.recipient);
+    const data = row.data, contact = (await contacts.byDestination(row.project_id, { phone: row.recipient })).find((item: any) => item.phone === row.recipient), block = await suppression(row.project_id, row.recipient);
     return { ...data, id: row.id, projectId: row.project_id, platform: 'sms', provider: 'twilio', sender: row.sender, recipient: row.recipient, participantId: row.recipient, participantName: contact?.name || row.recipient, ...(contact ? { contactId: contact.id } : {}), blocked: Boolean(block), blockedReason: block?.reason || '' };
   }
   // Callers hold a transaction; ON CONFLICT plus FOR UPDATE make concurrent first messages share one conversation row and serialise its lastMessage update.

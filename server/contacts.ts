@@ -75,6 +75,8 @@ export function createContacts({ db }: { db: Database }) {
     return contacts;
   }
   const list = async (projectId: string, ex: Executor = db): Promise<ProviderRecord[]> => contactViews(ex, await resultRows(ex.execute(sql`SELECT data FROM direct_contacts WHERE project_id = ${projectId} ORDER BY seq DESC`)));
+  // Contacts holding this email or phone, read through the destination indexes (migration 0011) instead of the whole list.
+  const byDestination = async (projectId: string, { email = '', phone = '' }: { email?: string; phone?: string }, ex: Executor = db): Promise<ProviderRecord[]> => email || phone ? contactViews(ex, await resultRows(ex.execute(sql`SELECT data FROM direct_contacts WHERE project_id = ${projectId} AND (data->>'email' = ${email || null} OR data->>'phone' = ${phone || null}) ORDER BY seq DESC`))) : [];
   const get = async (projectId: string, id: string, ex: Executor = db): Promise<ProviderRecord | null> => (await contactViews(ex, await resultRows(ex.execute(sql`SELECT data FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`))))[0] || null;
   async function findMessenger(projectId: string, accountId: unknown, participantId: unknown, ex: Executor = db) {
     const found = await resultRows(ex.execute(sql`SELECT c.data FROM direct_contact_messenger_identities i JOIN direct_contacts c ON c.id = i.contact_id AND c.project_id = i.project_id WHERE i.project_id = ${projectId} AND i.account_id = ${messengerId(accountId, 'account ID')} AND i.participant_id = ${messengerId(participantId, 'participant ID')}`));
@@ -111,11 +113,12 @@ export function createContacts({ db }: { db: Database }) {
     result.hygiene = hygiene(result.email, result.email === previous?.email ? previous?.hygiene : undefined);
     return { ...result, id: previous?.id || randomUUID(), projectId, createdAt: previous?.createdAt || now, updatedAt: now };
   }
-  function match(rows: Map<string, ProviderRecord>, body: any, id?: string) {
+  const destination = (body: any) => ({ email: own(body, 'email') ? emailAddress(body.email) : '', phone: body.phone === undefined ? '' : text(body.phone, 'phone number', 16) });
+  // The contact a body without an ID updates: the one holding its email or phone, refusing a body that spans two contacts.
+  function match(candidates: Iterable<ProviderRecord>, body: any) {
     if (!object(body)) fail(400, 'Use the supported contact fields.');
-    if (id) { const previous = rows.get(id); if (!previous) fail(404, 'Contact not found in this project.'); return previous; }
-    const email = own(body, 'email') ? emailAddress(body.email) : '', phone = body.phone === undefined ? '' : text(body.phone, 'phone number', 16);
-    const matches = [...rows.values()].filter(row => email && row.email === email || phone && row.phone === phone);
+    const { email, phone } = destination(body);
+    const matches = [...candidates].filter(row => email && row.email === email || phone && row.phone === phone);
     if (matches.length > 1) fail(409, 'Email and phone match different contacts. Review them separately.');
     const previous = matches[0];
     if (previous && (email && previous.email && email !== previous.email || phone && previous.phone && phone !== previous.phone)) fail(409, 'This row would replace another contact identity. Edit that contact explicitly.');
@@ -129,10 +132,11 @@ export function createContacts({ db }: { db: Database }) {
   async function save(projectId: string, body: any, id?: string) {
     return db.transaction(async tx => {
       await lockContacts(tx, projectId);
-      // ponytail: scan at most 10,000 contacts; index canonical destinations if this project limit grows.
-      const rows = new Map((await list(projectId, tx)).map(row => [row.id, row])), previous = match(rows, body, id), record = await prepare(tx, projectId, body, previous);
-      if ([...rows.values()].some(row => row.id !== record.id && (record.email && row.email === record.email || record.phone && row.phone === record.phone))) fail(409, 'This destination belongs to another contact in this project.');
-      if (!previous && rows.size >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
+      if (!object(body)) fail(400, 'Use the supported contact fields.');
+      const previous = id ? await get(projectId, id, tx) ?? fail(404, 'Contact not found in this project.') : match(await byDestination(projectId, destination(body), tx), body);
+      const record = await prepare(tx, projectId, body, previous);
+      if ((await byDestination(projectId, record, tx)).some(row => row.id !== record.id && (record.email && row.email === record.email || record.phone && row.phone === record.phone))) fail(409, 'This destination belongs to another contact in this project.');
+      if (!previous && (await resultRows(tx.execute(sql`SELECT count(*)::int AS n FROM direct_contacts WHERE project_id = ${projectId}`)))[0].n >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
       return persist(tx, record);
     });
   }
@@ -176,7 +180,7 @@ export function createContacts({ db }: { db: Database }) {
       for (const entry of entries) {
         try {
           if (!entry.values) fail(400, 'The number of fields does not match the CSV header.');
-          const body: ProviderRecord = Object.fromEntries(Object.entries(entry.values as ProviderRecord).filter(([, value]) => value.trim())), previous = match(rows, body);
+          const body: ProviderRecord = Object.fromEntries(Object.entries(entry.values as ProviderRecord).filter(([, value]) => value.trim())), previous = match(rows.values(), body);
           if (body.tags) body.tags = [...new Set([...(previous?.tags || []), ...body.tags.split(/[;|]/).map((value: string) => value.trim()).filter(Boolean)])];
           body.consents = Object.fromEntries(Object.entries(options.consents || {}).filter(([, granted]) => granted)); if (options.consentSource !== undefined) body.consentSource = options.consentSource;
           const record = await prepare(tx, projectId, body, previous);
@@ -230,7 +234,7 @@ export function createContacts({ db }: { db: Database }) {
       if (!(await tx.execute(sql`SELECT id FROM projects WHERE id = ${projectId}`)).rowCount) return { suppressed: 0 };
       await lockContacts(tx, projectId);
       const at = new Date().toISOString(); await remember(tx, projectId, channel, hash(target), reason, at);
-      const matching = (await list(projectId, tx)).filter(record => (channel === 'email' ? record.email : record.phone) === target);
+      const matching = (await byDestination(projectId, channel === 'email' ? { email: target } : { phone: target }, tx)).filter(record => (channel === 'email' ? record.email : record.phone) === target);
       for (const record of matching) await suppressRecord(tx, record, channel, reason, at);
       return { suppressed: matching.length };
     });
@@ -253,7 +257,7 @@ export function createContacts({ db }: { db: Database }) {
       const projects = [...new Set((await resultRows(tx.execute(sql`DELETE FROM direct_contact_suppressions WHERE channel = 'sms' AND target_hash = ${targetHash} AND reason = ${reason} RETURNING project_id`))).map(row => row.project_id as string))].sort();
       for (const projectId of projects) {
         await lockContacts(tx, projectId);
-        for (const record of (await list(projectId, tx)).filter(record => record.phone === target && record.suppression.sms?.reason === reason)) { delete record.suppression.sms; record.updatedAt = new Date().toISOString(); await persist(tx, record); }
+        for (const record of (await byDestination(projectId, { phone: target }, tx)).filter(record => record.phone === target && record.suppression.sms?.reason === reason)) { delete record.suppression.sms; record.updatedAt = new Date().toISOString(); await persist(tx, record); }
       }
       return Boolean(global.rowCount || projects.length);
     });
@@ -307,5 +311,5 @@ export function createContacts({ db }: { db: Database }) {
       return { checked: outcomes.size, contacts, notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' };
     });
   }
-  return { list, get, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string) { return Boolean((await db.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount); } };
+  return { list, get, byDestination, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string) { return Boolean((await db.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount); } };
 }

@@ -69,6 +69,7 @@ export const records = pgTable('records', {
 }, t => [
   index('records_project').on(t.project_id, t.collection, t.seq),
   index('records_external_id').on(t.project_id, t.collection, sql`(${t.data}->>'externalId')`).where(sql`${t.data}->>'externalId' IS NOT NULL`),
+  index('records_delivery_url').on(t.project_id, t.collection, sql`(${t.data}->>'deliveryUrl')`),
 ]);
 export const activity = pgTable('activity', {
   id: text('id').primaryKey(),
@@ -357,6 +358,8 @@ export const directContacts = pgTable('direct_contacts', {
   seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
 }, t => [
   index('direct_contacts_project').on(t.project_id),
+  index('direct_contacts_email').on(t.project_id, sql`(${t.data}->>'email')`),
+  index('direct_contacts_phone').on(t.project_id, sql`(${t.data}->>'phone')`),
 ]);
 export const directContactMessengerIdentities = pgTable('direct_contact_messenger_identities', {
   project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),

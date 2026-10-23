@@ -38,7 +38,7 @@ export function getDatabase(connectionString = process.env.DATABASE_URL): Connec
 export async function closeDatabase() { if (shared) { const { pool } = shared; shared = undefined; await pool.end(); } }
 
 // Versioned SQL with a checksum ledger: the shared @ten98/runtime implementation (ported from ten98-discover).
-const ledger = createMigrationLedger({ directory: new URL('../migrations/', import.meta.url), files: ['0001_baseline.sql', '0002_insertion_order.sql', '0003_self_approval.sql', '0004_zernio_profile_unique.sql', '0005_lookup_indexes.sql', '0006_inbox_item_state.sql', '0007_ad_spend_approval.sql', '0008_inbox_item_notes.sql', '0009_deliverability_alerts.sql', '0010_ses_feedback.sql'], lockKey: [109858, 1] });
+const ledger = createMigrationLedger({ directory: new URL('../migrations/', import.meta.url), files: ['0001_baseline.sql', '0002_insertion_order.sql', '0003_self_approval.sql', '0004_zernio_profile_unique.sql', '0005_lookup_indexes.sql', '0006_inbox_item_state.sql', '0007_ad_spend_approval.sql', '0008_inbox_item_notes.sql', '0009_deliverability_alerts.sql', '0010_ses_feedback.sql', '0011_destination_indexes.sql'], lockKey: [109858, 1] });
 export const migrationSources = ledger.sources, pendingMigrations = ledger.pending;
 
 export async function assertSchema(pool = getDatabase().pool) {
@@ -50,10 +50,20 @@ export async function assertSchema(pool = getDatabase().pool) {
   }
 }
 
-/** Applies pending migrations once, in one advisory-locked transaction on a dedicated connection. */
+/**
+ * Applies pending migrations once, in one advisory-locked transaction on a dedicated connection. The pool's 10 s
+ * statement_timeout is lifted for that connection while it migrates (#35): a large migration, or the wait for another
+ * instance's migration lock, may take longer. The setting is reset before the connection returns to the pool.
+ */
 export async function migrate(pool = getDatabase().pool): Promise<string[]> {
   const client = await pool.connect();
-  try { return [...await ledger.migrate(client)]; } finally { client.release(); }
+  let reusable = false;
+  try {
+    await client.query('SET statement_timeout = 0');
+    const applied = [...await ledger.migrate(client)];
+    await client.query('RESET statement_timeout'); reusable = true;
+    return applied;
+  } finally { client.release(!reusable); }
 }
 
 export type ProjectRecord = { id: string; projectId: string; createdAt: string; updatedAt: string; [key: string]: any };
@@ -70,6 +80,10 @@ export function createStore(db: Executor) {
     // Records carrying one provider ID (records_external_id), instead of loading the collection to find them.
     async byExternalId(projectId: string, collection: string, externalId: string): Promise<ProjectRecord[]> {
       return (await db.select({ data: records.data }).from(records).where(and(scope(projectId, collection), sql`${records.data}->>'externalId' = ${externalId}`)).orderBy(desc(records.seq))).map(row => row.data as ProjectRecord);
+    },
+    // Assets served from one delivery URL (records_delivery_url).
+    async byDeliveryUrl(projectId: string, deliveryUrl: string): Promise<ProjectRecord[]> {
+      return (await db.select({ data: records.data }).from(records).where(and(scope(projectId, 'assets'), sql`${records.data}->>'deliveryUrl' = ${deliveryUrl}`)).orderBy(desc(records.seq))).map(row => row.data as ProjectRecord);
     },
     async get(projectId: string, collection: string, id: string): Promise<ProjectRecord | null> {
       const [row] = await db.select({ data: records.data }).from(records).where(and(scope(projectId, collection), eq(records.id, id)));
