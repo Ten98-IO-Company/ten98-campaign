@@ -182,7 +182,8 @@ export function createContacts({ db }: { db: Database }) {
           if (!entry.values) fail(400, 'The number of fields does not match the CSV header.');
           const body: ProviderRecord = Object.fromEntries(Object.entries(entry.values as ProviderRecord).filter(([, value]) => value.trim())), previous = match(rows.values(), body);
           if (body.tags) body.tags = [...new Set([...(previous?.tags || []), ...body.tags.split(/[;|]/).map((value: string) => value.trim()).filter(Boolean)])];
-          body.consents = Object.fromEntries(Object.entries(options.consents || {}).filter(([, granted]) => granted)); if (options.consentSource !== undefined) body.consentSource = options.consentSource;
+          body.consents = Object.fromEntries(Object.entries(options.consents || {}).filter(([, granted]) => granted)); // An empty source from the form records nothing, so a merged contact keeps the source behind its existing consent (#135).
+          if (typeof options.consentSource === 'string' && options.consentSource.trim()) body.consentSource = options.consentSource;
           const record = await prepare(tx, projectId, body, previous);
           if (!previous && rows.size >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
           rows.set(record.id, record); result.imported++; result[previous ? 'updated' : 'created']++; result.contacts.push(record);
