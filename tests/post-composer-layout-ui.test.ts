@@ -41,7 +41,8 @@ function mount(initialProps: Record<string, any>) {
   };
 }
 const accounts = [{ id: 'fb-a', platform: 'facebook', displayName: 'Brand page', isActive: true }, { id: 'ig-a', platform: 'instagram', displayName: 'Brand gram', isActive: true }];
-const base = { assets: [], campaigns: [{ id: 'launch', name: 'Launch' }], canWrite: true, onSubmit: async () => {} };
+// The editor passes onLoadAccounts only to projects with a social publishing connection.
+const base = { assets: [], campaigns: [{ id: 'launch', name: 'Launch' }], canWrite: true, onSubmit: async () => {}, onLoadAccounts: async () => ({}) };
 
 test('caption usage counts each network against its own limit and names the reason it is over', () => {
   const post = { content: 'a'.repeat(2201), platforms: ['instagram', 'twitter', 'facebook'], mediaItems: [] };
@@ -157,4 +158,22 @@ test('a provider post keeps Save changes as its one action and edits its time in
   assert.equal(view.find(node => node.type === ui.Popover), undefined);
   assert.equal(view.button('Save changes')!.props.variant, 'primary');
   assert.ok(view.find(node => node.type === ui.DateTimeField), 'The planned time stays editable in the form.');
+});
+
+test('without a social publishing connection the post check, file check and queues are disabled with a reason and Open integrations (#152)', async () => {
+  const calls: string[] = [], opened: boolean[] = [];
+  const offline = { ...base, onLoadAccounts: undefined, accounts, post: { content: 'Hi', platforms: ['facebook'], accounts: ['fb-a'], mediaItems: [{ type: 'image', url: 'https://cdn.example.test/a.jpg' }] }, onValidate: async () => { calls.push('validate'); return { valid: true }; }, onInspectMedia: async () => { calls.push('inspect'); return {}; }, onLoadQueues: async () => { calls.push('queues'); return { queues: [] }; }, onOpenIntegrations: () => opened.push(true) };
+  const view = mount(offline);
+  assert.equal(view.button('Next free slot')!.props.disabled, true);
+  assert.match(view.html(), /<button[^>]*disabled=""[^>]*>Check file<\/button>/, 'The media file check waits for a connection.');
+  await view.click('Pick a time');
+  for (const label of ['Check post', 'Load queues']) assert.equal(view.button(label)!.props.disabled, true, label);
+  assert.deepEqual(calls, [], 'Opening Schedule does not ask the provider.');
+  assert.match(view.html(), /Connect social accounts in Integrations to check posts and use queues\./);
+  const action = view.all(node => node.type === ui.Button && text(node) === 'Open integrations');
+  assert.ok(action.length > 0); action[0].props.onClick(); assert.deepEqual(opened, [true]);
+  const online = mount({ ...offline, onLoadAccounts: async () => ({}) });
+  assert.notEqual(online.button('Next free slot')!.props.disabled, true);
+  assert.match(online.html(), /<button(?![^>]*disabled)[^>]*>Check file<\/button>/);
+  assert.doesNotMatch(online.html(), /Open integrations/);
 });

@@ -22,6 +22,9 @@ type Props = {
   busy?: boolean; readOnly?: boolean; initialScheduledAt?: string;
   /** Element (the editor Dialog's footer) the actions render into; without it they follow the form. */
   actionsHost?: HTMLElement | null;
+  /** The project has a social publishing connection. Defaults to whether accounts can be loaded (the editor passes `onLoadAccounts` only when connected); provider posts are connected. */
+  connected?: boolean;
+  onOpenIntegrations?: () => void;
 };
 const own = Object.hasOwn;
 const localTime = (value = '') => value && Number.isFinite(Date.parse(value)) ? new Date(Date.parse(value) - new Date(value).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
@@ -134,7 +137,7 @@ function PublishingDestinations({ platform, accounts, options, lookup, onChange,
   </Fieldset></Stack>;
 }
 
-function MediaEditor({ items, onChange, label, disabled, onInspect }: { items: MediaItem[]; onChange: (items: MediaItem[]) => void; label: string; disabled?: boolean; onInspect?: (item: MediaItem) => Promise<any> }) {
+function MediaEditor({ items, onChange, label, disabled, onInspect, unavailable }: { items: MediaItem[]; onChange: (items: MediaItem[]) => void; label: string; disabled?: boolean; onInspect?: (item: MediaItem) => Promise<any>; unavailable?: React.ReactNode }) {
   const [inspecting, setInspecting] = useState(-1), [notice, setNotice] = useState('');
   const current = useRef(items), active = useRef(true); current.current = items;
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
@@ -181,13 +184,14 @@ function MediaEditor({ items, onChange, label, disabled, onInspect }: { items: M
     {items.map((item, index) => <Fieldset key={index} legend={`${label} media ${index + 1} source`}>
       <FormGrid><Field label={`${label} media ${index + 1} type`}><Select value={item.type} onChange={event => update(index, { type: event.target.value, width: undefined, height: undefined, duration: undefined })}><Option value="image">Image</Option><Option value="video">Video</Option><Option value="gif">Animated GIF</Option><Option value="document">Document / PDF</Option></Select></Field>
         <Field label={`${label} media ${index + 1} URL`}><Input type="url" value={item.url} maxLength={4000} required placeholder="https://cdn.example.com/creative.jpg" onChange={event => { const { width, height, duration, size, mimeType, ...rest } = item; onChange(items.map((media, position) => position === index ? { ...rest, url: event.target.value } : media)); }}/></Field></FormGrid>
-      {(['image', 'gif', 'video'].includes(item.type) || onInspect) && <Inline gap={2}>{['image', 'gif', 'video'].includes(item.type) && <Button variant="ghost" size="sm" disabled={disabled || inspecting !== -1 || !previewUrl(item.url)} onClick={() => inspect(index)}>{inspecting === index ? 'Reading metadata…' : 'Check dimensions'}</Button>}{onInspect && <Button variant="ghost" size="sm" disabled={disabled || inspecting !== -1 || !previewUrl(item.url)} onClick={() => inspectWithProvider(index)}>Check file</Button>}</Inline>}
+      {(['image', 'gif', 'video'].includes(item.type) || onInspect) && <Inline gap={2}>{['image', 'gif', 'video'].includes(item.type) && <Button variant="ghost" size="sm" disabled={disabled || inspecting !== -1 || !previewUrl(item.url)} onClick={() => inspect(index)}>{inspecting === index ? 'Reading metadata…' : 'Check dimensions'}</Button>}{onInspect && <Button variant="ghost" size="sm" disabled={disabled || inspecting !== -1 || !previewUrl(item.url) || !!unavailable} onClick={() => inspectWithProvider(index)}>Check file</Button>}</Inline>}
       <Disclosure variant="plain" summary="Media details and metadata"><Stack gap={3}><Text tone="muted" size="sm">Use the file’s actual values. Unknown dimensions, duration, size and encoding cannot be fully checked until the provider reads the file.</Text>
         <FormGrid>{[['width', 'Width (pixels)'], ['height', 'Height (pixels)'], ['duration', 'Duration (seconds)'], ['size', 'File size (bytes)']].map(([key, fieldLabel]) => <Field key={key} label={`${label} media ${index + 1} ${fieldLabel}`}><Input type="number" min={key === 'duration' ? 0.001 : 1} step={key === 'duration' ? 'any' : 1} value={item[key] ?? ''} onChange={event => update(index, { [key]: event.target.value === '' ? undefined : Number(event.target.value) })}/></Field>)}</FormGrid>
         <FormGrid><Field label={`${label} media ${index + 1} MIME type`}><Input value={item.mimeType || ''} maxLength={100} placeholder={item.type === 'video' ? 'video/mp4' : item.type === 'document' ? 'application/pdf' : 'image/jpeg'} onChange={event => update(index, { mimeType: event.target.value || undefined })}/></Field><Field label={`${label} media ${index + 1} title`}><Input value={item.title || ''} maxLength={300} onChange={event => update(index, { title: event.target.value || undefined })}/></Field></FormGrid>
         {item.type === 'video' && <Field label={`${label} media ${index + 1} thumbnail URL`}><Input type="url" value={item.thumbnail || ''} maxLength={4000} onChange={event => update(index, { thumbnail: event.target.value || undefined })}/></Field>}
       </Stack></Disclosure>
     </Fieldset>)}
+    {onInspect && items.length > 0 && unavailable}
     {notice && <StatusLine>{notice}</StatusLine>}
     <Inline><Button variant="secondary" disabled={disabled || items.length >= 35} onClick={() => onChange([...items, { type: 'image', url: '' }])}>Add {items.length ? 'another ' : ''}media URL</Button></Inline>
   </Stack>;
@@ -224,7 +228,7 @@ export function PostVariantPreview({ platform, variant, accountName = 'Your bran
     firstComment={options.firstComment || undefined}/>;
 }
 
-export default function PostComposer({ post, assets = [], campaigns = [], accounts: connectedAccounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onLookupDestinations, onLoadQueues, onLoadGroups, onShortenLinks, providerPost = false, busy = false, readOnly = false, initialScheduledAt, actionsHost }: Props) {
+export default function PostComposer({ post, assets = [], campaigns = [], accounts: connectedAccounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onLookupDestinations, onLoadQueues, onLoadGroups, onShortenLinks, providerPost = false, connected = providerPost || !!onLoadAccounts, onOpenIntegrations, busy = false, readOnly = false, initialScheduledAt, actionsHost }: Props) {
   const [content, setContent] = useState(post?.content || ''), [platforms, setPlatforms] = useState<string[]>(post?.platforms || []), [selectedAccounts, setAccounts] = useState<string[]>(post?.accounts || []);
   const [assetId, setAssetId] = useState(post?.assetId || ''), [campaignId, setCampaignId] = useState(post?.campaignId || ''), [scheduledAt, setScheduledAt] = useState(localTime(post?.scheduledAt) || initialScheduledAt || '');
   const [baseMode, setBaseMode] = useState(Array.isArray(post?.mediaItems) ? post.mediaItems.length ? 'custom' : 'none' : post?.assetId ? 'asset' : 'none'), [baseMedia, setBaseMedia] = useState<MediaItem[]>(post?.mediaItems || []);
@@ -247,6 +251,9 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   // The Schedule confirm step and its menu. The post check runs when the step opens and when its queue changes.
   const [reviewing, setReviewing] = useState(false), [scheduleMenu, setScheduleMenu] = useState(false);
   useEffect(() => { if (reviewing) void checkWithProvider(); }, [reviewing, queueId]);
+  // Without a connection the server refuses provider checks and queue reads, so those controls say what to do instead (#152).
+  const integrationsAction = onOpenIntegrations ? <Button variant="secondary" size="sm" onClick={onOpenIntegrations}>Open integrations</Button> : undefined;
+  const offline = connected ? undefined : <Inline gap={2} align="center"><Text tone="muted" size="sm">Connect social accounts in Integrations to check posts and use queues.</Text>{integrationsAction}</Inline>;
   const disabled = busy || saving || shortening || !canWrite || readOnly || post?.status === 'published' || !!post?.externalId && !providerPost;
   const selected = platforms.includes(activePlatform) ? activePlatform : platforms[0] || '', rule = PLATFORM_RULES[selected];
   const accountChoices = accounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))), editingAccount = accountChoices.find(account => accountId(account) === activeAccount), editingAccountId = editingAccount ? accountId(editingAccount) : '', editKey = selected + ':' + editingAccountId;
@@ -290,7 +297,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     } catch (failure) { setError((failure as Error).message || 'Your draft could not be saved. Your entries are still here.'); headingRef.current?.focus(); } finally { setSaving(false); }
   }
   async function checkWithProvider() {
-    if (!onValidate || checking || disabled) return;
+    if (!onValidate || checking || disabled || !connected) return;
     const signature = JSON.stringify(values); setChecking(true); setError('');
     try { normalizePostTags(values.tags); normalizePostVariants(values); normalizeAccountVariants(values); const result = await onValidate(values); setProviderCheck({ signature, result }); }
     catch (failure) { setProviderCheck({ signature, result: { valid: false, errors: [{ message: (failure as Error).message || 'The post could not be checked.' }] } }); }
@@ -318,6 +325,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   // "Next free slot" uses the default active queue (else the first active one); the queue reserves the slot on submission.
   async function startReview(choice: 'queue' | 'time') {
     setScheduleMenu(false);
+    if (choice === 'queue' && !connected) return;
     if (choice === 'queue') {
       const rows = queues.length ? queues : await loadQueues(), queue = rows.find(row => row.isDefault && row.active && row.slots?.length) || rows.find(row => row.active && row.slots?.length);
       if (!alive.current) return;
@@ -349,7 +357,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     <Field label={`${rule.label} caption${!own(override, 'content') ? editingAccount ? ' (using platform caption)' : ' (using shared caption)' : ''}`} description={selected === 'twitter' ? 'Counted as weighted characters.' : selected === 'bluesky' ? 'Counted in graphemes.' : undefined} count={captionLimit > 0 ? { value: variant.content, max: captionLimit, measure: value => countCaption(value, selected) } : undefined}><Textarea value={variant.content} maxLength={100000} readOnly={!own(override, 'content')} onChange={event => changeOverride({ content: event.target.value })} aria-invalid={errors.some((item: any) => item.field === 'content')}/></Field>
     <Field label={`${rule.label} media source`}><Select value={mediaMode} onChange={event => { const mode = event.target.value; setPlatformMediaModes(previous => ({ ...previous, [editKey]: mode })); if (mode === 'shared') changeOverride({}, ['mediaItems', 'assetId']); else if (mode === 'none') changeOverride({ mediaItems: [] }, ['assetId']); else if (mode === 'asset') changeOverride({ assetId: '' }, ['mediaItems']); else changeOverride({ mediaItems: variant.mediaItems.map((item: MediaItem) => ({ ...item })) }, ['assetId']); }}><Option value="shared">Use {editingAccount ? 'platform' : 'shared'} media</Option><Option value="none">Text only / no media</Option><Option value="asset">Choose a different asset</Option><Option value="custom">Separate media URLs</Option></Select></Field>
     {mediaMode === 'asset' && <Field label={`${rule.label} creative asset`}><Select value={override.assetId || ''} onChange={event => changeOverride({ assetId: event.target.value })}><Option value="">Choose an asset</Option>{assets.map(asset => <Option key={asset.id} value={asset.id}>{asset.name} · {asset.kind}{asset.approval !== 'approved' ? ' · Approval required' : ''}</Option>)}</Select></Field>}
-    {mediaMode === 'custom' && <MediaEditor key={editKey} items={override.mediaItems || []} onChange={mediaItems => changeOverride({ mediaItems })} label={editingAccount ? accountLabel(editingAccount) : rule.label} disabled={disabled} onInspect={onInspectMedia}/>}
+    {mediaMode === 'custom' && <MediaEditor key={editKey} items={override.mediaItems || []} onChange={mediaItems => changeOverride({ mediaItems })} label={editingAccount ? accountLabel(editingAccount) : rule.label} disabled={disabled} onInspect={onInspectMedia} unavailable={offline}/>}
     {selected === 'tiktok' && <Text tone="muted" size="sm">Privacy choices, creator permissions and your posting consent are checked against the connected TikTok creator before submission.</Text>}
     {selected === 'tiktok' && onTikTokInfo && <Stack gap={2}><Inline><Button variant="secondary" disabled={disabled || loadingTikTok || !tikTokAccounts.length} onClick={loadTikTokPermissions}>{loadingTikTok ? 'Loading TikTok permissions…' : 'Load TikTok publishing permissions'}</Button></Inline>{!tikTokAccounts.length && <Text tone="muted" size="sm">Select a connected TikTok account to load its allowed privacy settings.</Text>}{tikTokAccounts.map(account => {
       const saved = tikTokPermissions[accountId(account)], permissions = saved?.result;
@@ -385,17 +393,18 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     {!providerPost && <Inline gap={2} role="group" aria-label="Quick schedule times">{schedulePresets.map(preset => <Button key={preset.key} variant="secondary" size="sm" disabled={!!queueId} onClick={() => setScheduledAt(presetTime(preset.key))}>{preset.label}</Button>)}</Inline>}
     {!providerPost && (onLoadQueues || queueId) && <Stack gap={2}>
       <Field label="Queue"><Select value={queueId} onChange={event => { const selected = queues.find(row => row._id === event.target.value); setQueueId(selected?._id || ''); setQueueVersion(selected?.version || ''); if (selected) setScheduledAt(''); setProviderCheck(null); }}><Option value="">No queue · use the time above</Option>{queueId && !queues.some(row => row._id === queueId) && <Option value={queueId}>Saved queue · {queueId} (load to verify)</Option>}{queues.map(row => <Option key={row._id} value={row._id} disabled={!row.active || !row.slots?.length}>{row.name} · {row.timezone}{row.isDefault ? ' · Default' : ''}{!row.active ? ' · Paused' : ''}</Option>)}</Select></Field>
-      {onLoadQueues && !queues.length && <Inline><Button variant="ghost" size="sm" disabled={disabled || loadingQueues} onClick={() => void loadQueues()}>{loadingQueues ? 'Loading queues…' : 'Load queues'}</Button></Inline>}
+      {onLoadQueues && !queues.length && <Inline><Button variant="ghost" size="sm" disabled={disabled || loadingQueues || !connected} onClick={() => void loadQueues()}>{loadingQueues ? 'Loading queues…' : 'Load queues'}</Button></Inline>}
       {queueId && queues.some(row => row._id === queueId && row.version !== queueVersion) && <ReviewConfirm title="This queue changed since you selected it" reviewKey={`${queueId}:${selectedQueue?.version}`} acknowledgements={[]} confirmLabel="Use reviewed queue settings" onConfirm={() => { setQueueVersion(queues.find(row => row._id === queueId)?.version || ''); setProviderCheck(null); }}><Text>Review its schedule, then save the new queue settings and obtain approval again if required.</Text></ReviewConfirm>}
       {queueId && selectedQueue && nextSlot && <StatusLine>Next weekly slot: {new Intl.DateTimeFormat(undefined, { timeZone: selectedQueue.timezone, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(nextSlot)} ({selectedQueue.timezone}). The queue takes its next free slot when the post is sent, so this time may already be taken.</StatusLine>}
     </Stack>}
   </Stack>;
   const checksBlock = <Stack gap={3}>
     <ValidationSummary title="Checks" emptyMessage="Choose where to post to check your post." items={destinationChecks.map(check => { const account = check.accountId ? accounts.find(row => accountId(row) === check.accountId) : undefined; return { id: check.platform + ':' + (check.accountId || ''), target: (PLATFORM_RULES[check.platform]?.label || check.platform) + (check.accountId ? ' · ' + (account ? accountLabel(account) : check.accountId) : ''), status: check.errors.length ? 'error' : check.warnings.length ? 'warning' : 'ok', messages: issueMessages(check.errors, check.warnings) }; })}/>
-    {onValidate && <ValidationSummary title="Post check" emptyMessage="Not checked yet." busy={checking} stale={providerStale} onRecheck={disabled || !platforms.length ? undefined : checkWithProvider} recheckLabel="Check again" items={providerCheck ? [{ id: 'provider', target: providerPassed ? 'Post check passed' : providerFailed ? 'Post check found problems' : 'Post check completed', status: providerPassed ? providerWarnings.length ? 'warning' : 'ok' : providerFailed ? 'error' : 'warning', messages: providerMessages }] : []}/>}
-    {onValidate && !providerCheck && <Inline><Button variant="secondary" size="sm" disabled={disabled || checking || !platforms.length} onClick={checkWithProvider}>{checking ? 'Checking…' : 'Check post'}</Button></Inline>}
+    {onValidate && <ValidationSummary title="Post check" emptyMessage="Not checked yet." busy={checking} stale={providerStale} onRecheck={disabled || !connected || !platforms.length ? undefined : checkWithProvider} recheckLabel="Check again" items={providerCheck ? [{ id: 'provider', target: providerPassed ? 'Post check passed' : providerFailed ? 'Post check found problems' : 'Post check completed', status: providerPassed ? providerWarnings.length ? 'warning' : 'ok' : providerFailed ? 'error' : 'warning', messages: providerMessages }] : []}/>}
+    {onValidate && !providerCheck && <Inline><Button variant="secondary" size="sm" disabled={disabled || checking || !connected || !platforms.length} onClick={checkWithProvider}>{checking ? 'Checking…' : 'Check post'}</Button></Inline>}
   </Stack>;
   const review = reviewing && !providerPost && <ReviewConfirm title="Schedule this post" reviewKey={formId} acknowledgements={[]} confirmLabel="Schedule" autoFocus busy={saving || busy} error={error || undefined} disabledReason={scheduleBlocked} onConfirm={save} onCancel={() => setReviewing(false)}><Stack gap={4}>
+    {(onValidate || onLoadQueues) && offline}
     {timing}
     <Stack gap={1}><Text size="sm" weight="semibold">Posts to</Text>{destinationNames.length ? <List>{destinationNames.map(name => <ListItem key={name}>{name}</ListItem>)}</List> : <Text size="sm" tone="muted">No destinations chosen.</Text>}</Stack>
     {checksBlock}
@@ -408,7 +417,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
         {socialAccounts.length > 0 && <DestinationPicker label="Post to" readOnly={providerPost} accounts={socialAccounts.map(account => ({ id: accountId(account), name: accountLabel(account), provider: PLATFORM_RULES[account.platform].label }))} selectedIds={selectedAccounts} onSelectionChange={chooseAccounts}/>}
         {socialAccounts.length > 0 && !providerPost && <Inline gap={2}><Button variant="ghost" size="sm" disabled={socialAccounts.length > 50 || socialAccounts.every(account => selectedAccounts.includes(accountId(account)))} onClick={() => chooseAccounts(socialAccounts.map(accountId))}>Select all</Button></Inline>}
         {(!socialAccounts.length || unmatched.length > 0) && <CheckboxGroup legend={socialAccounts.length ? 'Platforms without a connected account' : 'Post to'} orientation="horizontal" disabled={providerPost} value={platforms} onValueChange={next => { const changed = next.find(platform => !platforms.includes(platform)) || platforms.find(platform => !next.includes(platform)); if (changed) togglePlatform(changed); }} options={Object.entries(PLATFORM_RULES).filter(([platform, config]) => config.supported || platforms.includes(platform)).map(([platform, config]: [string, any]) => ({ value: platform, label: config.label + (config.supported ? '' : ' (posting unavailable)') }))}/>}
-        {!socialAccounts.length && <Inline gap={2} align="center"><Text tone="muted" size="sm">No social accounts connected. Connect them in Integrations, or save a draft for a platform.</Text>{onLoadAccounts && <Button variant="ghost" size="sm" disabled={disabled || loadingAccounts || providerPost} onClick={loadAccounts}>{loadingAccounts ? 'Loading accounts…' : 'Refresh accounts'}</Button>}</Inline>}
+        {!socialAccounts.length && <Inline gap={2} align="center"><Text tone="muted" size="sm">No social accounts connected. Connect them in Integrations, or save a draft for a platform.</Text>{integrationsAction}{onLoadAccounts && <Button variant="ghost" size="sm" disabled={disabled || loadingAccounts || providerPost} onClick={loadAccounts}>{loadingAccounts ? 'Loading accounts…' : 'Refresh accounts'}</Button>}</Inline>}
         {onLoadGroups && !providerPost && <Disclosure variant="plain" summary="Use a saved group"><AccountGroupPicker load={onLoadGroups} disabled={disabled || loadingAccounts} onChoose={(members, directory) => { setGroupAccounts(directory); setAccountsTouched(true); setAccounts(members.map(accountId)); setPlatforms([...new Set(members.map(row => row.platform))]); setActivePlatform(members[0]?.platform || ''); setActiveAccount(''); setProviderCheck(null); }}/></Disclosure>}
         {providerPost && <Text tone="muted" size="sm">Destinations are fixed for this post.</Text>}
         {missingAccounts.length > 0 && <Alert tone="warning" variant="inline">Choose an account for {missingAccounts.map(platform => PLATFORM_RULES[platform]?.label || platform).join(', ')} before publishing.</Alert>}
@@ -425,7 +434,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
       <Stack gap={3}>
         <Field label="Media"><Select value={baseMode} onChange={event => setBaseMode(event.target.value)}><Option value="none">No media</Option><Option value="asset">From assets</Option><Option value="custom">Media URLs</Option></Select></Field>
         {baseMode === 'asset' && <Field label="Asset"><Select value={assetId} onChange={event => setAssetId(event.target.value)}><Option value="">Choose an asset</Option>{assets.map(asset => <Option key={asset.id} value={asset.id}>{asset.name} · {asset.kind}{asset.approval !== 'approved' ? ' · Approval required' : ''}</Option>)}</Select></Field>}
-        {baseMode === 'custom' && <MediaEditor items={baseMedia} onChange={setBaseMedia} label="Shared" disabled={disabled} onInspect={onInspectMedia}/>}
+        {baseMode === 'custom' && <MediaEditor items={baseMedia} onChange={setBaseMedia} label="Shared" disabled={disabled} onInspect={onInspectMedia} unavailable={offline}/>}
       </Stack>
       {providerPost && <Stack gap={3}><Heading level={3} size="sm">When</Heading>{timing}</Stack>}
       <Disclosure variant="plain" summary="More options"><Stack gap={4}>
@@ -444,7 +453,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     <Text tone="muted" size="sm">{when}</Text>
   </Stack>;
   const canSave = !disabled || busy || saving;
-  const actions = <>{onDelete && canWrite && !readOnly && !post?.externalId && post?.status !== 'published' && <Button variant="danger" disabled={busy || saving} onClick={onDelete}>Delete</Button>}<Button variant="secondary" disabled={saving} onClick={onCancel}>{readOnly || !canWrite ? 'Close' : 'Cancel'}</Button>{canSave ? <Button variant={providerPost ? 'primary' : 'secondary'} type="submit" form={formId} disabled={disabled}>{saving || busy ? 'Saving…' : post ? 'Save changes' : 'Save draft'}</Button> : null}{canSave && !providerPost && <Popover label="Schedule options" triggerLabel="Schedule" triggerVariant="primary" placement="top-end" open={scheduleMenu} onOpenChange={setScheduleMenu} disabled={disabled}><Stack gap={1}>{onLoadQueues && <Button variant="ghost" disabled={loadingQueues} onClick={() => void startReview('queue')}>Next free slot</Button>}<Button variant="ghost" onClick={() => void startReview('time')}>Pick a time</Button></Stack></Popover>}</>;
+  const actions = <>{onDelete && canWrite && !readOnly && !post?.externalId && post?.status !== 'published' && <Button variant="danger" disabled={busy || saving} onClick={onDelete}>Delete</Button>}<Button variant="secondary" disabled={saving} onClick={onCancel}>{readOnly || !canWrite ? 'Close' : 'Cancel'}</Button>{canSave ? <Button variant={providerPost ? 'primary' : 'secondary'} type="submit" form={formId} disabled={disabled}>{saving || busy ? 'Saving…' : post ? 'Save changes' : 'Save draft'}</Button> : null}{canSave && !providerPost && <Popover label="Schedule options" triggerLabel="Schedule" triggerVariant="primary" placement="top-end" open={scheduleMenu} onOpenChange={setScheduleMenu} disabled={disabled}><Stack gap={1}>{onLoadQueues && <Button variant="ghost" disabled={loadingQueues || !connected} onClick={() => void startReview('queue')}>Next free slot</Button>}{onLoadQueues && offline}<Button variant="ghost" onClick={() => void startReview('time')}>Pick a time</Button></Stack></Popover>}</>;
   return <Form id={formId} onSubmit={(_, event) => submit(event)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !disabled) { event.preventDefault(); primaryAction(); } }}>
     <Input type="hidden" name="draftSnapshot" readOnly value={JSON.stringify(values)}/>
     <VisuallyHidden as="h3" tabIndex={-1} ref={headingRef}>Post composer</VisuallyHidden>
