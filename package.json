@@ -12,11 +12,11 @@
     "build": "npm run check:architecture && tsc --noEmit && vite build",
     "start": "node --env-file-if-exists=.env server/index.ts",
     "migrate": "node --env-file-if-exists=.env server/cli.ts migrate",
-    "test": "npm run check:architecture && node --test --test-timeout=120000 tests/*.test.mjs",
+    "test": "npm run check:architecture && tsc -p tsconfig.backend.json && node --test --test-timeout=120000 tests/*.test.mjs tests/*.test.ts",
     "check:architecture": "node node_modules/@ten98/runtime/check.mjs ."
   },
   "dependencies": {
-    "@ten98/runtime": "file:vendor/ten98-runtime-0.1.17.tgz",
+    "@ten98/runtime": "file:vendor/ten98-runtime-0.1.19.tgz",
     "@ten98/ui": "file:vendor/ten98-ui-0.21.0.tgz",
     "drizzle-orm": "0.45.2",
     "openid-client": "6.8.8",

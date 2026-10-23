@@ -5,7 +5,8 @@
     "strict": true, "noEmit": true, "skipLibCheck": true,
     "allowImportingTsExtensions": true, "erasableSyntaxOnly": true, "verbatimModuleSyntax": true,
     "noUnusedLocals": true, "noUnusedParameters": true,
-    "types": ["node"]
+    "types": ["node"],
+    "allowJs": true, "checkJs": false
   },
-  "include": ["server/**/*.ts", "shared/**/*.ts"]
+  "include": ["server/**/*.ts", "shared/**/*.ts", "tests/**/*.ts"]
 }
