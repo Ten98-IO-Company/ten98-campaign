@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, AudienceSummary, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, ContentPreview, CopyButton, DataTable, DateTimeField, DescriptionList, Disclosure, EmptyState, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Inline, Input, List, ListItem, LoadMore, OperationResults, Option, ReviewConfirm, SandboxedPreview, Select, Stack, StatusLine, Tabs, Text, Textarea, type OperationStatus } from '@ten98/ui';
 import WhatsAppTemplate, { templateRestriction, templatePreviewText } from './WhatsAppTemplate';
+import { useFocusReturn } from './focus-return';
 
 // Provider deliverability reports that are not a recipient's own suppression, such as a Cloudflare policy block (#77).
 type DeliverabilityAlert = { provider: string; kind: string; contacts: number; expiresAt: string | null };
@@ -96,8 +97,9 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
     };
     const timer = window.setInterval(refreshProgress, 4000); return () => { closed = true; window.clearInterval(timer); };
   }, [path, detail?.campaign?.id, detail?.campaign?.status]);
+  const rememberFocus = useFocusReturn(busy);
   async function action(label: string, run: (generation: number) => Promise<void>) {
-    if (pending.current) return; const generation = version.current; pending.current = true; actionVersion.current++; setBusy(label); setError(''); setNotice('');
+    if (pending.current) return; rememberFocus(); const generation = version.current; pending.current = true; actionVersion.current++; setBusy(label); setError(''); setNotice('');
     try { await run(generation); } catch (failure) { if (generation === version.current) setError((failure as any)?.code === 'EMAIL_PROVIDER_REQUIRED' ? emailProviderChoice : (failure as Error).message || 'This action could not be completed.'); }
     finally { if (generation === version.current) { pending.current = false; setBusy(''); } }
   }

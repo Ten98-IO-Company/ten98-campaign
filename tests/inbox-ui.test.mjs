@@ -681,7 +681,7 @@ test('webhook polling reads only the local update feed until new relevant activi
 
 test('the actual action lock rejects double clicks and stale operation results do not alter a new project', async () => {
   const pending = { current: false }, version = { current: 1 }, busy = [], errors = [];
-  const action = compile(section('async function action(', '  async function write('), { pending, version, revision: { current: 0 }, setBusy: value => busy.push(value), setError: value => errors.push(value), setNotice() {} });
+  const action = compile(section('async function action(', '  async function write('), { pending, version, revision: { current: 0 }, setBusy: value => busy.push(value), setError: value => errors.push(value), setNotice() {}, rememberFocus() {} });
   let finish, sends = 0; const first = action('Replying', async () => { sends++; await new Promise(resolve => { finish = resolve; }); }); await action('Reply again', async () => { sends++; }); assert.equal(sends, 1);
   version.current = 2; finish(); await first; assert.deepEqual(busy, ['Replying']); assert.deepEqual(errors, ['']);
 });
@@ -901,7 +901,7 @@ function triageContext(overrides = {}) {
   context.setTriage = value => { context.triage = typeof value === 'function' ? value(context.triage) : value; };
   context.setError = value => context.errors.push(value); context.setNotice = value => context.notices.push(value);
   context.requester = { current: async (...args) => { calls.push(args); return overrides.respond ? overrides.respond(...args) : { state: { ...context.triage.states[first], ...args[2], updatedAt: '2026-10-22T09:00:00.000Z' } }; } };
-  context.action = compile(section('async function action(', '  async function write('), context);
+  context.rememberFocus = () => {}; context.action = compile(section('async function action(', '  async function write('), context);
   // Each call closes over the states of a fresh render, as React would.
   const changeTriage = (...args) => compile(section('async function changeTriage(', '  async function searchHistory('), { ...context, ...triageScope(context) })(...args);
   return { context, calls, changeTriage };
@@ -1122,7 +1122,7 @@ async function mountNotes(overrides = {}) {
   const useEffect = (callback, deps) => { const index = effectIndex++, previous = effects[index]; if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) effects[index] = { deps, callback, cleanup: previous?.cleanup }; };
   const ItemNotes = new Function('React', ...uiNames, 'useState', 'useRef', 'useEffect', 'when', 'merge', code + '; return ItemNotes;')(React, ...uiValues, useState, useRef, useEffect, value => 'at ' + value, merge);
   const calls = [], errors = [], notices = [], replies = [];
-  const context = { version: { current: 1 }, pending: { current: false }, revision: { current: 0 }, setBusy() {}, setError: value => errors.push(value), setNotice: value => notices.push(value) };
+  const context = { version: { current: 1 }, pending: { current: false }, revision: { current: 0 }, setBusy() {}, setError: value => errors.push(value), setNotice: value => notices.push(value), rememberFocus() {} };
   const action = compile(section('async function action(', '  async function write('), context);
   const request = (...args) => { calls.push(args); const reply = replies.shift(); return reply ? reply(...args) : Promise.resolve({ notes: [] }); };
   let props = { path, request, accountId: 'tg', kind: 'conversation', resourceId: 'thread-1', readOnly: false, role: 'editor', userId: 'me', busy: false, defaultOpen: true, run: action, onNotice: value => notices.push(value), ...overrides };
@@ -1243,4 +1243,12 @@ test('inbox setup warnings offer Open integrations, and Refresh connections repo
   const refresh = compile(section('async function loadAccounts(', '  async function changeTriage('), { switchSelection: change => change(), action: async (_, run) => run(1), version: { current: 1 }, path, accountId: '', tab: 'messages', requester: { current: async target => { requests.push(target); return { configured: false, mapped: false, webhookConfigured: false, accounts: [] }; } }, setStatus: value => statuses.push(value), setAccounts() {}, setRows() {}, resetSelection() {}, setAccountId() {} });
   await refresh();
   assert.deepEqual(requests, [path + '/status'], 'The status read reports missing setup as data, so no duplicate error alert is added.'); assert.equal(statuses[0].configured, false);
+});
+
+test('the Messages workspace and its conversation list have different headings', () => {
+  const [, label, listLabel] = source.match(/\{tab === 'messages' \? <DetailWorkspace label="([^"]+)" listLabel=\{historyFilter \? 'History results' : '([^']+)'\}/);
+  const html = renderToStaticMarkup(React.createElement(ui.DetailWorkspace, { label, listLabel, detailLabel: 'Conversation', list: null, detail: null, selected: false }));
+  const headings = [...html.matchAll(/<h[1-6][^>]*>([^<]+)<\/h[1-6]>/g)].map(match => match[1]);
+  assert.ok(headings.includes('Private messages') && headings.includes('Conversations'), headings.join(', '));
+  assert.equal(new Set(headings).size, headings.length, 'No heading text repeats: ' + headings.join(', '));
 });

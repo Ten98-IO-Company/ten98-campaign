@@ -46,6 +46,7 @@ test('browser-pass copy: connection empty states, disabled-control reasons, resu
   assert.match(html, /Connect Zernio to use provider updates/); assert.match(html, />Open integrations</); assert.doesNotMatch(html, /Connect your/);
   for (const subject of (appSource.match(/subject="[^"]+"/g) || [])) assert.match(subject, /^subject="(?:the |[a-z]|WhatsApp|Google)/, subject);
   assert.doesNotMatch(appSource, /Open Integrations/, 'Button and prose casing is consistent within the shell.');
+  for (const name of ['GoogleCalendar', 'UnifiedInbox']) assert.doesNotMatch(readFileSync(new URL(`../src/${name}.tsx`, import.meta.url), 'utf8'), /Open Integrations/, name + ' uses the same "Open integrations" casing.');
   assert.match(appSource, /\{!connected && <Text tone="muted" size="sm">Connect Zernio in Integrations to load channels\.<\/Text>\}<Button[^\r\n]*?disabled=\{busy \|\| !connected\}[^\r\n]*?>Load channels<\/Button>/);
   assert.match(appSource, /'Drive assets synced'\)\}>Sync Drive<\/Button>\}>\{driveSyncReason && <Text tone="muted" size="sm">\{driveSyncReason\}<\/Text>\}/);
   const reason = new Function('canWrite', 'remote', appSource.match(/const driveSyncReason = ([^\r\n]+);/)[1].replace(/^/, 'return ') + ';');
@@ -54,6 +55,13 @@ test('browser-pass copy: connection empty states, disabled-control reasons, resu
   assert.equal(reason(true, { status: { drive: { configured: true, mapped: true } } }), '');
   assert.match(appSource, /<DataTable ariaLabel="Campaign results"[^\r\n]*?emptyTitle=\{state\.campaigns\.length \? 'No campaigns match this search' : 'No campaign results yet'\} emptyDescription=/);
   assert.match(appSource, /\{canWrite && p\.source !== 'broadsign' \? 'Edit booking' : 'View booking'\}/, 'The OOH card names the editor it opens.');
+  // Each OOH card's button names its placement, so several cards do not share one accessible name.
+  const bookingButton = appSource.match(/<Button variant="secondary" aria-label=\{[^}]+\} onClick=\{\(\) => setModal\(\{ type: 'placement', item: p \}\)\}>[^<]+<\/Button>/)?.[0]; assert.ok(bookingButton);
+  const { code: bookingCode } = await transformWithOxc(`const render = (p, canWrite, setModal) => (${bookingButton});`, 'BookingButton.tsx', { jsx: { runtime: 'classic' } });
+  const booking = new Function('React', 'Button', bookingCode + '; return render;')(React, Button);
+  assert.match(renderToStaticMarkup(booking({ name: 'Marina screen', source: 'manual' }, true, () => {})), /aria-label="Edit booking for Marina screen"[^>]*>Edit booking</);
+  assert.match(renderToStaticMarkup(booking({ name: 'Mall screen', source: 'broadsign' }, true, () => {})), /aria-label="View booking for Mall screen"[^>]*>View booking</);
+  assert.match(renderToStaticMarkup(booking({ name: 'Mall screen', source: 'manual' }, false, () => {})), /aria-label="View booking for Mall screen"/);
   assert.match(appSource, /providerManaged \|\| modal\.type === 'ad-details' \|\| !canWrite \? 'View '/, 'Read-only editors are titled View.');
   // The reporting currency select sizes to its options beside the summary instead of filling the row.
   assert.match(appSource, /<\/Text><UiSelect width="auto" aria-label="Reporting currency"[^\r\n]*?\/><\/Inline>/);

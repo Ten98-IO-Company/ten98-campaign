@@ -325,6 +325,20 @@ test('an ended session returns to sign-in, keeps the deep link and clears the si
   assert.match(source, /useEffect\(\(\) => \{ if \(!session\?\.user\) return; endSession = sessionExpired; return \(\) => \{ endSession = null; \}; \}, \[session\]\);/);
 });
 
+test('an ended session with an unsaved editor or inbox draft tells the sign-in screen that the changes were lost', () => {
+  // endSession keeps the closure from the last session change, so a stale draftDirty must not decide this.
+  const editing = app(); editing.session = { user: { id: 'u' } }; editing.draftDirty = false;
+  editing.setModal({ type: 'campaign', item: { id: 'c' } }); editing.dirtyScopes.current.set({ form: 'campaign' }, 1);
+  editing.sessionExpired();
+  assert.deepEqual(editing.session, { user: null, sessionEnded: true, unsavedChangesLost: true });
+  const replying = app(); replying.session = { user: { id: 'u' } }; replying.inboxDraftChanged(true);
+  replying.sessionExpired();
+  assert.equal(replying.session.unsavedChangesLost, true); assert.equal(replying.inboxDraft.current.dirty, false, 'The inbox draft is cleared with the signed-in state.');
+  const clean = app(); clean.session = { user: { id: 'u' } }; clean.dirtyScopes.current.set({ form: 'closed editor' }, 1);
+  clean.sessionExpired();
+  assert.deepEqual(clean.session, { user: null, sessionEnded: true }, 'Without an open edited dialog or inbox draft the plain notice is shown.');
+});
+
 test('discarding editor changes returns focus to the control that opened the editor', async () => {
   const ui = app(), focused = []; ui.triggerRef.current = { isConnected: true, focus() { focused.push('trigger'); } };
   ui.setModal({ type: 'campaign', item: { id: 'c' } }); ui.draftDirty = true; ui.closeEditor(); assert.equal(ui.discardPrompt, true);
