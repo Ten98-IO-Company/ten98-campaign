@@ -103,7 +103,7 @@ test('receipt ordering and pagination survive deferred earlier events processing
   const earlier = event(), later = event('ad.video.processed'); await deliver(f.service, earlier); assert.deepEqual(await f.service.processPending(), { processed: 0, pending: 1 });
   await f.sql.run("UPDATE projects SET zernio_profile_id='profile-a' WHERE id='project-a'"); await deliver(f.service, later); assert.deepEqual(await f.service.processPending(), { processed: 1, pending: 0 });
   assert.deepEqual(await f.service.processPending({ now: Date.now() + 61000 }), { processed: 1, pending: 0 });
-  // The public cursor is the receipt sequence: webhook_events.seq (SQLite rowid before).
+  // The public cursor is the receipt sequence: webhook_events.seq.
   const first = await f.read('', '?accountId=meta-a&adAccountId=act_123&limit=1'); assert.equal(first.data.updates[0].id, later.id); assert.equal(first.data.updates[0].sequence, (await f.sql.get('SELECT seq FROM webhook_events WHERE id=?', later.id)).seq);
   const second = await f.read('', '?accountId=meta-a&adAccountId=act_123&limit=1&before=' + first.data.pagination.before); assert.equal(second.data.updates[0].id, earlier.id); assert.equal(second.data.pagination.hasMore, false);
 });
