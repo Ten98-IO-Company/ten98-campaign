@@ -58,6 +58,6 @@ test('agenda list and month grid entries name the approval status only when it i
   const list = renderToStaticMarkup(React.createElement(Agenda, { ...props, postApprovals: { post: 'Changed since approval' } }));
   assert.match(list, /Scheduled · Changed since approval/);
   const grid = renderToStaticMarkup(React.createElement(Agenda, { ...props, view: 'month', onMonthChange() {}, postApprovals: { post: 'Awaiting approval' } }));
-  assert.match(grid, /Launch · Awaiting approval/);
+  assert.match(grid, /Launch · Scheduled · Awaiting approval/);
   assert.doesNotMatch(renderToStaticMarkup(React.createElement(Agenda, props)), /approval/i, 'Without required approval nothing extra is shown.');
 });

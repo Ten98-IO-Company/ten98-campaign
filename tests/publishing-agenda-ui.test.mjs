@@ -106,16 +106,16 @@ test('the month view groups posts and Google events by local day, counts the mon
     assert.ok(grid, 'The month view renders the shared CalendarMonth.'); assert.equal(find(element, ofType(PublishingAgenda)), undefined);
     assert.deepEqual(grid.props.month, { year: 2026, month: 10 });
     assert.deepEqual([...grid.props.days.keys()].sort(), ['2026-10-01', '2026-10-02', '2026-10-15', '2026-10-20'], 'A 20:30 UTC post lands on the next Dubai day; the all-day event keeps its exclusive end.');
-    assert.deepEqual(grid.props.days.get('2026-10-15').map(entry => entry.label), ['Launch caption']);
+    assert.deepEqual(grid.props.days.get('2026-10-15').map(entry => entry.label), ['Launch caption · Scheduled'], 'Grid entries name their status (#124).');
     assert.equal(grid.props.days.get('2026-10-20')[0].onSelect, undefined, 'Google events are plain text in the grid.');
     grid.props.days.get('2026-10-15')[0].onSelect(); assert.deepEqual(selected, ['scheduled']);
     grid.props.onPrev(); grid.props.onNext(); assert.deepEqual(months, [[2026, 8], [2026, 10]]);
-    grid.props.onCreateDay('2026-10-09'); assert.deepEqual(created, ['2026-10-09']);
+    assert.equal(grid.props.onCreateDay, undefined, 'No per-day Create buttons (#124): a focused day creates with Enter or N.'); assert.deepEqual(created, []);
     const html = renderToStaticMarkup(element);
     assert.match(html, /<strong[^>]*>1<\/strong> scheduled/); assert.match(html, /<strong[^>]*>1<\/strong> published/, 'Two account copies of one post count once.'); assert.match(html, /<strong[^>]*>2<\/strong> Google events/);
     find(element, ofType(ui.SegmentedControl)).props.onValueChange('list'); assert.deepEqual(views, ['list']);
     const readOnly = find(Agenda({ ...props, canWrite: false }), ofType(ui.CalendarMonth));
-    assert.equal(readOnly.props.onCreateDay, undefined); assert.match(String(readOnly.props.createDisabledReason), /Read only/);
+    assert.equal(readOnly.props.onCreateDay, undefined); assert.equal(readOnly.props.createDisabledReason, undefined); assert.match(renderToStaticMarkup(Agenda({ ...props, canWrite: false })), /Read only/);
   } finally { if (originalTimezone === undefined) delete process.env.TZ; else process.env.TZ = originalTimezone; }
 });
 
