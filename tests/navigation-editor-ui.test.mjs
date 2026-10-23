@@ -136,16 +136,16 @@ function app(href = 'https://campaign.example/?view=overview&project=a', initial
   const dialog = { contains: () => true, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {}, close() { this.open = false; }, showModal() { this.open = true; } }, context = {
     window, document: { activeElement: null }, pageSections, navigationUrl, readNavigation, editorValues, DOMException, setTimeout,
     state: initial, navigationRef: { current: readNavigation(window.location.search) }, historyIndex: { current: 0 }, restoringPop: { current: null },
-    modal: null, modalRef: { current: null }, dialogRef: { current: dialog }, triggerRef: { current: null }, draftDirty: false, discardPrompt: false, discardAction: { current: null }, dirtyScopes: { current: new Map() },
+    modal: null, modalRef: { current: null }, dialogRef: { current: dialog }, triggerRef: { current: null }, signedOutFocus: { current: false }, draftDirty: false, discardPrompt: false, discardAction: { current: null }, dirtyScopes: { current: new Map() },
     inboxDirty: false, inboxDraft: { current: { dirty: false, revision: 0 } }, discardSwitch: { current: false }, pendingKeys: { current: new Map() },
     loadVersion: { current: 0 }, activeProject: { current: initial?.projectId || '' }, workspace: { id: 'workspace-a' }, FormData: class { constructor(form) { return new Map(Object.entries(form)); } }, error: '', calls: [],
     api: async path => { context.calls.push(path); return stateFor(path.includes('projectId=b') ? 'b' : 'a'); },
     setState: value => { context.state = value; }, setNavigation: value => { context.navigation = value; }, setLoading: value => { context.loading = value; },
-    setDraftDirty: value => { context.draftDirty = value; }, setInboxDirty: value => { context.inboxDirty = value; }, setDiscardPrompt: value => { context.discardPrompt = value; }, setModal: value => { context.modal = value; context.modalRef.current = value; }, setError: value => { context.error = value; }, setNotice: value => { context.notice = value; }, setRemote: () => {}, setSession: value => { context.session = value; },
+    setDraftDirty: value => { context.draftDirty = value; }, setInboxDirty: value => { context.inboxDirty = value; }, setDiscardPrompt: value => { context.discardPrompt = value; }, setModal: value => { context.modal = value; context.modalRef.current = value; }, setError: value => { context.error = value; }, setNotice: value => { context.notice = value; }, setRemote: () => {}, setSession: value => { context.session = typeof value === 'function' ? value(context.session) : value; }, setPublishing: value => { context.publishing = value; },
     run: async work => { try { return await work(); } catch (error) { if (error.name !== 'AbortError') context.error = error.message; } },
   };
   const invoke = (name, ...args) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(declaration(name))});`)(...Object.values(context))(...args);
-  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'keepEditing', 'discardChanges', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'signOut', 'submitForm', 'saveEditor']) context[name] = (...args) => invoke(name, ...args);
+  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'keepEditing', 'discardChanges', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'clearSignedInState', 'signOut', 'sessionExpired', 'submitForm', 'saveEditor']) context[name] = (...args) => invoke(name, ...args);
   const popStart = source.indexOf('    const onPop = () =>'), popEnd = source.indexOf('\n  }, [state, draftDirty]);', popStart);
   context.listen = () => new Function(...Object.keys(context), `return (${stripTypeScriptTypes('function listen(){' + source.slice(popStart, popEnd) + '}')})();`)(...Object.values(context));
   const unloadStart = source.indexOf('    if (!(draftDirty && modal) && !inboxDirty) return;'), unloadEnd = source.indexOf('\n  }, [draftDirty, modal, inboxDirty]);', unloadStart);
@@ -299,6 +299,40 @@ test('inbox-only drafts register native unload protection, show an accessible co
   assert.match(source, /<Dialog open=\{!!modal\} size=\{modal\?\.type === 'post' \? 'wide' : 'default'\} footer=\{modal\?\.type === 'post' && !modal\.item\?\.externalId \? <Inline ref=\{setComposerActions\} gap=\{2\}\/> : undefined\}/);
   assert.match(source, /<PostComposer key=[^\n]+? actionsHost=\{composerActions\}/); assert.match(source, /<Stack ref=\{dialogRef\} gap=\{4\}/);
   assert.match(source, /onDraftChange=\{inboxDraftChanged\}/); assert.match(source, /Discard and switch/);
+});
+
+test('sign-out clears the page and project from the address and asks for sign-in focus', async () => {
+  const ui = app('https://campaign.example/?view=integrations&section=x&project=a&invite=keep#top');
+  ui.api = async path => { ui.calls.push(path); return { user: null }; }; ui.signOut(); await tick();
+  const url = new URL(ui.window.location.href);
+  assert.deepEqual([url.searchParams.get('view'), url.searchParams.get('section'), url.searchParams.get('project'), url.searchParams.get('invite'), url.hash], [null, null, null, 'keep', '#top']);
+  assert.equal(ui.navigation.page, 'Overview'); assert.equal(ui.navigation.projectId, ''); assert.equal(ui.signedOutFocus.current, true);
+  assert.deepEqual(ui.session, { user: null });
+  // The sign-in screen's effect moves focus to the email field once the signed-out session renders.
+  assert.match(source, /useEffect\(\(\) => \{ if \(session && !session\.user && signedOutFocus\.current\) \{ signedOutFocus\.current = false; document\.querySelector<HTMLInputElement>\('input\[name="email"\]'\)\?\.focus\(\); \} \}, \[session\]\);/);
+  assert.match(source, /signOut=\{\{ onClick: signOut \}\}/, 'Signing out without project access uses the same path.');
+});
+
+test('an ended session returns to sign-in, keeps the deep link and clears the signed-in state', () => {
+  const ui = app('https://campaign.example/?view=approvals&project=a'); ui.session = { user: { id: 'u' }, oidcEnabled: true };
+  ui.pendingKeys.current.set('operation', 'key'); ui.modalRef.current = { type: 'campaign' }; ui.publishing = { id: 'post' }; ui.discardPrompt = true; ui.error = 'Sign in to continue.';
+  ui.sessionExpired();
+  assert.deepEqual(ui.session, { user: null, oidcEnabled: true, sessionEnded: true });
+  assert.equal(ui.state, null); assert.equal(ui.modalRef.current, null); assert.equal(ui.publishing, null); assert.equal(ui.discardPrompt, false); assert.equal(ui.error, '');
+  assert.equal(ui.pendingKeys.current.size, 0); assert.equal(ui.activeProject.current, ''); assert.equal(ui.signedOutFocus.current, true);
+  const url = new URL(ui.window.location.href); assert.equal(url.searchParams.get('view'), 'approvals'); assert.equal(url.searchParams.get('project'), 'a');
+  assert.equal(ui.navigationRef.current.page, 'Approvals', 'Signing in again reloads the same page and project.');
+  assert.match(source, /useEffect\(\(\) => \{ if \(!session\?\.user\) return; endSession = sessionExpired; return \(\) => \{ endSession = null; \}; \}, \[session\]\);/);
+});
+
+test('discarding editor changes returns focus to the control that opened the editor', async () => {
+  const ui = app(), focused = []; ui.triggerRef.current = { isConnected: true, focus() { focused.push('trigger'); } };
+  ui.setModal({ type: 'campaign', item: { id: 'c' } }); ui.draftDirty = true; ui.closeEditor(); assert.equal(ui.discardPrompt, true);
+  ui.discardChanges(); assert.equal(ui.modalRef.current, null); await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(focused, ['trigger']);
+  ui.triggerRef.current = { isConnected: false, focus() { focused.push('removed'); } }; ui.setModal({ type: 'placement', item: { id: 'p' } }); ui.closeEditor();
+  await new Promise(resolve => setTimeout(resolve, 5)); assert.deepEqual(focused, ['trigger'], 'A trigger that left the page is not focused.');
+  assert.match(source, /useLayoutEffect\(\(\) => \{ triggerRef\.current = modal && document\.activeElement instanceof HTMLElement \? document\.activeElement : null; \}, \[!!modal\]\);/);
 });
 
 test('Forward protects the mounted inbox and unavailable historical projects never discard it', async () => {

@@ -74,9 +74,11 @@ test('the sign-in screen shows the startup error through SignInFlow, keeps the s
   const message = oidcSignInErrors.OIDC_NOT_PROVISIONED, WithError = load(message);
   const screen = WithError({ session: { setupRequired: false, oidcEnabled: true, sessionEnded: true }, inviteToken: 'A'.repeat(43), error: '', busy: false, onSubmit() {} });
   assert.equal(screen.type, SignInFlow); assert.equal(screen.props.error, message);
-  assert.equal(screen.props.description, 'Your sign-in session has ended. Sign in again to continue.');
-  assert.ok(renderToStaticMarkup(screen).includes(message.replace(/'/g, '&#x27;')));
+  // An ended session (expired, or a 401 while signed in) is a notice beside the form, not a form error.
+  assert.deepEqual(screen.props.notice, { tone: 'warning', text: 'Your session ended. Sign in again.' });
+  const html = renderToStaticMarkup(screen); assert.ok(html.includes(message.replace(/'/g, '&#x27;'))); assert.match(html, /Your session ended\. Sign in again\./);
   assert.equal(WithError({ session: { oidcEnabled: true }, error: '', busy: false, onSubmit() {} }).props.description, 'Use your account to access your workspaces.');
+  assert.equal(WithError({ session: { oidcEnabled: true }, error: '', busy: false, onSubmit() {} }).props.notice, undefined);
   assert.equal(WithError({ session: { oidcEnabled: true }, error: 'Email or password is incorrect.', busy: false, onSubmit() {} }).props.error, 'Email or password is incorrect.');
   let submitted; WithError({ session: { oidcEnabled: true }, error: '', busy: false, onSubmit: values => { submitted = values; } }).props.onSubmit({ email: 'member@example.test', password: 'secret' });
   assert.deepEqual(submitted, { email: 'member@example.test', password: 'secret' });
