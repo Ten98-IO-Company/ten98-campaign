@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { InvitationAcceptFlow, type InvitationState } from '@ten98/ui';
 import { AppBrand as Brand } from '@ten98/ui/app';
+import { roleLabel } from './workspace-roles';
 
 type Invite = { email: string; role: string; workspaceName: string; expiresAt: string };
 type Props = { token: string; signedInEmail?: string; request: (path: string, method?: string, body?: unknown) => Promise<any>; onAccepted: (result: any) => void | Promise<void>; onSignIn: (email?: string) => void };
 // Campaign adapter: the token stays in memory and travels only in POST bodies, and the server decides whether the invited account must sign in first.
+// InvitationAcceptFlow shows `invitation.role` as given and has no role-label prop, so the adapter passes Campaign's label; its default date format matches Team settings.
 export default function AcceptInvitation({ token, signedInEmail, request, onAccepted, onSignIn }: Props) {
   const [details, setDetails] = useState<{ invitation: Invite; accountExists: boolean; requiresSignIn: boolean } | null>(null), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const version = useRef(0);
@@ -24,7 +26,7 @@ export default function AcceptInvitation({ token, signedInEmail, request, onAcce
   const state: InvitationState = loading ? 'loading' : !details ? 'unavailable' : details.requiresSignIn ? 'signin-required' : 'details';
   const title = loading ? 'Opening invitation…' : details ? 'Join ' + details.invitation.workspaceName : 'Invitation unavailable';
   const description = loading ? 'Checking your workspace access.' : details ? 'This gives you access to every project in this workspace.' : 'Ask a workspace owner or administrator for a new invitation link.';
-  return <InvitationAcceptFlow surface="card" brand={<Brand product="Campaign" href="/"/>} label="Workspace invitation" title={title} description={description} state={state} invitation={details?.invitation} formatDate={value => new Date(value).toLocaleDateString()}
+  return <InvitationAcceptFlow surface="card" brand={<Brand product="Campaign" href="/"/>} label="Workspace invitation" title={title} description={description} state={state} invitation={details ? { ...details.invitation, role: roleLabel(details.invitation.role) } : undefined}
     signedInEmail={signedInEmail} accountExists={details?.accountExists}
     passwordPolicy={{ minLength: 12, maxLength: 128, hint: 'Use at least 12 characters.' }} busy={busy} busyLabel="Joining your team…" error={error || undefined}
     messages={{ signInRequired: 'Sign in with the invited email to keep your existing account and password.' }} onSignIn={() => onSignIn(details?.invitation.email)} cancel={!loading && !details ? { label: 'Go to sign in', href: '/' } : undefined} onSubmit={accept}/>;
