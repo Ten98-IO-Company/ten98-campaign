@@ -5,7 +5,7 @@ import { stripTypeScriptTypes } from 'node:module';
 
 // Evaluate the real useFocusReturn hook with React's hooks mocked by call order and a minimal document.
 const hookSource = await readFile(new URL('../src/focus-return.ts', import.meta.url), 'utf8');
-const hookCode = stripTypeScriptTypes(hookSource.replace(/^import .*?;\r?\n/gm, '').replace('export function', 'function'));
+const hookCode = stripTypeScriptTypes(hookSource.replace(/^import .*?;\r?\n/gm, '').replaceAll('export function', 'function'));
 
 class FakeElement { isConnected = true; focused = 0; focus() { this.focused++; document.activeElement = this; } }
 const document = { body: new FakeElement(), activeElement: null as FakeElement | null };
@@ -55,3 +55,32 @@ for (const [file, component, start, end] of [['DirectCampaigns', 'export default
     if (file !== 'TeamSettings') { pending.current = true; await action('Repeat', async () => {}); assert.equal(remembered, 1, 'A refused repeat does not replace the remembered control.'); }
   });
 }
+
+// ten98-campaign#138: a row action that opens a panel elsewhere scrolls it into view and focuses its first field.
+function mountReveal(panels: Record<string, unknown>) {
+  const effects: { deps: unknown[] }[] = [];
+  let effectIndex = 0;
+  const useEffect = (run: () => void, deps: unknown[]) => { const index = effectIndex++, previous = effects[index]; if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) { effects[index] = { deps }; run(); } };
+  const fakeDocument = { getElementById: (id: string) => panels[id] || null };
+  const useRevealPanel = new Function('useRef', 'useEffect', 'document', 'HTMLElement', hookCode + '; return useRevealPanel;')(() => ({ current: null }), useEffect, fakeDocument, FakeElement);
+  return (trigger: number, id: string) => { effectIndex = 0; useRevealPanel(trigger, id); };
+}
+test('a revealed panel scrolls into view and its first enabled field takes focus, once per trigger', () => {
+  const field = new FakeElement(), scrolls: unknown[] = [], selectors: string[] = [];
+  const panel = { scrollIntoView: (options: unknown) => scrolls.push(options), querySelector: (selector: string) => { selectors.push(selector); return field; } };
+  const render = mountReveal({ 'contact-suppression': panel });
+  render(0, ''); assert.deepEqual(scrolls, [], 'Nothing happens before a row action.');
+  render(1, 'contact-suppression'); assert.deepEqual(scrolls, [{ block: 'start' }]); assert.equal(field.focused, 1);
+  assert.match(selectors[0], /input:not\(\[disabled\]\)/);
+  render(1, 'contact-suppression'); assert.equal(field.focused, 1, 'A re-render without a new action does not steal focus.');
+  render(2, 'contact-suppression'); assert.equal(field.focused, 2, 'Clicking the action again brings the panel back.');
+  assert.doesNotThrow(() => render(3, 'missing-panel'));
+});
+
+test('Contacts row actions name their contact and reveal the panel they open', async () => {
+  const source = await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8');
+  assert.match(source, /useRevealPanel\(reveal\.tick, reveal\.panel\);/);
+  assert.match(source, /aria-label=\{`Edit \$\{contactName\(person\)\}`\} onClick=\{\(\) => \{ editContact\(person\); revealPanel\('contact-form'\); \}\}/);
+  assert.match(source, /aria-label=\{`Suppress \$\{contactName\(person\)\}`\} onClick=\{\(\) => \{ setSuppression\(\{ id: person\.id, channel: 'email', reason: '' \}\); revealPanel\('contact-suppression'\); \}\}/);
+  assert.match(source, /<Card as="section" id="contact-form" /); assert.match(source, /<Card as="section" id="contact-suppression" /);
+});
