@@ -25,6 +25,7 @@ import { createDirectCampaigns } from './direct-campaigns.ts';
 import { handleInbox } from './inbox.ts';
 import { createSmsInbox } from './sms-inbox.ts';
 import { createLinks } from './links.ts';
+import { ACTIVATION_TYPES } from '../shared/offline-activations.ts';
 import { normalizePostVariants, normalizeAccountVariants, normalizeMediaItems, normalizePostTags } from '../shared/social-posts.ts';
 import { validateQueueIntent } from './zernio-queues.ts';
 import { MEDIA_UPLOAD_TIMEOUT, MEDIA_DELIVERY_FIELDS, closeMediaUploads } from './zernio-media.ts';
@@ -59,13 +60,19 @@ function date(value: unknown, label: string): void {
   if (typeof value !== 'string' || value.length > 40 || !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2}))?$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value.slice(0, 10)).toISOString().slice(0, 10) !== value.slice(0, 10)) bad(`${label} must be a valid ISO date.`);
 }
 function strings(value: unknown, label: string, limit = 30): string[] { if (!Array.isArray(value) || value.length > limit) bad(`${label} must be a list of at most ${limit} items.`); return value.map(item => text(item, label, 120)); }
+// Optional map pin: both coordinates, or both null to clear it.
+function coordinates(data: ProviderRecord): void {
+  if (data.latitude === undefined && data.longitude === undefined) return;
+  const { latitude, longitude } = data;
+  if (!(latitude === null && longitude === null) && (typeof latitude !== 'number' || !Number.isFinite(latitude) || Math.abs(latitude) > 90 || typeof longitude !== 'number' || !Number.isFinite(longitude) || Math.abs(longitude) > 180)) bad('Enter both latitude (-90 to 90) and longitude (-180 to 180).');
+}
 function safeUrl(value: string): string { let url: URL; try { url = new URL(value); } catch { bad('Use an HTTPS asset URL.'); } if (url.protocol !== 'https:' || url.username || url.password || value.length > 4096) bad('Use an HTTPS asset URL without credentials.'); return url.href; }
 function validateRecord(collection: string, raw: unknown): ProviderRecord {
   const data = { ...object(raw) };
   for (const key of ['id', 'projectId', 'createdAt', 'updatedAt', 'sample']) delete data[key];
   for (const [key, value] of Object.entries(data)) if (typeof value === 'string' && value.length > (collection === 'posts' && key === 'content' ? 100000 : 16000)) bad(`${key} is too long.`);
   if (collection === 'campaigns') {
-    data.name = text(data.name, 'Campaign name'); data.channel = choice(data.channel ?? 'mixed', ['social', 'paid', 'ooh', 'mixed'], 'Channel');
+    data.name = text(data.name, 'Campaign name'); data.channel = choice(data.channel ?? 'mixed', ['social', 'paid', 'ooh', 'offline', 'mixed'], 'Channel');
     data.status = choice(data.status ?? 'draft', ['draft', 'active', 'paused', 'completed'], 'Status'); data.budget = money(data.budget ?? 0, 'Budget'); data.spent = money(data.spent ?? 0, 'Spend');
   } else if (collection === 'posts') {
     data.content ??= '';
@@ -89,8 +96,20 @@ function validateRecord(collection: string, raw: unknown): ProviderRecord {
   } else if (collection === 'placements') {
     data.name = text(data.name, 'Placement name'); data.type = choice(data.type ?? 'billboard', ['billboard', 'digital', 'transit', 'street'], 'Placement type');
     data.location = text(data.location, 'Location', 500); data.cost = money(data.cost ?? 0, 'Cost'); data.status = choice(data.status ?? 'draft', ['draft', 'requested', 'booked', 'live', 'completed', 'cancelled'], 'Status');
-    if (data.latitude !== undefined || data.longitude !== undefined) { const { latitude, longitude } = data; if (!(latitude === null && longitude === null) && (typeof latitude !== 'number' || !Number.isFinite(latitude) || Math.abs(latitude) > 90 || typeof longitude !== 'number' || !Number.isFinite(longitude) || Math.abs(longitude) > 180)) bad('Enter both latitude (-90 to 90) and longitude (-180 to 180).'); }
+    coordinates(data);
     if (data.proofUrl) data.proofUrl = safeUrl(text(data.proofUrl, 'Proof URL', 4096));
+  } else if (collection === 'activations') {
+    // Offline field work on a campaign; spend is in the campaign's currency. People and the tracking link are checked against the project afterwards.
+    data.name = text(data.name, 'Activation name'); data.type = choice(data.type, ACTIVATION_TYPES, 'Activation type'); data.status = choice(data.status ?? 'planned', ['planned', 'completed', 'cancelled'], 'Status');
+    data.campaignId = text(data.campaignId, 'Campaign', 100); data.location = text(data.location, 'Location', 500); data.notes = text(data.notes ?? '', 'Notes', 2000, true);
+    if (!data.startAt || !data.endAt) bad('Enter when the activation starts and ends.');
+    coordinates(data); data.budget = money(data.budget ?? 0, 'Planned budget'); data.spent = money(data.spent ?? 0, 'Actual spend');
+    data.reached = money(data.reached ?? 0, 'People reached'); if (!Number.isSafeInteger(data.reached)) bad('People reached must be a whole number.');
+    data.ownerId = text(data.ownerId ?? '', 'Owner', 100, true); data.teamIds = [...new Set(strings(data.teamIds ?? [], 'Team', 20))];
+    if (!Array.isArray(data.materials) && data.materials !== undefined || data.materials?.length > 30) bad('Materials must be a list of at most 30 items.');
+    data.materials = (data.materials ?? []).map((item: any) => { if (!item || typeof item !== 'object' || typeof item.done !== 'boolean') bad('Each material needs a label and a done flag.'); return { label: text(item.label, 'Material', 80), done: item.done }; });
+    data.promoCode = text(data.promoCode ?? '', 'Promo code', 40, true); if (data.promoCode && !/^[A-Za-z0-9_-]+$/.test(data.promoCode)) bad('Use letters, numbers, dashes or underscores in the promo code.');
+    data.linkId = text(data.linkId ?? '', 'Tracking link', 100, true); delete data.currency;
   } else if (collection === 'assets') {
     data.name = text(data.name, 'Asset name', 250); data.kind = choice(data.kind ?? 'image', ['image', 'video', 'document'], 'Asset kind'); data.url = safeUrl(text(data.url, 'Asset URL', 4096)); data.approval = choice(data.approval ?? 'pending', ['pending', 'approved', 'rejected'], 'Approval');
     if (data.deliveryUrl !== undefined) data.deliveryUrl = data.deliveryUrl === '' ? '' : mediaUrl(text(data.deliveryUrl, 'Public delivery URL', 4096));
@@ -386,7 +405,7 @@ export async function createApp(options: AppOptions = {}) {
             if (!id && req.method === 'POST') {
               rejectProviderFields(body, collection);
               if (collection === 'posts' && body.status === 'published') bad('Publish through a connected provider to confirm publication.');
-              const data = validateRecord(collection, collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { ...body, locationSource: 'manual' } : body); await checkReferences(store, project.id, data);
+              const data = validateRecord(collection, collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { ...body, locationSource: 'manual' } : body); await checkReferences(store, project.id, data); if (collection === 'activations') await checkActivation(db, project, data);
               if (collection === 'assets' && data.approval !== 'pending' && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
               const record = await store.create(project.id, collection, data); await store.activity(project.id, `${collection.slice(0, -1)} created.`); return send(201, { record });
             }
@@ -396,7 +415,7 @@ export async function createApp(options: AppOptions = {}) {
               if (req.method === 'DELETE') { await checkDependants(store, project.id, collection, id); await store.remove(project.id, collection, id); await store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
               rejectProviderFields(body, collection);
               if (collection === 'posts' && (body.status === 'published' || previous.status === 'published' || previous.externalId)) bad('Provider posts must be managed through their connected provider.');
-              const data = validateRecord(collection, { ...previous, ...body, ...(collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { locationSource: 'manual' } : {}) }); await checkReferences(store, project.id, data);
+              const data = validateRecord(collection, { ...previous, ...body, ...(collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { locationSource: 'manual' } : {}) }); await checkReferences(store, project.id, data); if (collection === 'activations') await checkActivation(db, project, data);
               if (collection === 'assets') {
                 if (body.approval !== undefined && body.approval !== previous.approval && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
                 if (['url', 'deliveryUrl', 'kind'].some(key => data[key] !== previous[key])) data.approval = 'pending';
@@ -438,6 +457,12 @@ async function profileWrite(write: Promise<unknown>): Promise<void> {
 function projectInput(data: ProviderRecord): ProjectInput {
   const color = data.color || '#5943ce'; if (typeof color !== 'string' || !/^#[\da-f]{6}$/i.test(color)) bad('Use a six digit hex color.');
   return { name: text(data.name, 'Project name'), color, zernioProfileId: text(data.zernioProfileId, 'Zernio profile', 200, true), driveFolderId: text(data.driveFolderId, 'Drive folder', 200, true) };
+}
+// Activation people must be able to edit in the project's workspace; the tracking link must be one of the project's links.
+async function checkActivation(db: Executor, project: { id: string; workspaceId: string }, data: ProviderRecord): Promise<void> {
+  const people = [...new Set([data.ownerId, ...data.teamIds].filter(Boolean))];
+  if (people.length && Number((await first<{ count: number }>(db.execute(sql`SELECT count(*)::int AS count FROM memberships WHERE workspace_id=${project.workspaceId} AND role IN ('owner','admin','editor') AND user_id IN ${people}`)))!.count) !== people.length) bad('Choose the owner and team from workspace members who can edit.');
+  if (data.linkId && !await first(db.execute(sql`SELECT id FROM campaign_links WHERE project_id=${project.id} AND id=${data.linkId}`))) bad('Choose a tracking link from this project.');
 }
 async function checkReferences(store: Store, projectId: string, data: ProviderRecord): Promise<void> {
   for (const [key, collection] of [['campaignId', 'campaigns'], ['assetId', 'assets'], ['providerId', 'providers']]) if (data[key] && !await store.get(projectId, collection, data[key])) bad(`${key} does not belong to this project.`);
