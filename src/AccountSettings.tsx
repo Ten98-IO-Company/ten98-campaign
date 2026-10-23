@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { AccountProfileFlow, Alert, Button, Card, PasswordChangeFlow, Stack, StatusLine, Text, type AccountProfileValues, type AccountTheme, type AuthNotice } from '@ten98/ui';
 
-type Props = { request: (path: string, method?: string, body?: unknown) => Promise<any>; onChanged: () => void };
+// Settings shows Profile and Security as separate sections; without a part both render together.
+type Props = { request: (path: string, method?: string, body?: unknown) => Promise<any>; onChanged: () => void; part?: 'profile' | 'security' };
 type Section = 'profile' | 'password' | 'sessions';
 
-export default function AccountSettings({ request, onChanged }: Props) {
+export default function AccountSettings({ request, onChanged, part }: Props) {
   const [account, setAccount] = useState<any>(null), [busy, setBusy] = useState<Section | ''>(''), [error, setError] = useState(''), [feedback, setFeedback] = useState<{ section: Section; error?: string; notice?: AuthNotice }>();
   const [passwordForm, setPasswordForm] = useState(0);
   const [appearance, setAppearance] = useState<AccountTheme>(() => ['light', 'dark'].includes(document.documentElement.dataset.theme || '') ? document.documentElement.dataset.theme as AccountTheme : 'system');
@@ -30,11 +31,12 @@ export default function AccountSettings({ request, onChanged }: Props) {
   }
   const state = (section: Section) => ({ busy: busy === section, error: feedback?.section === section ? feedback.error : undefined, notice: feedback?.section === section ? feedback.notice : undefined });
   const sessions = state('sessions');
-  return <Card as="section" title="Your account"><Stack gap={6}>
+  const profile = part !== 'security', security = part !== 'profile';
+  return <Card as="section" title={part === 'profile' ? 'Profile' : part === 'security' ? 'Security' : 'Your account'}><Stack gap={6}>
     {error && <Alert tone="danger" title={error}/>}
-    {account && <AccountProfileFlow {...state('profile')} email={account.user.email} defaultValues={{ name: account.user.name, theme: appearance }} description="System follows your device’s light or dark preference. Appearance applies to this browser." onSubmit={values => action('profile', () => saveProfile(values), 'Profile saved.')}/>}
-    {account && <PasswordChangeFlow key={passwordForm} {...state('password')} hasPassword={account.localPassword} policy={{ minLength: 12, maxLength: 128 }} messages={{ noPassword: 'Your identity provider manages your password.' }} onSubmit={values => action('password', async () => { await request('/account/password', 'POST', values); setPasswordForm(value => value + 1); }, 'Password changed. Other sessions have been signed out.')}/>}
-    {account && <Stack gap={2}>
+    {account && profile && <AccountProfileFlow {...state('profile')} email={account.user.email} defaultValues={{ name: account.user.name, theme: appearance }} description="System follows your device’s light or dark preference. Appearance applies to this browser." onSubmit={values => action('profile', () => saveProfile(values), 'Profile saved.')}/>}
+    {account && security && <PasswordChangeFlow key={passwordForm} {...state('password')} hasPassword={account.localPassword} policy={{ minLength: 12, maxLength: 128 }} messages={{ noPassword: 'Your identity provider manages your password.' }} onSubmit={values => action('password', async () => { await request('/account/password', 'POST', values); setPasswordForm(value => value + 1); }, 'Password changed. Other sessions have been signed out.')}/>}
+    {account && security && <Stack gap={2}>
       <Text tone="muted">{account.activeSessions} active {account.activeSessions === 1 ? 'session' : 'sessions'}</Text>
       <Button variant="secondary" disabled={!!busy || account.activeSessions < 2} loading={sessions.busy} onClick={() => action('sessions', async () => { await request('/account/sessions/revoke', 'POST', {}); }, 'Other sessions signed out.')}>Sign out other sessions</Button>
       {sessions.error && <Alert tone="danger" title={sessions.error}/>}
