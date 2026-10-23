@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Alert, Badge, Button, Checkbox, CheckboxGroup, ContentPreview, DateTimeField, DestinationPicker, Disclosure, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Image as MediaImage, Inline, Input, List, ListItem, MediaPlayer, MediaStrip, Option, ReviewConfirm, SegmentedControl, Select, Stack, StatusLine, Tabs, Text, Textarea, ValidationSummary, VisuallyHidden, type MediaItem as StripItem, type ValidationMessage } from '@ten98/ui';
-import { PLATFORM_RULES, sentenceCaseLabel, captionLimitForVariant, countCaption, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms, providerPostMediaUrls } from '../shared/social-posts.ts';
+import { Alert, Badge, Button, Checkbox, CheckboxGroup, ContentPreview, DateTimeField, DestinationPicker, Disclosure, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Image as MediaImage, Inline, Input, List, ListItem, MediaPlayer, MediaStrip, Option, Popover, ReviewConfirm, SegmentedControl, Select, Stack, StatusLine, Tabs, Text, Textarea, ValidationSummary, VisuallyHidden, type MediaItem as StripItem, type ValidationMessage } from '@ten98/ui';
+import { PLATFORM_RULES, sentenceCaseLabel, captionLimitForVariant, captionUsage, countCaption, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms, providerPostMediaUrls } from '../shared/social-posts.ts';
 import InstagramPublishingTools from './InstagramPublishingTools';
 import TikTokPublishingTools from './TikTokPublishingTools';
 
@@ -79,9 +79,8 @@ function AccountGroupPicker({ load, onChoose, disabled }: { load: NonNullable<Pr
     onChoose(members.map(row => ({ ...row })), data.accounts.map((row: Row) => ({ ...row })));
     setNotice(`Copied ${members.length} account${members.length === 1 ? '' : 's'} from ${group.name}. Later group changes will not change this draft’s recipients.`);
   }
-  return <Stack as="section" gap={3}>
-    <Heading level={4} size="sm">Choose recipients from an account group</Heading>
-    <Inline><Button variant="secondary" disabled={disabled || busy} onClick={refresh}>{busy ? 'Loading account groups…' : 'Load account groups'}</Button></Inline>
+  return <Stack gap={3}>
+    <Inline><Button variant="secondary" size="sm" disabled={disabled || busy} onClick={refresh}>{busy ? 'Loading account groups…' : 'Load account groups'}</Button></Inline>
     {data && <Field label="Project account group"><Select disabled={disabled || busy} value={selectedId} onChange={event => { setSelectedId(event.target.value); setNotice(''); }}><Option value="">Choose a group</Option>{data.groups.map((row: any) => <Option key={row._id} value={row._id}>{row.name} · {row.accountIds.length} accounts</Option>)}</Select></Field>}
     {data && !data.groups.length && <Text tone="muted">No account groups belong entirely to this project.</Text>}
     {group && <ReviewConfirm title={`Accounts in ${group.name}`} reviewKey={selectedId} acknowledgements={[]} confirmLabel="Replace destinations with these accounts" onConfirm={choose} busy={busy} disabledReason={!canChoose ? members.length ? 'Resolve the listed problems or choose individual accounts.' : 'This group has no accounts.' : disabled ? 'Destinations cannot be changed right now.' : undefined}>
@@ -90,7 +89,6 @@ function AccountGroupPicker({ load, onChoose, disabled }: { load: NonNullable<Pr
       {!!problems.length && <Alert tone="danger" variant="inline">This group includes unavailable, disconnected or non-publishing accounts. Resolve every listed member or choose individual accounts; no members will be silently skipped.</Alert>}
     </ReviewConfirm>}
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}
-    <Text tone="muted" size="sm">Review the accounts above before choosing. This copies their IDs into the draft; saving, review and publishing remain separate actions.</Text>
   </Stack>;
 }
 function previewUrl(value: string) {
@@ -171,19 +169,19 @@ function MediaEditor({ items, onChange, label, disabled, onInspect }: { items: M
     const item = current.current[index]; setInspecting(index); setNotice('');
     try {
       const result = await onInspect(item), metadata = result?.mediaItem || result?.media || result?.metadata || result;
-      if (result?.valid === false) throw new Error(result.error || 'Zernio could not read this media file.');
+      if (result?.valid === false) throw new Error(result.error || 'This media file could not be read.');
       if (current.current[index]?.url !== item.url || current.current[index]?.type !== item.type) return;
       const patch = Object.fromEntries(['width', 'height', 'duration', 'size', 'mimeType'].filter(key => key === 'mimeType' ? typeof (metadata?.mimeType || metadata?.contentType) === 'string' : Number.isFinite(metadata?.[key]) && metadata[key] > 0).map(key => [key, key === 'mimeType' ? metadata.mimeType || metadata.contentType : metadata[key]]));
       if (Object.keys(patch).length) update(index, patch);
-      setNotice(result?.message || (Object.keys(patch).length ? 'Media metadata checked with Zernio. Captions, publishing options and each account still need the post check.' : 'Zernio media check completed. Check the full post before publishing.'));
-    } catch (failure) { setNotice((failure as Error).message || 'Zernio could not inspect this media.'); } finally { setInspecting(-1); }
+      setNotice(result?.message || (Object.keys(patch).length ? 'Media file checked. The post check still covers captions, options and each account.' : 'Media file checked. Check the full post before publishing.'));
+    } catch (failure) { setNotice((failure as Error).message || 'This media file could not be checked.'); } finally { setInspecting(-1); }
   }
   return <Stack gap={4}>
     <MediaStrip label={`${label} media`} altMaxLength={1500} items={strip} readOnly={disabled} emptyMessage="No media. Platforms that require an image or video will show a restriction below." onItemsChange={next => onChange(next.map(entry => { const item = items[Number(entry.id)], altText = entry.altText; return altText === (item.altText || '') ? item : Object.fromEntries(Object.entries({ ...item, altText: altText || undefined }).filter(([, value]) => value !== undefined)) as MediaItem; }))}/>
     {items.map((item, index) => <Fieldset key={index} legend={`${label} media ${index + 1} source`}>
       <FormGrid><Field label={`${label} media ${index + 1} type`}><Select value={item.type} onChange={event => update(index, { type: event.target.value, width: undefined, height: undefined, duration: undefined })}><Option value="image">Image</Option><Option value="video">Video</Option><Option value="gif">Animated GIF</Option><Option value="document">Document / PDF</Option></Select></Field>
         <Field label={`${label} media ${index + 1} URL`}><Input type="url" value={item.url} maxLength={4000} required placeholder="https://cdn.example.com/creative.jpg" onChange={event => { const { width, height, duration, size, mimeType, ...rest } = item; onChange(items.map((media, position) => position === index ? { ...rest, url: event.target.value } : media)); }}/></Field></FormGrid>
-      {(['image', 'gif', 'video'].includes(item.type) || onInspect) && <Inline gap={2}>{['image', 'gif', 'video'].includes(item.type) && <Button variant="ghost" size="sm" disabled={disabled || inspecting !== -1 || !previewUrl(item.url)} onClick={() => inspect(index)}>{inspecting === index ? 'Reading metadata…' : 'Check dimensions'}</Button>}{onInspect && <Button variant="ghost" size="sm" disabled={disabled || inspecting !== -1 || !previewUrl(item.url)} onClick={() => inspectWithProvider(index)}>Check file with Zernio</Button>}</Inline>}
+      {(['image', 'gif', 'video'].includes(item.type) || onInspect) && <Inline gap={2}>{['image', 'gif', 'video'].includes(item.type) && <Button variant="ghost" size="sm" disabled={disabled || inspecting !== -1 || !previewUrl(item.url)} onClick={() => inspect(index)}>{inspecting === index ? 'Reading metadata…' : 'Check dimensions'}</Button>}{onInspect && <Button variant="ghost" size="sm" disabled={disabled || inspecting !== -1 || !previewUrl(item.url)} onClick={() => inspectWithProvider(index)}>Check file</Button>}</Inline>}
       <Disclosure variant="plain" summary="Media details and metadata"><Stack gap={3}><Text tone="muted" size="sm">Use the file’s actual values. Unknown dimensions, duration, size and encoding cannot be fully checked until the provider reads the file.</Text>
         <FormGrid>{[['width', 'Width (pixels)'], ['height', 'Height (pixels)'], ['duration', 'Duration (seconds)'], ['size', 'File size (bytes)']].map(([key, fieldLabel]) => <Field key={key} label={`${label} media ${index + 1} ${fieldLabel}`}><Input type="number" min={key === 'duration' ? 0.001 : 1} step={key === 'duration' ? 'any' : 1} value={item[key] ?? ''} onChange={event => update(index, { [key]: event.target.value === '' ? undefined : Number(event.target.value) })}/></Field>)}</FormGrid>
         <FormGrid><Field label={`${label} media ${index + 1} MIME type`}><Input value={item.mimeType || ''} maxLength={100} placeholder={item.type === 'video' ? 'video/mp4' : item.type === 'document' ? 'application/pdf' : 'image/jpeg'} onChange={event => update(index, { mimeType: event.target.value || undefined })}/></Field><Field label={`${label} media ${index + 1} title`}><Input value={item.title || ''} maxLength={300} onChange={event => update(index, { title: event.target.value || undefined })}/></Field></FormGrid>
@@ -246,6 +244,9 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   // (zernio-dev/latewiz@28dd018063b955769de11f881acd03bb64c61cd4 src/app/dashboard/compose/_components/platform-selector.tsx:24, MIT).
   const autoLoaded = useRef(false);
   useEffect(() => { if (autoLoaded.current || readOnly || !canWrite || providerPost || !onLoadAccounts || connectedAccounts.length) return; autoLoaded.current = true; void loadAccounts(); }, []);
+  // The Schedule confirm step and its menu. The post check runs when the step opens and when its queue changes.
+  const [reviewing, setReviewing] = useState(false), [scheduleMenu, setScheduleMenu] = useState(false);
+  useEffect(() => { if (reviewing) void checkWithProvider(); }, [reviewing, queueId]);
   const disabled = busy || saving || shortening || !canWrite || readOnly || post?.status === 'published' || !!post?.externalId && !providerPost;
   const selected = platforms.includes(activePlatform) ? activePlatform : platforms[0] || '', rule = PLATFORM_RULES[selected];
   const accountChoices = accounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))), editingAccount = accountChoices.find(account => accountId(account) === activeAccount), editingAccountId = editingAccount ? accountId(editingAccount) : '', editKey = selected + ':' + editingAccountId;
@@ -292,7 +293,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     if (!onValidate || checking || disabled) return;
     const signature = JSON.stringify(values); setChecking(true); setError('');
     try { normalizePostTags(values.tags); normalizePostVariants(values); normalizeAccountVariants(values); const result = await onValidate(values); setProviderCheck({ signature, result }); }
-    catch (failure) { setProviderCheck({ signature, result: { valid: false, errors: [{ message: (failure as Error).message || 'Zernio could not check this post.' }] } }); }
+    catch (failure) { setProviderCheck({ signature, result: { valid: false, errors: [{ message: (failure as Error).message || 'The post could not be checked.' }] } }); }
     finally { setChecking(false); }
   }
   async function loadAccounts() {
@@ -308,6 +309,32 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
       setTikTokPermissions(previous => ({ ...previous, ...Object.fromEntries(results.map(item => [item.id, { mediaType: item.mediaType, result: item.result }])) }));
     } catch (failure) { setError((failure as Error).message || 'TikTok publishing permissions could not be loaded.'); } finally { setLoadingTikTok(false); }
   }
+  async function loadQueues(): Promise<any[]> {
+    if (!onLoadQueues || loadingQueues) return queues; setLoadingQueues(true); setError('');
+    try { const result = await onLoadQueues(), rows = result.queues || []; if (alive.current) setQueues(rows); return rows; }
+    catch (failure) { if (alive.current) setError((failure as Error).message || 'Publishing queues could not be loaded.'); return []; }
+    finally { if (alive.current) setLoadingQueues(false); }
+  }
+  // "Next free slot" uses the default active queue (else the first active one); the queue reserves the slot on submission.
+  async function startReview(choice: 'queue' | 'time') {
+    setScheduleMenu(false);
+    if (choice === 'queue') {
+      const rows = queues.length ? queues : await loadQueues(), queue = rows.find(row => row.isDefault && row.active && row.slots?.length) || rows.find(row => row.active && row.slots?.length);
+      if (!alive.current) return;
+      if (queue) { setQueueId(queue._id); setQueueVersion(queue.version || ''); setScheduledAt(''); setProviderCheck(null); }
+      else setError('No active publishing queue. Pick a time instead.');
+    }
+    setReviewing(true);
+  }
+  // Choosing accounts chooses their networks: a new account adds its platform, removing a platform's last account removes it.
+  function chooseAccounts(ids: string[]) {
+    const platformOf = (id: string) => socialAccounts.find(account => accountId(account) === id)?.platform, added = ids.filter(id => !selectedAccounts.includes(id)), removed = selectedAccounts.filter(id => !ids.includes(id));
+    const next = platforms.filter(platform => !removed.some(id => platformOf(id) === platform) || ids.some(id => platformOf(id) === platform));
+    for (const id of added) { const platform = platformOf(id); if (platform && !next.includes(platform)) next.push(platform); }
+    setAccountsTouched(true); setAccounts(ids); setPlatforms(next);
+    const last = added.length ? platformOf(added[added.length - 1]) : undefined; if (last) setActivePlatform(last);
+  }
+  const save = () => submit({ preventDefault() {} } as React.FormEvent<HTMLFormElement>);
   const providerErrors = providerCheck?.result?.errors || providerCheck?.result?.validation?.errors || [], providerWarnings = providerCheck?.result?.warnings || providerCheck?.result?.validation?.warnings || [];
   const mediaMode = platformMediaModes[editKey] || (own(override, 'mediaItems') ? override.mediaItems?.length ? 'custom' : 'none' : own(override, 'assetId') ? override.assetId ? 'asset' : 'none' : 'shared');
   const captionLimit = variant ? captionLimitForVariant(variant) : rule?.captionLimit || 0;
@@ -342,55 +369,86 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     <ValidationSummary title={`${rule.label} restriction checks`} items={[{ id: editKey, target: editingAccount ? `${accountLabel(editingAccount)} · ${rule.label}` : rule.label, status: errors.length ? 'error' : warnings.length ? 'warning' : 'ok', messages: errors.length || warnings.length ? issueMessages(errors, warnings) : [{ id: 'ok', text: 'No known caption or media restriction failed.' }] }]}/>
     {editingAccountId && <DateTimeField label="Separate account time (your local timezone, optional)" timeZoneLabel={browserTimeZone} disabled={!!queueId || !scheduledAt} value={localTime(accountOverrides[editingAccountId]?.scheduledAt)} onValueChange={value => { setAccountOverrides(previous => ({ ...previous, [editingAccountId]: { ...previous[editingAccountId], platform: selected, scheduledAt: value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : '' } })); }} description="Leave empty to use the planned post time. Choose a fixed post time first. Separate times are unavailable for immediate publishing and queues."/>}
     {editingAccountId && accountOverrides[editingAccountId]?.scheduledAt && <Text tone="muted" size="sm">This account: {new Date(accountOverrides[editingAccountId].scheduledAt!).toLocaleString()}</Text>}
-    <SegmentedControl label="Preview size" value={previewSize} onValueChange={value => setPreviewSize(value === 'mobile' ? 'mobile' : 'desktop')} options={[{ value: 'mobile', label: 'Mobile' }, { value: 'desktop', label: 'Desktop' }]}/>
-    <PostVariantPreview size={previewSize} platform={selected} variant={variant} accountName={editingAccount ? accountLabel(editingAccount) + ' · ' + editingAccountId : activeAccounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))).map(accountLabel).join(', ') || 'Your brand'} scheduled={!!scheduledAt || !!queueId}/>
   </Stack>;
-  const actions = <>{onDelete && canWrite && !readOnly && !post?.externalId && post?.status !== 'published' && <Button variant="danger" disabled={busy || saving} onClick={onDelete}>Delete</Button>}<Button variant="secondary" disabled={saving} onClick={onCancel}>{readOnly || !canWrite ? 'Close' : 'Cancel'}</Button>{!disabled || busy || saving ? <Button variant="primary" type="submit" form={formId} disabled={disabled}>{saving || busy ? 'Saving…' : post ? 'Save changes' : 'Save draft'}</Button> : null}</>;
-  return <Form id={formId} onSubmit={(_, event) => submit(event)}>
-    <Input type="hidden" name="draftSnapshot" readOnly value={JSON.stringify(values)}/>
-    <VisuallyHidden as="h3" tabIndex={-1} ref={headingRef}>Post composer</VisuallyHidden>
-    {error && <Alert tone="danger">{error}</Alert>}
-    <Text tone="muted">Start with shared content, then tailor captions, media, options and times for each platform or connected account. Save a draft at any stage; publishing checks every selected destination.</Text>
-    <Stack as="fieldset" gap={8} disabled={disabled}>
-      <Stack as="section" gap={3}><Heading level={3}>1. Choose destinations</Heading>
-        <CheckboxGroup legend="Social platforms" orientation="horizontal" disabled={providerPost} value={platforms} onValueChange={next => { const changed = next.find(platform => !platforms.includes(platform)) || platforms.find(platform => !next.includes(platform)); if (changed) togglePlatform(changed); }} options={Object.entries(PLATFORM_RULES).filter(([platform, config]) => config.supported || platforms.includes(platform)).map(([platform, config]: [string, any]) => ({ value: platform, label: config.label + (config.supported ? '' : ' (posting unavailable)') }))}/>
-        {onLoadGroups && !providerPost && <AccountGroupPicker load={onLoadGroups} disabled={disabled || loadingAccounts} onChoose={(members, directory) => { setGroupAccounts(directory); setAccountsTouched(true); setAccounts(members.map(accountId)); setPlatforms([...new Set(members.map(row => row.platform))]); setActivePlatform(members[0]?.platform || ''); setActiveAccount(''); setProviderCheck(null); }}/>}
-        {onLoadAccounts && <Inline><Button variant="secondary" disabled={disabled || loadingAccounts || providerPost} onClick={loadAccounts}>{loadingAccounts ? 'Loading channels…' : 'Load connected channels'}</Button></Inline>}
-        {activeAccounts.length > 0 ? <DestinationPicker label="Connected accounts" readOnly={providerPost} accounts={activeAccounts.map(account => ({ id: accountId(account), name: accountLabel(account), provider: PLATFORM_RULES[account.platform].label }))} selectedIds={selectedAccounts} onSelectionChange={ids => { setAccountsTouched(true); setAccounts(ids); }}/> : <Text tone="muted" size="sm">Load connected channels to choose accounts. You can save platform drafts before connecting.</Text>}
-        {providerPost && <Text tone="muted" size="sm">Destinations are fixed for this provider post. Caption, media, options and timing changes update the existing unpublished post.</Text>}
-        {platforms.some(platform => !selectedAccounts.some(id => socialAccounts.find(account => accountId(account) === id)?.platform === platform)) && <Alert tone="warning" variant="inline">Choose an account for every platform before publishing. If accounts have not been loaded, existing account IDs are retained.</Alert>}
+  const usage = captionUsage(values, platforms, assets), unmatched = platforms.filter(platform => !socialAccounts.some(account => account.platform === platform));
+  const problems: any[] = [...new Map(checks.errors.filter((item: any) => item.platform).map((item: any) => [item.platform + ':' + item.message, item])).values()];
+  const missingAccounts = socialAccounts.length ? platforms.filter(platform => !selectedAccounts.some(id => socialAccounts.find(account => accountId(account) === id)?.platform === platform)) : [];
+  const customised = Object.keys(post?.platformOverrides || {}).length > 0 || Object.keys(post?.accountOverrides || {}).length > 0;
+  const plannedAt = scheduledAt && Number.isFinite(Date.parse(scheduledAt)) ? new Date(scheduledAt) : null;
+  // Local checks gate Schedule; Save draft stays available for unfinished posts.
+  const scheduleBlocked = !platforms.length ? 'Choose where to post.' : !queueId && !plannedAt ? 'Choose a time or the next free slot.' : !queueId && plannedAt!.getTime() <= Date.now() ? 'Choose a time in the future.' : queueId && selectedQueue && selectedQueue.version !== queueVersion ? 'Review the queue changes first.' : checks.errors.length ? 'Fix the problems listed under the caption first.' : undefined;
+  const when = queueId ? `Next free slot${selectedQueue ? ' in ' + selectedQueue.name : ''}` : plannedAt ? `Planned for ${plannedAt.toLocaleString()}` : 'Not scheduled';
+  const destinationNames = [...selectedAccounts.map(id => { const account = accounts.find(row => accountId(row) === id); return account ? `${accountLabel(account)} · ${PLATFORM_RULES[account.platform]?.label || account.platform}` : id; }), ...platforms.filter(platform => !selectedAccounts.some(id => accounts.find(row => accountId(row) === id)?.platform === platform)).map(platform => PLATFORM_RULES[platform]?.label || platform)];
+  function primaryAction() { if (providerPost) void save(); else if (!reviewing) setReviewing(true); else if (!scheduleBlocked && !saving && !busy) void save(); }
+  const timing = <Stack gap={3}>
+    <DateTimeField label="Time" timeZoneLabel={browserTimeZone} disabled={!!queueId} value={scheduledAt} onValueChange={setScheduledAt} description={providerPost ? 'Accounts without a separate time use this planned time. Clear every separate account time before returning the provider post to an unpublished draft.' : undefined}/>
+    {!providerPost && <Inline gap={2} role="group" aria-label="Quick schedule times">{schedulePresets.map(preset => <Button key={preset.key} variant="secondary" size="sm" disabled={!!queueId} onClick={() => setScheduledAt(presetTime(preset.key))}>{preset.label}</Button>)}</Inline>}
+    {!providerPost && (onLoadQueues || queueId) && <Stack gap={2}>
+      <Field label="Queue"><Select value={queueId} onChange={event => { const selected = queues.find(row => row._id === event.target.value); setQueueId(selected?._id || ''); setQueueVersion(selected?.version || ''); if (selected) setScheduledAt(''); setProviderCheck(null); }}><Option value="">No queue · use the time above</Option>{queueId && !queues.some(row => row._id === queueId) && <Option value={queueId}>Saved queue · {queueId} (load to verify)</Option>}{queues.map(row => <Option key={row._id} value={row._id} disabled={!row.active || !row.slots?.length}>{row.name} · {row.timezone}{row.isDefault ? ' · Default' : ''}{!row.active ? ' · Paused' : ''}</Option>)}</Select></Field>
+      {onLoadQueues && !queues.length && <Inline><Button variant="ghost" size="sm" disabled={disabled || loadingQueues} onClick={() => void loadQueues()}>{loadingQueues ? 'Loading queues…' : 'Load queues'}</Button></Inline>}
+      {queueId && queues.some(row => row._id === queueId && row.version !== queueVersion) && <ReviewConfirm title="This queue changed since you selected it" reviewKey={`${queueId}:${selectedQueue?.version}`} acknowledgements={[]} confirmLabel="Use reviewed queue settings" onConfirm={() => { setQueueVersion(queues.find(row => row._id === queueId)?.version || ''); setProviderCheck(null); }}><Text>Review its schedule, then save the new queue settings and obtain approval again if required.</Text></ReviewConfirm>}
+      {queueId && selectedQueue && nextSlot && <StatusLine>Next weekly slot: {new Intl.DateTimeFormat(undefined, { timeZone: selectedQueue.timezone, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(nextSlot)} ({selectedQueue.timezone}). The queue takes its next free slot when the post is sent, so this time may already be taken.</StatusLine>}
+    </Stack>}
+  </Stack>;
+  const checksBlock = <Stack gap={3}>
+    <ValidationSummary title="Checks" emptyMessage="Choose where to post to check your post." items={destinationChecks.map(check => { const account = check.accountId ? accounts.find(row => accountId(row) === check.accountId) : undefined; return { id: check.platform + ':' + (check.accountId || ''), target: (PLATFORM_RULES[check.platform]?.label || check.platform) + (check.accountId ? ' · ' + (account ? accountLabel(account) : check.accountId) : ''), status: check.errors.length ? 'error' : check.warnings.length ? 'warning' : 'ok', messages: issueMessages(check.errors, check.warnings) }; })}/>
+    {onValidate && <ValidationSummary title="Post check" emptyMessage="Not checked yet." busy={checking} stale={providerStale} onRecheck={disabled || !platforms.length ? undefined : checkWithProvider} recheckLabel="Check again" items={providerCheck ? [{ id: 'provider', target: providerPassed ? 'Post check passed' : providerFailed ? 'Post check found problems' : 'Post check completed', status: providerPassed ? providerWarnings.length ? 'warning' : 'ok' : providerFailed ? 'error' : 'warning', messages: providerMessages }] : []}/>}
+    {onValidate && !providerCheck && <Inline><Button variant="secondary" size="sm" disabled={disabled || checking || !platforms.length} onClick={checkWithProvider}>{checking ? 'Checking…' : 'Check post'}</Button></Inline>}
+  </Stack>;
+  const review = reviewing && !providerPost && <ReviewConfirm title="Schedule this post" reviewKey={formId} acknowledgements={[]} confirmLabel="Schedule" autoFocus busy={saving || busy} error={error || undefined} disabledReason={scheduleBlocked} onConfirm={save} onCancel={() => setReviewing(false)}><Stack gap={4}>
+    {timing}
+    <Stack gap={1}><Text size="sm" weight="semibold">Posts to</Text>{destinationNames.length ? <List>{destinationNames.map(name => <ListItem key={name}>{name}</ListItem>)}</List> : <Text size="sm" tone="muted">No destinations chosen.</Text>}</Stack>
+    {checksBlock}
+    <Text tone="muted" size="sm">Scheduling saves the planned time. Send the post to the networks from its card in Publishing.</Text>
+  </Stack></ReviewConfirm>;
+  const editor = <Stack gap={6}>
+    {error && !reviewing && <Alert tone="danger">{error}</Alert>}
+    <Stack as="fieldset" gap={6} disabled={disabled}>
+      <Stack gap={3}>
+        {socialAccounts.length > 0 && <DestinationPicker label="Post to" readOnly={providerPost} accounts={socialAccounts.map(account => ({ id: accountId(account), name: accountLabel(account), provider: PLATFORM_RULES[account.platform].label }))} selectedIds={selectedAccounts} onSelectionChange={chooseAccounts}/>}
+        {socialAccounts.length > 0 && !providerPost && <Inline gap={2}><Button variant="ghost" size="sm" disabled={socialAccounts.length > 50 || socialAccounts.every(account => selectedAccounts.includes(accountId(account)))} onClick={() => chooseAccounts(socialAccounts.map(accountId))}>Select all</Button></Inline>}
+        {(!socialAccounts.length || unmatched.length > 0) && <CheckboxGroup legend={socialAccounts.length ? 'Platforms without a connected account' : 'Post to'} orientation="horizontal" disabled={providerPost} value={platforms} onValueChange={next => { const changed = next.find(platform => !platforms.includes(platform)) || platforms.find(platform => !next.includes(platform)); if (changed) togglePlatform(changed); }} options={Object.entries(PLATFORM_RULES).filter(([platform, config]) => config.supported || platforms.includes(platform)).map(([platform, config]: [string, any]) => ({ value: platform, label: config.label + (config.supported ? '' : ' (posting unavailable)') }))}/>}
+        {!socialAccounts.length && <Inline gap={2} align="center"><Text tone="muted" size="sm">No social accounts connected. Connect them in Integrations, or save a draft for a platform.</Text>{onLoadAccounts && <Button variant="ghost" size="sm" disabled={disabled || loadingAccounts || providerPost} onClick={loadAccounts}>{loadingAccounts ? 'Loading accounts…' : 'Refresh accounts'}</Button>}</Inline>}
+        {onLoadGroups && !providerPost && <Disclosure variant="plain" summary="Use a saved group"><AccountGroupPicker load={onLoadGroups} disabled={disabled || loadingAccounts} onChoose={(members, directory) => { setGroupAccounts(directory); setAccountsTouched(true); setAccounts(members.map(accountId)); setPlatforms([...new Set(members.map(row => row.platform))]); setActivePlatform(members[0]?.platform || ''); setActiveAccount(''); setProviderCheck(null); }}/></Disclosure>}
+        {providerPost && <Text tone="muted" size="sm">Destinations are fixed for this post.</Text>}
+        {missingAccounts.length > 0 && <Alert tone="warning" variant="inline">Choose an account for {missingAccounts.map(platform => PLATFORM_RULES[platform]?.label || platform).join(', ')} before publishing.</Alert>}
       </Stack>
-      <Stack as="section" gap={3}><Heading level={3}>2. Shared content</Heading>
-        <Field label="Shared caption" description="Platforms inherit this caption until you enable a separate caption below."><Textarea value={content} maxLength={100000} onChange={event => setContent(event.target.value)} placeholder="Write your main message…"/></Field>
-        {onShortenLinks && <Stack gap={1}><Inline><Button variant="secondary" disabled={disabled} onClick={shortenLinks}>{shortening ? 'Creating short links…' : 'Shorten caption links'}</Button></Inline><Text tone="muted" size="sm">Uses this project’s short domain for shared and separate captions. Review the result before saving; media delivery URLs stay intact.</Text></Stack>}
-        {platforms.includes('youtube') && <Field label="YouTube keyword tags" description="One keyword per line or separated by commas. Shared by every selected YouTube channel. Maximum 100 characters per keyword and 500 combined. These keywords are separate from caption hashtags." error={tagErrors.length ? tagErrors.map((item: any) => item.message).join(' ') : undefined}><Textarea value={tagInput} maxLength={20000} onChange={event => setTagInput(event.target.value)}/></Field>}
-        <Field label="Shared media source"><Select value={baseMode} onChange={event => setBaseMode(event.target.value)}><Option value="none">Text only / no shared media</Option><Option value="asset">Asset library</Option><Option value="custom">Custom media URLs</Option></Select></Field>
-        {baseMode === 'asset' && <Field label="Shared creative asset"><Select value={assetId} onChange={event => setAssetId(event.target.value)}><Option value="">Choose an asset</Option>{assets.map(asset => <Option key={asset.id} value={asset.id}>{asset.name} · {asset.kind}{asset.approval !== 'approved' ? ' · Approval required' : ''}</Option>)}</Select></Field>}
+      <Stack gap={2}>
+        <Field label="Caption"><Textarea value={content} maxLength={100000} onChange={event => setContent(event.target.value)} placeholder="Write your post…"/></Field>
+        {usage.length > 0 && <Inline gap={3}>{usage.map(row => <Text key={row.platform} size="sm" numeric tone={row.tone === 'error' ? 'danger' : row.tone === 'warning' ? 'warning' : 'muted'}>{`${row.label} ${row.count.toLocaleString()}/${row.limit.toLocaleString()}`}</Text>)}</Inline>}
+        {problems.map(item => <Text key={item.platform + ':' + item.message} size="sm" tone="danger">{`${PLATFORM_RULES[item.platform]?.label || item.platform}: ${item.message}`}</Text>)}
+        {usage.filter(row => row.tone === 'warning' && row.message).map(row => <Text key={'warning:' + row.platform} size="sm" tone="warning">{`${row.label}: ${row.message}`}</Text>)}
+        {!!platforms.length && <Disclosure variant="plain" summary="Customize per network" defaultOpen={customised}>
+          <Tabs label="Platform customisation" value={selected} onValueChange={setActivePlatform} keepMounted={false} items={platforms.map(platform => ({ value: platform, label: <>{PLATFORM_RULES[platform]?.label || platform}{checks.errors.some((item: any) => item.platform === platform) && <> <Badge tone="danger">Needs a fix</Badge></>}{Object.keys(overrides[platform] || {}).some(key => key !== 'options' || Object.keys(overrides[platform]?.options || {}).length) && <> <Badge>Custom</Badge></>}</>, content: platform === selected ? panel : undefined }))}/>
+        </Disclosure>}
+      </Stack>
+      <Stack gap={3}>
+        <Field label="Media"><Select value={baseMode} onChange={event => setBaseMode(event.target.value)}><Option value="none">No media</Option><Option value="asset">From assets</Option><Option value="custom">Media URLs</Option></Select></Field>
+        {baseMode === 'asset' && <Field label="Asset"><Select value={assetId} onChange={event => setAssetId(event.target.value)}><Option value="">Choose an asset</Option>{assets.map(asset => <Option key={asset.id} value={asset.id}>{asset.name} · {asset.kind}{asset.approval !== 'approved' ? ' · Approval required' : ''}</Option>)}</Select></Field>}
         {baseMode === 'custom' && <MediaEditor items={baseMedia} onChange={setBaseMedia} label="Shared" disabled={disabled} onInspect={onInspectMedia}/>}
       </Stack>
-      {!!platforms.length && <Stack as="section" gap={3}><Heading level={3}>3. Customise each platform</Heading>
-        <Tabs label="Platform customisation" value={selected} onValueChange={setActivePlatform} keepMounted={false} items={platforms.map(platform => ({ value: platform, label: <>{PLATFORM_RULES[platform]?.label || platform}{checks.errors.some((item: any) => item.platform === platform) && <> <Badge tone="danger">Needs a fix</Badge></>}{Object.keys(overrides[platform] || {}).some(key => key !== 'options' || Object.keys(overrides[platform]?.options || {}).length) && <> <Badge>Custom</Badge></>}</>, content: platform === selected ? panel : undefined }))}/>
-      </Stack>}
-      <Stack as="section" gap={3}><Heading level={3}>{platforms.length ? 4 : 3}. Campaign and timing</Heading>
+      {providerPost && <Stack gap={3}><Heading level={3} size="sm">When</Heading>{timing}</Stack>}
+      <Disclosure variant="plain" summary="More options"><Stack gap={4}>
         <Field label="Campaign"><Select disabled={providerPost} value={campaignId} onChange={event => setCampaignId(event.target.value)}><Option value="">No campaign</Option>{campaigns.map(campaign => <Option value={campaign.id} key={campaign.id}>{campaign.name}</Option>)}</Select></Field>
-        <DateTimeField label="Plan for (your local timezone, optional)" timeZoneLabel={browserTimeZone} disabled={!!queueId} value={scheduledAt} onValueChange={setScheduledAt} description={`${scheduledAt ? `Planned for ${new Date(scheduledAt).toLocaleString()}. ` : ''}${providerPost ? 'Accounts without a separate time use this planned time. Clear every separate account time before returning the provider post to an unpublished draft.' : 'Saving keeps the post local. Choose Publish or Schedule in Publishing to submit it to Zernio.'}`}/>
-        <Inline gap={2} role="group" aria-label="Quick schedule times">{schedulePresets.map(preset => <Button key={preset.key} variant="secondary" size="sm" disabled={!!queueId} onClick={() => setScheduledAt(presetTime(preset.key))}>{preset.label}</Button>)}</Inline>
-      </Stack>
-      {!providerPost && (onLoadQueues || queueId) && <Stack as="section" gap={3}><Heading level={3}>Publishing queue</Heading>
-        {onLoadQueues && <Inline><Button variant="secondary" disabled={disabled || loadingQueues} onClick={async () => { if (loadingQueues) return; setLoadingQueues(true); setError(''); try { const result = await onLoadQueues(); if (alive.current) setQueues(result.queues || []); } catch (failure) { if (alive.current) setError((failure as Error).message || 'Publishing queues could not be loaded.'); } finally { if (alive.current) setLoadingQueues(false); } }}>{loadingQueues ? 'Loading queues…' : 'Load publishing queues'}</Button></Inline>}
-        <Field label="Queue for this post"><Select value={queueId} onChange={event => { const selected = queues.find(row => row._id === event.target.value); setQueueId(selected?._id || ''); setQueueVersion(selected?.version || ''); if (selected) setScheduledAt(''); setProviderCheck(null); }}><Option value="">No queue · use the planned time above</Option>{queueId && !queues.some(row => row._id === queueId) && <Option value={queueId}>Saved queue · {queueId} (load to verify)</Option>}{queues.map(row => <Option key={row._id} value={row._id} disabled={!row.active || !row.slots?.length}>{row.name} · {row.timezone}{row.isDefault ? ' · Default' : ''}{!row.active ? ' · Paused' : ''}</Option>)}</Select></Field>
-        {queueId && queues.some(row => row._id === queueId && row.version !== queueVersion) && <ReviewConfirm title="This queue changed since you selected it" reviewKey={`${queueId}:${selectedQueue?.version}`} acknowledgements={[]} confirmLabel="Use reviewed queue settings" onConfirm={() => { setQueueVersion(queues.find(row => row._id === queueId)?.version || ''); setProviderCheck(null); }}><Text>Review its schedule, then save the new queue settings and obtain approval again if required.</Text></ReviewConfirm>}
-        <Text tone="muted" size="sm">Saving keeps this post local. Submit it from Publishing or Queues after approval. Zernio reserves the next free slot when the post is submitted; preview times are not reservations. Choosing a queue clears a fixed planned time.</Text>
-        {queueId && selectedQueue && <Text tone="muted" size="sm">Weekly slots ({selectedQueue.timezone}): {selectedQueue.slots.map((slot: any) => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][slot.dayOfWeek] + ' ' + slot.time).join(', ') || 'None'}</Text>}
-        {queueId && selectedQueue && nextSlot && <StatusLine>Next weekly slot (preview): {new Intl.DateTimeFormat(undefined, { timeZone: selectedQueue.timezone, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(nextSlot)} ({selectedQueue.timezone}). Zernio reserves the next free slot only when the post is submitted, so this time may already be taken.</StatusLine>}
-      </Stack>}
-      <Stack as="section" gap={3}>
-        <ValidationSummary title="Publishing checks" emptyMessage="Choose a platform to check your post." items={destinationChecks.map(check => { const account = check.accountId ? accounts.find(row => accountId(row) === check.accountId) : undefined; return { id: check.platform + ':' + (check.accountId || ''), target: (PLATFORM_RULES[check.platform]?.label || check.platform) + (check.accountId ? ' · ' + (account ? accountLabel(account) : check.accountId) : ''), status: check.errors.length ? 'error' : check.warnings.length ? 'warning' : 'ok', messages: issueMessages(check.errors, check.warnings) }; })}/>
-        <Text tone="muted" size="sm">{checks.errors.length ? 'You can save this draft and finish it later.' : 'The provider verifies account permissions, media encoding and current platform rules when you submit.'}{checks.warnings.length ? ` ${checks.warnings.length} item${checks.warnings.length === 1 ? '' : 's'} still need verification.` : ''}</Text>
-        {onValidate && <ValidationSummary title="Zernio check" emptyMessage="Not checked with Zernio yet." busy={checking} stale={providerStale} onRecheck={disabled || !platforms.length ? undefined : checkWithProvider} recheckLabel="Check with Zernio again" items={providerCheck ? [{ id: 'zernio', target: providerPassed ? 'Zernio checks passed' : providerFailed ? 'Zernio found restrictions' : 'Zernio check completed', status: providerPassed ? providerWarnings.length ? 'warning' : 'ok' : providerFailed ? 'error' : 'warning', messages: providerMessages }] : []}/>}
-        {onValidate && !providerCheck && <Inline><Button variant="secondary" disabled={disabled || checking || !platforms.length} onClick={checkWithProvider}>{checking ? 'Checking with Zernio…' : 'Check with Zernio'}</Button></Inline>}
-      </Stack>
+        {platforms.includes('youtube') && <Field label="YouTube keyword tags" description="One keyword per line or separated by commas. Shared by every selected YouTube channel. Maximum 100 characters per keyword and 500 combined. These keywords are separate from caption hashtags." error={tagErrors.length ? tagErrors.map((item: any) => item.message).join(' ') : undefined}><Textarea value={tagInput} maxLength={20000} onChange={event => setTagInput(event.target.value)}/></Field>}
+        {onShortenLinks && <Inline><Button variant="secondary" size="sm" disabled={disabled} onClick={shortenLinks}>{shortening ? 'Shortening links…' : 'Shorten links'}</Button></Inline>}
+      </Stack></Disclosure>
+      {providerPost && checksBlock}
     </Stack>
+  </Stack>;
+  const preview = <Stack as="aside" gap={4} aria-label="Post preview">
+    {review}
+    {platforms.length > 1 && <SegmentedControl label="Preview network" value={selected} onValueChange={setActivePlatform} options={platforms.map(platform => ({ value: platform, label: PLATFORM_RULES[platform]?.label || platform }))}/>}
+    <SegmentedControl label="Preview size" value={previewSize} onValueChange={value => setPreviewSize(value === 'mobile' ? 'mobile' : 'desktop')} options={[{ value: 'mobile', label: 'Mobile' }, { value: 'desktop', label: 'Desktop' }]}/>
+    {rule && variant ? <PostVariantPreview size={previewSize} platform={selected} variant={variant} accountName={editingAccount ? accountLabel(editingAccount) + ' · ' + editingAccountId : activeAccounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account))).map(accountLabel).join(', ') || 'Your brand'} scheduled={!!scheduledAt || !!queueId}/> : <Text tone="muted" size="sm">Choose where to post to see a preview.</Text>}
+    <Text tone="muted" size="sm">{when}</Text>
+  </Stack>;
+  const canSave = !disabled || busy || saving;
+  const actions = <>{onDelete && canWrite && !readOnly && !post?.externalId && post?.status !== 'published' && <Button variant="danger" disabled={busy || saving} onClick={onDelete}>Delete</Button>}<Button variant="secondary" disabled={saving} onClick={onCancel}>{readOnly || !canWrite ? 'Close' : 'Cancel'}</Button>{canSave ? <Button variant={providerPost ? 'primary' : 'secondary'} type="submit" form={formId} disabled={disabled}>{saving || busy ? 'Saving…' : post ? 'Save changes' : 'Save draft'}</Button> : null}{canSave && !providerPost && <Popover label="Schedule options" triggerLabel="Schedule" triggerVariant="primary" placement="top-end" open={scheduleMenu} onOpenChange={setScheduleMenu} disabled={disabled}><Stack gap={1}>{onLoadQueues && <Button variant="ghost" disabled={loadingQueues} onClick={() => void startReview('queue')}>Next free slot</Button>}<Button variant="ghost" onClick={() => void startReview('time')}>Pick a time</Button></Stack></Popover>}</>;
+  return <Form id={formId} onSubmit={(_, event) => submit(event)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !disabled) { event.preventDefault(); primaryAction(); } }}>
+    <Input type="hidden" name="draftSnapshot" readOnly value={JSON.stringify(values)}/>
+    <VisuallyHidden as="h3" tabIndex={-1} ref={headingRef}>Post composer</VisuallyHidden>
+    <Grid columns={2} gap={6} align="start">{editor}{preview}</Grid>
     {actionsHost ? createPortal(actions, actionsHost) : <FormActions>{actions}</FormActions>}
   </Form>;
 }

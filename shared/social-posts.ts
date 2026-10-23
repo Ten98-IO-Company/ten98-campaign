@@ -42,8 +42,8 @@ const label = (key: string) => optionLabels[key] || sentenceCaseLabel(key);
 export const PLATFORM_RULES: Record<string, PlatformRule> = Object.fromEntries(Object.entries(definitions).map(([key, [name, captionLimit, mediaTypes, maxMedia, minMedia = 0]]) => [key, {
   label: name, captionLimit, mediaTypes, maxMedia, minMedia,
   supported: !['whatsapp', 'snapchat'].includes(key),
-  ...(key === 'snapchat' ? { notice: 'Snapchat publishing is unavailable. Zernio cannot connect Snapchat accounts while its app approval is pending.' } : {}),
-  ...(key === 'whatsapp' ? { notice: 'WhatsApp is unavailable through Zernio’s social post endpoint. Remove this destination before publishing.' } : {}),
+  ...(key === 'snapchat' ? { notice: 'Snapchat publishing is unavailable: Snapchat accounts cannot be connected yet.' } : {}),
+  ...(key === 'whatsapp' ? { notice: 'WhatsApp is unavailable for social posts. Remove this destination before publishing.' } : {}),
   options: Object.entries(OPTION_SCHEMAS[key]?.properties || {}).map(([name, schema]): PlatformOption => ({
     key: name, label: label(name), type: schema.enum ? 'select' : schema.type === 'boolean' ? 'boolean' : ['integer', 'number'].includes(schema.type!) ? 'number' : schema.type === 'array' && schema.items?.type === 'string' ? 'string-list' : ['array', 'object'].includes(schema.type!) || schema.oneOf ? 'json' : name === 'firstComment' || name === 'description' ? 'textarea' : 'text',
     ...(schema.enum ? { values: schema.enum } : {}), ...(schema.maxLength ? { maxLength: schema.maxLength } : {}), ...(schema.minimum !== undefined ? { min: schema.minimum } : {}), ...(schema.maximum !== undefined ? { max: schema.maximum } : {}),
@@ -261,6 +261,23 @@ export function captionLimitForVariant(variant: ResolvedVariant): number {
   return platform === 'telegram' && mediaItems.length ? 1024 : platform === 'tiktok' && mediaItems.some(item => item.type === 'image') ? 4000 : platform === 'snapchat' && options.contentType === 'saved_story' ? 45 : PLATFORM_RULES[platform]?.captionLimit || 0;
 }
 
+export interface CaptionUsage { platform: string; label: string; count: number; limit: number; tone: 'ok' | 'warning' | 'error'; message?: string }
+/** Each network's caption length against its own limit, with the validation message that names why it is over. */
+export function captionUsage(post: SocialPost, platforms: string[], assets: any[] = []): CaptionUsage[] {
+  return platforms.flatMap((platform): CaptionUsage[] => {
+    const rule = PLATFORM_RULES[platform];
+    if (!rule?.supported) return [];
+    let variant: ResolvedVariant;
+    try { variant = resolveVariant(post, platform, assets); } catch { return []; }
+    // Threads and articles are counted per entry by the validator, not as one caption.
+    if (variant.options.threadItems?.length || variant.options.article) return [];
+    const count = countCaption(variant.content, platform), limit = captionLimitForVariant(variant);
+    if (count <= limit) return [{ platform, label: rule.label, count, limit, tone: 'ok' }];
+    const check = validatePostForPlatforms(post, [platform], { assets }), error = check.errors.find(item => item.field === 'content'), warning = check.warnings.find(item => item.field === 'content');
+    return [{ platform, label: rule.label, count, limit, tone: error ? 'error' : 'warning', message: (error || warning)?.message }];
+  });
+}
+
 export function validatePostForPlatforms(post: SocialPost, platforms: string[], { assets = [], requireMediaMetadata = false, accountId, now = Date.now(), providerOwnedMediaUrls = new Set() }: { assets?: any[]; requireMediaMetadata?: boolean; accountId?: string; now?: number; providerOwnedMediaUrls?: Set<string> } = {}): { valid: boolean; errors: RestrictionIssue[]; warnings: RestrictionIssue[]; variants: Record<string, ResolvedVariant> } {
   const errors: RestrictionIssue[] = [], warnings: RestrictionIssue[] = [], variants: Record<string, ResolvedVariant> = {};
   const issue = (list: RestrictionIssue[], platform: string, field: string, message: string) => list.push({ platform, field, message });
@@ -309,7 +326,7 @@ export function validatePostForPlatforms(post: SocialPost, platforms: string[], 
       if ((content.match(/#[\p{L}\p{N}_]+/gu) || []).length > 30) add('content', 'Instagram permits at most 30 hashtags.');
       if (options.collaborators?.length > 3) add('options.collaborators', 'Instagram permits at most three collaborators.');
       if ((options.audioConfiguration || options.trialParams || options.audioName) && (story || media.length !== 1 || videos.length !== 1)) add('options', 'Catalog audio, audio names and Trial Reels require a single video Reel.');
-      if (options.muteAudio && media.some(item => item.type === 'video' && item.size! > 200 * MB)) add('options.muteAudio', 'Mute this video before uploading: Zernio cannot strip audio above 200 MB.');
+      if (options.muteAudio && media.some(item => item.type === 'video' && item.size! > 200 * MB)) add('options.muteAudio', 'Mute this video before uploading: audio cannot be removed from videos above 200 MB.');
       for (const tag of options.userTags || []) {
         const target = media[tag.mediaIndex ?? 0];
         if (!target) add('options.userTags', 'A user tag refers to a missing media slide.');
@@ -370,7 +387,7 @@ function checkMedia(platform: string, item: MediaItem, options: Record<string, a
   else if (!item.size || !item.mimeType || (image || video) && (!item.width || !item.height) || video && !item.duration) warn(field, 'Some file size, MIME type, dimensions or duration are unknown. Local checks cover supplied metadata; the provider checks the delivered file.');
   const sizeLimits: Record<string, number> = { twitter: image ? item.type === 'gif' ? 15 : 5 : 512, instagram: image ? 8 : options.contentType === 'story' ? 100 : 300, facebook: image ? 4 : 4096, linkedin: image ? 8 : item.type === 'document' ? 100 : 5120, tiktok: image ? 20 : 4096, youtube: 256 * 1024, pinterest: image ? 32 : 2048, threads: image ? 8 : 1024, bluesky: image ? 1 : 50, googlebusiness: 5, telegram: image ? 10 : 50, discord: 25, slack: 1024, snapchat: image ? 5 : 1024, reddit: image ? 20 : 1024 };
   if (item.size! > sizeLimits[platform]! * MB) {
-    if (image && ['instagram', 'bluesky'].includes(platform)) warn(`${field}.size`, `The image exceeds ${sizeLimits[platform]} MB; Zernio may compress it, changing quality.`);
+    if (image && ['instagram', 'bluesky'].includes(platform)) warn(`${field}.size`, `The image exceeds ${sizeLimits[platform]} MB; it may be compressed, changing quality.`);
     else add(`${field}.size`, `File exceeds ${PLATFORM_RULES[platform].label}'s ${sizeLimits[platform]} MB limit.`);
   }
   const durationLimits: Record<string, [number, number]> = { tiktok: [3, 600], facebook: options.contentType === 'reel' ? [3, 60] : options.contentType === 'story' ? [1, 120] : [1, 14400], instagram: options.contentType === 'story' ? [0, 60] : [0, 3600], threads: [0, 300], bluesky: [0, 60], linkedin: [3, 1800], pinterest: [4, 900], youtube: [0, 43200], snapchat: [0, 60] };
