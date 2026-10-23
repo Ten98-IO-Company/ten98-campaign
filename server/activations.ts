@@ -9,10 +9,12 @@ function fail(status: number, message: string): never { throw new HttpError(stat
 const optional = (value: unknown, label: string, max: number) => { if (value === undefined || value === '') return undefined; if (typeof value !== 'string' || value.length > max) fail(400, `${label} must be text of at most ${max} characters.`); return value.trim() || undefined; };
 
 // Field routes below an activation; the activation record itself uses the generic project record routes.
-export async function handleActivations({ req, url, project, role, user, body, store, send }: Context, contacts: Contacts): Promise<boolean> {
+export async function handleActivations({ req, url, project, role, user, body, store, send }: Context, contacts: Contacts, limit: (key: string, maximum: number) => Promise<void>): Promise<boolean> {
   const route = url.pathname.match(/^\/api\/projects\/[^/]+\/activations\/([^/]+)\/leads$/);
   if (!route || req.method !== 'POST') return false;
   if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'Your workspace role is view only.');
+  // About one lead every 7 seconds per staff member over 15 minutes, counting refused attempts.
+  await limit('activation-leads:' + user.id, 120);
   const activation = await store.get(project.id, 'activations', decodeURIComponent(route[1]));
   if (!activation) fail(404, 'Activation not found in this project.');
   if (activation.status === 'cancelled') fail(409, 'This activation was cancelled, so it takes no leads.');

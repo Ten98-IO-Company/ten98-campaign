@@ -377,7 +377,7 @@ export async function createApp(options: AppOptions = {}) {
           context.contacts = direct.contacts; context.webhooks = webhooks;
           if (projectRoute[2]?.startsWith('sms-inbox') && await smsInbox.handle(context)) return;
           if (projectRoute[2]?.startsWith('links') && await links.handle(context)) return;
-          if (projectRoute[2]?.startsWith('activations/') && await handleActivations(context, direct.contacts)) return;
+          if (projectRoute[2]?.startsWith('activations/') && await handleActivations(context, direct.contacts, auth.limit)) return;
           if (projectRoute[2]?.startsWith('integrations/inbox') && await handleInbox(context)) return;
           if (projectRoute[2]?.startsWith('direct/') && await direct.handle(context)) return;
           if (projectRoute[2]?.startsWith('operations') && await handleOperationRecovery(context)) return;

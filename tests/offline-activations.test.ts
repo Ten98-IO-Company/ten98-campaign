@@ -95,4 +95,10 @@ test('staff capture leads at an activation with explicit per-channel consent, an
 
   await request(project + '/activations/' + second.id, 'PATCH', { status: 'cancelled' }, owner);
   assert.equal((await request(`${project}/activations/${second.id}/leads`, 'POST', { email: 'late@example.test', consents: { email: true } }, editor.cookie)).status, 409, 'Cancelled activations take no leads.');
+
+  // Rate limit per staff member, counting refused attempts too, so a stolen session cannot flood Contacts.
+  const busy = await member('editor', 'Bo'), statuses = [];
+  for (let attempt = 0; attempt < 121; attempt++) statuses.push((await request(leads, 'POST', { consents: {} }, busy.cookie)).status);
+  assert.deepEqual([statuses.slice(0, 120).every(status => status === 400), statuses[120]], [true, 429]);
+  assert.equal((await request(leads, 'POST', { email: 'still-fine@example.test', consents: { email: true } }, editor.cookie)).status, 201, 'Each staff member has their own allowance.');
 });
