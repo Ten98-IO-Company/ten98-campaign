@@ -252,3 +252,12 @@ test('YouTube keywords save and reopen as a shared field and reach unpublished u
   await new Function(...Object.keys(updateContext), `return (${stripTypeScriptTypes(action)});`)(...Object.values(updateContext))(values);
   assert.deepEqual(calls[0][1].tags, values.tags);
 });
+
+test('composer step numbers run consecutively whether or not the platform step is shown', async () => {
+  const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview').replace('export const accountLabel', 'const accountLabel'), 'PostComposer.tsx', { jsx: { runtime: 'classic' } });
+  const hooks = { useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute(), useId: () => 'composer' };
+  const context = { React, ...hooks, ...social, ...ui, MediaImage: ui.Image }, Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
+  const steps = platforms => [...renderToStaticMarkup(Composer({ post: { content: 'Launch', platforms, mediaItems: [] }, assets: [], accounts: [], campaigns: [], canWrite: true, onSubmit: async () => {} })).matchAll(/<h3[^>]*>(\d+)\. ([^<]+)<\/h3>/g)].map(match => `${match[1]}. ${match[2]}`);
+  assert.deepEqual(steps([]), ['1. Choose destinations', '2. Shared content', '3. Campaign and timing']);
+  assert.deepEqual(steps(['linkedin']), ['1. Choose destinations', '2. Shared content', '3. Customise each platform', '4. Campaign and timing']);
+});
