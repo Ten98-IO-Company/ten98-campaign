@@ -27,7 +27,7 @@ test('audience readiness renders the real library summary with app counts and pr
   const { code } = await transformWithOxc(`const render = (validPreview, audienceMode, draft) => (${jsx});`, 'AudienceReadiness.tsx', { jsx: { runtime: 'classic' } });
   const summary = new Function('React', 'AudienceSummary', 'labels', `${code}; return render;`)(React, AudienceSummary, { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' });
   const counts = { total: 8, eligible: 5, excluded: 3, unverified: 2 };
-  for (const [mode, scope, channel, purpose] of [['all', 'All contacts in this project', 'email', 'Transactional email'], ['tags', 'Contacts matching tags', 'sms', 'Direct campaign'], ['contacts', 'Chosen contacts', 'whatsapp', 'Direct campaign']]) {
+  for (const [mode, scope, channel, purpose] of [['all', 'All contacts in this project', 'email', 'Transactional email only'], ['tags', 'Contacts matching tags', 'sms', 'Direct campaign'], ['contacts', 'Chosen contacts', 'whatsapp', 'Direct campaign']]) {
     const element = summary({ audience: counts }, mode, { channel }); assert.deepEqual(element.props.counts, counts);
     const html = renderToStaticMarkup(element);
     assert.match(html, /class="t98-card t98-audience-summary"/); assert.match(html, /Audience readiness/);
@@ -363,4 +363,11 @@ test('a WhatsApp draft can be saved before its account and template are chosen',
     assert.doesNotMatch(field.split('<Option')[0], /\brequired\b/, `${label} must not block saving a draft.`);
     assert.match(field, /description="Needed before preview and sending/);
   }
+});
+
+// ten98-campaign#137(a): the page says plainly that email campaigns are transactional only, and why.
+test('Direct campaigns says email campaigns are transactional only, with the reason', () => {
+  assert.match(source, /Email campaigns are transactional only\./);
+  assert.doesNotMatch(source, /Manage permission-based email, SMS and approved WhatsApp template campaigns/, 'The intro no longer implies newsletters.');
+  assert.match(source, /title="Transactional email only">[^<]*because the configured email provider is for transactional mail\./);
 });
