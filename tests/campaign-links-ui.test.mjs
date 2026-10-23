@@ -10,16 +10,38 @@ import * as UI from '@ten98/ui';
 const source = await readFile(new URL('../src/CampaignLinks.tsx', import.meta.url), 'utf8');
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 const compile = (code, context = {}) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
-const destinationWithUtm = compile(section('function destinationWithUtm(', 'const localShortAddress'));
+const DestinationError = compile(source.match(/class DestinationError extends Error \{\}/)[0]);
+const destinationWithUtm = compile(section('function destinationWithUtm(', 'const localShortAddress'), { DestinationError });
 const event = { preventDefault() {} }, path = '/projects/project-a/links';
 const draft = { name: 'Launch', destination: 'https://example.com/offer?product=one&utm_source=old#details', campaignId: 'campaign-a', utm_source: ' instagram ', utm_medium: 'social', utm_campaign: '', utm_content: '', utm_term: '' };
 
 test('actual link creation preserves destination parameters, applies optional UTM values and never submits an unsafe protocol', async () => {
   const url = new URL(destinationWithUtm(draft)); assert.equal(url.searchParams.get('product'), 'one'); assert.equal(url.searchParams.get('utm_source'), 'instagram'); assert.equal(url.hash, '#details');
-  for (const destination of ['javascript:alert(1)', 'http://example.com/offer', 'https://user:secret@example.com/offer']) assert.throws(() => destinationWithUtm({ ...draft, destination }), /public HTTPS/);
+  for (const destination of ['javascript:alert(1)', 'http://example.com/offer', 'https://user:secret@example.com/offer']) assert.throws(() => destinationWithUtm({ ...draft, destination }), error => error instanceof DestinationError && /public HTTPS/.test(error.message));
+  assert.throws(() => destinationWithUtm({ ...draft, destination: 'example.com/offer' }), error => error instanceof DestinationError && /https:\/\//.test(error.message));
   const calls = [], saved = [], selections = [], cleared = [];
-  const create = compile(section('async function create(', '  async function saveName('), { readOnly: false, draft, destinationWithUtm, action: async (_, run) => run(1), requester: { current: async (...args) => { calls.push(args); return { link: { id: 'new-link' } }; } }, path, version: { current: 1 }, acceptLink: value => saved.push(value), setSelected: value => selections.push(value), setDraft: value => cleared.push(value), blank: () => ({}), setNotice() {} });
+  const create = compile(section('async function create(', '  async function saveName('), { readOnly: false, draft, destinationWithUtm, DestinationError, setDestinationError: value => assert.equal(value, '', 'A valid destination has no field error.'), destinationRef: { current: null }, focusDestination: { current: false }, action: async (_, run) => run(1), requester: { current: async (...args) => { calls.push(args); return { link: { id: 'new-link' } }; } }, path, version: { current: 1 }, acceptLink: value => saved.push(value), setSelected: value => selections.push(value), setDraft: value => cleared.push(value), blank: () => ({}), setNotice() {} });
   await create(event); assert.deepEqual(calls[0], [path, 'POST', { name: 'Launch', destination: url.href, campaignId: 'campaign-a' }]); assert.deepEqual(saved, [{ id: 'new-link' }]); assert.deepEqual(selections, ['new-link']); assert.equal(cleared.length, 1);
+});
+
+test('destination problems from the client check or the server show on the destination field, not as a form error', async () => {
+  const run = (destination, response) => {
+    const calls = [], fieldErrors = [], formErrors = [], focused = [], focusDestination = { current: false };
+    const create = compile(section('async function create(', '  async function saveName('), { readOnly: false, draft: { ...draft, destination }, destinationWithUtm, DestinationError, setDestinationError: value => { if (value) fieldErrors.push(value); }, destinationRef: { current: { focus: () => focused.push('destination') } }, focusDestination,
+      action: async (_, work) => { try { await work(1); } catch (failure) { formErrors.push(failure.message); } }, requester: { current: async (...args) => { calls.push(args); return response(); } }, path, version: { current: 1 }, acceptLink() {}, setSelected() {}, setDraft() {}, blank: () => ({}), setNotice() {} });
+    return create(event).then(() => ({ calls, fieldErrors, formErrors, focused, deferredFocus: focusDestination.current }));
+  };
+  const local = await run('http://example.com/offer', () => assert.fail('An HTTP destination is never sent.'));
+  assert.deepEqual(local, { calls: [], fieldErrors: ['Choose a public HTTPS destination without embedded credentials.'], formErrors: [], focused: ['destination'], deferredFocus: false }, 'The client check focuses the enabled field at once.');
+  const server = await run('https://intranet.example/offer', () => { throw Object.assign(new Error('Use a public HTTPS domain without credentials or private addresses.'), { status: 400 }); });
+  assert.deepEqual([server.calls.length, server.fieldErrors, server.formErrors, server.deferredFocus], [1, ['Use a public HTTPS domain without credentials or private addresses.'], [], true], 'A server rejection focuses the field after the fieldset re-enables.');
+  const other = await run('https://example.com/offer', () => { throw Object.assign(new Error('Choose a campaign in this project.'), { status: 400 }); });
+  assert.deepEqual([other.fieldErrors, other.formErrors], [[], ['Choose a campaign in this project.']], 'Other failures stay form-level.');
+  // The field carries the message and aria-invalid through Field's error, and takes focus once the fieldset is enabled again.
+  assert.match(source, /<Field label="Public HTTPS destination \*" error=\{destinationError \|\| undefined\}><Input ref=\{destinationRef\}/);
+  assert.match(source, /useEffect\(\(\) => \{ if \(focusDestination\.current && !busy\) \{ focusDestination\.current = false; destinationRef\.current\?\.focus\(\); \} \}, \[busy, destinationError\]\);/);
+  const html = renderToStaticMarkup(React.createElement(UI.Field, { label: 'Public HTTPS destination *', error: 'Choose a public HTTPS destination without embedded credentials.' }, React.createElement(UI.Input, { type: 'url' })));
+  assert.match(html, /aria-invalid="true"/); assert.match(html, /role="alert"[^>]*>Choose a public HTTPS destination/);
 });
 
 test('renames cannot alter a saved destination and disabling a link requires confirmation', async () => {
