@@ -38,6 +38,8 @@ function mount(initialProps: Record<string, any>) {
     pick: (ids: string[]) => { find(node => node.type === ui.DestinationPicker)!.props.onSelectionChange(ids); paint(); },
     key: async (event: Record<string, unknown>) => { find(node => node.type === ui.Form)!.props.onKeyDown({ preventDefault() {}, ...event }); paint(); await tick(); paint(); },
     settle: async () => { await tick(); paint(); },
+    openSchedule: async () => { find(node => node.type === ui.Popover)!.props.onOpenChange(true); paint(); await tick(); paint(); },
+    confirm: () => nodes(find(node => node.type === ui.Popover)).find(node => node.type === ui.Button && node.props.variant === 'primary'),
   };
 }
 const accounts = [{ id: 'fb-a', platform: 'facebook', displayName: 'Brand page', isActive: true }, { id: 'ig-a', platform: 'instagram', displayName: 'Brand gram', isActive: true }];
@@ -109,16 +111,15 @@ test('Schedule picks a time in at most three clicks, runs the post check and sav
   const view = mount({ ...base, accounts, onSubmit: async (values: any) => { saved.push(values); }, onValidate: async (values: any) => { checked.push(values); return { valid: true }; } });
   view.pick(['fb-a']); view.type('Caption', 'Launch day');
   const draft = view.button('Save draft')!; assert.equal(draft.props.variant, 'secondary'); assert.equal(draft.props.type, 'submit');
-  const menu = view.find(node => node.type === ui.Popover)!; assert.equal(menu.props.triggerLabel, 'Schedule'); assert.equal(menu.props.triggerVariant, 'primary');
-  await view.click('Pick a time');
-  const review = () => view.find(node => node.type === ui.ReviewConfirm && node.props.title === 'Schedule this post')!;
-  assert.ok(review(), 'Choosing opens the confirm step.'); assert.equal(review().props.autoFocus, true);
+  const menu = view.find(node => node.type === ui.Popover)!; assert.equal(menu.props.triggerVariant, 'primary');
+  await view.openSchedule();
   assert.equal(checked.length, 1, 'The post check runs when scheduling starts.');
-  assert.ok(review().props.disabledReason, 'Confirming waits for a time.');
+  assert.equal(view.confirm()!.props.disabled, true, 'Confirming waits for a time.');
+  assert.match(view.html(), /Choose a time or the next free slot\./, 'A blocked confirm says why.');
   await view.click('Tomorrow 9 AM');
-  assert.equal(review().props.disabledReason, undefined);
-  assert.match(renderToStaticMarkup(review() as any), /Brand page/, 'The confirm step lists the destinations.');
-  await review().props.onConfirm(); await view.settle();
+  assert.notEqual(view.confirm()!.props.disabled, true);
+  assert.ok(view.find(node => node.type === ui.Text && text(node).includes('Brand page · Facebook')), 'The step lists the destinations.');
+  await view.confirm()!.props.onClick(); await view.settle();
   assert.equal(saved.length, 1); assert.equal(saved[0].status, 'scheduled'); assert.ok(saved[0].scheduledAt);
   assert.deepEqual(saved[0].accounts, ['fb-a']);
 });
@@ -127,11 +128,10 @@ test('Next free slot chooses the default publishing queue instead of a fixed tim
   const saved: any[] = [], queues = [{ _id: 'paused', name: 'Old', timezone: 'UTC', active: false, slots: [{ dayOfWeek: 1, time: '09:00' }], version: 'v0' }, { _id: 'main', name: 'Weekdays', timezone: 'UTC', active: true, isDefault: true, slots: [{ dayOfWeek: 1, time: '09:00' }], version: 'v1' }];
   const view = mount({ ...base, accounts, initialScheduledAt: '2070-01-01T09:00', onSubmit: async (values: any) => { saved.push(values); }, onLoadQueues: async () => ({ queues }) });
   view.pick(['fb-a']); view.type('Caption', 'Queued');
-  await view.click('Next free slot'); await view.settle();
+  await view.openSchedule(); await view.click('Next free slot'); await view.settle();
   assert.equal(view.snapshot().queueId, 'main'); assert.equal(view.snapshot().queueVersion, 'v1'); assert.equal(view.snapshot().scheduledAt, '', 'A queue clears the fixed time.');
-  const review = view.find(node => node.type === ui.ReviewConfirm && node.props.title === 'Schedule this post')!;
-  assert.equal(review.props.disabledReason, undefined);
-  await review.props.onConfirm(); assert.equal(saved[0].queueId, 'main');
+  assert.notEqual(view.confirm()!.props.disabled, true);
+  await view.confirm()!.props.onClick(); assert.equal(saved[0].queueId, 'main');
 });
 
 test('Cmd or Ctrl+Enter runs the primary action', async () => {
@@ -139,16 +139,16 @@ test('Cmd or Ctrl+Enter runs the primary action', async () => {
   const view = mount({ ...base, accounts, initialScheduledAt: '2070-01-01T09:00', onSubmit: async (values: any) => { saved.push(values); } });
   view.pick(['fb-a']); view.type('Caption', 'Shortcut');
   await view.key({ key: 'Enter', metaKey: true });
-  assert.ok(view.find(node => node.type === ui.ReviewConfirm && node.props.title === 'Schedule this post'), 'The first press opens the confirm step.');
+  assert.equal(view.find(node => node.type === ui.Popover)!.props.open, true, 'The first press opens the Schedule step.');
   await view.key({ key: 'Enter', ctrlKey: true });
-  assert.equal(saved.length, 1, 'The second press schedules.'); assert.equal(saved[0].status, 'scheduled');
+  assert.equal(saved.length, 1, 'The second press confirms.'); assert.equal(saved[0].status, 'scheduled');
   await view.key({ key: 'Enter' }); assert.equal(saved.length, 1, 'Enter alone does nothing.');
 });
 
 test('the composer never names the provider', async () => {
   const post = { content: 'Hi', platforms: ['facebook'], accounts: ['fb-a'], mediaItems: [{ type: 'image', url: 'https://cdn.example.test/a.jpg' }] };
   const view = mount({ ...base, accounts, post, onValidate: async () => ({ valid: false, errors: [{ message: 'Account needs reconnecting.' }] }), onInspectMedia: async () => ({}), onLoadQueues: async () => ({ queues: [] }), onShortenLinks: async () => ({ content: '', platformOverrides: {} }), onLoadGroups: async () => ({ groups: [], accounts: [] }) });
-  await view.click('Pick a time');
+  await view.openSchedule();
   assert.doesNotMatch(view.html(), /Zernio/);
   assert.match(view.html(), /Account needs reconnecting/, 'The provider check shows in the confirm step.');
 });
@@ -171,13 +171,28 @@ test('destinations span both panes, problems read "Network (Account): message" a
   assert.deepEqual(status('facebook'), [['success', 'Ready']]);
 });
 
+test('the Schedule step lives in the footer menu: one confirm, one Cancel, and the preview stays in place', async () => {
+  const saved: any[] = [];
+  const view = mount({ ...base, accounts, onSubmit: async (values: any) => { saved.push(values); } });
+  view.pick(['fb-a']); view.type('Caption', 'Launch day');
+  await view.openSchedule();
+  assert.equal(view.find(node => node.type === ui.ReviewConfirm && node.props.title === 'Schedule this post'), undefined, 'No second confirm panel.');
+  assert.equal(nodes(view.find(node => node.props?.['aria-label'] === 'Post preview')).some(node => node.type === ui.DateTimeField), false, 'The preview pane holds only the preview.');
+  assert.ok(nodes(view.find(node => node.type === ui.Popover)).some(node => node.type === ui.DateTimeField), 'The time is chosen in the Schedule menu.');
+  assert.equal(view.all(node => node.type === ui.Button && text(node) === 'Cancel').length, 1);
+  assert.equal(view.all(node => node.type === ui.Button && ['Schedule', 'Save to calendar'].includes(text(node))).length, 1, 'One confirm button.');
+  await view.click('Tomorrow 9 AM');
+  await view.confirm()!.props.onClick(); await view.settle();
+  assert.equal(saved.length, 1); assert.equal(saved[0].status, 'scheduled');
+});
+
 test('without a social publishing connection the post check, file check and queues are disabled with a reason and Open integrations (#152)', async () => {
   const calls: string[] = [], opened: boolean[] = [];
   const offline = { ...base, onLoadAccounts: undefined, accounts, post: { content: 'Hi', platforms: ['facebook'], accounts: ['fb-a'], mediaItems: [{ type: 'image', url: 'https://cdn.example.test/a.jpg' }] }, onValidate: async () => { calls.push('validate'); return { valid: true }; }, onInspectMedia: async () => { calls.push('inspect'); return {}; }, onLoadQueues: async () => { calls.push('queues'); return { queues: [] }; }, onOpenIntegrations: () => opened.push(true) };
   const view = mount(offline);
   assert.equal(view.button('Next free slot')!.props.disabled, true);
   assert.match(view.html(), /<button[^>]*disabled=""[^>]*>Check file<\/button>/, 'The media file check waits for a connection.');
-  await view.click('Pick a time');
+  await view.openSchedule();
   for (const label of ['Check post', 'Load queues']) assert.equal(view.button(label)!.props.disabled, true, label);
   assert.deepEqual(calls, [], 'Opening Schedule does not ask the provider.');
   assert.match(view.html(), /Connect social accounts in Integrations to check posts and use queues\./);
