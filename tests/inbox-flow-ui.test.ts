@@ -47,6 +47,7 @@ function transport(calls: any[][], { conversations = rows, states = triage, meta
     if (route.endsWith('/item-states')) return { states: url.searchParams.getAll('id').map(id => states.find(state => state.resourceId === id)).filter(Boolean).map(state => ({ accountId: url.searchParams.get('accountId'), kind: url.searchParams.get('kind'), ...state })) };
     if (route.endsWith('/item-notes')) return { notes: [] };
     if (route.endsWith('/conversations')) return { conversations, pagination: {}, ...(meta ? { meta } : {}) };
+    if (route.endsWith('/integrations/inbox/comments')) return { posts: [{ id: 'post-1', content: 'Launch post', commentCount: 2 }], pagination: {} };
     if (/\/conversations\/[^/]+\/messages$/.test(route)) return { conversation: {}, messages: [], pagination: {} };
     throw new Error('Unexpected request ' + target);
   };
@@ -58,7 +59,7 @@ async function open(options: { conversations?: any[]; states?: any[]; meta?: any
   return { calls, h, props, step, tree: await step() };
 }
 const listReads = (calls: any[][]) => calls.filter(([target, method]) => !method && /\/integrations\/inbox\/conversations\?/.test(target));
-const list = (tree: any) => find(tree, ui.SelectableList, props => props.label === 'Conversations')[0];
+const list = (tree: any) => find(tree, ui.SelectableList, props => props.label === 'Conversation list')[0];
 const shown = (tree: any) => list(tree).props.items.map((item: any) => item.id);
 
 test('opening the inbox lists the first connected account’s conversations without a click, with one list read', async () => {
@@ -139,7 +140,8 @@ test('an inbox without a connected account shows only Connect social accounts, w
 // The page header is the h1 and names the page, so the inbox starts at h2 and each heading nests at most one level deeper.
 const headings = (tree: any) => [...renderToStaticMarkup(tree).matchAll(/<h([1-6])[^>]*>(.*?)<\/h\1>/g)].map(([, level, name]) => ({ level: Number(level), name: name.replace(/<[^>]+>/g, '') }));
 test('inbox headings start below the page heading, nest in order and never repeat', async () => {
-  for (const options of [{}, { conversations: [] }]) {
+  const commentAccounts = [{ id: 'fb', platform: 'facebook', name: 'Studio page', capabilities: { comments: true } }];
+  for (const options of [{}, { conversations: [] }, { status: { accounts: commentAccounts }, props: { tab: 'comments' } }]) {
     const found = headings((await open(options)).tree), names = found.map(({ name }) => name), summary = found.map(({ level, name }) => `h${level} ${name}`).join(', ');
     assert.equal(names.includes('Unified inbox'), false, 'The page header already names the page: ' + summary);
     assert.equal(new Set(names).size, names.length, 'No heading text repeats: ' + summary);

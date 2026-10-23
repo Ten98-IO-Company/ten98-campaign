@@ -1231,30 +1231,21 @@ test('switching item never shows another item’s notes or applies a stale read 
   assert.doesNotMatch(add.html(), /For thread A/, 'A late add does not appear on another item.'); assert.equal(add.notices.includes('Note added.'), false); assert.equal(add.find(ui.Textarea).props.value, '');
 });
 
-test('inbox setup warnings offer Open integrations, and Refresh connections reports setup through the status read only', async () => {
+// The not-set-up state is one empty state, covered with the running component in inbox-flow-ui.test.ts.
+test('the webhook warning offers Open integrations, and Refresh connections reports setup through the status read only', async () => {
   const zernio = section('function ZernioInbox(', '\nfunction ');
   assert.match(zernio, /^function ZernioInbox\(\{[^}]*onOpenIntegrations[^}]*\}/, 'ZernioInbox receives the navigation prop the shell passes.');
-  const actionJsx = zernio.match(/const integrationsAction = (onOpenIntegrations \? <Button[^\n]*?<\/Button> : undefined);/)?.[1], warnings = zernio.match(/\{status && !connected && <Alert[\s\S]*?<\/Alert>\}\n\s*\{connected && tab !== 'mentions' && status\?\.webhookConfigured === false && <Alert[\s\S]*?<\/Alert>\}/)?.[0];
+  const actionJsx = zernio.match(/const integrationsAction = (onOpenIntegrations \? <Button[^\n]*?<\/Button> : undefined);/)?.[1], warnings = zernio.match(/\{connected && tab !== 'mentions' && status\?\.webhookConfigured === false && <Alert[\s\S]*?<\/Alert>\}/)?.[0];
   assert.ok(actionJsx); assert.ok(warnings);
   const { code } = await transformWithOxc(`const make = onOpenIntegrations => (${actionJsx}); const render = (status, connected, tab, integrationsAction) => (<>${warnings}</>);`, 'InboxSetup.tsx', { jsx: { runtime: 'classic' } });
   const [make, render] = new Function('React', 'Button', 'Alert', `${code}; return [make, render];`)(React, ui.Button, ui.Alert), opened = [], action = make(() => opened.push('Integrations'));
   assert.equal(make(undefined), undefined);
-  const html = renderToStaticMarkup(render({ configured: false, mapped: false, webhookConfigured: false }, false, 'messages', action));
-  assert.equal((html.match(/<button[^>]*>Open integrations<\/button>/g) || []).length, 1, 'An inbox that is not set up shows one banner, which links to Integrations.');
   const webhook = renderToStaticMarkup(render({ configured: true, mapped: true, webhookConfigured: false }, true, 'messages', action));
   assert.equal((webhook.match(/<button[^>]*>Open integrations<\/button>/g) || []).length, 1, 'A set-up inbox without webhooks shows the webhook banner, which links to Integrations.'); assert.match(webhook, /inbox webhooks/);
   action.props.onClick(); assert.deepEqual(opened, ['Integrations']);
-  assert.doesNotMatch(renderToStaticMarkup(render({ configured: false, mapped: false, webhookConfigured: false }, false, 'messages', undefined)), /Open integrations/);
+  assert.doesNotMatch(renderToStaticMarkup(render({ configured: true, mapped: true, webhookConfigured: false }, true, 'messages', undefined)), /Open integrations/);
   const requests = [], statuses = [];
   const refresh = compile(section('async function loadAccounts(', '  async function changeTriage('), { switchSelection: change => change(), action: async (_, run) => run(1), version: { current: 1 }, path, accountId: '', tab: 'messages', requester: { current: async target => { requests.push(target); return { configured: false, mapped: false, webhookConfigured: false, accounts: [] }; } }, setStatus: value => statuses.push(value), setAccounts() {}, setRows() {}, resetSelection() {}, setAccountId() {} });
   await refresh();
   assert.deepEqual(requests, [path + '/status'], 'The status read reports missing setup as data, so no duplicate error alert is added.'); assert.equal(statuses[0].configured, false);
-});
-
-test('the Messages workspace and its conversation list have different headings', () => {
-  const [, label, listLabel] = source.match(/\{tab === 'messages' \? <DetailWorkspace label="([^"]+)" listLabel=\{historyFilter \? 'History results' : '([^']+)'\}/);
-  const html = renderToStaticMarkup(React.createElement(ui.DetailWorkspace, { label, listLabel, detailLabel: 'Conversation', list: null, detail: null, selected: false }));
-  const headings = [...html.matchAll(/<h[1-6][^>]*>([^<]+)<\/h[1-6]>/g)].map(match => match[1]);
-  assert.ok(headings.includes('Private messages') && headings.includes('Conversations'), headings.join(', '));
-  assert.equal(new Set(headings).size, headings.length, 'No heading text repeats: ' + headings.join(', '));
 });
