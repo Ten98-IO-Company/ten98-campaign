@@ -215,6 +215,12 @@ test('the editor wires Schedule to save then the post card publish path, with th
   assert.equal(gate({ p: { publishable: true, reason: '' } }, true, { id: 'p' }), undefined);
 });
 
+test('the caption box is the largest field: at least six lines tall', () => {
+  const caption = mount({ ...base, accounts }).field('Caption')!;
+  assert.equal(caption.type, ui.Textarea); assert.ok(caption.props.rows >= 6, `rows=${caption.props.rows}`);
+  assert.equal(caption.props.style, undefined, 'Sized with the library prop, not a style.');
+});
+
 test('on narrow screens the footer stays one row and the To row stays short, so the caption is not hidden', () => {
   const hosted = mount({ ...base, accounts: [], actionsHost: {} });
   assert.equal(hosted.button('Cancel'), undefined, 'In the editor dialog its close button cancels; the footer keeps Save draft and the primary only.');

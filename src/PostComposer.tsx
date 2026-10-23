@@ -437,7 +437,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   </Stack>;
   const editor = <Stack as="fieldset" gap={6} disabled={disabled}>
     <Stack gap={2}>
-      <Field label="Caption"><Textarea value={content} maxLength={100000} onChange={event => setContent(event.target.value)} placeholder="Write your post…"/></Field>
+      <Field label="Caption"><Textarea rows={8} value={content} maxLength={100000} onChange={event => setContent(event.target.value)} placeholder="Write your post…"/></Field>
       {usage.length > 0 && <Inline gap={3}>{usage.map(row => <Text key={row.platform} size="sm" numeric tone={row.tone === 'error' ? 'danger' : row.tone === 'warning' ? 'warning' : 'muted'}>{`${row.label} ${row.count.toLocaleString()}/${row.limit.toLocaleString()}`}</Text>)}</Inline>}
       {problems.map(item => <Text key={item.text} size="sm" tone="danger">{item.text}</Text>)}
       {usage.filter(row => row.tone === 'warning' && row.message).map(row => <Text key={'warning:' + row.platform} size="sm" tone="warning">{`${row.label}: ${row.message}`}</Text>)}
