@@ -149,6 +149,7 @@ export function createContacts({ db }: { db: Database }) {
    * In-person lead capture (offline activations). Records only the channels the person ticked, never opts a suppressed
    * destination back in, keeps existing opt-ins and name, and adds the activation tag. Stores nothing when no channel can
    * be recorded: refused when every ticked channel is suppressed.
+   * The field wording asks for news and offers, so an email opt-in also records marketing permission (emailMarketing).
    */
   async function capture(projectId: string, person: { name?: string; email?: string; phone?: string }, requested: string[], source: string, tag: string) {
     return db.transaction(async tx => {
@@ -161,7 +162,7 @@ export function createContacts({ db }: { db: Database }) {
       }
       const recorded = requested.filter(channel => !refused.includes(channel));
       if (!recorded.length) fail(409, 'This person opted out of the ticked channels earlier, so nothing was saved.');
-      const body = { ...(person.name && !previous?.name ? { name: person.name } : {}), ...(target.email ? { email: target.email } : {}), ...(target.phone ? { phone: target.phone } : {}), tags: [...new Set([...(previous?.tags || []), tag])], consents: Object.fromEntries(recorded.map(channel => [channel, true])), consentSource: source };
+      const body = { ...(person.name && !previous?.name ? { name: person.name } : {}), ...(target.email ? { email: target.email } : {}), ...(target.phone ? { phone: target.phone } : {}), tags: [...new Set([...(previous?.tags || []), tag])], consents: Object.fromEntries([...recorded, ...(recorded.includes('email') ? ['emailMarketing'] : [])].map(channel => [channel, true])), consentSource: source };
       const contact = await write(tx, projectId, await prepare(tx, projectId, body, previous), previous);
       return { contactId: contact.id, recorded, refused };
     });
