@@ -71,11 +71,11 @@ test('Calendar retains event workflows and navigates to Integrations without a s
     const tree = h.render(options), html = renderToStaticMarkup(tree);
     assert.doesNotMatch(html, /Save calendar connection|Shared calendar ID|service account|type="password"/);
     assert.equal(elements(tree).filter(node => node.type === 'input' && node.props.name === 'calendarId').length, 0);
-    calendarButton(tree, 'Open Integrations').props.onClick(); assert.equal(opened, 1);
+    calendarButton(tree, 'Open integrations').props.onClick(); assert.equal(opened, 1);
     assert.deepEqual(calls, [['/projects/project-a/calendar/status']]);
     if (connected) { calendarButton(tree, 'Load Google events'); calendarButton(tree, 'Review campaign plan for Google'); assert.match(html, /Create a Google event/); }
     else assert.match(html, /Connect this project’s Google Calendar in Integrations/);
-    assert.doesNotMatch(renderToStaticMarkup(h.render({ ...options, onOpenIntegrations: undefined })), /Open Integrations/);
+    assert.doesNotMatch(renderToStaticMarkup(h.render({ ...options, onOpenIntegrations: undefined })), /Open integrations/i);
     h.unmount();
   }
 });
@@ -127,7 +127,7 @@ test('SMS inbox keeps consent and STOP guidance, history and setup navigation wi
   assert.match(html, /Replies do not grant marketing permission\. STOP opt-outs block further replies\./);
   assert.match(html, /Previously received messages remain available/);
   assert.doesNotMatch(html, /Incoming-message webhook|must-stay-in-integrations|Configure the Twilio/);
-  button(tree, 'Refresh SMS replies'); button(tree, 'Open Integrations').props.onClick(); assert.equal(opened, 1);
+  button(tree, 'Refresh SMS replies'); button(tree, 'Open integrations').props.onClick(); assert.equal(opened, 1);
   h.unmount();
 });
 

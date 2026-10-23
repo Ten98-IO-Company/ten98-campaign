@@ -91,7 +91,7 @@ export default function GoogleCalendar({ projectId, canWrite, request, fromDate,
   </Inline>; };
   return <>
     {agenda?.(eventActions)}
-    <Card as="section" headingLevel={2} title="Google Calendar" description="Share campaign dates with your team and manage project events." actions={onOpenIntegrations && <Button variant="secondary" onClick={onOpenIntegrations}>Open Integrations</Button>}>
+    <Card as="section" headingLevel={2} title="Google Calendar" description="Share campaign dates with your team and manage project events." actions={onOpenIntegrations && <Button variant="secondary" onClick={onOpenIntegrations}>Open integrations</Button>}>
       <Stack>
         {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}
         {status && <Text tone="muted">{connected ? `Shared calendar: ${status.calendarId}` : 'Connect this project’s Google Calendar in Integrations.'}</Text>}

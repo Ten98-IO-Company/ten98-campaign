@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
+import { workspaceRoles } from '../src/workspace-roles.ts';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -16,6 +17,8 @@ async function view(file, names, request, initial = {}) {
     useState(value) { const index = state.length; state.push(Object.hasOwn(initial, index) ? initial[index] : value); return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next; }]; },
     useRef(value) { const ref = { current: value }; refs.push(ref); return ref; }, useEffect(run) { effects.push(run); },
     FormData: FormValues, window: { confirm: () => true, location: { reload: () => reloads.push(file) } }, crypto, DOMException,
+    // Imported app helpers (TeamSettings): the real role list, and a focus-return hook without a DOM.
+    workspaceRoles, useFocusReturn: () => () => {},
     lines: value => String(value || '').split('\n').map(line => line.trim()).filter(Boolean),
     // Pure module-level helpers the component body calls (ContentApprovals), taken from the real source.
     ...Object.fromEntries(['approveBlocked', 'postName', 'reviewItem'].flatMap(name => { const line = source.match(new RegExp(`^const ${name} = (.+);$`, 'm')); return line ? [[name, new Function('return ' + stripTypeScriptTypes(line[1]))()]] : []; })),

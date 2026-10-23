@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { TeamFlow, type AuthNotice, type TeamInvitation, type TeamMember } from '@ten98/ui';
+import { useFocusReturn } from './focus-return';
+import { workspaceRoles } from './workspace-roles';
 
 type Props = { workspaceId: string; role: string; currentUserId: string; request: (path: string, method?: string, body?: unknown) => Promise<any> };
 
@@ -7,7 +9,7 @@ type Props = { workspaceId: string; role: string; currentUserId: string; request
 export default function TeamSettings({ workspaceId, role, currentUserId, request }: Props) {
   const [members, setMembers] = useState<TeamMember[]>([]), [invitations, setInvitations] = useState<TeamInvitation[]>([]), [link, setLink] = useState<{ id: string; url: string }>(), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState<AuthNotice>();
   const version = useRef(0), readVersion = useRef(0), base = `/workspaces/${encodeURIComponent(workspaceId)}`;
-  const allRoles = [{ value: 'owner', label: 'Owner' }, { value: 'admin', label: 'Admin' }, { value: 'editor', label: 'Editor' }, { value: 'viewer', label: 'Viewer' }], delegated = ['editor', 'viewer'];
+  const allRoles = workspaceRoles, delegated = ['editor', 'viewer'];
   const roles = role === 'owner' ? allRoles : allRoles.filter(option => delegated.includes(option.value));
   async function load(generation = version.current) {
     const read = ++readVersion.current;
@@ -25,9 +27,11 @@ export default function TeamSettings({ workspaceId, role, currentUserId, request
     loading.catch(err => { if (generation === version.current && read === readVersion.current) setError((err as Error).message || 'The team could not be loaded.'); });
     return () => { version.current++; };
   }, [workspaceId, role]);
+  const rememberFocus = useFocusReturn(busy);
   // Every write invalidates older reads first, then reloads; a change to your own membership reloads the app instead.
   async function act(work: () => Promise<any>, message: string, self = false, after?: (result: any) => void) {
     if (busy) return;
+    rememberFocus();
     const generation = version.current; readVersion.current++; setBusy(true); setError(''); setNotice(undefined);
     try {
       const result = await work();

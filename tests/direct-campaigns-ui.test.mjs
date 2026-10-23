@@ -102,7 +102,7 @@ test('actual loader preserves independent contact/campaign results and ignores r
 
 test('actual action lock prevents repeat sends and local progress polling never invokes provider refresh or overwrites a later action', async () => {
   const pending = { current: false }, version = { current: 1 }, actionVersion = { current: 0 }, busy = [], errors = [];
-  const action = compile(section('async function action(', '  function acceptCampaign('), { pending, version, actionVersion, setBusy: value => busy.push(value), setError: value => errors.push(value), setNotice() {} });
+  const action = compile(section('async function action(', '  function acceptCampaign('), { pending, version, actionVersion, setBusy: value => busy.push(value), setError: value => errors.push(value), setNotice() {}, rememberFocus() {} });
   let release, executions = 0; const work = action('Sending', async () => { executions++; await new Promise(resolve => { release = resolve; }); });
   await action('Sending again', async () => { executions++; }); assert.equal(executions, 1); assert.equal(actionVersion.current, 1); release(); await work; assert.equal(pending.current, false); assert.deepEqual(busy, ['Sending', '']);
   const polling = section('const refreshProgress = async () =>', '    const timer =').replace('const refreshProgress = ', '').trim().replace(/;$/, '');
@@ -311,7 +311,7 @@ test('the Amazon SES feedback webhook URL is shown with a copy action only when 
 
 test('a send refused for EMAIL_PROVIDER_REQUIRED shows the provider choice, other failures keep the server message', async () => {
   async function run(failure) {
-    const errors = [], context = { pending: { current: false }, version: { current: 1 }, actionVersion: { current: 0 }, setBusy() {}, setNotice() {}, setError: value => errors.push(value), emailProviderChoice };
+    const errors = [], context = { pending: { current: false }, version: { current: 1 }, actionVersion: { current: 0 }, setBusy() {}, setNotice() {}, setError: value => errors.push(value), emailProviderChoice, rememberFocus() {} };
     await compile(section('async function action(', '\n  function acceptCampaign('), context)('Sending campaign', async () => { throw failure; });
     return errors.filter(Boolean);
   }

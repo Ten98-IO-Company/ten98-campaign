@@ -34,8 +34,9 @@ test('sign-in submits credentials, and invitation single sign-on starts through 
   const screen = Auth({ session: { setupRequired: false, oidcEnabled: true }, inviteToken: 'A'.repeat(43), error: 'Email or password is incorrect.', busy: false, onSubmit: values => { submitted = values; }, onOidcStart: () => { started++; } });
   assert.equal(screen.type, SignInFlow);
   const html = renderToStaticMarkup(screen);
-  assert.match(html, /<h1[^>]*>Sign in<\/h1>/); assert.match(html, /role="alert"[^>]*>[^<]*Email or password is incorrect\.|Email or password is incorrect\./);
+  assert.match(html, /<h1[^>]*>Sign in to join<\/h1>/); assert.match(html, /role="alert"[^>]*>[^<]*Email or password is incorrect\.|Email or password is incorrect\./);
   assert.match(html, /Organization single sign-on/);
+  assert.match(renderToStaticMarkup(Auth({ session: { oidcEnabled: false }, error: '', busy: false, onSubmit() {} })), /<h1[^>]*>Sign in<\/h1>/, 'Plain sign-in keeps its title.');
   assert.equal(html.includes('A'.repeat(43)), false, 'The invitation token is not rendered into the page.'); assert.doesNotMatch(html, /href="\/api\/auth\/oidc\/start/);
   const providers = screen.props.providers;
   assert.equal(providers.type, OidcProviderButtons); assert.deepEqual(providers.props.providers, [{ id: 'sso', name: 'Organization single sign-on' }]);
@@ -44,6 +45,23 @@ test('sign-in submits credentials, and invitation single sign-on starts through 
   assert.deepEqual(submitted, { email: 'member@example.test', password: 'secret' });
   assert.match(renderToStaticMarkup(Auth({ session: { setupRequired: false, oidcEnabled: true }, error: '', busy: false, onSubmit() {} })), /href="\/api\/auth\/oidc\/start"/, 'Plain single sign-on stays a link.');
   assert.doesNotMatch(renderToStaticMarkup(Auth({ session: { setupRequired: false, oidcEnabled: false }, error: '', busy: false, onSubmit() {} })), /single sign-on/);
+});
+
+test('Sign in instead keeps the invitation context: it names the invitation, prefills the invited email and leads back', () => {
+  let back = 0;
+  const screen = Auth({ session: { oidcEnabled: false }, inviteToken: 'A'.repeat(43), inviteEmail: 'invited@example.test', onBackToInvitation: () => { back++; }, error: '', busy: false, onSubmit() {} });
+  assert.equal(screen.type, SignInFlow);
+  assert.equal(screen.props.title, 'Sign in to join'); assert.equal(screen.props.description, 'Sign in as invited@example.test to accept your workspace invitation.');
+  assert.deepEqual(screen.props.defaultValues, { email: 'invited@example.test' });
+  const html = renderToStaticMarkup(screen);
+  assert.match(html, /value="invited@example\.test"/); assert.match(html, /Back to invitation/); assert.equal(html.includes('A'.repeat(43)), false);
+  screen.props.cancel.onClick(); assert.equal(back, 1);
+  const unknown = Auth({ session: { oidcEnabled: false }, inviteToken: 'A'.repeat(43), error: '', busy: false, onSubmit() {} });
+  assert.equal(unknown.props.description, 'Sign in with the invited email to accept your workspace invitation.'); assert.equal(unknown.props.defaultValues, undefined);
+  // The App keeps the token in memory: Sign in instead stores the invited email, Back clears it, and a signed-in session shows the invitation again.
+  assert.match(source, /onSignIn=\{email => \{ setInviteSignIn\(\{ email \}\);/);
+  assert.match(source, /<Auth session=\{session\} inviteToken=\{inviteToken\} inviteEmail=\{inviteSignIn\?\.email\} onBackToInvitation=\{\(\) => \{ setError\(''\); setInviteSignIn\(null\); \}\}/);
+  assert.match(source, /if \(inviteToken && !\(inviteSignIn && !session\.user\)\) return <AcceptInvitation /);
 });
 
 // The real startup invitation reader from main.tsx.
@@ -93,7 +111,7 @@ test('the startup reader removes auth_error from the address and keeps the invit
   assert.deepEqual(returnTo('?auth_error=OIDC_INVITE_EMAIL_MISMATCH', '#invite=' + invite).calls, [[{ campaignIndex: 3 }, '', '/#invite=' + invite]]);
   assert.deepEqual(returnTo(`?project=p1&auth_error=X&auth_error=Y&invite=${invite}`, '#top').calls, [[{ campaignIndex: 3 }, '', `/?project=p1&invite=${invite}#top`]]);
   assert.equal((source.match(/takeAuthError\(window\.location, window\.history\)/g) || []).length, 1, 'auth_error is read once, at startup.');
-  assert.match(source, /\[inviteSignIn, setInviteSignIn\] = useState\(Boolean\(startupAuthError\)\)/, 'A returned invitation opens the sign-in screen so the error is visible.');
+  assert.match(source, /\[inviteSignIn, setInviteSignIn\] = useState<\{ email\?: string \} \| null>\(startupAuthError \? \{\} : null\)/, 'A returned invitation opens the sign-in screen so the error is visible.');
 });
 
 test('the sign-in screen shows the startup error through SignInFlow, keeps the session notice and clears it on the next attempt', () => {
@@ -102,6 +120,8 @@ test('the sign-in screen shows the startup error through SignInFlow, keeps the s
   assert.equal(screen.type, SignInFlow); assert.equal(screen.props.error, message);
   // An ended session (expired, or a 401 while signed in) is a notice beside the form, not a form error.
   assert.deepEqual(screen.props.notice, { tone: 'warning', text: 'Your session ended. Sign in again.' });
+  // A session that ended with an unsaved editor or inbox draft says those changes were not saved.
+  assert.deepEqual(WithError({ session: { sessionEnded: true, unsavedChangesLost: true }, error: '', busy: false, onSubmit() {} }).props.notice, { tone: 'warning', text: 'Your session ended before your changes were saved. Sign in again, then make those changes again.' });
   const html = renderToStaticMarkup(screen); assert.ok(html.includes(message.replace(/'/g, '&#x27;'))); assert.match(html, /Your session ended\. Sign in again\./);
   assert.equal(WithError({ session: { oidcEnabled: true }, error: '', busy: false, onSubmit() {} }).props.description, 'Use your account to access your workspaces.');
   assert.equal(WithError({ session: { oidcEnabled: true }, error: '', busy: false, onSubmit() {} }).props.notice, undefined);

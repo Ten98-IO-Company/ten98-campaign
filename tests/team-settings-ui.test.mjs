@@ -5,6 +5,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { TeamFlow } from '@ten98/ui';
+import { workspaceRoles } from '../src/workspace-roles.ts';
 
 // Evaluate Campaign's real TeamSettings adapter with loaded state, then render the shared TeamFlow.
 const source = await readFile(new URL('../src/TeamSettings.tsx', import.meta.url), 'utf8');
@@ -12,13 +13,15 @@ const { code } = await transformWithOxc(source.replace(/^import .*?;\r?\n/gm, ''
 const members = [{ id: 'owner-1', name: 'Olive Owner', email: 'olive@example.test', role: 'owner' }, { id: 'admin-1', name: 'Ada Admin', email: 'ada@example.test', role: 'admin' }, { id: 'editor-1', name: 'Eli Editor', email: 'eli@example.test', role: 'editor' }];
 const invitations = [{ id: 'invite-1', email: 'new@example.test', role: 'viewer', expiresAt: '2026-10-28T00:00:00.000Z', status: 'pending' }];
 
-function view(role, currentUserId, calls = []) {
+function view(role, currentUserId, calls = [], focusMarks = []) {
   const state = [members, invitations]; let index = 0;
   const useState = value => { const slot = index++; if (!(slot in state)) state[slot] = value; return [state[slot], next => { state[slot] = typeof next === 'function' ? next(state[slot]) : next; }]; };
-  const TeamSettings = new Function('React', 'useState', 'useRef', 'useEffect', 'TeamFlow', code + '; return TeamSettings;')(React, useState, value => ({ current: value }), () => {}, TeamFlow);
+  // useFocusReturn is the app hook from src/focus-return.ts; here it records when an action remembers the focused control.
+  const useFocusReturn = busy => () => focusMarks.push(busy);
+  const TeamSettings = new Function('React', 'useState', 'useRef', 'useEffect', 'TeamFlow', 'workspaceRoles', 'useFocusReturn', code + '; return TeamSettings;')(React, useState, value => ({ current: value }), () => {}, TeamFlow, workspaceRoles, useFocusReturn);
   const request = async (path, method, body) => { calls.push([path, method, body]); return method === 'POST' ? { invitation: { id: 'invite-2' }, url: 'https://campaign.example.test/?invite=token' } : path.endsWith('/members') ? { members } : { invitations }; };
   const render = () => { index = 0; return TeamSettings({ workspaceId: 'workspace-1', role, currentUserId, request }); };
-  return { render, state, calls };
+  return { render, state, calls, focusMarks };
 }
 
 test('owners manage every role and invite by link; there is no direct add-account form', async () => {
@@ -33,6 +36,8 @@ test('owners manage every role and invite by link; there is no direct add-accoun
   await tree.props.onInvite({ email: 'new@example.test', role: 'admin' });
   assert.deepEqual(ui.calls[0], ['/workspaces/workspace-1/invitations', 'POST', { email: 'new@example.test', role: 'admin' }]);
   assert.deepEqual(ui.render().props.inviteLink, { id: 'invite-2', url: 'https://campaign.example.test/?invite=token' });
+  // TeamFlow disables Create invitation link while busy; the action remembers it so focus returns there afterwards.
+  assert.deepEqual(ui.focusMarks, [false], 'The invite remembers the focused control once, before it turns busy.');
 });
 
 test('an owner who shares ownership can still change their own role, and the sole-owner note is not shown', () => {
