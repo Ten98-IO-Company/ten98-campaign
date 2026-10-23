@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sendDirect, getSmsStatus, syncEmailSuppressions, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast } from '../server/direct-providers.ts';
 import { createIntegrationSettings } from '../server/integration-settings.ts';
+import { IntegrationError } from '../server/provider-core.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
 
 const env = { TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'secret-twilio-token', TWILIO_FROM_NUMBER: '+12025550100', CLOUDFLARE_ACCOUNT_ID: 'b'.repeat(32), CLOUDFLARE_EMAIL_API_TOKEN: 'secret-cloudflare-token', CLOUDFLARE_ZONE_ID: 'c'.repeat(32), CLOUDFLARE_EMAIL_FROM_ADDRESS: 'service@example.com', ZERNIO_API_KEY: 'secret-zernio-key' };
@@ -43,6 +44,15 @@ test('direct SMS and transactional email use exact contracts, sender isolation, 
     result.result.delivered = ['foreign@example.com']; result.result.suppressed_recipients = []; await reject(sendDirect(mail), 'INVALID_PROVIDER_RESPONSE', true);
     const mailBefore = calls.length; await reject(sendDirect({ ...mail, campaign: { ...mail.campaign, emailPurpose: 'marketing' } }), 'TRANSACTIONAL_EMAIL_ONLY'); assert.equal(calls.length, mailBefore);
   } finally { globalThis.fetch = original; }
+});
+
+test('an SES send reports a mapping guard refusal as itself and sends nothing', async t => {
+  const original = globalThis.fetch, calls = []; globalThis.fetch = async target => { calls.push(String(target)); return Response.json({ MessageId: 'ses-1' }); }; t.after(() => { globalThis.fetch = original; });
+  const ses = { AWS_SES_REGION: 'us-east-1', AWS_SES_ACCESS_KEY_ID: 'AKIAFIXTUREKEY000000', AWS_SES_SECRET_ACCESS_KEY: 'fixture-secret', AWS_SES_FROM_ADDRESS: 'service@example.com', EMAIL_PROVIDER: 'ses' };
+  const mail = { channel: 'email', env: { ...env, ...ses }, contact, campaign: { emailPurpose: 'transactional', subject: 'Receipt', text: 'Thanks' }, delivery: { id: 'delivery-1' }, appUrl };
+  await reject(sendDirect({ ...mail, assertMapping: () => { throw new IntegrationError(409, 'CONNECTION_CHANGED', 'Integration settings changed.'); } }), 'CONNECTION_CHANGED');
+  assert.deepEqual(calls, []);
+  assert.deepEqual(await sendDirect({ ...mail, assertMapping: () => {} }), { providerId: 'ses-1', status: 'accepted', recipient: contact.email });
 });
 
 test('WhatsApp phases are scoped broadcasts, validate approved template values, never send on create and refresh recipients', async () => {

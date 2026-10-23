@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createPrivateKey, hkdfSync, randomBytes } from 'node:crypto';
-import { openRouterFetch, readResponseText } from '@ten98/runtime';
+import { SES_REGIONS, openRouterFetch, readResponseText, sesOrigin, signAwsV4Request } from '@ten98/runtime';
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
 import type { Database } from './database.ts';
@@ -17,9 +17,10 @@ const groups: Record<string, Record<string, string>> = {
   broadsign: { apiKey: 'BROADSIGN_API_KEY', environment: 'BROADSIGN_ENVIRONMENT', domainId: 'BROADSIGN_DOMAIN_ID', currency: 'BROADSIGN_CURRENCY' },
   twilio: { accountSid: 'TWILIO_ACCOUNT_SID', authToken: 'TWILIO_AUTH_TOKEN', fromNumber: 'TWILIO_FROM_NUMBER', messagingServiceSid: 'TWILIO_MESSAGING_SERVICE_SID' },
   cloudflareEmail: { accountId: 'CLOUDFLARE_ACCOUNT_ID', apiKey: 'CLOUDFLARE_EMAIL_API_TOKEN', zoneId: 'CLOUDFLARE_ZONE_ID', fromAddress: 'CLOUDFLARE_EMAIL_FROM_ADDRESS', fromName: 'CLOUDFLARE_EMAIL_FROM_NAME', replyToAddress: 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS' },
+  amazonSes: { emailProvider: 'EMAIL_PROVIDER', region: 'AWS_SES_REGION', accessKeyId: 'AWS_SES_ACCESS_KEY_ID', secretAccessKey: 'AWS_SES_SECRET_ACCESS_KEY', fromAddress: 'AWS_SES_FROM_ADDRESS', fromName: 'AWS_SES_FROM_NAME', replyToAddress: 'AWS_SES_REPLY_TO_ADDRESS', configurationSet: 'AWS_SES_CONFIGURATION_SET', snsTopicArn: 'AWS_SES_SNS_TOPIC_ARN' },
 };
-const providers: Record<string, string> = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', googleAdsNative: 'Google Shopping', microsoftAds: 'Microsoft Advertising', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email' };
-const secretFields = new Set(['apiKey', 'authToken', 'webhookSecret', 'privateKey', 'browserApiKey', 'clientSecret', 'refreshToken', 'developerToken']);
+const providers: Record<string, string> = { zernio: 'Zernio', openrouter: 'OpenRouter', googleDrive: 'Google Drive', googleCalendar: 'Google Calendar', googleMaps: 'Google Maps', googleAdsNative: 'Google Shopping', microsoftAds: 'Microsoft Advertising', broadsign: 'Broadsign', twilio: 'Twilio SMS', cloudflareEmail: 'Cloudflare transactional email', amazonSes: 'Amazon SES email' };
+const secretFields = new Set(['secretAccessKey', 'apiKey', 'authToken', 'webhookSecret', 'privateKey', 'browserApiKey', 'clientSecret', 'refreshToken', 'developerToken']);
 const defaults: Record<string, string> = { maxTokens: '2048', maxSteps: '4', environment: 'sandbox' };
 const groupFor = (provider: string) => ['googleDrive', 'googleCalendar'].includes(provider) ? 'google' : provider;
 
@@ -54,6 +55,12 @@ function validate(field: string, input: any) {
   if (field === 'fromNumber' && !/^\+[1-9]\d{6,14}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the Twilio sender number with + and country code.');
   if (['fromAddress', 'replyToAddress'].includes(field) && (value.length > 254 || !/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value))) fail(400, 'INVALID_SETTING', 'Enter a valid sender or reply email address.');
   if (field === 'fromName' && value.length > 200) fail(400, 'INVALID_SETTING', 'Keep the sender name to 200 characters.');
+  if (field === 'emailProvider' && !['ses', 'cloudflare'].includes(value)) fail(400, 'INVALID_SETTING', 'Choose Amazon SES or Cloudflare as the email provider.');
+  if (field === 'region' && !SES_REGIONS.includes(value)) fail(400, 'INVALID_SETTING', 'Choose an Amazon SES region from the list.');
+  if (field === 'accessKeyId' && !/^(AKIA|ASIA)[A-Z0-9]{16}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the 20-character AWS access key ID.');
+  if (field === 'secretAccessKey' && !/^[!-~]{40}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the 40-character AWS secret access key.');
+  if (field === 'configurationSet' && !/^[A-Za-z0-9_-]{1,64}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the SES configuration set name: letters, digits, dashes and underscores.');
+  if (field === 'snsTopicArn' && !/^arn:aws:sns:[a-z]{2}(?:-[a-z]+)+-\d:\d{12}:[A-Za-z0-9_-]{1,256}$/.test(value)) fail(400, 'INVALID_SETTING', 'Enter the SNS topic ARN, such as arn:aws:sns:us-east-1:123456789012:ses-feedback.');
   return value;
 }
 
@@ -103,8 +110,8 @@ export async function createIntegrationSettings({ db, env, secret }: { db: Datab
       if (secretFields.has(field)) secrets[field] = { configured: Boolean(value), source };
       else fields[field] = ['maxTokens', 'maxSteps'].includes(field) ? Number(value || defaults[field]) : value || defaults[field] || '';
     }
-    const configured = group === 'google' ? Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) : provider === 'openrouter' ? Boolean(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL) : provider === 'googleMaps' ? Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY) : provider === 'twilio' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : provider === 'cloudflareEmail' ? Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS) : provider === 'googleAdsNative' ? Boolean(env.GOOGLE_ADS_CLIENT_ID && env.GOOGLE_ADS_CLIENT_SECRET && env.GOOGLE_ADS_REFRESH_TOKEN && env.GOOGLE_ADS_DEVELOPER_TOKEN) : provider === 'microsoftAds' ? Boolean(env.MICROSOFT_ADS_CLIENT_ID && env.MICROSOFT_ADS_REFRESH_TOKEN && env.MICROSOFT_ADS_DEVELOPER_TOKEN) : Boolean(env[groups[group].apiKey]);
-    return { id: provider, label: providers[provider], configured, source: sources.size > 1 ? 'mixed' : [...sources][0] || 'unconfigured', fields, secretFields: secrets, updatedAt: row?.updatedAt || null };
+    const configured = group === 'google' ? Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY) : provider === 'openrouter' ? Boolean(env.OPENROUTER_API_KEY && env.OPENROUTER_MODEL) : provider === 'googleMaps' ? Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY) : provider === 'twilio' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : provider === 'cloudflareEmail' ? Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS) : provider === 'amazonSes' ? Boolean(env.AWS_SES_REGION && env.AWS_SES_ACCESS_KEY_ID && env.AWS_SES_SECRET_ACCESS_KEY && env.AWS_SES_FROM_ADDRESS) : provider === 'googleAdsNative' ? Boolean(env.GOOGLE_ADS_CLIENT_ID && env.GOOGLE_ADS_CLIENT_SECRET && env.GOOGLE_ADS_REFRESH_TOKEN && env.GOOGLE_ADS_DEVELOPER_TOKEN) : provider === 'microsoftAds' ? Boolean(env.MICROSOFT_ADS_CLIENT_ID && env.MICROSOFT_ADS_REFRESH_TOKEN && env.MICROSOFT_ADS_DEVELOPER_TOKEN) : Boolean(env[groups[group].apiKey]);
+    return { id: provider, label: providers[provider], configured, source: sources.size > 1 ? 'mixed' : [...sources][0] || 'unconfigured', fields, secretFields: secrets, ...(provider === 'amazonSes' ? { options: { region: [...SES_REGIONS] } } : {}), updatedAt: row?.updatedAt || null };
   }
   const describe = () => ({ providers: Object.keys(providers).map(describeProvider), revision });
   // Saves and resets run one at a time here, so env, the saved map and revision change in commit order.
@@ -214,6 +221,16 @@ export async function createIntegrationSettings({ db, env, secret }: { db: Datab
         const domain = current.CLOUDFLARE_EMAIL_FROM_ADDRESS.split('@')[1].toLowerCase();
         if (!data.result.some((row: any) => row.enabled && (row.name.toLowerCase() === domain || row.name.startsWith('*.') && domain.endsWith(row.name.slice(1).toLowerCase())))) fail(409, 'EMAIL_SENDER_NOT_ENABLED', 'The sender domain is not enabled for Cloudflare Email Sending in this zone.');
         result.message = 'Cloudflare confirmed an enabled sender domain. No email was sent; send permissions and delivery were not tested. Transactional email only.';
+      } else if (provider === 'amazonSes') {
+        if (current.AWS_SES_SNS_TOPIC_ARN && current.AWS_SES_SNS_TOPIC_ARN.split(':')[3] !== current.AWS_SES_REGION) fail(409, 'INVALID_SETTING', 'Use an SNS topic in the same region as Amazon SES.');
+        // Signed, read-only SES v2 reads: GetAccount, then GetEmailIdentity for the sender domain.
+        const origin = sesOrigin(current.AWS_SES_REGION), credentials = { accessKeyId: current.AWS_SES_ACCESS_KEY_ID, secretAccessKey: current.AWS_SES_SECRET_ACCESS_KEY };
+        const read = (path: string) => readProvider(origin + path, '', 'Amazon SES', (url, options) => fetch(url, { ...options, headers: { Accept: 'application/json', ...signAwsV4Request({ method: 'GET', host: new URL(origin).host, path, credentials, region: current.AWS_SES_REGION, service: 'ses', date: new Date() }) } }));
+        const account = await read('/v2/email/account'), domain = current.AWS_SES_FROM_ADDRESS.split('@')[1].toLowerCase();
+        if (account.SendingEnabled !== true) fail(409, 'SES_SENDING_DISABLED', 'Amazon SES reports that sending is paused for this account.');
+        const identity = await read(`/v2/email/identities/${pathSegment(domain)}`);
+        if (identity.VerifiedForSendingStatus !== true) fail(409, 'EMAIL_SENDER_NOT_ENABLED', 'The sender domain is not verified for sending in Amazon SES.');
+        result.message = `Amazon SES confirmed a verified sender domain${account.ProductionAccessEnabled === true ? '' : ' (sandbox: only verified recipients receive mail)'}. No email was sent; delivery and the SNS subscription were not tested.`;
       } else {
         const base = ({ sandbox: 'https://direct-sandbox.broadsign.com', production: 'https://direct.broadsign.com' } as Record<string, string>)[current.BROADSIGN_ENVIRONMENT || 'sandbox'];
         if (!base) fail(409, 'INVALID_SETTING', 'Choose the Broadsign sandbox or production environment.');

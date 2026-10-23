@@ -13,7 +13,7 @@ test('every Drizzle table and column is created by the SQL migrations', async ()
   const sql = await migrationSql(), type = '(?:text|bigint|integer|boolean|json|bytea)\\b';
   const created = new Map([...sql.matchAll(/^CREATE TABLE (\w+) \((.*)\);$/gm)].map(([, name, body]) => [name, [...body.matchAll(new RegExp(`(?:^|, )(\\w+) ${type}`, 'g'))].map(match => match[1])]));
   for (const [, name, column] of sql.matchAll(new RegExp(`^ALTER TABLE (\\w+) ADD COLUMN (\\w+) ${type}`, 'gm'))) created.get(name).push(column);
-  assert.equal(tables.length, 84);
+  assert.equal(tables.length, 86);
   assert.deepEqual(tables.map(table => table.name).sort(), [...created.keys()].sort());
   for (const table of tables) assert.deepEqual(table.columns.map(column => column.name), created.get(table.name), table.name);
 });

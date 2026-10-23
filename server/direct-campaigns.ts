@@ -4,7 +4,8 @@ import { createStore } from './database.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { activeSuppression, createContacts, lockContacts } from './contacts.ts';
-import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions } from './direct-providers.ts';
+import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions, emailProvider, requireEmailProvider } from './direct-providers.ts';
+import { SES_REGIONS, classifyEmailFeedback, readResponseText, verifySnsMessage } from '@ten98/runtime';
 
 const channels = ['email', 'sms', 'whatsapp'];
 const nowISO = () => new Date().toISOString();
@@ -57,7 +58,13 @@ function exclusion(contact: any, channel: string) {
   return '';
 }
 const credentialFields: Record<string, string[]> = { email: ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN', 'CLOUDFLARE_EMAIL_FROM_ADDRESS', 'CLOUDFLARE_EMAIL_FROM_NAME', 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS'], sms: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'TWILIO_MESSAGING_SERVICE_SID'], whatsapp: ['ZERNIO_API_KEY'] };
-const fingerprint = (env: any, channel: string) => createHash('sha256').update(JSON.stringify(credentialFields[channel].map(key => env[key] || ''))).digest('hex');
+// SES settings join the email fingerprint only once any is set, so campaigns scheduled before SES keep their hash.
+const sesFields = ['EMAIL_PROVIDER', 'AWS_SES_REGION', 'AWS_SES_ACCESS_KEY_ID', 'AWS_SES_SECRET_ACCESS_KEY', 'AWS_SES_FROM_ADDRESS', 'AWS_SES_FROM_NAME', 'AWS_SES_REPLY_TO_ADDRESS', 'AWS_SES_CONFIGURATION_SET'];
+const fingerprint = (env: any, channel: string) => createHash('sha256').update(JSON.stringify([...credentialFields[channel], ...(channel === 'email' && sesFields.some(key => env[key]) ? sesFields : [])].map(key => env[key] || ''))).digest('hex');
+// Transient and undetermined bounces suppress a recipient at the third within seven days (brief for ten98-campaign#77).
+const feedbackRules = { threshold: 3, windowMs: 7 * 86400000 };
+const recipientHash = (email: string) => createHash('sha256').update(email.toLowerCase()).digest('hex');
+const SES_SUPPRESSION_REASONS: Record<string, string> = { 'permanent-bounce': 'hard-bounce', complaint: 'complaint', 'repeated-transient': 'repeated-transient-bounce' };
 const statuses = ['pending', 'sending', 'accepted', 'queued', 'sent', 'delivered', 'read', 'failed', 'undelivered', 'suppressed', 'cancelled', 'uncertain'];
 const terminal = new Set(['delivered', 'read', 'failed', 'undelivered', 'suppressed', 'cancelled', 'uncertain']);
 function nextStatus(previous: string, incoming: string) {
@@ -129,7 +136,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     if (requireAuthor && !(await db.execute(sql`SELECT m.role FROM memberships m JOIN projects p ON p.workspace_id = m.workspace_id WHERE p.id = ${campaign.projectId} AND m.user_id = ${campaign.scheduledBy} AND m.role IN ('owner', 'admin', 'editor')`)).rowCount) fail(409, 'ACCESS_CHANGED', 'The campaign author no longer has permission to send.');
     return project;
   }
-  function ready(channel: string) { return channel === 'email' ? Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS) : channel === 'sms' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : Boolean(env.ZERNIO_API_KEY); }
+  function ready(channel: string) { return channel === 'email' ? emailProvider(env) === 'ses' || emailProvider(env) === 'cloudflare' && Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS) : channel === 'sms' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : Boolean(env.ZERNIO_API_KEY); }
   function unsubscribeToken(projectId: string, email: string) { const value = Buffer.from(JSON.stringify([projectId, email])).toString('base64url'); return `${value}.${createHmac('sha256', secret).update(`direct-unsubscribe:${value}`).digest('base64url')}`; }
   function unsubscribe(token: any) {
     if (typeof token !== 'string' || token.length > 1000) fail(400, 'INVALID_LINK', 'The preference link is invalid.');
@@ -179,7 +186,10 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     const policy: { contactId: string; expiresAt: string | null }[] = [];
     for (const contact of await contacts.list(projectId)) {
       const match = suppressed.find((row: any) => row.email?.toLowerCase() === contact.email); if (!match) continue;
-      if (match.reason === 'policy') policy.push({ contactId: contact.id, expiresAt: match.expiresAt });
+      const [outcome] = classifyEmailFeedback({ provider: 'cloudflare', email: match.email, reason: match.reason, expiresAt: match.expiresAt }, { transient: feedbackRules });
+      // Only a policy row alerts; any other row, including a reason the classifier does not recognise, suppresses (fail safe).
+      if (outcome?.action === 'deliverability-alert') policy.push({ contactId: contact.id, expiresAt: match.expiresAt });
+      // Cloudflare refuses the address itself until the row expires, so an expiring row holds the contact until then.
       else if (match.expiresAt) await contacts.suppressUntil(projectId, contact.id, 'email', match.reason, match.expiresAt);
       else await contacts.suppress(projectId, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason);
     }
@@ -225,7 +235,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           await finish(campaign);
         } else {
           // A failed sync leaves this tick's send waiting rather than sending past a fresh complaint.
-          if (campaign.channel === 'email' && !(Date.parse(campaign.suppressionsSyncedAt) > Date.now() - 900000)) { await applyEmailSuppressions(campaign.projectId, assertMapping); campaign.suppressionsSyncedAt = new Date().toISOString(); await save(campaign); }
+          if (campaign.channel === 'email' && emailProvider(env) === 'cloudflare' && !(Date.parse(campaign.suppressionsSyncedAt) > Date.now() - 900000)) { await applyEmailSuppressions(campaign.projectId, assertMapping); campaign.suppressionsSyncedAt = new Date().toISOString(); await save(campaign); }
           const [delivery] = (await resultRows(db.execute(sql`SELECT data FROM direct_deliveries WHERE campaign_id = ${campaign.id} AND data->>'status' = 'pending' ORDER BY seq LIMIT 1`))).map(row => row.data);
           if (!delivery) { await finish(campaign); continue; }
           const contact: any = await contacts.get(campaign.projectId, delivery.contactId), reason = exclusion(contact, campaign.channel);
@@ -247,7 +257,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           } catch (error: any) {
             if (campaign.channel === 'sms' && error.providerCode === 21610) await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
             const latest = await changeDelivery(delivery.id, latest => { if (latest.providerId) return false; latest.status = error.uncertain ? 'uncertain' : 'failed'; latest.error = error instanceof IntegrationError ? error.message : 'The provider did not confirm the message.'; });
-            if (error.uncertain || error.status === 429) { campaign.status = 'attention'; campaign.lastError = latest.error || 'Review the provider acknowledgement before continuing.'; }
+            if (error.uncertain || error.status === 429 || error.code === 'EMAIL_SENDER_BLOCKED') { campaign.status = 'attention'; campaign.lastError = latest.error || 'Review the provider acknowledgement before continuing.'; }
           }
           await finish(campaign);
         }
@@ -259,7 +269,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     const route = url.pathname.match(/^\/api\/projects\/[^/]+\/direct\/(status|templates|contacts|campaigns)(?:\/([^/]+))?(?:\/([^/]+))?$/);
     if (!route) return false;
     const [, kind, id, action] = route, method = req.method;
-    if (kind === 'status' && method === 'GET') { let accounts: any[] = [], accountError: any; if (env.ZERNIO_API_KEY && project.zernioProfileId) { try { accounts = await scopedAccounts(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping(project.zernioProfileId)), project.zernioProfileId); } catch (error: any) { accountError = error instanceof IntegrationError ? error.message : 'WhatsApp accounts could not be loaded.'; } } send(200, { providers: Object.fromEntries(channels.map(channel => [channel, ready(channel) && (channel !== 'whatsapp' || Boolean(project.zernioProfileId && !accountError))])), accounts: accounts.filter(account => account.platform === 'whatsapp').map(account => ({ id: account._id || account.id, name: account.displayName || account.username || 'WhatsApp Business' })), accountError, emailPolicy: 'transactional_only', deliverabilityAlerts: await deliverabilityAlerts(project.id), callbackUrl: `${appUrl}/api/webhooks/twilio/inbound`, publicCallbacks: appUrl.startsWith('https://') }); return true; }
+    if (kind === 'status' && method === 'GET') { let accounts: any[] = [], accountError: any; if (env.ZERNIO_API_KEY && project.zernioProfileId) { try { accounts = await scopedAccounts(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping(project.zernioProfileId)), project.zernioProfileId); } catch (error: any) { accountError = error instanceof IntegrationError ? error.message : 'WhatsApp accounts could not be loaded.'; } } send(200, { providers: Object.fromEntries(channels.map(channel => [channel, ready(channel) && (channel !== 'whatsapp' || Boolean(project.zernioProfileId && !accountError))])), accounts: accounts.filter(account => account.platform === 'whatsapp').map(account => ({ id: account._id || account.id, name: account.displayName || account.username || 'WhatsApp Business' })), accountError, emailPolicy: 'transactional_only', emailProvider: emailProvider(env), sesWebhookUrl: `${appUrl}/api/webhooks/ses/sns`, deliverabilityAlerts: await deliverabilityAlerts(project.id), callbackUrl: `${appUrl}/api/webhooks/twilio/inbound`, publicCallbacks: appUrl.startsWith('https://') }); return true; }
     if (kind === 'templates' && method === 'GET') { send(200, await listWhatsAppTemplates({ env: { ...env }, project, accountId: url.searchParams.get('accountId'), assertMapping: () => context.assertProjectMapping(project.zernioProfileId) })); return true; }
     if (kind === 'contacts') {
       if (!id && method === 'GET') send(200, { contacts: await contacts.list(project.id) });
@@ -292,6 +302,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       if (!['email', 'sms'].includes(campaign.channel)) fail(400, 'TEST_SEND_UNSUPPORTED', 'Test sends are available for email and SMS drafts.');
       if (!body || typeof body !== 'object' || Object.keys(body).some(key => !['confirmed', 'contactId'].includes(key))) fail(400, 'INVALID_TEST_SEND', 'Use only the fields shown in the test send form.');
       if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Confirm the test send and its provider charge.');
+      if (campaign.channel === 'email') requireEmailProvider(env);
       if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
       if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending.');
       let contact: any;
@@ -309,6 +320,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       if (campaign.status !== 'draft') { send(200, { campaign: await decorate(campaign), deliveries: await deliveries(id) }); return true; }
       if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Review the audience and confirm provider charges before sending.');
       if (campaign.channel === 'email' && body.transactionalConfirmed !== true) fail(400, 'TRANSACTIONAL_CONFIRMATION_REQUIRED', 'Confirm this message is transactional and contains no marketing content.');
+      if (campaign.channel === 'email') requireEmailProvider(env);
       if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
       if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending so unsubscribe links and delivery callbacks can work.');
       const scheduledAt = action === 'send' ? nowISO() : body.scheduledAt;
@@ -324,7 +336,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
         // Row lock: a double-submitted send or schedule queues the deliveries once.
         const fresh = await find(project.id, id, tx, true); if (fresh.status !== 'draft') return;
         if ((await preview(fresh, tx)).previewToken !== body.previewToken) fail(409, 'AUDIENCE_CHANGED', 'The campaign or audience changed during preparation. Review a fresh preview before confirming.');
-        Object.assign(campaign, { status: 'scheduled', scheduledAt: new Date(scheduledAt).toISOString(), scheduledBy: user.id, profileId: project.zernioProfileId, credentialHash: fingerprint(env, campaign.channel), audienceCount: selected.eligible.length }); await save(campaign, tx);
+        Object.assign(campaign, { status: 'scheduled', scheduledAt: new Date(scheduledAt).toISOString(), scheduledBy: user.id, profileId: project.zernioProfileId, credentialHash: fingerprint(env, campaign.channel), ...(campaign.channel === 'email' ? { emailProvider: emailProvider(env) } : {}), audienceCount: selected.eligible.length }); await save(campaign, tx);
         for (const contact of selected.eligible) { const delivery = { id: randomUUID(), campaignId: id, contactId: contact.id, recipient: campaign.channel === 'email' ? contact.email : contact.phone, status: 'pending', createdAt: nowISO() }; await tx.execute(sql`INSERT INTO direct_deliveries (id, campaign_id, contact_id, data) VALUES (${delivery.id}, ${id}, ${contact.id}, ${JSON.stringify(delivery)})`); }
         await createStore(tx).activity(project.id, `${campaign.channel === 'email' ? 'Transactional email' : campaign.channel.toUpperCase()} campaign scheduled for ${selected.eligible.length} recipients.`);
       });
@@ -361,10 +373,78 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           await recordSms(campaign, latest); if (result.errorCode === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
         }
       }
-      if (campaign.channel === 'email' && ready('email')) await applyEmailSuppressions(project.id, () => context.assertIntegrationSettings());
+      if (campaign.channel === 'email' && ready('email') && emailProvider(env) === 'cloudflare') await applyEmailSuppressions(project.id, () => context.assertIntegrationSettings());
       await context.assertIntegrationSettings(); await finishLatest(project.id, id); send(200, { campaign: await decorate(await find(project.id, id)), deliveries: await deliveries(id) }); return true;
     }
     return false;
+  }
+  // SNS signing certificates, cached by URL. The runtime verifier only asks for URLs on the regional SNS origin.
+  const certificates = new Map<string, string>();
+  async function snsCertificate(url: string) {
+    const cached = certificates.get(url); if (cached) return cached;
+    const signal = AbortSignal.timeout(10000), response = await fetch(url, { redirect: 'error', credentials: 'omit', signal });
+    if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new Error('certificate'); }
+    const pem = await readResponseText(response, { maxBytes: 16384, signal });
+    if (certificates.size >= 20) certificates.clear(); certificates.set(url, pem); return pem;
+  }
+  // Amazon SES feedback through an SNS HTTPS subscription. Only a verified message for the configured topic does anything,
+  // and every refusal gets the same empty 400. Returns the HTTP status; a 500 asks SNS to redeliver. It depends on the
+  // topic settings, not on the current send provider, so feedback for earlier SES sends still applies after a switch.
+  async function receiveSes(rawBody: Buffer): Promise<number> {
+    const topic = env.AWS_SES_SNS_TOPIC_ARN, region = env.AWS_SES_REGION;
+    if (!topic || !SES_REGIONS.includes(region) || topic.split(':')[3] !== region) return 503;
+    let body: string; try { body = new TextDecoder('utf-8', { fatal: true }).decode(rawBody); } catch { return 400; }
+    const claimed = async (id: string) => Boolean((await db.execute(sql`SELECT 1 FROM ses_notification_receipts WHERE topic_arn = ${topic} AND message_id = ${id}`)).rowCount);
+    const verified = await verifySnsMessage(body, { allowedRegions: [region], topicArns: [topic], fetchCertificate: snsCertificate, isDuplicate: claimed });
+    if (!verified.ok) return 400;
+    if (verified.duplicate) return 200;
+    try {
+      // The claim and every effect commit together: a failure or crash leaves nothing, so SNS's redelivery is applied in full.
+      await db.transaction(async tx => {
+        if (!(await tx.execute(sql`INSERT INTO ses_notification_receipts VALUES (${topic}, ${verified.messageId}, ${nowISO()}) ON CONFLICT DO NOTHING`)).rowCount) return;
+        if (verified.type === 'SubscriptionConfirmation') {
+          const response = await fetch(verified.subscribeUrl!, { redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(10000) });
+          await response.body?.cancel().catch(() => {}); if (!response.ok) throw new Error('subscription');
+        } else if (verified.type === 'Notification') await applySesFeedback(tx, verified.message);
+      });
+    } catch { return 500; }
+    // The verifier refuses messages older than an hour, so a day of receipts covers every redelivery it would accept.
+    await db.execute(sql`DELETE FROM ses_notification_receipts WHERE received_at < ${new Date(Date.now() - 86400000).toISOString()}`);
+    return 200;
+  }
+  // One SES Bounce, Complaint or Delivery record for a direct campaign delivery, classified by the shared runtime mapper.
+  // Feedback for mail Campaign did not send through a campaign (no delivery has that SES message ID) is ignored.
+  async function applySesFeedback(tx: Transaction, message: any) {
+    const messageId = message?.mail?.messageId;
+    if (typeof messageId !== 'string' || !messageId) return;
+    const [row] = await resultRows(tx.execute(sql`SELECT d.id, d.data AS delivery, c.project_id FROM direct_deliveries d JOIN direct_campaigns c ON c.id = d.campaign_id WHERE d.data->>'providerId' = ${messageId} AND c.data->>'channel' = 'email' AND c.data->>'emailProvider' = 'ses' LIMIT 1`));
+    if (!row) return;
+    const delivery = row.delivery, projectId: string = row.project_id, recipient = String(delivery.recipient).toLowerCase(), target = recipientHash(recipient);
+    // One recipient's feedback is applied one message at a time, so concurrent transients cannot both miss the threshold.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'ses-feedback:' + projectId + ':' + target}, 0))`);
+    const occurred = Date.parse(message.bounce?.timestamp || message.complaint?.timestamp || message.delivery?.timestamp || message.mail?.timestamp), at = new Date(Number.isFinite(occurred) ? occurred : Date.now()).toISOString();
+    const earlier = (await resultRows(tx.execute(sql`SELECT occurred_at FROM direct_email_feedback WHERE project_id = ${projectId} AND target_hash = ${target} AND occurred_at >= ${new Date(Date.parse(at) - feedbackRules.windowMs).toISOString()}`))).map(item => Date.parse(item.occurred_at));
+    const eventId = String(message.bounce?.feedbackId || message.complaint?.feedbackId || messageId);
+    for (const outcome of classifyEmailFeedback(message, { transient: feedbackRules, history: () => earlier })) {
+      if (outcome.recipient.toLowerCase() !== recipient) continue;
+      // Each provider event counts once toward the transient threshold, however often SNS delivers it.
+      if (['count-transient', 'flag-undetermined'].includes(outcome.action) || outcome.reason === 'repeated-transient') {
+        const counted = await tx.execute(sql`INSERT INTO direct_email_feedback VALUES (${projectId}, 'ses', ${eventId}, ${target}, ${message.bounce?.bounceType === 'Undetermined' ? 'undetermined' : 'transient'}, ${outcome.subType ?? null}, ${at}) ON CONFLICT DO NOTHING`);
+        if (!counted.rowCount) continue;
+      }
+      if (outcome.action === 'suppress') await contacts.suppressDestination(projectId, 'email', recipient, SES_SUPPRESSION_REASONS[outcome.reason] || outcome.reason, tx);
+      if (outcome.action === 'record' && outcome.reason === 'unsubscribed-recipient') await contacts.suppressDestination(projectId, 'email', recipient, 'Unsubscribed', tx);
+      if (['deliverability-alert', 'flag-undetermined'].includes(outcome.action)) {
+        // SES alerts lapse a week after the latest report; Cloudflare's are replaced by each suppression sync.
+        const expires = new Date(Date.parse(at) + feedbackRules.windowMs).toISOString(), kind = outcome.action === 'flag-undetermined' ? 'undetermined' : 'policy';
+        await tx.execute(sql`INSERT INTO direct_deliverability_alerts SELECT ${projectId}, 'ses', ${kind}, id, ${expires}, ${at}, ${at} FROM direct_contacts WHERE id = ${delivery.contactId} AND project_id = ${projectId} ON CONFLICT (project_id, provider, kind, contact_id) DO UPDATE SET expires_at = excluded.expires_at, last_seen_at = excluded.last_seen_at`);
+      }
+      const status = outcome.action === 'delivered' ? 'delivered' : outcome.action === 'record' && outcome.reason === 'provider-suppressed' ? 'suppressed' : message.bounce ? 'failed' : '';
+      if (status) {
+        const [locked] = await resultRows(tx.execute(sql`SELECT data FROM direct_deliveries WHERE id = ${row.id} FOR UPDATE`)), current = locked?.data;
+        if (current && nextStatus(current.status, status) !== current.status) { current.status = nextStatus(current.status, status); await putDelivery(current, tx); }
+      }
+    }
   }
   async function receiveTwilio({ rawBody, headers, url }: { rawBody: any; headers: any; url: URL }) {
     if (!env.TWILIO_AUTH_TOKEN || !env.TWILIO_ACCOUNT_SID) fail(503, 'WEBHOOK_NOT_CONFIGURED', 'Twilio is not configured.');
@@ -401,7 +481,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
   async function backfillSms() {
     for (const { data: campaign } of await resultRows(db.execute(sql`SELECT data FROM direct_campaigns ORDER BY seq`))) { if (campaign.channel !== 'sms') continue; for (const delivery of await deliveries(campaign.id)) { if (!delivery.smsAccountSid && campaign.credentialHash === fingerprint(env, 'sms') && !env.TWILIO_MESSAGING_SERVICE_SID) Object.assign(delivery, { smsAccountSid: env.TWILIO_ACCOUNT_SID, smsSender: env.TWILIO_FROM_NUMBER }); await recordSms(campaign, delivery); } }
   }
-  return { handle, contacts, processPending, receiveTwilio, handleUnsubscribe,
+  return { handle, contacts, processPending, receiveTwilio, receiveSes, handleUnsubscribe,
     /** Attaches the inbox at once; the returned promise records existing campaign SMS in it. Await it before serving requests. */
     attachSmsInbox(service: any) { smsInbox = service; return attaching = backfillSms(); },
     close() { closed = true; },
