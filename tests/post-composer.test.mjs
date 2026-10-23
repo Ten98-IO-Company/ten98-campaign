@@ -108,7 +108,7 @@ test('actual account composer rendering shows distinct caption, media, options a
   // In the editor Dialog the actions render into its always-visible footer, outside the form, so Save names the form it submits.
   stateIndex = 0; const host = {}, hosted = renderToStaticMarkup(Composer({ post, accounts, assets: [], campaigns: [], canWrite: true, onSubmit: async () => {}, actionsHost: host }));
   assert.doesNotMatch(hosted, />Save changes</); assert.equal(portals.length, 1); assert.equal(portals[0][1], host);
-  assert.match(renderToStaticMarkup(portals[0][0]), /^<button type="button"[^>]*>Cancel<\/button><button type="submit"[^>]*form="composer-form"[^>]*>Save changes<\/button>[\s\S]*>Schedule</, 'Schedule follows Save as the primary action.');
+  assert.match(renderToStaticMarkup(portals[0][0]), /^<button type="button"[^>]*>Cancel<\/button><button type="submit"[^>]*form="composer-form"[^>]*>Save changes<\/button>[\s\S]*>(Schedule|Save to calendar)</, 'The schedule action follows Save as the primary action.');
   assert.match(html, /Customise destination/); assert.match(html, /Brand Two · second/); assert.match(html, /Second brand caption/); assert.match(html, /second\.jpg/); assert.match(html, /Separate account publishing options/); assert.match(html, /Separate account time/); assert.match(html, /2070-01-02/); assert.equal(post.platformOverrides.facebook.content, 'Platform caption');
 });
 

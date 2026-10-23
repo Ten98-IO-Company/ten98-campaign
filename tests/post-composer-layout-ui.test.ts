@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { stripTypeScriptTypes as stripTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
@@ -169,6 +170,49 @@ test('destinations span both panes, problems read "Network (Account): message" a
   const status = (platform: string) => { view.find(node => node.type === ui.SegmentedControl && node.props.label === 'Preview network')!.props.onValueChange(platform); view.paint(); const aside = view.find(node => node.props?.['aria-label'] === 'Post preview')!; return nodes(aside).filter(node => node.type === ui.Badge).map(node => [node.props.tone, text(node)]); };
   assert.deepEqual(status('instagram'), [['danger', 'Needs a fix']]);
   assert.deepEqual(status('facebook'), [['success', 'Ready']]);
+});
+
+test('Schedule submits to the scheduler when publishing is open; otherwise the action reads Save to calendar and says why', async () => {
+  const published: any[] = [], saved: any[] = [], opened: boolean[] = [];
+  const props = { ...base, accounts, initialScheduledAt: '2070-01-01T09:00', onSubmit: async (values: any) => { saved.push(values); }, onSchedule: async (values: any) => { published.push(values); }, onOpenIntegrations: () => opened.push(true) };
+  const menu = (view: ReturnType<typeof mount>) => view.find(node => node.type === ui.Popover)!;
+  const ready = mount(props); ready.pick(['fb-a']); ready.type('Caption', 'Go');
+  assert.equal(menu(ready).props.triggerLabel, 'Schedule');
+  await ready.openSchedule(); assert.equal(text(ready.confirm()), 'Schedule');
+  await ready.confirm()!.props.onClick(); await ready.settle();
+  assert.equal(published.length, 1, 'Schedule submits through the publish path.'); assert.equal(saved.length, 0); assert.equal(published[0].status, 'scheduled');
+  const offline = mount({ ...props, onLoadAccounts: undefined }); offline.pick(['fb-a']); offline.type('Caption', 'Plan');
+  assert.equal(menu(offline).props.triggerLabel, 'Save to calendar');
+  await offline.openSchedule(); assert.equal(text(offline.confirm()), 'Save to calendar');
+  assert.match(offline.html(), /Connect Zernio in Integrations to publish\./);
+  nodes(menu(offline)).find(node => node.type === ui.Button && text(node) === 'Open integrations')!.props.onClick(); assert.deepEqual(opened, [true]);
+  await offline.confirm()!.props.onClick(); await offline.settle();
+  assert.equal(saved.length, 1, 'Save to calendar saves the plan.'); assert.equal(published.length, 1);
+  const reason = 'This project requires approval before publishing. Request a review first.';
+  const blocked = mount({ ...props, publishBlock: reason }); blocked.pick(['fb-a']); blocked.type('Caption', 'Needs review');
+  assert.equal(menu(blocked).props.triggerLabel, 'Save to calendar');
+  assert.ok(nodes(menu(blocked)).some(node => node.type === ui.Text && text(node) === reason), 'The block reason sits beside the action.');
+  const invalid = mount({ ...props, post: { content: 'Reel', platforms: ['instagram'], accounts: ['ig-a'], mediaItems: [] } });
+  assert.equal(menu(invalid).props.triggerLabel, 'Save to calendar');
+  assert.ok(nodes(menu(invalid)).some(node => node.type === ui.Text && text(node) === 'Instagram (Brand gram): Instagram requires media.'));
+});
+
+test('the editor wires Schedule to save then the post card publish path, with the same connection and approval gates', async () => {
+  const app = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  const composer = app.match(/modal\.type === 'post' \? <PostComposer [^\r\n]+?\/>/)?.[0] || '';
+  for (const prop of ['onSchedule={schedulePost}', 'connected={!!connected}', 'publishBlock={composerPublishBlock}', "onOpenIntegrations={() => setPage('Integrations')}"]) assert.ok(composer.includes(prop), prop);
+  const schedule = app.slice(app.indexOf('async function schedulePost('), app.indexOf('\n', app.indexOf('async function schedulePost(')));
+  const calls: any[] = [];
+  const run = new Function('savePost', 'publish', 'modal', `return (${stripTypes(schedule)});`)(async (...args: any[]) => { calls.push(['save', ...args]); return { record: { id: 'new-post', status: 'scheduled' } }; }, async (post: any) => { calls.push(['publish', post]); }, null);
+  await run({ content: 'Go' });
+  assert.deepEqual(calls, [['save', { content: 'Go' }, ''], ['publish', { id: 'new-post', status: 'scheduled' }]], 'Saved first, then the existing publish(post), with no second notice.');
+  const block = app.match(/const composerPublishBlock = (.+);/)![1];
+  const approval = app.match(/const composerApproval = (.+);/)![1];
+  const gate = (summary: any, connected: any, item: any) => { const modal = { type: 'post', item }, approvalGate = (_: any, id: string) => summary?.[id] ?? null; const composerApproval = new Function('modal', 'approvalGate', 'approvalSummary', `return (${approval});`)(modal, approvalGate, summary); return new Function('connected', 'modal', 'composerApproval', `return (${block});`)(connected, modal, composerApproval); };
+  assert.equal(gate(null, false, undefined), 'Connect Zernio in Integrations to publish.');
+  assert.equal(gate(null, true, { id: 'p', sample: true }), 'Sample posts cannot be published.');
+  assert.equal(gate({ p: { publishable: false, reason: 'Waiting for approval.' } }, true, { id: 'p' }), 'Waiting for approval.');
+  assert.equal(gate({ p: { publishable: true, reason: '' } }, true, { id: 'p' }), undefined);
 });
 
 test('the Schedule step lives in the footer menu: one confirm, one Cancel, and the preview stays in place', async () => {

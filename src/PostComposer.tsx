@@ -25,6 +25,11 @@ type Props = {
   /** The project has a social publishing connection. Defaults to whether accounts can be loaded (the editor passes `onLoadAccounts` only when connected); provider posts are connected. */
   connected?: boolean;
   onOpenIntegrations?: () => void;
+  /** Saves the post and submits it to the networks' scheduler (the post card's publish path). Without it, or while publishing
+   * is blocked, the primary action only saves the plan to the calendar. */
+  onSchedule?: (values: Record<string, any>) => Promise<any>;
+  /** Why publishing is blocked for this post, for example an approval it still needs. */
+  publishBlock?: string;
 };
 const own = Object.hasOwn;
 const localTime = (value = '') => value && Number.isFinite(Date.parse(value)) ? new Date(Date.parse(value) - new Date(value).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
@@ -228,7 +233,7 @@ export function PostVariantPreview({ platform, variant, accountName = 'Your bran
     firstComment={options.firstComment || undefined}/>;
 }
 
-export default function PostComposer({ post, assets = [], campaigns = [], accounts: connectedAccounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onLookupDestinations, onLoadQueues, onLoadGroups, onShortenLinks, providerPost = false, connected = providerPost || !!onLoadAccounts, onOpenIntegrations, busy = false, readOnly = false, initialScheduledAt, actionsHost }: Props) {
+export default function PostComposer({ post, assets = [], campaigns = [], accounts: connectedAccounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onLookupDestinations, onLoadQueues, onLoadGroups, onShortenLinks, providerPost = false, connected = providerPost || !!onLoadAccounts, onOpenIntegrations, onSchedule, publishBlock, busy = false, readOnly = false, initialScheduledAt, actionsHost }: Props) {
   const [content, setContent] = useState(post?.content || ''), [platforms, setPlatforms] = useState<string[]>(post?.platforms || []), [selectedAccounts, setAccounts] = useState<string[]>(post?.accounts || []);
   const [assetId, setAssetId] = useState(post?.assetId || ''), [campaignId, setCampaignId] = useState(post?.campaignId || ''), [scheduledAt, setScheduledAt] = useState(localTime(post?.scheduledAt) || initialScheduledAt || '');
   const [baseMode, setBaseMode] = useState(Array.isArray(post?.mediaItems) ? post.mediaItems.length ? 'custom' : 'none' : post?.assetId ? 'asset' : 'none'), [baseMedia, setBaseMedia] = useState<MediaItem[]>(post?.mediaItems || []);
@@ -286,14 +291,14 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     const options = { ...variant?.options }; value === undefined ? delete options[key] : options[key] = value;
     changeOverride({ options });
   }
-  async function submit(event: React.FormEvent<HTMLFormElement>) {
+  async function submit(event: React.FormEvent<HTMLFormElement>, publish = false) {
     event.preventDefault(); if (disabled) return; setError('');
     try {
       if (!platforms.length) throw new Error('Choose at least one social platform.');
       const invalid = Object.entries(optionErrors).find(([key, value]) => value && platforms.includes(key.split(':')[0]));
       if (invalid) throw new Error(invalid[1]);
       normalizePostTags(values.tags); normalizePostVariants(values); normalizeAccountVariants(values);
-      setSaving(true); await onSubmit(values);
+      setSaving(true); await (publish && onSchedule ? onSchedule(values) : onSubmit(values));
     } catch (failure) { setError((failure as Error).message || 'Your draft could not be saved. Your entries are still here.'); headingRef.current?.focus(); } finally { setSaving(false); }
   }
   async function checkWithProvider() {
@@ -338,7 +343,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     setAccountsTouched(true); setAccounts(ids); setPlatforms(next);
     const last = added.length ? platformOf(added[added.length - 1]) : undefined; if (last) setActivePlatform(last);
   }
-  const save = () => submit({ preventDefault() {} } as React.FormEvent<HTMLFormElement>);
+  const save = (publish = false) => submit({ preventDefault() {} } as React.FormEvent<HTMLFormElement>, publish);
   const providerErrors = providerCheck?.result?.errors || providerCheck?.result?.validation?.errors || [], providerWarnings = providerCheck?.result?.warnings || providerCheck?.result?.validation?.warnings || [];
   const mediaMode = platformMediaModes[editKey] || (own(override, 'mediaItems') ? override.mediaItems?.length ? 'custom' : 'none' : own(override, 'assetId') ? override.assetId ? 'asset' : 'none' : 'shared');
   const captionLimit = variant ? captionLimitForVariant(variant) : rule?.captionLimit || 0;
@@ -382,10 +387,13 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   const customised = Object.keys(post?.platformOverrides || {}).length > 0 || Object.keys(post?.accountOverrides || {}).length > 0;
   const plannedAt = scheduledAt && Number.isFinite(Date.parse(scheduledAt)) ? new Date(scheduledAt) : null;
   // Local checks gate Schedule; Save draft stays available for unfinished posts.
-  const scheduleBlocked = !platforms.length ? 'Choose where to post.' : !queueId && !plannedAt ? 'Choose a time or the next free slot.' : !queueId && plannedAt!.getTime() <= Date.now() ? 'Choose a time in the future.' : queueId && selectedQueue && selectedQueue.version !== queueVersion ? 'Review the queue changes first.' : checks.errors.length ? 'Fix the problems listed under the caption first.' : undefined;
+  const scheduleBlocked = !platforms.length ? 'Choose where to post.' : !queueId && !plannedAt ? 'Choose a time or the next free slot.' : !queueId && plannedAt!.getTime() <= Date.now() ? 'Choose a time in the future.' : queueId && selectedQueue && selectedQueue.version !== queueVersion ? 'Review the queue changes first.' : undefined;
+  // Schedule submits to the networks only when nothing blocks publishing; otherwise the same step saves the plan and says why.
+  const publishReason = !connected ? 'Connect Zernio in Integrations to publish.' : publishBlock || problems[0]?.text || (!onSchedule ? 'Publishing is not available from this editor.' : undefined);
+  const primaryLabel = publishReason ? 'Save to calendar' : 'Schedule';
   const when = queueId ? `Next free slot${selectedQueue ? ' in ' + selectedQueue.name : ''}` : plannedAt ? `Planned for ${plannedAt.toLocaleString()}` : 'Not scheduled';
   const destinationNames = [...selectedAccounts.map(id => { const account = accounts.find(row => accountId(row) === id); return account ? `${accountLabel(account)} · ${PLATFORM_RULES[account.platform]?.label || account.platform}` : id; }), ...platforms.filter(platform => !selectedAccounts.some(id => accounts.find(row => accountId(row) === id)?.platform === platform)).map(platform => PLATFORM_RULES[platform]?.label || platform)];
-  function primaryAction() { if (providerPost) void save(); else if (!scheduleMenu) setScheduleMenu(true); else if (!scheduleBlocked && !saving && !busy) void save(); }
+  function primaryAction() { if (providerPost) void save(); else if (!scheduleMenu) setScheduleMenu(true); else if (!scheduleBlocked && !saving && !busy) void save(!publishReason); }
   const timing = <Stack gap={3}>
     <DateTimeField label="Time" timeZoneLabel={browserTimeZone} disabled={!!queueId} value={scheduledAt} onValueChange={setScheduledAt} description={providerPost ? 'Accounts without a separate time use this planned time. Clear every separate account time before returning the provider post to an unpublished draft.' : undefined}/>
     {!providerPost && <Inline gap={2} role="group" aria-label="Quick schedule times">{schedulePresets.map(preset => <Button key={preset.key} variant="secondary" size="sm" disabled={!!queueId} onClick={() => setScheduledAt(presetTime(preset.key))}>{preset.label}</Button>)}</Inline>}
@@ -406,15 +414,14 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   </Stack>;
   const reasonId = formId + '-schedule-reason';
   const scheduleStep = <Stack gap={4}>
-    {(onValidate || onLoadQueues) && offline}
     {onLoadQueues && <Inline><Button variant="secondary" size="sm" pressed={!!queueId} disabled={loadingQueues || !connected} onClick={() => void chooseNextSlot()}>Next free slot</Button></Inline>}
     {timing}
     <Text size="sm"><Text as="strong" weight="semibold">Posts to</Text> {destinationNames.join(', ') || 'no destinations yet'}</Text>
     {postCheck}
     {error && <Alert tone="danger" variant="inline">{error}</Alert>}
-    <Text tone="muted" size="sm">Scheduling saves the planned time. Send the post to the networks from its card in Publishing.</Text>
+    {publishReason && <Inline gap={2} align="center"><Text size="sm" tone="muted">{publishReason}</Text>{!connected && integrationsAction}</Inline>}
     {scheduleBlocked && <Text id={reasonId} size="sm" tone="muted">{scheduleBlocked}</Text>}
-    <Inline justify="end"><Button variant="primary" disabled={!!scheduleBlocked || saving || busy} aria-describedby={scheduleBlocked ? reasonId : undefined} onClick={() => save()}>{saving || busy ? 'Saving…' : 'Schedule'}</Button></Inline>
+    <Inline justify="end"><Button variant="primary" disabled={!!scheduleBlocked || saving || busy} aria-describedby={scheduleBlocked ? reasonId : undefined} onClick={() => save(!publishReason)}>{saving || busy ? 'Saving…' : primaryLabel}</Button></Inline>
   </Stack>;
   // The To row spans both panes so the preview sits beside the caption.
   const destinations = <Stack as="fieldset" gap={3} disabled={disabled}>
@@ -457,7 +464,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     <Text tone="muted" size="sm">{when}</Text>
   </Stack>;
   const canSave = !disabled || busy || saving;
-  const actions = <>{onDelete && canWrite && !readOnly && !post?.externalId && post?.status !== 'published' && <Button variant="danger" disabled={busy || saving} onClick={onDelete}>Delete</Button>}<Button variant="secondary" disabled={saving} onClick={onCancel}>{readOnly || !canWrite ? 'Close' : 'Cancel'}</Button>{canSave ? <Button variant={providerPost ? 'primary' : 'secondary'} type="submit" form={formId} disabled={disabled}>{saving || busy ? 'Saving…' : post ? 'Save changes' : 'Save draft'}</Button> : null}{canSave && !providerPost && <Popover label="Schedule options" triggerLabel="Schedule" triggerVariant="primary" placement="top-end" open={scheduleMenu} onOpenChange={setScheduleMenu} disabled={disabled}>{scheduleStep}</Popover>}</>;
+  const actions = <>{onDelete && canWrite && !readOnly && !post?.externalId && post?.status !== 'published' && <Button variant="danger" disabled={busy || saving} onClick={onDelete}>Delete</Button>}<Button variant="secondary" disabled={saving} onClick={onCancel}>{readOnly || !canWrite ? 'Close' : 'Cancel'}</Button>{canSave ? <Button variant={providerPost ? 'primary' : 'secondary'} type="submit" form={formId} disabled={disabled}>{saving || busy ? 'Saving…' : post ? 'Save changes' : 'Save draft'}</Button> : null}{canSave && !providerPost && <Popover label="Schedule options" triggerLabel={primaryLabel} triggerVariant="primary" placement="top-end" open={scheduleMenu} onOpenChange={setScheduleMenu} disabled={disabled}>{scheduleStep}</Popover>}</>;
   return <Form id={formId} gap={6} onSubmit={(_, event) => submit(event)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !disabled) { event.preventDefault(); primaryAction(); } }}>
     <Input type="hidden" name="draftSnapshot" readOnly value={JSON.stringify(values)}/>
     <VisuallyHidden as="h3" tabIndex={-1} ref={headingRef}>Post composer</VisuallyHidden>
