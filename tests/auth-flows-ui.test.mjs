@@ -29,17 +29,42 @@ test('owner setup keeps the host token, password policy and sample opt-in and su
   assert.deepEqual(submitted, { name: 'Owner', token: 't'.repeat(32), email: 'owner@example.test', password: 'p'.repeat(12), sample: false });
 });
 
-test('sign-in submits credentials and keeps the invitation on the single sign-on link', () => {
-  let submitted;
-  const screen = Auth({ session: { setupRequired: false, oidcEnabled: true }, inviteToken: 'A'.repeat(43), error: 'Email or password is incorrect.', busy: false, onSubmit: values => { submitted = values; } });
+test('sign-in submits credentials, and invitation single sign-on starts through the app instead of a link carrying the token', () => {
+  let submitted, started = 0;
+  const screen = Auth({ session: { setupRequired: false, oidcEnabled: true }, inviteToken: 'A'.repeat(43), error: 'Email or password is incorrect.', busy: false, onSubmit: values => { submitted = values; }, onOidcStart: () => { started++; } });
   assert.equal(screen.type, SignInFlow);
   const html = renderToStaticMarkup(screen);
   assert.match(html, /<h1[^>]*>Sign in<\/h1>/); assert.match(html, /role="alert"[^>]*>[^<]*Email or password is incorrect\.|Email or password is incorrect\./);
-  assert.match(html, new RegExp('href="/api/auth/oidc/start\\?invite=' + 'A'.repeat(43) + '"'));
   assert.match(html, /Organization single sign-on/);
+  assert.equal(html.includes('A'.repeat(43)), false, 'The invitation token is not rendered into the page.'); assert.doesNotMatch(html, /href="\/api\/auth\/oidc\/start/);
+  const providers = screen.props.providers;
+  assert.equal(providers.type, OidcProviderButtons); assert.deepEqual(providers.props.providers, [{ id: 'sso', name: 'Organization single sign-on' }]);
+  providers.props.onStart('sso'); assert.equal(started, 1);
   screen.props.onSubmit({ email: 'member@example.test', password: 'secret' });
   assert.deepEqual(submitted, { email: 'member@example.test', password: 'secret' });
+  assert.match(renderToStaticMarkup(Auth({ session: { setupRequired: false, oidcEnabled: true }, error: '', busy: false, onSubmit() {} })), /href="\/api\/auth\/oidc\/start"/, 'Plain single sign-on stays a link.');
   assert.doesNotMatch(renderToStaticMarkup(Auth({ session: { setupRequired: false, oidcEnabled: false }, error: '', busy: false, onSubmit() {} })), /single sign-on/);
+});
+
+// The real startup invitation reader from main.tsx.
+const inviteStart = source.indexOf('function takeInvite('), inviteEnd = source.indexOf('\n}\n', inviteStart) + 2;
+const takeInvite = inviteStart < 0 ? undefined : new Function((await transformWithOxc(source.slice(inviteStart, inviteEnd), 'TakeInvite.ts')).code + '; return takeInvite;')();
+function openLink(search, hash = '') {
+  const calls = [], history = { state: { campaignIndex: 2 }, replaceState: (...args) => calls.push(args) };
+  return { token: takeInvite({ pathname: '/', search, hash }, history), calls };
+}
+
+test('the startup reader takes the invitation from #invite= or an older ?invite= link and removes it from the address and history entry', () => {
+  assert.equal(typeof takeInvite, 'function');
+  const invite = 'Ab_-'.repeat(10) + 'xyz';
+  assert.deepEqual(openLink('', '#invite=' + invite), { token: invite, calls: [[{ campaignIndex: 2 }, '', '/']] });
+  assert.deepEqual(openLink('?invite=' + invite), { token: invite, calls: [[{ campaignIndex: 2 }, '', '/']] }, 'Older query links keep working.');
+  assert.deepEqual(openLink('?project=p1&invite=' + invite), { token: invite, calls: [[{ campaignIndex: 2 }, '', '/?project=p1']] });
+  assert.deepEqual(openLink('?invite=' + 'B'.repeat(43), '#invite=' + invite), { token: invite, calls: [[{ campaignIndex: 2 }, '', '/']] }, 'The fragment wins, and both copies are removed.');
+  assert.deepEqual(openLink('?project=p1', '#top'), { token: '', calls: [] }, 'Without an invitation the address is left alone.');
+  assert.equal((source.match(/takeInvite\(window\.location, window\.history\)/g) || []).length, 1, 'The invitation is read once, at startup.');
+  assert.doesNotMatch(source, /get\('invite'\) \|\| ''/, 'The app does not read the invitation from the address again.');
+  assert.ok(source.indexOf('let startupAuthError = takeAuthError(') < source.indexOf('const startupInvite = takeInvite('), 'An identity error is read first, so a returned #invite= survives until the invitation reader takes it.');
 });
 
 // The real startup reader and code map from main.tsx.
@@ -65,6 +90,7 @@ test('the startup reader removes auth_error from the address and keeps the invit
   const invite = 'Ab_-'.repeat(10) + 'xyz';
   assert.deepEqual(returnTo(`?auth_error=OIDC_INVITE_EMAIL_MISMATCH&invite=${invite}`).calls, [[{ campaignIndex: 3 }, '', '/?invite=' + invite]]);
   assert.deepEqual(returnTo('?auth_error=OIDC_RATE_LIMITED').calls, [[{ campaignIndex: 3 }, '', '/']]);
+  assert.deepEqual(returnTo('?auth_error=OIDC_INVITE_EMAIL_MISMATCH', '#invite=' + invite).calls, [[{ campaignIndex: 3 }, '', '/#invite=' + invite]]);
   assert.deepEqual(returnTo(`?project=p1&auth_error=X&auth_error=Y&invite=${invite}`, '#top').calls, [[{ campaignIndex: 3 }, '', `/?project=p1&invite=${invite}#top`]]);
   assert.equal((source.match(/takeAuthError\(window\.location, window\.history\)/g) || []).length, 1, 'auth_error is read once, at startup.');
   assert.match(source, /\[inviteSignIn, setInviteSignIn\] = useState\(Boolean\(startupAuthError\)\)/, 'A returned invitation opens the sign-in screen so the error is visible.');

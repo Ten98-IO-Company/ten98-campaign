@@ -163,12 +163,16 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       if (token) await db.execute(sql`DELETE FROM sessions WHERE token = ${digest(token)}`);
       setCookie(res, cookie(sessionName, '', 0));
     },
-    // The OIDC routes are full-page navigations, so a failure redirects to the app with a fixed code (never the message or
-    // an email address); the sign-in screen maps the code to its text. An invitation the browser already holds is kept.
+    // The GET start and the callback are full-page navigations, so a failure redirects to the app with a fixed code (never
+    // the message or an email address); the sign-in screen maps the code to its text. An invitation the browser already
+    // holds is kept, in the #invite= fragment. GET start still reads ?invite= from clients made before the POST start.
     async oidcStart(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const held = new URL(req.url || '/api/auth/oidc/start', config.appUrl).searchParams.get('invite');
-      try { await startFlow(req, res); } catch (error) { signInError(res, error, held && /^[A-Za-z0-9_-]{43}$/.test(held) ? held : ''); }
+      try { const location = await startFlow(req, res, held); res.writeHead(302, { Location: location }); res.end(); }
+      catch (error) { signInError(res, error, held && /^[A-Za-z0-9_-]{43}$/.test(held) ? held : ''); }
     },
+    /** Invitation sign-in: the token comes in the POST body, and the caller returns the authorization URL as JSON. */
+    oidcAuthorize(req: IncomingMessage, res: ServerResponse, invite: string | null): Promise<string> { return startFlow(req, res, invite); },
     async oidcCallback(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
       const held = { invite: '' };
       try { await finishFlow(req, res, url, held); } catch (error) { signInError(res, error, held.invite); }
@@ -177,13 +181,12 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   function signInError(res: ServerResponse, error: unknown, invite: string) {
     const code = error instanceof HttpError && error.code ? error.code : error instanceof HttpError && error.status === 429 ? 'OIDC_RATE_LIMITED' : 'OIDC_SIGN_IN_FAILED';
     if (res.headersSent) { res.end(); return; }
-    res.writeHead(302, { Location: `${config.appUrl}/?auth_error=${code}${invite ? '&invite=' + encodeURIComponent(invite) : ''}` }); res.end();
+    res.writeHead(302, { Location: `${config.appUrl}/?auth_error=${code}${invite ? '#invite=' + encodeURIComponent(invite) : ''}` }); res.end();
   }
-  async function startFlow(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function startFlow(req: IncomingMessage, res: ServerResponse, invite: string | null): Promise<string> {
       if (!config.oidcEnabled || !(await db.execute(sql`SELECT id FROM users LIMIT 1`)).rowCount) throw new HttpError(400, 'Identity sign-in is unavailable.');
       await limit('oidc:' + clientAddress(req), 30);
       const { client, provider } = await oidc();
-      const invite = new URL(req.url || '/api/auth/oidc/start', config.appUrl).searchParams.get('invite');
       if (invite && !/^[A-Za-z0-9_-]{43}$/.test(invite)) throw new HttpError(400, 'Use a valid invitation link before signing in.');
       const state = client.randomState(), nonce = client.randomNonce(), verifier = client.randomPKCECodeVerifier(), browser = randomBytes(32).toString('base64url'), expires = Date.now() + oidcWindow * 1000;
       const continuation = invite ? `${expires}.${invite}` : '';
@@ -196,7 +199,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       // Without an invitation no hash is stored, so a stale continuation cookie is ignored and cleared at the callback.
       if (continuation) setCookie(res, cookie(inviteName, continuation, oidcWindow, callbackPath));
       setCookie(res, cookie(oidcName, browser, oidcWindow));
-      res.writeHead(302, { Location: location.href }); res.end();
+      return location.href;
   }
   async function finishFlow(req: IncomingMessage, res: ServerResponse, url: URL, held: { invite: string }): Promise<void> {
       const values = cookies(req), scoped = Object.hasOwn(values, oidcName), state = url.searchParams.get('state'), browser = scoped ? values[oidcName] : values.ten98_oidc;
@@ -237,7 +240,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
           await tx.execute(sql`INSERT INTO projects (id, workspace_id, name) VALUES (${randomUUID()}, ${workspace}, 'My project')`);
           return establish(res, id, req, tx);
         });
-        res.writeHead(302, { Location: config.appUrl + '/' + (invite && !joined ? '?invite=' + encodeURIComponent(invite) : '') }); res.end();
+        res.writeHead(302, { Location: config.appUrl + '/' + (invite && !joined ? '#invite=' + encodeURIComponent(invite) : '') }); res.end();
       } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, 'Identity sign-in could not be verified. Start again.'); }
   }
 }
