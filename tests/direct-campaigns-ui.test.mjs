@@ -114,7 +114,7 @@ test('actual action lock prevents repeat sends and local progress polling never 
 
 test('actual contact import previews grant only explicit permissions and do not refresh records until imported', async () => {
   const handler = section('async function importContacts(', '  async function readCsv('), calls = [], results = [], people = [], notices = [];
-  const context = { readOnly: false, action: async (_, run) => run(1), requester: { current: async (path, method, body) => { calls.push({ path, method, body }); return method === 'POST' ? { imported: 3, created: 2, updated: 1, skipped: 0, errors: [] } : { contacts: [{ id: 'saved' }] }; } }, path: '/projects/a/direct', csv: 'name,email,tags\nAlex,alex@example.com,customer|launch', importConsent: { email: true, sms: false, whatsapp: false }, importSource: 'Signup form 2026-10-18', version: { current: 1 }, setImportResult: value => results.push(value), setNotice: value => notices.push(value), setContacts: value => people.push(value) };
+  const context = { importNotice: compile(helper('importNotice')), readOnly: false, action: async (_, run) => run(1), requester: { current: async (path, method, body) => { calls.push({ path, method, body }); return method === 'POST' ? { imported: 3, created: 2, updated: 1, skipped: 0, errors: [] } : { contacts: [{ id: 'saved' }] }; } }, path: '/projects/a/direct', csv: 'name,email,tags\nAlex,alex@example.com,customer|launch', importConsent: { email: true, sms: false, whatsapp: false }, importSource: 'Signup form 2026-10-18', version: { current: 1 }, setImportResult: value => results.push(value), setNotice: value => notices.push(value), setContacts: value => people.push(value) };
   const submit = compile(handler, context);
   await submit({ ...event, nativeEvent: { submitter: { getAttribute: () => 'preview' } } }); assert.equal(calls.length, 1); assert.equal(calls[0].body.dryRun, true); assert.deepEqual(calls[0].body.consents, context.importConsent); assert.equal(results[0].dryRun, true); assert.equal(people.length, 0);
   await submit({ ...event, nativeEvent: { submitter: { getAttribute: () => 'import' } } }); assert.equal(calls.length, 3); assert.equal(calls[1].body.dryRun, undefined); assert.deepEqual(people[0], [{ id: 'saved' }]); assert.match(notices.at(-1), /Processed 3 rows: 2 created, 1 merged/);
@@ -385,4 +385,14 @@ test('the Marketing email purpose is offered only while Amazon SES sends, with a
   assert.match(source, /draft\.emailPurpose === 'marketing' \? 'Marketing email' : 'Transactional email only'/);
   assert.match(source, /<Checkbox label="Email marketing permission \(newsletters and promotions\) is recorded for this contact\." checked=\{contact\.consents\.emailMarketing\}/);
   assert.match(source, /<Checkbox label="Email marketing permission is recorded for all applicable imported contacts\." checked=\{importConsent\.emailMarketing\}/);
+});
+
+// ten98-campaign#135 client points: the import notice counts every processed row, skipped ones included, with a correct
+// plural, and the preview says a merge updates details but keeps recorded permissions.
+test('the import notice counts every processed row and the preview explains what a merge keeps', () => {
+  const importNotice = compile(helper('importNotice'));
+  assert.equal(importNotice({ imported: 4, created: 3, updated: 1, skipped: 2 }), 'Processed 6 rows: 3 created, 1 merged, 2 skipped. Review contact hygiene before sending.');
+  assert.equal(importNotice({ created: 0, updated: 1, skipped: 0 }), 'Processed 1 row: 0 created, 1 merged, 0 skipped. Review contact hygiene before sending.');
+  assert.equal(importNotice({}), 'Processed 0 rows: 0 created, 0 merged, 0 skipped. Review contact hygiene before sending.');
+  assert.match(source, /\{importResult\.dryRun && importResult\.updated > 0 && <Text tone="muted" size="sm">Merging updates an existing contact's details from the file, such as name and company, and keeps the permissions and evidence already recorded\.<\/Text>\}/);
 });
