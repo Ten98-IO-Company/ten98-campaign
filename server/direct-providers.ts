@@ -1,6 +1,7 @@
 import { IntegrationError, fail, reportObject as plain, providerRequest, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
 import type { ProviderRecord } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
+import { SES_REGIONS, sendSesEmail } from '@ten98/runtime';
 
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
 const number = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
@@ -20,6 +21,50 @@ function smsReceipt(data: any, env: ProviderRecord, uncertain: boolean, expected
   if (!plain(data) || !sid(data.sid, 'SM') || data.account_sid !== env.TWILIO_ACCOUNT_SID || !phone(data.to) || !SMS_STATUSES.has(data.status) || expectedId && data.sid !== expectedId || expectedRecipient && data.to !== expectedRecipient) invalid('Twilio', uncertain);
   if (data.from != null && !phone(data.from) || data.messaging_service_sid != null && !sid(data.messaging_service_sid, 'MG')) invalid('Twilio', uncertain);
   return { providerId: data.sid, status: data.status === 'canceled' ? 'cancelled' : data.status, recipient: data.to, ...(data.from ? { sender: data.from } : {}), ...(data.messaging_service_sid ? { messagingServiceSid: data.messaging_service_sid } : {}), ...(data.error_code != null ? { errorCode: String(data.error_code).slice(0, 100) } : {}) };
+}
+/**
+ * The installation's direct email provider: the configured one of Amazon SES and Cloudflare Email Sending, or EMAIL_PROVIDER
+ * when both are configured (null until it is chosen). With neither, Cloudflare, so the send reports what to configure.
+ */
+export function emailProvider(env: ProviderRecord): 'ses' | 'cloudflare' | null {
+  const ses = Boolean(SES_REGIONS.includes(env.AWS_SES_REGION) && env.AWS_SES_ACCESS_KEY_ID && env.AWS_SES_SECRET_ACCESS_KEY && email(env.AWS_SES_FROM_ADDRESS));
+  const cloudflare = Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS);
+  if (ses && cloudflare) return env.EMAIL_PROVIDER === 'ses' || env.EMAIL_PROVIDER === 'cloudflare' ? env.EMAIL_PROVIDER : null;
+  return ses ? 'ses' : 'cloudflare';
+}
+export const requireEmailProvider = (env: ProviderRecord) => emailProvider(env) ?? fail(409, 'EMAIL_PROVIDER_REQUIRED', 'Amazon SES and Cloudflare are both configured. Choose the email provider in Integrations.');
+// SES refuses every message from a suspended, paused or misconfigured sender, so these stop the campaign for review
+// instead of failing one recipient after another. https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html
+const SES_SENDER_BLOCKS = new Set(['AccountSuspendedException', 'SendingPausedException', 'MailFromDomainNotVerifiedException', 'NotFoundException', 'LimitExceededException']);
+// The runtime accepts a printable-ASCII display name without address delimiters; any other name is sent as an RFC 2047 word.
+const PLAIN_DISPLAY_NAME = /^[ !#-+\--9=?A-Z^-~]{1,128}$/;
+function sesSender(from: any) {
+  if (typeof from === 'string') return from;
+  const name = PLAIN_DISPLAY_NAME.test(from.name) && from.name.trim() ? from.name : `=?UTF-8?B?${Buffer.from(from.name).toString('base64')}?=`;
+  return `${name} <${from.address}>`;
+}
+async function sendSes(env: ProviderRecord, body: ProviderRecord, recipient: string, deliveryId: unknown, assertMapping?: () => unknown) {
+  // The mapping guard runs before the send, so its refusal is reported as itself rather than as an unconfirmed send.
+  await assertMapping?.();
+  let result: { messageId: string };
+  try {
+    result = await sendSesEmail({
+      region: env.AWS_SES_REGION, credentials: { accessKeyId: env.AWS_SES_ACCESS_KEY_ID, secretAccessKey: env.AWS_SES_SECRET_ACCESS_KEY },
+      message: { from: sesSender(body.from), to: recipient, subject: body.subject, text: body.text, ...(body.html ? { html: body.html } : {}), ...(body.reply_to ? { replyTo: body.reply_to } : {}), ...(body.headers ? { headers: body.headers } : {}) },
+      ...(env.AWS_SES_CONFIGURATION_SET ? { configurationSetName: env.AWS_SES_CONFIGURATION_SET } : {}),
+      // A correlation tag on the SES event, not a deduplication key: SES has none.
+      ...(typeof deliveryId === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(deliveryId) ? { idempotencyKey: deliveryId } : {}),
+      fetch: (url, init) => fetch(url, { ...init, redirect: 'error', credentials: 'omit' }),
+    });
+  } catch (error: any) {
+    if (error?.uncertain) fail(502, 'PROVIDER_UNCERTAIN', 'Amazon SES did not confirm the message. Reconcile with SES before retrying a send.', true);
+    if (error?.retryable) fail(429, 'PROVIDER_RATE_LIMITED', 'Amazon SES is throttling sends. Resume the campaign later.');
+    if (SES_SENDER_BLOCKS.has(error?.code)) fail(409, 'EMAIL_SENDER_BLOCKED', 'Amazon SES refused this sender. Check the SES account, sending status and configuration set.');
+    fail(400, 'PROVIDER_REJECTED', 'Amazon SES rejected this message.');
+  }
+  if (!validId(result.messageId)) invalid('Amazon SES', true);
+  // Delivery, bounces and complaints arrive later through the SNS webhook.
+  return { providerId: result.messageId, status: 'accepted', recipient };
 }
 function cloudflare(env: ProviderRecord) {
   if (!/^[a-fA-F0-9]{32}$/.test(env.CLOUDFLARE_ACCOUNT_ID || '') || !env.CLOUDFLARE_EMAIL_API_TOKEN || !email(env.CLOUDFLARE_EMAIL_FROM_ADDRESS)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure the Cloudflare account, Email Sending API token, and sender address in Integrations.');
@@ -51,13 +96,14 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
     return receipt;
   }
   if (channel !== 'email') fail(400, 'UNSUPPORTED_CHANNEL', 'Use the WhatsApp broadcast workflow for WhatsApp campaigns.');
-  if (campaign.emailPurpose !== 'transactional') fail(400, 'TRANSACTIONAL_EMAIL_ONLY', 'Cloudflare Email Sending supports transactional email only.');
-  const api = cloudflare(env);
+  if (campaign.emailPurpose !== 'transactional') fail(400, 'TRANSACTIONAL_EMAIL_ONLY', 'Campaign sends transactional email only.');
+  const provider = requireEmailProvider(env), api = provider === 'cloudflare' ? cloudflare(env) : null;
   if (!email(contact.email)) fail(400, 'INVALID_RECIPIENT', 'Enter a valid email recipient.');
   const subject = text(campaign.subject, 'email subject', 998); if (/[\r\n]/.test(subject)) fail(400, 'INVALID_DIRECT_CONTENT', 'Email subjects cannot contain line breaks.');
-  const body: ProviderRecord = { from: env.CLOUDFLARE_EMAIL_FROM_NAME ? { address: env.CLOUDFLARE_EMAIL_FROM_ADDRESS, name: text(env.CLOUDFLARE_EMAIL_FROM_NAME, 'sender name', 200) } : env.CLOUDFLARE_EMAIL_FROM_ADDRESS, to: [contact.email], subject, text: text(campaign.text, 'plain-text email', 100000) };
+  const sender = provider === 'ses' ? { address: env.AWS_SES_FROM_ADDRESS, name: env.AWS_SES_FROM_NAME, replyTo: env.AWS_SES_REPLY_TO_ADDRESS } : { address: env.CLOUDFLARE_EMAIL_FROM_ADDRESS, name: env.CLOUDFLARE_EMAIL_FROM_NAME, replyTo: env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS };
+  const body: ProviderRecord = { from: sender.name ? { address: sender.address, name: text(sender.name, 'sender name', 200) } : sender.address, to: [contact.email], subject, text: text(campaign.text, 'plain-text email', 100000) };
   if (campaign.html) body.html = text(campaign.html, 'HTML email', 500000);
-  if (env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS) { if (!email(env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS)) fail(409, 'INVALID_REPLY_TO', 'Configure a valid email reply address.'); body.reply_to = env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS; }
+  if (sender.replyTo) { if (!email(sender.replyTo)) fail(409, 'INVALID_REPLY_TO', 'Configure a valid email reply address.'); body.reply_to = sender.replyTo; }
   if (unsubscribeUrl) {
     let url: string;
     try { url = publicMediaUrl(unsubscribeUrl); if (new URL(url).origin !== new URL(appUrl).origin) throw new Error(); }
@@ -67,7 +113,8 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
     // List-ID (RFC 2919) names the project's list, so mail clients can identify and filter it.
     body.headers = { 'List-Unsubscribe': `<${url}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click', ...(project?.id ? { 'List-ID': `<${project.id}.${new URL(appUrl).hostname}>` } : {}) };
   }
-  const data = await providerRequest(`${api.base}/send`, { method: 'POST', headers: api.headers, body: JSON.stringify(body) }, 'Cloudflare Email Sending', assertMapping);
+  if (provider === 'ses') return sendSes(env, body, contact.email, delivery.id, assertMapping);
+  const data = await providerRequest(`${api!.base}/send`, { method: 'POST', headers: api!.headers, body: JSON.stringify(body) }, 'Cloudflare Email Sending', assertMapping);
   const buckets = { delivered: 'delivered', permanent_bounces: 'failed', queued: 'queued', suppressed_recipients: 'suppressed' }, matches = [];
   if (data?.success !== true || !plain(data.result)) invalid('Cloudflare Email Sending', true);
   for (const [key, status] of Object.entries(buckets)) {

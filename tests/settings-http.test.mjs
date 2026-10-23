@@ -102,7 +102,7 @@ test('integration settings HTTP routes enforce operators, retain encrypted secre
     const setup = await request('/api/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'Settings operator', email: 'settings-operator@example.test', password: 'fixture settings password 2026', sample: false } });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const state = (await request('/api/state')).data, projectId = state.projectId, project = `/api/projects/${projectId}`, workspaceId = state.workspaces[0].id;
-    const settings = await request(route); assert.equal(settings.status, 200); assert.equal(settings.data.providers.length, 10);
+    const settings = await request(route); assert.equal(settings.status, 200); assert.equal(settings.data.providers.length, 11);
     assert.equal(find(settings.data, 'zernio').source, 'environment');
     assert.equal(JSON.stringify(settings.data).includes(env.ZERNIO_API_KEY), false);
 

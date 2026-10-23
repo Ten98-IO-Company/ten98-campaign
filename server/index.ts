@@ -177,6 +177,8 @@ export async function createApp(options: AppOptions = {}) {
         res.setHeader('Cache-Control', 'no-store');
         if (path === '/api/webhooks/zernio' && req.method === 'POST') { const result = await webhooks.receive(await readRawBody(req, WEBHOOK_MAX_BYTES), req.headers); return send(result.status, result.body); }
         if (/^\/api\/webhooks\/twilio\/(?:inbound(?:\/[\w-]+)?|status\/[\w-]+)$/.test(path) && req.method === 'POST') { await direct.receiveTwilio({ rawBody: await readRawBody(req, 65536), headers: req.headers, url }); res.writeHead(200, { 'Content-Type': 'text/xml; charset=utf-8' }); return res.end('<Response/>'); }
+        // Amazon SES feedback via SNS: a raw text/plain JSON body of at most 256 KB, verified before it is read further.
+        if (path === '/api/webhooks/ses/sns' && req.method === 'POST') return send(await direct.receiveSes(await readRawBody(req, 262144 + 4096)), {});
         const unsubscribe = path.match(/^\/api\/direct\/unsubscribe\/([A-Za-z0-9_.-]+)$/);
         if (unsubscribe && ['GET', 'POST'].includes(req.method!)) { if (req.method === 'POST') await readRawBody(req, 4096); const html = await direct.handleUnsubscribe(unsubscribe[1], req.method!); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Email preferences</title><main>' + html + '</main></html>'); }
         // Readiness includes PostgreSQL, so the Compose healthcheck and deploy verification fail while the database is down.

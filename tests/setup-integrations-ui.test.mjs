@@ -232,3 +232,58 @@ test('each provider card holds its own project mapping and host sections, and sa
   assert.equal(elements(card(viewerTree, 'zernio')).some(node => node.type === ui.Button && node.props.type === 'submit'), false, 'Mapping changes stay operator-only.');
   viewer.unmount();
 });
+
+test('Amazon SES settings take regions only from the server, never prefill the secret and save the email provider choice', async () => {
+  // The region list is deliberately not the runtime's order, so a client copy would not match.
+  const ses = { id: 'amazonSes', label: 'Amazon SES email', configured: true, source: 'saved', fields: { emailProvider: '', region: 'eu-west-1', accessKeyId: 'AKIAEXAMPLEEXAMPLE00', fromAddress: 'receipts@example.test', fromName: '', replyToAddress: '', configurationSet: 'feedback', snsTopicArn: '' }, secretFields: { secretAccessKey: { configured: true, source: 'saved' } }, options: { region: ['eu-west-1', 'ap-south-1'] } };
+  async function open(provider) {
+    const h = mount('IntegrationSettings'), calls = [];
+    const options = props(async (...args) => {
+      calls.push(args); const [path, method] = args;
+      if (path === '/settings/integrations') return { providers: [structuredClone(provider)] };
+      if (path.endsWith('/calendar/status')) return { calendarId: '' };
+      if (path.endsWith('/sms-inbox/status')) return { callbackUrl: 'https://campaign.example.test/inbound/a', publicCallbacks: true };
+      // Stubbed: the real SES test signs AWS reads, which must not run here.
+      if (path === '/settings/integrations/amazonSes/test' && method === 'POST') return { ok: true, status: 'connected', message: 'Synthetic SES check.' };
+      if (path === '/settings/integrations/amazonSes' && method === 'PUT') return {};
+      throw new Error('Unexpected synthetic request: ' + args.join(' '));
+    });
+    h.render(options); h.flush(); await settle();
+    return { h, calls, tree: () => h.render(options) };
+  }
+  const named = (tree, name) => elements(card(tree, 'amazonSes')).find(node => node.props?.name === 'amazonSes-' + name);
+  const fieldOf = (tree, name) => elements(card(tree, 'amazonSes')).find(node => node.type === ui.Field && node.props.children?.props?.name === 'amazonSes-' + name);
+  const submit = tree => elements(card(tree, 'amazonSes')).find(node => node.props?.as === 'form').props.onSubmit({ preventDefault() {} });
+
+  const view = await open(ses); let tree = view.tree();
+  assert.match(renderToStaticMarkup(tree), /Amazon SES email/);
+  const region = named(tree, 'region');
+  assert.equal(region.type, ui.Select); assert.equal(region.props.value, 'eu-west-1'); assert.equal(region.props.disabled, false);
+  assert.deepEqual(region.props.options.map(option => option.value), ['', 'eu-west-1', 'ap-south-1']);
+  const secret = named(tree, 'secretAccessKey');
+  assert.equal(secret.type, ui.Input); assert.equal(secret.props.type, 'password'); assert.equal(secret.props.value, ''); assert.equal(secret.props.placeholder, 'Configured — leave blank to keep');
+  const choice = named(tree, 'emailProvider');
+  assert.equal(choice.type, ui.Select); assert.equal(fieldOf(tree, 'emailProvider').props.label, 'Send email campaigns with');
+  assert.deepEqual(choice.props.options, [{ value: '', label: 'Automatic' }, { value: 'cloudflare', label: 'Cloudflare' }, { value: 'ses', label: 'Amazon SES' }]);
+  assert.match(fieldOf(tree, 'emailProvider').props.description, /When both are configured, choose one/);
+  choice.props.onChange({ target: { value: 'ses' } }); tree = view.tree();
+  named(tree, 'region').props.onChange({ target: { value: 'ap-south-1' } }); tree = view.tree();
+  await submit(tree);
+  assert.deepEqual(view.calls.find(call => call[1] === 'PUT'), ['/settings/integrations/amazonSes', 'PUT', { fields: { emailProvider: 'ses', region: 'ap-south-1' } }], 'The blank secret is not sent.');
+  tree = view.tree();
+  await button(card(tree, 'amazonSes'), 'Test connection').props.onClick();
+  assert.deepEqual(view.calls.filter(call => call[0].endsWith('/test')), [['/settings/integrations/amazonSes/test', 'POST', { projectId: 'project-a' }]]);
+  view.h.unmount();
+
+  const automatic = await open({ ...ses, fields: { ...ses.fields, emailProvider: 'cloudflare' } }); tree = automatic.tree();
+  named(tree, 'emailProvider').props.onChange({ target: { value: '' } }); tree = automatic.tree();
+  await submit(tree);
+  assert.deepEqual(automatic.calls.find(call => call[1] === 'PUT')[2], { fields: { emailProvider: '' } }, 'Automatic saves an empty choice.');
+  automatic.h.unmount();
+
+  const unlisted = await open({ ...ses, options: undefined }); tree = unlisted.tree();
+  assert.equal(named(tree, 'region').type, ui.Select); assert.equal(named(tree, 'region').props.disabled, true);
+  assert.deepEqual(named(tree, 'region').props.options.map(option => option.value), [''], 'Without the server list there is no region to choose.');
+  assert.match(fieldOf(tree, 'region').props.description, /does not list Amazon SES regions/);
+  unlisted.h.unmount();
+});
