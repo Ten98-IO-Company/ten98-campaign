@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import AdSpendNotice from './AdSpendNotice';
 import { adSpendBlock, type AdSpendBlock } from './approval-status';
-import { Alert, Button, Card, Checkbox, DataTable, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, ResourceCard, ReviewSummary, Select, Stack, StatusLine, Text, Textarea, VisuallyHidden } from '@ten98/ui';
+import { Alert, Button, Card, Checkbox, DataTable, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, ResourceCard, ReviewSummary, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
 
 type Props = { projectId: string; role: string; isOperator: boolean; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void; onOpenApprovals?: () => void; onSpendReview?: () => void; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onInventory?: (items: any[]) => void; onChanged?: () => void | Promise<void> };
 const statuses: Record<number, string> = { 1: 'Saved', 3: 'Processing', 4: 'Held', 5: 'Partially held', 9: 'Booked', 10: 'Submitted', 11: 'Live', 12: 'Cancelled', 14: 'Ended', 15: 'Cancelling' };
@@ -114,9 +114,8 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
     {mode === 'workflow' && status?.connection && <>
       <Inline><Button disabled={busy || !canWrite || !status.configured} onClick={() => action(async () => { const result = await request(`${path}/sync`, 'POST', {}); if (!active.current) return; setInventory(result.inventory); setSelected(previous => previous.filter(id => result.inventory.some((screen: any) => screen.id === id))); inventoryCallback.current?.(result.inventory); await onChanged?.(); setNotice(`Synced ${result.inventory.length} approved screens.`); })}>{busy ? 'Working…' : 'Sync provider inventory'}</Button></Inline>
       {!inventory.length && <Text tone="muted">Sync the approved inventory to load locations and start a provider proposal.</Text>}
-      {/* Selection stays controlled here with a Checkbox column: DataTable's `selectable` has no controlled selectedKeys. */}
-      {inventory.length > 0 && <DataTable ariaLabel="Approved Broadsign inventory" searchable={false} sortable={false} pagination={false} rows={inventory} rowKey={screen => String(screen.id)} columns={[
-        { key: 'select', header: 'Select', render: screen => <Checkbox aria-label={`Select ${screen.name}`} label={<VisuallyHidden>Select {screen.name}</VisuallyHidden>} disabled={busy || !canWrite} checked={selected.includes(screen.id)} onChange={event => setSelected(event.target.checked ? [...selected, screen.id] : selected.filter(id => id !== screen.id))}/> },
+      {inventory.length > 0 && <DataTable ariaLabel="Approved Broadsign inventory" searchable={false} sortable={false} pagination={false} rows={inventory} rowKey={screen => String(screen.id)}
+        selectable={canWrite} selectedKeys={selected.map(String)} onSelectionChange={keys => { if (!busy) setSelected(inventory.filter(screen => keys.includes(String(screen.id))).map(screen => screen.id)); }} columns={[
         { key: 'screen', header: 'Screen / face', render: screen => <Stack gap={1}><Text as="strong" weight="semibold">{screen.name}</Text><Text as="small" size="xs" tone="muted">{screen.id}</Text></Stack> },
         { key: 'location', header: 'Location', render: screen => <Stack gap={1}><Text as="span">{screen.location || 'Location not supplied'}</Text>{screen.latitude !== null && screen.longitude !== null && <Text as="small" size="xs" tone="muted">{screen.latitude}, {screen.longitude}</Text>}</Stack> },
         { key: 'resolution', header: 'Resolution', render: screen => screen.resolution || '—' }]}/>}
