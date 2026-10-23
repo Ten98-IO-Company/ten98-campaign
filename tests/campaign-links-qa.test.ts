@@ -6,6 +6,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import * as UI from '@ten98/ui';
+import { transformWithOxc } from 'vite';
 
 type Row = Record<string, unknown>;
 type Run = (generation: number) => Promise<void>;
@@ -59,4 +60,25 @@ test('#113 a refused website origin shows at the origins field with focus, not a
   assert.match(source, /useEffect\(\(\) => \{ if \(focusOrigins\.current && !busy\) \{ focusOrigins\.current = false; originsRef\.current\?\.focus\(\); \} \}, \[busy, originsError\]\);/);
   const html = renderToStaticMarkup(React.createElement(UI.Field, { label: 'Websites allowed to send analytics (one origin per line)', description: 'Hint', error: refused }, React.createElement(UI.Textarea)));
   assert.match(html, /<textarea[^>]*aria-invalid="true"/); assert.match(html, /role="alert"[^>]*>Use a public HTTPS domain/);
+});
+
+test('#115 row actions name the link they act on, and so does the disable confirmation', async () => {
+  const start = source.indexOf('rowActions={item => ') + 'rowActions={item => '.length, end = source.indexOf('}/> : <EmptyState', start);
+  assert.ok(start > 20 && end > start);
+  const { code } = await transformWithOxc(`function Actions({ item, busy, readOnly, setSelected, setEditing, setArchiving, renameReturn }) { return ${source.slice(start, end)}; }`, 'LinkActions.tsx', { jsx: { runtime: 'classic' } });
+  const Actions = new Function('React', ...Object.keys(UI), code + '; return Actions;')(React, ...Object.values(UI));
+  const render = (item: Row) => renderToStaticMarkup(React.createElement(Actions, { item: { id: 'a', name: 'Billboard Downtown QR', shortUrl: 'https://go.example.com/s/abc', ...item }, busy: '', readOnly: false, setSelected() {}, setEditing() {}, setArchiving() {}, renameReturn: { current: null } }));
+  const html = render({});
+  assert.match(html, /role="group"[^>]*aria-label="Actions for Billboard Downtown QR"/, 'Copy link is announced within a group named for its link.');
+  for (const name of ['QR code for Billboard Downtown QR', 'Rename Billboard Downtown QR', 'Disable Billboard Downtown QR']) assert.match(html, new RegExp(`<button[^>]*aria-label="${name}"`), name);
+  assert.match(render({ archived: true }), /<button[^>]*aria-label="Restore Billboard Downtown QR"/);
+  assert.match(source, /<ConfirmDialog open=\{!!archiving\}[^\n]*title=\{archiving\?\.archived \? `Restore “\$\{archiving\.name\}” and its QR code\?` : `Disable “\$\{archiving\?\.name\}”\?`\}/);
+});
+
+test('#115 the rename and QR panels take focus when opened, which scrolls them into view, and rename returns focus to its row', () => {
+  assert.match(source, /\{editing && !readOnly && <Card key=\{editing\.id\} as="section"[^\n]*<Input autoFocus required maxLength=\{120\} value=\{editing\.name\}/, 'Each rename remounts the form, so its name field takes focus.');
+  assert.match(source, /\{chosen && <Card id="campaign-link-qr" tabIndex=\{-1\} as="section"/);
+  assert.match(source, /useEffect\(\(\) => \{ if \(selected\) document\.getElementById\('campaign-link-qr'\)\?\.focus\(\); \}, \[selected\]\);/);
+  assert.match(source, /onClick=\{event => \{ renameReturn\.current = event\.currentTarget; setEditing\(\{ id: item\.id, name: item\.name \}\); \}\}/);
+  assert.match(source, /useEffect\(\(\) => \{ const trigger = renameReturn\.current; if \(editing \|\| busy \|\| !trigger\) return; renameReturn\.current = null; if \(trigger\.isConnected\) trigger\.focus\(\); \}, \[editing, busy\]\);/, 'Focus returns to the Rename button once the form closes and the row is enabled again.');
 });

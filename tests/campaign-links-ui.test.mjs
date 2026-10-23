@@ -48,7 +48,7 @@ test('renames cannot alter a saved destination and disabling a link requires con
   const calls = [], accepted = [], context = { readOnly: false, editing: { id: 'link/a', name: 'Updated name' }, path, version: { current: 1 }, requester: { current: async (...args) => { calls.push(args); return { link: { id: 'link/a', archived: true } }; } }, action: async (_, run) => run(1), acceptLink: value => accepted.push(value), setEditing() {}, setNotice() {} };
   await compile(section('async function saveName(', '  async function archive('), context)(event); assert.deepEqual(calls[0], [path + '/link%2Fa', 'PATCH', { name: 'Updated name' }]);
   assert.match(source, /onClick=\{\(\) => setArchiving\(item\)\}>\{item.archived \? 'Restore' : 'Disable'\}/, 'Disable and restore only open the confirmation.');
-  assert.match(source, /<ConfirmDialog open=\{!!archiving\}.*?'Disable this short link\?'.*?'Existing posts and QR codes will stop redirecting.'.*?onConfirm=\{\(\) => archive\(archiving!\)\}/, 'Only the confirmation dialog dispatches the archive request.');
+  assert.match(source, /<ConfirmDialog open=\{!!archiving\}.*?`Disable “\$\{archiving\?\.name\}”\?`.*?'Existing posts and QR codes will stop redirecting.'.*?onConfirm=\{\(\) => archive\(archiving!\)\}/, 'Only the confirmation dialog dispatches the archive request.');
   const archive = compile(section('async function archive(', '  async function saveSettings('), context);
   await archive({ id: 'link/a', archived: false }); assert.deepEqual(calls[1], [path + '/link%2Fa', 'PATCH', { archived: true }]);
   await compile(section('async function archive(', '  async function saveSettings('), { ...context, readOnly: true })({ id: 'link/a' }); assert.equal(calls.length, 2);
