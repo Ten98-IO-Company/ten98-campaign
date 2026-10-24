@@ -15,7 +15,7 @@ test('outcome checks preserve the original key without creating a first send and
     async (...args) => { calls.push(args); if (mode === 'lost') throw new Error('Request may not have arrived'); if (mode === 'missing') throw Object.assign(new Error('Receipt unavailable'), { status: 409, code: 'OPERATION_OUTCOME_UNAVAILABLE' }); return { accepted: true }; }, path => path, DOMException,
   );
   const path = 'products/store/product/archive', body = { confirmArchive: true };
-  await assert.rejects(invoke(path, body, undefined, true), /original action key/); assert.equal(calls.length, 0); assert.equal(pendingKeys.current.size, 0);
+  await assert.rejects(invoke(path, body, undefined, true), /can’t confirm the earlier attempt/); assert.equal(calls.length, 0); assert.equal(pendingKeys.current.size, 0);
   await assert.rejects(invoke(path, body), /may not have arrived/); mode = 'missing';
   await assert.rejects(invoke(path, body, undefined, true), /Receipt unavailable/);
   assert.equal(calls[1][0], 'integrations/' + path + '?check=1'); assert.equal(calls[1][3], calls[0][3]); assert.equal(pendingKeys.current.size, 1);
