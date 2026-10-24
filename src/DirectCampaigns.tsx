@@ -26,11 +26,16 @@ const split = (value = '') => [...new Set(value.split(',').map(item => item.trim
 const blank = (): Draft => ({ name: '', channel: 'email', emailPurpose: 'transactional', subject: '', text: '', html: '', accountId: '', templateName: '', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [] });
 const contactBlank = () => ({ name: '', email: '', phone: '', company: '', tags: '', consents: { email: false, sms: false, whatsapp: false, emailMarketing: false }, consentSource: '' });
 function campaignDraft(campaign?: Row): Draft { return { ...blank(), ...Object.fromEntries(Object.keys(blank()).filter(key => campaign?.[key] !== undefined).map(key => [key, campaign![key]])) }; }
+// A message without its own name is listed by what recipients see first.
+export function defaultName(draft: Draft) {
+  const first = draft.channel === 'email' ? draft.subject : draft.channel === 'sms' ? draft.text.split('\n')[0] : draft.templateName;
+  return (first || '').trim().slice(0, 120) || labels[draft.channel] + ' message';
+}
 function campaignBody(draft: Draft, audienceMode: string) {
   const audience = { contactIds: audienceMode === 'contacts' ? draft.contactIds : [], tags: audienceMode === 'tags' ? draft.tags : [] };
   if (audienceMode === 'contacts' && !audience.contactIds.length) throw new Error('Choose at least one contact, or switch to all eligible contacts.');
   if (audienceMode === 'tags' && !audience.tags.length) throw new Error('Enter at least one audience tag, or switch to all eligible contacts.');
-  return { name: draft.name, channel: draft.channel, ...audience, ...(draft.channel === 'email' ? { subject: draft.subject, text: draft.text, html: draft.html, emailPurpose: draft.emailPurpose === 'marketing' ? 'marketing' : 'transactional' } : draft.channel === 'sms' ? { text: draft.text } : { accountId: draft.accountId, templateName: draft.templateName, templateLanguage: draft.templateLanguage, templateComponents: draft.templateComponents }) };
+  return { name: draft.name.trim() || defaultName(draft), channel: draft.channel, ...audience, ...(draft.channel === 'email' ? { subject: draft.subject, text: draft.text, html: draft.html, emailPurpose: draft.emailPurpose === 'marketing' ? 'marketing' : 'transactional' } : draft.channel === 'sms' ? { text: draft.text } : { accountId: draft.accountId, templateName: draft.templateName, templateLanguage: draft.templateLanguage, templateComponents: draft.templateComponents }) };
 }
 const when = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : 'Not scheduled';
 const contactName = (contact: any = {}) => contact.name || contact.email || contact.phone || contact.id || 'Contact';
@@ -87,7 +92,7 @@ function campaignChecks({ draft, audienceMode, status, selectedTemplate, estimat
   const at = Date.parse(scheduledAt), validTime = Number.isFinite(at) && at > Date.now() && at <= Date.now() + 366 * 86400000;
   const time: Check = sendMode !== 'schedule' ? { summary: 'Send now, after you confirm' } : { summary: validTime ? `${new Date(at).toLocaleString()} (${timeZone()})` : 'Scheduled send', reason: !scheduledAt ? 'Choose a send time' : validTime ? undefined : 'Choose a future time within 366 days' };
   // A WhatsApp draft without a template already reports that on its Template row.
-  const draftBlockers = [draft.name.trim() ? undefined : 'Add a campaign name', audience?.eligible === 0 ? undefined : to.reason, subject?.reason, channel === 'whatsapp' && !selectedTemplate ? undefined : content.reason].filter(Boolean) as string[];
+  const draftBlockers = [audience?.eligible === 0 ? undefined : to.reason, subject?.reason, channel === 'whatsapp' && !selectedTemplate ? undefined : content.reason].filter(Boolean) as string[];
   const sendBlockers = readOnly ? ['You have view-only access'] : [...new Set([...draftBlockers, from.reason, status?.publicCallbacks === false ? isOperator ? 'Set the public web address (APP_URL) in the server settings' : 'Sending is unavailable until your admin finishes setup' : undefined, !audience ? 'Check the audience' : audience.eligible === 0 ? to.reason : audience.eligible > 500 ? 'Choose at most 500 eligible recipients' : undefined, time.reason].filter(Boolean) as string[])];
   return { rows: { to, from, ...(subject ? { subject } : {}), content, time } as Record<string, Check>, draftBlockers, sendBlockers };
 }
@@ -118,6 +123,8 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   const [status, setStatus] = useState<any>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [contacts, setContacts] = useState<Row[]>([]);
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [editingId, setEditingId] = useState(''), [draft, setDraft] = useState<Draft>(blank), [audienceMode, setAudienceMode] = useState('all');
   const [detail, setDetail] = useState<any>(null), [preview, setPreview] = useState<{ signature: string; result: any } | null>(null), [templates, setTemplates] = useState<any[]>([]), [templateAccount, setTemplateAccount] = useState('');
+  // Review and send: the primary button checks the audience itself, then opens the same final confirmation.
+  const [pendingSend, setPendingSend] = useState('');
   const [confirmationMode, setConfirmationMode] = useState(''), [confirmed, setConfirmed] = useState(false), [transactionalConfirmed, setTransactionalConfirmed] = useState(false), [scheduledAt, setScheduledAt] = useState('');
   const [search, setSearch] = useState(''), [contactEditId, setContactEditId] = useState(''), [contact, setContact] = useState(contactBlank), [csv, setCsv] = useState(''), [importConsent, setImportConsent] = useState({ email: false, sms: false, whatsapp: false, emailMarketing: false }), [importSource, setImportSource] = useState(''), [importResult, setImportResult] = useState<any>(null);
   const [suppression, setSuppression] = useState<{ id: string; channel: Channel; reason: string } | null>(null);
@@ -302,6 +309,9 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   const row = (key: string): Check => editable ? checks.rows[key] : { summary: key === 'to' ? toSummary : checks.rows[key].summary };
   const toggle = (key: string) => (open: boolean) => setOpenRow(open ? key : '');
   const pageOpen = composing || !!editingId, sendBlocked = !ready || checks.sendBlockers.length > 0, sendSummary = [checks.rows.to.summary, labels[draft.channel], checks.rows.time.summary].join(' · ');
+  // Only the audience check is missing: the primary button runs it, so "Save and check audience" is not a required step.
+  const checkThenSend = sendBlocked && !validPreview && !readOnly && editable && checks.sendBlockers.every(reason => reason === 'Check the audience') && !!status?.providers?.[draft.channel] && status?.publicCallbacks !== false;
+  useEffect(() => { if (!pendingSend || busy) return; if (ready && checks.sendBlockers.length === 0) setConfirmationMode(pendingSend); setPendingSend(''); }, [pendingSend, busy, ready]);
   const sendReasons = checks.sendBlockers.length ? checks.sendBlockers : ['Check the audience again'];
   const campaignList = <Card as="section" title="Campaigns" description={`Drafts stay private until you send or schedule them. ${status?.marketingAvailable ? 'Email campaigns can be transactional or marketing.' : 'Email campaigns are for transactional messages such as receipts and updates. Marketing email needs Amazon SES.'}`} actions={!readOnly && <Popover label="Choose a channel" triggerLabel="New campaign" triggerVariant="primary" placement="bottom-end" open={choosingChannel} onOpenChange={setChoosingChannel} disabled={!!busy}><Stack gap={1}>{channels.map(channel => <Button key={channel} variant="ghost" onClick={() => startCampaign(channel)}>{labels[channel]} campaign</Button>)}</Stack></Popover>}>
     <DataTable searchable={false} sortable={false} pagination={false} ariaLabel="Direct campaigns" rows={campaigns} rowKey={campaign => campaign.id} emptyState={<EmptyState title="No campaigns yet" description="Start with New campaign. You choose the channel, then fill in a short checklist before anything is sent."/>} columns={[{ key: 'name', header: 'Campaign', rowHeader: true, wrap: true, render: campaign => <Stack gap={0}><Text as="strong" weight="semibold">{campaign.name}</Text><Text as="small" tone="muted" truncate>{campaignSubtitle(campaign)}</Text></Stack> }, { key: 'status', header: 'Status', render: campaign => <CampaignStatus campaign={campaign}/> }, { key: 'results', header: 'Results', render: campaign => <CampaignResults campaign={campaign}/> }]} rowActionsLabel="Actions" rowActions={campaign => <Inline gap={2}><Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openCampaign(campaign)}>{campaign.status === 'draft' && !readOnly ? 'Edit draft' : 'View campaign'}</Button>{onOpenReplies && ['sms', 'whatsapp'].includes(campaign.channel) && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openReplies(campaign)}>Open replies</Button>}</Inline>}/>
@@ -315,7 +325,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
       </Inline>
     </Stack>
     <Form ref={formRef} onSubmit={(_, event) => save(event)}><Stack as="fieldset" gap={4} disabled={!!busy || readOnly || !editable}>
-      <Field label="Campaign name" required><Input required maxLength={120} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })}/></Field>
+      <Field label="Name (optional)" description="Only your team sees this. Left empty, the subject or first line is used."><Input maxLength={120} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })}/></Field>
       <Stack gap={2}>
         <ChecklistRow label="To" check={row('to')} open={openRow === 'to'} onOpenChange={toggle('to')}>
           <Fieldset legend="Audience" description="The audience check excludes contacts without channel permission, missing or invalid addresses, and suppressions. Permission and suppression are checked again when sending.">
@@ -368,10 +378,10 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
             <Button variant="secondary" type="submit">Save draft</Button>
             <Button variant="secondary" disabled={!!busy || readOnly || !editable || checks.draftBlockers.length > 0} onClick={checkAudience}>Save and check audience</Button>
             {testable && current && <Button variant="secondary" disabled={!!busy || !testProviderReady || current.channel === 'sms' && !testRecipient || status?.publicCallbacks === false} onClick={() => setConfirmingTest(true)}>{current.channel === 'sms' ? 'Send test SMS' : 'Send test email'}</Button>}
-            <Tooltip content={sendBlocked ? sendReasons.join(' · ') : 'Opens the final review before anything is sent.'}><Button variant="primary" disabled={!!busy || sendBlocked} onClick={() => setConfirmationMode(sendMode)}>{sendMode === 'schedule' ? 'Schedule…' : 'Send…'}</Button></Tooltip>
+            <Tooltip content={sendBlocked && !checkThenSend ? sendReasons.join(' · ') : 'Opens the final review before anything is sent.'}><Button variant="primary" disabled={!!busy || (sendBlocked && !checkThenSend)} onClick={() => { if (checkThenSend) { setPendingSend(sendMode); void checkAudience(); } else setConfirmationMode(sendMode); }}>{checkThenSend ? (sendMode === 'schedule' ? 'Review and schedule' : 'Review and send') : sendMode === 'schedule' ? 'Schedule…' : 'Send…'}</Button></Tooltip>
           </Inline>
         </Inline>
-        {sendBlocked && <Text tone="muted" size="sm">Before sending: {sendReasons.join(' · ')}.</Text>}
+        {sendBlocked && !checkThenSend && <Text tone="muted" size="sm">Before sending: {sendReasons.join(' · ')}.</Text>}
         {testable && <>{!testProviderReady && <Inline gap={2} align="center"><Text tone="muted" size="sm">{testProviderReason}</Text>{integrationsAction}</Inline>}</>}
         {shownTest?.error && <Alert tone="danger" variant="inline" actions={shownTest.error === emailProviderChoice || shownTest.error === testSendErrors.INTEGRATION_NOT_CONFIGURED ? integrationsAction : undefined}>{shownTest.error}</Alert>}
         {shownTest?.result && <StatusLine tone={deliveryStatus(shownTest.result.status) === 'error' ? 'danger' : 'success'}>Test to {shownTest.result.recipient || 'the test recipient'}: {statusLabel(shownTest.result.status)}{shownTest.result.providerId ? ` · Provider reference ${shownTest.result.providerId}` : ''}</StatusLine>}

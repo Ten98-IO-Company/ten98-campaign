@@ -16,7 +16,7 @@ const strip = (text: string) => text.replace(/^import .+;\r?\n/gm, '').replace(/
 const compiled = async (text: string, file: string) => (await transformWithOxc(strip(text), file, { jsx: { runtime: 'classic' } })).code;
 const templateModule = new Function('React', ...Object.keys(library), await compiled(templateSource, 'WhatsAppTemplate.tsx') + '; return { WhatsAppTemplate, templateRestriction, templatePreviewText, templateParameter, templateMissing };')(React, ...Object.values(library));
 const module = new Function('React', 'useEffect', 'useRef', 'useState', 'WhatsAppTemplate', 'templateRestriction', 'templatePreviewText', 'templateMissing', 'useFocusReturn', 'useRevealPanel', ...Object.keys(library),
-  await compiled(source, 'DirectCampaigns.tsx') + '; return { DirectCampaigns, localAudience, exclusionGroups, campaignChecks, campaignProgress, ChecklistRow, CampaignStatus, CampaignResults };',
+  await compiled(source, 'DirectCampaigns.tsx') + '; return { DirectCampaigns, localAudience, exclusionGroups, campaignChecks, campaignProgress, ChecklistRow, CampaignStatus, CampaignResults, defaultName };',
 )(React, useEffect, useRef, useState, templateModule.WhatsAppTemplate, templateModule.templateRestriction, templateModule.templatePreviewText, templateModule.templateMissing, () => () => {}, () => {}, ...Object.values(library));
 
 const draft = (changes: Row = {}) => ({ name: 'Autumn notice', channel: 'email', emailPurpose: 'transactional', subject: 'Your receipt', text: 'Thanks {{name}}', html: '', accountId: '', templateName: '', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [], ...changes });
@@ -86,7 +86,7 @@ test('the send time row rejects past or far times and always names the timezone'
 
 test('the primary action lists every blocker, without operator setup text for other members', () => {
   assert.deepEqual(checks({ validPreview: null }).sendBlockers, ['Check the audience']);
-  assert.deepEqual(checks({ draft: draft({ name: '', subject: '' }), validPreview: null }).draftBlockers, ['Add a campaign name', 'Add a subject']);
+  assert.deepEqual(checks({ draft: draft({ name: '', subject: '' }), validPreview: null }).draftBlockers, ['Add a subject'], 'A name is optional; the subject names the message.');
   assert.ok(checks({ draft: draft({ subject: '' }) }).sendBlockers.includes('Add a subject'));
   assert.deepEqual(checks({ readOnly: true }).sendBlockers, ['You have view-only access']);
   const member = checks({ status: status({ publicCallbacks: false }) }).sendBlockers, operator = checks({ isOperator: true, status: status({ publicCallbacks: false }) }).sendBlockers;
@@ -145,4 +145,20 @@ test('operator-only setup text is gated and the request paths are unchanged', ()
 test('main mounts the campaign and contact views through the Messages Contacts tab and passes the operator flag', () => {
   assert.match(mainSource, /\['campaigns', 'people'\]\.includes\(directView\) && [^\n]*<DirectCampaigns key=\{state\.projectId\} projectId=\{state\.projectId\} view=\{directView === 'people' \? 'contacts' : 'campaigns'\} isOperator=\{canMap\}/);
   assert.doesNotMatch(mainSource, /section: 'people', label: 'Contacts'/, 'There is no second Contacts tab.');
+});
+
+
+test('a message without its own name takes its subject, first SMS line or template, so naming is not a required step', () => {
+  assert.equal(module.defaultName(draft({ name: '', subject: '  Your October receipt ' })), 'Your October receipt');
+  assert.equal(module.defaultName(draft({ name: '', channel: 'sms', text: 'Sale starts Friday\nReply STOP to opt out' })), 'Sale starts Friday');
+  assert.equal(module.defaultName(draft({ name: '', channel: 'whatsapp', templateName: 'order_update' })), 'order_update');
+  assert.equal(module.defaultName(draft({ name: '', subject: '' })), 'Email message');
+  assert.equal(module.defaultName(draft({ name: '', subject: 'x'.repeat(200) })).length, 120);
+  assert.match(source, /return \{ name: draft\.name\.trim\(\) \|\| defaultName\(draft\), channel: draft\.channel,/, 'Saving uses the default only when the name is empty.');
+});
+
+test('when only the audience check is missing, the primary button runs it and opens the same final confirmation', () => {
+  assert.match(source, /const checkThenSend = sendBlocked && !validPreview && !readOnly && editable && checks\.sendBlockers\.every\(reason => reason === 'Check the audience'\) && !!status\?\.providers\?\.\[draft\.channel\] && status\?\.publicCallbacks !== false;/);
+  assert.match(source, /onClick=\{\(\) => \{ if \(checkThenSend\) \{ setPendingSend\(sendMode\); void checkAudience\(\); \} else setConfirmationMode\(sendMode\); \}\}>\{checkThenSend \? \(sendMode === 'schedule' \? 'Review and schedule' : 'Review and send'\)/);
+  assert.match(source, /useEffect\(\(\) => \{ if \(!pendingSend \|\| busy\) return; if \(ready && checks\.sendBlockers\.length === 0\) setConfirmationMode\(pendingSend\); setPendingSend\(''\); \}, \[pendingSend, busy, ready\]\);/, 'Nothing is sent here: a clean check only opens the existing confirmation.');
 });
