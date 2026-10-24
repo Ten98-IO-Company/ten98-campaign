@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Card, CodeBlock, ConfirmDialog, CopyButton, DataTable, DescriptionList, Disclosure, EmptyState, Field, FormActions, FormGrid, Grid, Heading, Image, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
 
 type Row = Record<string, any>;
-type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; campaigns?: Row[]; directCampaigns?: Row[]; readOnly?: boolean; canManageSettings?: boolean; canChangeDomain?: boolean };
+type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; campaigns?: Row[]; directCampaigns?: Row[]; readOnly?: boolean; canManageSettings?: boolean; canChangeDomain?: boolean; createFor?: string; onCreateHandled?: () => void };
 const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '—';
 const blank = () => ({ name: '', destination: '', campaignId: '', utm_source: '', utm_medium: '', utm_campaign: '', utm_content: '', utm_term: '' });
 // Thrown for problems the person fixes in the destination field, so the form can show them there.
@@ -17,7 +17,7 @@ function destinationWithUtm(draft: ReturnType<typeof blank>) {
 const localShortAddress = (value: string) => { try { return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname); } catch { return false; } };
 const siteSnippet = (url: string) => `<script defer src="${url.replaceAll('&', '&amp;').replaceAll('"', '&quot;')}"></script>`;
 
-export default function CampaignLinks({ projectId, request, campaigns = [], directCampaigns, readOnly = false, canManageSettings = false, canChangeDomain = false }: Props) {
+export default function CampaignLinks({ projectId, request, campaigns = [], directCampaigns, readOnly = false, canManageSettings = false, canChangeDomain = false, createFor, onCreateHandled }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/links`, requester = useRef(request), version = useRef(0), pending = useRef(false); requester.current = request;
   const [settings, setSettings] = useState<Row | null>(null), [settingsForm, setSettingsForm] = useState({ shortBaseUrl: '', allowedWebsiteOrigins: '' }), [links, setLinks] = useState<Row[]>([]), [direct, setDirect] = useState<Row[]>(directCampaigns || []);
   const [draft, setDraft] = useState(blank), [editing, setEditing] = useState<{ id: string; name: string } | null>(null), [selected, setSelected] = useState(''), [search, setSearch] = useState('');
@@ -40,6 +40,8 @@ export default function CampaignLinks({ projectId, request, campaigns = [], dire
     }).finally(() => { if (generation === version.current) setBusy(''); });
     return () => { version.current++; };
   }, [projectId]);
+  // createFor: a campaign page's Add menu asked for a new item in this campaign; start it once, then tell the app.
+  useEffect(() => { if (!createFor) return; if (!readOnly && campaigns.some(campaign => campaign.id === createFor)) { setDraft(current => ({ ...current, campaignId: createFor })); destinationRef.current?.focus(); } onCreateHandled?.(); }, [createFor]);
   // The fieldset is disabled while a request runs, so after a server rejection the destination takes focus once it is enabled again.
   useEffect(() => { if (focusDestination.current && !busy) { focusDestination.current = false; destinationRef.current?.focus(); } }, [busy, destinationError]);
   useEffect(() => { if (focusOrigins.current && !busy) { focusOrigins.current = false; originsRef.current?.focus(); } }, [busy, originsError]);
