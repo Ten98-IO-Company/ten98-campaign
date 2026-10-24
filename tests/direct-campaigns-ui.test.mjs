@@ -399,7 +399,9 @@ test('the import notice counts every processed row and the preview explains what
 
 test('Messages shows campaigns and contacts as its own tabs, so a view hides the inner tab strip', async () => {
   const source = (await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
-  assert.match(source, /\{\(sections => view \? sections\.find\(section => section\.value === view\)!\.content : <Tabs label="Direct campaign sections"[^\n]*items=\{sections\}\/>\)\(\[\{ value: 'campaigns',/);
+  // #128 removed the inner tab strip altogether: the view picks contacts, the campaign page or the campaign list.
+  assert.match(source, /\{view === 'contacts' \? contactsView : pageOpen \? campaignPage : campaignList\}/);
+  assert.doesNotMatch(source, /<Tabs /);
   const app = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
   assert.match(app, /\['campaigns', 'people'\]\.includes\(directView\) && <Suspense[^\n]*<DirectCampaigns key=\{state\.projectId\} projectId=\{state\.projectId\} view=\{directView === 'people' \? 'contacts' : 'campaigns'\}/);
   assert.match(app, /<SegmentedControl label="Contacts to show" value=\{directView\}[^\n]*'Your contacts'[^\n]*'From social accounts'/);
