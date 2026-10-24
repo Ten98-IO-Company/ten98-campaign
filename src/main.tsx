@@ -10,6 +10,7 @@ import '@ten98/ui/product.css';
 import AdComposer from './AdComposer';
 import SocialAnalytics from './SocialAnalytics';
 import TeamSettings from './TeamSettings';
+import { useFocusReturn } from './focus-return';
 import CampaignAgent from './CampaignAgent';
 import GoogleCalendar from './GoogleCalendar';
 import OohMap from './OohMap';
@@ -169,6 +170,7 @@ function App() {
   const discardAction = useRef<(() => void) | null>(null), dirtyScopes = useRef(new Map<Element, number>());
   const [inboxTarget, setInboxTarget] = useState<{ channel: 'sms' | 'whatsapp'; accountId?: string; search?: string; projectId: string } | null>(null);
   const [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [notice, setNotice] = useState(''), [error, setError] = useState('');
+  const rememberFocus = useFocusReturn(busy); // A failed owner setup or sign-in returns focus to the control that submitted it.
   const [mobile, setMobile] = useState(false), [currency, setCurrency] = useState('AED');
   const [remote, setRemote] = useState<any>({}), [connectionRevision, setConnectionRevision] = useState(0);
   const [oohInventory, setOohInventory] = useState<Row[]>([]), [calendarEvents, setCalendarEvents] = useState<Row[]>([]);
@@ -525,7 +527,7 @@ function App() {
     const { authorizationUrl } = await api('/auth/oidc/start', 'POST', { token: inviteToken });
     if (typeof authorizationUrl !== 'string' || !/^https?:\/\//.test(authorizationUrl)) throw new Error('Single sign-on could not be started. Try again.');
     window.location.assign(authorizationUrl);
-  })} onSubmit={async values => { await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
+  })} onSubmit={async values => { rememberFocus(); await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
   if (!state) return <AppStateScreen surface="card" state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading your campaigns…'} onRetry={error ? () => run(() => reload()) : undefined}/>;
   if (!state.projectId || !project) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} label="Workspace access" email={state.user.email} subheading="No project access yet." help="Ask a workspace owner for an invitation, refresh after access is granted, or create your own workspace." error={error || undefined} busy={busy} onSubmit={({ name }) => createWorkspace(name)} onRefresh={() => run(() => reload(''))} signOut={{ onClick: signOut }}><AccountSettings request={api} onChanged={() => { run(() => reload('')); }}/></WorkspaceOnboarding>;
   const campaigns = filtered(state.campaigns).filter(c => tab === 'all' || c.status === tab);
