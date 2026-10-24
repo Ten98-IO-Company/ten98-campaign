@@ -8,6 +8,12 @@ export const activationTag = (activationId: string) => 'offline:' + activationId
 export type ConsentChannel = 'email' | 'sms' | 'whatsapp';
 export const CONSENT_CHANNELS: ConsentChannel[] = ['email', 'sms', 'whatsapp'];
 export const CONSENT_LABELS: Record<ConsentChannel, string> = { email: 'Email', sms: 'Text message', whatsapp: 'WhatsApp' };
-// What staff show above the unticked channel boxes; the server records the same sentence, with the ticked channels, as consent evidence.
-export const consentPrompt = (brand: string) => `Yes, ${brand} may send me news and offers by`;
-export const consentWording = (brand: string, channels: ConsentChannel[]) => `${consentPrompt(brand)} ${channels.map(channel => CONSENT_LABELS[channel].toLowerCase()).join(', ')}. I can unsubscribe at any time.`;
+// Channel names inside a sentence, always in CONSENT_CHANNELS order whatever order the boxes were ticked in.
+const CONSENT_NAMES: Record<ConsentChannel, string> = { email: 'email', sms: 'text message', whatsapp: 'WhatsApp' };
+export const consentChannelList = (channels: ConsentChannel[], conjunction: 'and' | 'or' = 'and') => {
+  const names = CONSENT_CHANNELS.filter(channel => channels.includes(channel)).map(channel => CONSENT_NAMES[channel]);
+  return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} ${conjunction} ${names[names.length - 1]}`;
+};
+// The sentence the capture form shows, updated as channels are ticked (every channel while none is). The server records
+// the same sentence for the ticked channels as consent evidence, so the two cannot drift apart.
+export const consentWording = (brand: string, channels: ConsentChannel[]) => `Yes, ${brand} may send me news and offers by ${channels.length ? consentChannelList(channels) : consentChannelList(CONSENT_CHANNELS, 'or')}. I can unsubscribe at any time.`;

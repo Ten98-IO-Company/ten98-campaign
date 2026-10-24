@@ -39,9 +39,10 @@ test('record deletion preserves assignments and administrators can remove sample
     const campaign = await create('campaigns', { name: 'Keep my real campaign' }), provider = await create('providers', { name: 'Keep my real provider' }), asset = await create('assets', { name: 'Keep my real asset', url: 'https://cdn.example.com/real.jpg' });
     const post = await create('posts', { content: 'A real linked draft', platforms: ['facebook'], campaignId: campaign.id, assetId: asset.id });
     const placement = await create('placements', { name: 'A real booking', location: 'Dubai', providerId: provider.id });
-    for (const [collection, record] of [['campaigns', campaign], ['assets', asset], ['providers', provider]]) {
+    // The refusal names the record that still uses the one being deleted (#149).
+    for (const [collection, record, uses] of [['campaigns', campaign, 'post "A real linked draft"'], ['assets', asset, 'post "A real linked draft"'], ['providers', provider, 'booking "A real booking"']]) {
       const result = await request(`${project}/${collection}/${record.id}`, { method: 'DELETE' });
-      assert.equal(result.status, 409); assert.match(result.data.error, /Remove its assignments/); assert.ok(await app.store.get(projectId, collection, record.id));
+      assert.equal(result.status, 409); assert.equal(result.data.error, `This ${collection.slice(0, -1)} is assigned to ${uses}. Remove its assignments before deleting it.`); assert.ok(await app.store.get(projectId, collection, record.id));
     }
     assert.equal((await request(`${project}/posts/${post.id}`, { method: 'PATCH', body: { content: 'Still editable after a rejected deletion' } })).status, 200);
     assert.equal((await request(`${project}/posts/${post.id}`, { method: 'PATCH', body: { campaignId: '', assetId: '' } })).status, 200);
@@ -57,7 +58,8 @@ test('record deletion preserves assignments and administrators can remove sample
     assert.equal((await request(project + '/sample-data', { method: 'DELETE', cookie: cookies.editor })).status, 403);
     assert.equal((await request(project + '/sample-data', { method: 'DELETE', cookie: cookies.viewer })).status, 403);
     const before = (await request('/api/state')).data;
-    const blocked = await request(project + '/sample-data', { method: 'DELETE' }); assert.equal(blocked.status, 409); assert.match(blocked.data.error, /real record/);
+    const blocked = await request(project + '/sample-data', { method: 'DELETE' }); assert.equal(blocked.status, 409);
+    assert.equal(blocked.data.error, `Post "Real draft using a sample creative" uses sample asset "${linkedSample.name}". Remove that assignment before removing sample data.`, 'It names the blocking record and the sample it uses (#149).');
     assert.deepEqual((await request('/api/state')).data, before, 'A blocked cleanup must not partially delete records or their activity.');
     assert.equal((await request(`${project}/posts/${realWithSample.id}`, { method: 'PATCH', body: { assetId: '' } })).status, 200);
     const cleanup = await request(project + '/sample-data', { method: 'DELETE', cookie: cookies.admin });

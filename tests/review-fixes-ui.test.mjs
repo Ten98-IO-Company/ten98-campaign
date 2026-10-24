@@ -13,7 +13,7 @@ test('the composer offers account auto-loading only when the project has a Zerni
 test('a failed keyboard review forgets its pending focus move, while a saved one keeps it for the next card', async () => {
   const start = source.indexOf('export default function '), end = source.indexOf('  return <', start);
   function view(request) {
-    const state = [], context = { useState(value) { const index = state.length; state.push(index === 0 ? { requireApproval: true, posts: [] } : value); return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next; }]; }, useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null } };
+    const state = [], context = { useState(value) { const index = state.length; state.push(index === 0 ? { requireApproval: true, posts: [] } : value); return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next; }]; }, useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {} };
     return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(start, end).replace('export default ', '') + 'return { review, advance };\n}')});`)(...Object.values(context))({ projectId: 'project', role: 'owner', request, onChanged: async () => {} });
   }
   const item = { post: { id: 'post' }, review: { id: 'review' }, status: 'pending' };

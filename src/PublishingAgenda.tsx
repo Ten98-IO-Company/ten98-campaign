@@ -7,13 +7,15 @@ type ScheduledPost = { id: string; post: Row; accountId?: string; platform?: str
 type CalendarView = 'week' | 'month' | 'list';
 /** One choice per filter; an absent key shows everything. */
 type CalendarFilters = { channel?: string; status?: string; campaign?: string; googleHidden?: boolean };
-type DayEntry = CalendarEntry & { network?: string; snippet?: string; status?: string; tone?: Tone; campaign?: Row; event?: Row };
+type DayEntry = CalendarEntry & { network?: string; snippet?: string; status?: string; tone?: Tone; campaign?: Row; event?: Row; activation?: Row };
 type Props = {
   posts: ScheduledPost[];
   /** All post records. A published post without a schedule entry in `posts` is placed on its `publishedAt`. */
   records?: Row[];
   /** The app has already removed verified Google copies of these posts. */
   googleEvents: Row[];
+  /** Offline field activity, shown with or without Google Calendar; a Google copy of a shown activation is not listed again. */
+  activations?: Row[];
   month: Date;
   accounts?: Row[];
   /** Campaign names and colours for entries and the campaign filter. */
@@ -64,7 +66,7 @@ function statusTone(status: string | undefined, approval: string | undefined): T
 // The same campaign keeps the same decorative colour across views and reloads.
 const campaignPalette = (id: string) => badgePalettes[[...id].reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) >>> 0, 0) % badgePalettes.length];
 
-export default function CampaignPublishingAgenda({ posts: scheduled, records = [], googleEvents, month, accounts = [], campaigns = [], canWrite, postLabel, onSelect, onCreateDay, googleEventActions, actions, view = 'list', onViewChange, onMonthChange, weekStart, onWeekChange, filters = {}, onFiltersChange, postApprovals }: Props) {
+export default function CampaignPublishingAgenda({ posts: scheduled, records = [], googleEvents, activations = [], month, accounts = [], campaigns = [], canWrite, postLabel, onSelect, onCreateDay, googleEventActions, actions, view = 'list', onViewChange, onMonthChange, weekStart, onWeekChange, filters = {}, onFiltersChange, postApprovals }: Props) {
   // Posts published immediately (and the sample post) have no planned time, so schedules skip them.
   const placed = new Set(scheduled.map(entry => entry.post.id));
   const posts: ScheduledPost[] = [...scheduled, ...records.filter(post => !placed.has(post.id) && Number.isFinite(Date.parse(post.publishedAt))).map(post => ({ id: post.id, post, platform: post.platforms?.[0] || '', content: post.content || '', scheduledAt: post.publishedAt }))];
@@ -99,8 +101,20 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
     const snippet = entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post)), network = destinations(entry), status = statusText(entry.post);
     addDay(localDate(new Date(entry.scheduledAt)), { id: `post:${entry.id}`, label: [network, snippet, status].filter(Boolean).join(' · '), time: timeOnly.format(new Date(entry.scheduledAt)), onSelect: () => onSelect(entry.post), network, snippet, status, tone: statusTone(postStatus(entry.post), approvalLabel(entry.post)), campaign: campaignOf(entry.post) });
   }
+  // Field activity, like the Google plan built from it (server/calendar.ts), leaves out cancelled activations and shows on its first day in range.
+  const fieldActivity = activations.filter(activation => activation.status !== 'cancelled' && Number.isFinite(Date.parse(activation.startAt)));
+  for (const activation of fieldActivity) {
+    const date = new Date(activation.startAt);
+    if (!(date < end && (Date.parse(activation.endAt) || date.getTime()) > start.getTime())) continue;
+    const label = `Field activity · ${activation.name}`, status = activation.status ? capital(String(activation.status)) : 'Status unavailable', tone: Tone = activation.status === 'completed' ? 'success' : 'info';
+    entries.push({ id: `activation:${activation.id}`, title: label, dateTime: activation.startAt, when: format.format(date), order: date.getTime(), status: <Badge tone={tone} dot>{status}</Badge>, details: [activation.location, campaignOf(activation)?.name].filter(Boolean).join(' · ') });
+    addDay(localDate(date < start ? start : date), { id: `activation:${activation.id}`, label: `${label} · ${status}`, time: timeOnly.format(date), snippet: label, status, tone, activation });
+  }
+  // The Google copy of an activation shown above, at the same start, is the same entry.
+  const copied = (event: Row) => event.managed === true && event.plan?.collection === 'activations' && fieldActivity.some(activation => activation.id === event.plan.recordId && Date.parse(activation.startAt) === Date.parse(event.start?.dateTime));
   let googleCount = 0, googleHidden = 0;
   for (const event of googleEvents) {
+    if (copied(event)) continue;
     const allDay = Boolean(event.start?.date), dateTime = event.start?.date || event.start?.dateTime;
     const date = new Date(allDay ? dateTime + 'T00:00' : dateTime);
     if (!Number.isFinite(date.getTime()) || !(allDay ? event.start.date < localDate(end) && event.end?.date > localDate(start) : date < end && (Date.parse(event.end?.dateTime) || date.getTime()) > start.getTime())) continue;
@@ -157,7 +171,9 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
   const range = week.getFullYear() === lastDay.getFullYear() ? `${short.format(week)} – ${short.format(lastDay)}, ${lastDay.getFullYear()}` : `${short.format(week)}, ${week.getFullYear()} – ${short.format(lastDay)}, ${lastDay.getFullYear()}`;
   const weekEmpty = weekDays.every(day => !days.get(day)?.length);
   // Entry anatomy: time, network, one-line snippet, status dot and campaign colour, all part of the accessible name.
-  const weekEntry = (item: DayEntry) => item.event ? <Inline key={item.id} gap={2} align="center">
+  const weekEntry = (item: DayEntry) => item.activation ? <Inline key={item.id} gap={2} align="center">
+    <Text as="span" size="sm" tone="muted" numeric>{item.time}</Text><Text as="span" size="sm" truncate>{item.snippet}</Text><Badge tone={item.tone} dot>{item.status}</Badge>
+  </Inline> : item.event ? <Inline key={item.id} gap={2} align="center">
     <Text as="span" size="sm" tone="muted" numeric>{item.time}</Text><Text as="span" size="sm" truncate>{item.label}</Text><Badge tone="neutral" dot>Google Calendar</Badge>{googleEventActions?.(item.event)}
   </Inline> : <Button key={item.id} variant="ghost" size="sm" onClick={item.onSelect}>
     <Text as="span" size="sm" tone="muted" numeric>{item.time}</Text>
