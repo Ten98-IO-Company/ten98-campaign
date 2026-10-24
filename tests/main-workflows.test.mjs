@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
-import { Button, Card, FormActions, Grid, Inline, Link, SegmentedControl, Stack, Text } from '@ten98/ui';
+import { Button, Card, DangerZoneFlow, FormActions, Grid, Inline, Link, SegmentedControl, Stack, Text } from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 
@@ -272,13 +272,14 @@ test('Settings shows one section at a time, keeps scoped receipt recovery, and h
   const activeProject = { current: 'project-a' }, pendingKeys = { current: new Map([['retained', 'key']]) };
   const render = (section, isOperator = true) => {
     const context = { React, page: 'Settings', section, project: { id: 'project-a', name: 'Campaign project' }, state: { projectId: 'project-a', user: { id: 'viewer-a', isOperator } }, workspace: { id: 'workspace-a', role: 'admin', name: 'Workspace' }, session: { oidcEnabled: false }, canAdmin: true, sample: false, busy: false, activeProject, pendingKeys, api,
-      Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, Link, Grid, Stack, Card, Inline, Text, Button, FormActions, AccountSettings, OperationRecovery, TeamSettings, title: value => value, settingsFrame: content => React.createElement(Frame, null, content),
+      Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, Link, Grid, Stack, Card, DangerZoneFlow, Inline, Text, Button, FormActions, AccountSettings, OperationRecovery, TeamSettings, title: value => value, settingsFrame: content => React.createElement(Frame, null, content),
       run: () => assert.fail('Rendering must not run an action'), reload: () => assert.fail('Rendering must not reload'), setPage: () => {}, setModal: () => {}, clearSampleData: () => {}, leaveWorkspace: () => {} };
     return new Function(...Object.keys(context), code + '; return render();')(...Object.values(context));
   };
   const count = (tree, type) => nodes(tree).filter(node => node.type === type).length;
   assert.equal(renderToStaticMarkup(render('general')).includes('Project'), true); assert.equal(count(render('general'), OperationRecovery), 0);
   assert.deepEqual([count(render('members'), TeamSettings), count(render('members'), AccountSettings)], [1, 0]);
+  assert.match(renderToStaticMarkup(render('members')), /Leave workspace[\s\S]*To return, you need a new invitation\./, 'An admin is offered Leave workspace (#142).');
   assert.deepEqual(nodes(render('profile')).filter(node => node.type === AccountSettings).map(node => node.props.part), ['profile']);
   assert.deepEqual(nodes(render('security')).filter(node => node.type === AccountSettings).map(node => node.props.part), ['security']);
   assert.match(renderToStaticMarkup(render('sign-in')), /Single sign-on is off/); assert.equal(renderToStaticMarkup(render('sign-in', false)).includes('Single sign-on'), false, 'Only operators see sign-in setup.');
@@ -310,9 +311,10 @@ test('post card publishing asks once and names every destination before calling 
   assert.match(appSource, /async function publish\(post: Row\) \{ await run\(async \(\) => \{ await integrate\('social\/publish', \{ postId: post\.id \}\); await reload\(\); \}/);
 });
 
-test('only an owner is offered to leave the workspace, through one confirmed danger action on their own membership', () => {
+test('every member is offered to leave the workspace, through one confirmed danger action on their own membership', () => {
   const appSource = source();
-  assert.ok(appSource.includes("{workspace?.role === 'owner' && <DangerZoneFlow busy={busy} title=\"Leave workspace\""), 'Admins cannot remove themselves on the server, so they are not offered it.');
+  assert.ok(appSource.includes("{workspace && <DangerZoneFlow busy={busy} title=\"Leave workspace\""), 'Owners, admins, editors and viewers can all remove their own membership (#142).');
+  assert.ok(appSource.includes("description: 'You lose access to every project in this workspace.' + (workspace.role === 'owner' ? ' A workspace keeps at least one owner, so make another member an owner first.' : ' To return, you need a new invitation.'), confirmLabel: 'Leave workspace' }]"), 'Only an owner is told about the last-owner rule.');
   assert.ok(appSource.includes("onConfirm={leaveWorkspace}/>}"));
   const handler = appSource.slice(appSource.indexOf('async function leaveWorkspace('), appSource.indexOf('  if (!session) return'));
   assert.ok(handler.includes("await api(`/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`, 'DELETE'); window.location.reload();"), 'It removes the signed-in member only, then reloads the workspace list.');

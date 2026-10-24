@@ -290,8 +290,9 @@ export async function createApp(options: AppOptions = {}) {
         }
         const memberRoute = path.match(/^\/api\/workspaces\/([^/]+)\/members(?:\/([^/]+))?$/);
         if (memberRoute && ['GET', 'PATCH', 'DELETE'].includes(req.method!)) {
-          const role = await workspaceAccess(memberRoute[1], user.id);
-          if (!['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
+          // Any member may leave by removing their own membership; the last-owner rule below still applies.
+          const role = await workspaceAccess(memberRoute[1], user.id), leaving = req.method === 'DELETE' && memberRoute[2] === user.id;
+          if (!leaving && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
           if (req.method === 'GET' && !memberRoute[2]) return send(200, { members: (await db.execute(sql`SELECT u.id,u.id AS "userId",u.name,u.email,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=${memberRoute[1]} ORDER BY u.name COLLATE "C", u.id`)).rows });
           if (!memberRoute[2] || req.method === 'GET') throw new HttpError(404, 'Team route not found.');
           const requested = req.method === 'DELETE' ? null : choice(body.role, roles, 'Role');
@@ -300,11 +301,11 @@ export async function createApp(options: AppOptions = {}) {
           await db.transaction(async tx => {
             const current = await lockWorkspace(tx, memberRoute[1]) ? await memberRole(tx, memberRoute[1], user.id) : undefined;
             if (!current) throw new HttpError(404, 'Workspace not found or unavailable.');
-            if (!['owner', 'admin'].includes(current)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
+            if (!leaving && !['owner', 'admin'].includes(current)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
             const target = { id: memberRoute[2] }, previous = await memberRole(tx, memberRoute[1], target.id);
             if (!previous) throw new HttpError(404, 'Workspace member not found.');
             // The shared rule checks both the saved and the requested role; removal passes no next role.
-            if (!mayManageWorkspaceMember(current, previous, requested ?? undefined)) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
+            if (!leaving && !mayManageWorkspaceMember(current, previous, requested ?? undefined)) throw new HttpError(403, 'Only an owner can manage administrators and owners.');
             if (previous === 'owner' && requested !== 'owner' && (await first<{ count: number }>(tx.execute(sql`SELECT count(*) AS count FROM memberships WHERE workspace_id=${memberRoute[1]} AND role='owner'`)))!.count <= 1) throw new HttpError(409, 'A workspace must keep at least one owner.');
             if (req.method === 'DELETE') await tx.execute(sql`DELETE FROM memberships WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
             else await tx.execute(sql`UPDATE memberships SET role=${requested} WHERE workspace_id=${memberRoute[1]} AND user_id=${target.id}`);
