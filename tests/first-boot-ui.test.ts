@@ -20,7 +20,7 @@ const HomeSetup = new Function('React', 'useState', 'globalThis', 'Badge', 'Butt
 
 // FirstProject with its one useState replaced, so each test chooses the skipped state and sees the requested change.
 const { code: firstProjectCode } = await transformWithOxc(slice('function FirstProject(', '\n// The story panel beside'), 'FirstProject.tsx', { jsx: { runtime: 'classic' } });
-const story = React.createElement(ui.AuthStory, { title: 'Story panel' });
+const story = React.createElement(ui.AuthStory, { eyebrow: 'STORY', title: 'Story panel', lead: 'Lead line.', footnote: 'Footnote' });
 function firstProject(skipped: boolean) {
   const changes: boolean[] = [], created: unknown[] = []; let signedOut = 0;
   const FirstProject = new Function('React', 'useState', 'Brand', 'WorkspaceOnboarding', 'Button', 'AppShell', 'AppTopbar', 'AccountMenu', 'PageHeader', 'HomeSetup', 'authStory', firstProjectCode + '; return FirstProject;')(
