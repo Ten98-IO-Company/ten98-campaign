@@ -304,3 +304,24 @@ test('Enter in the platform picker never submits the composer; it only picks the
   assert.equal(prevented, 1, 'Enter elsewhere, such as a new line in the caption, is left alone.');
   assert.deepEqual(view.snapshot().platforms, [], 'Enter picked nothing by itself.');
 });
+
+test('typing a platform in Post to and pressing Enter picks the first match, without submitting (#188)', () => {
+  const view = mount({ ...base, accounts: [] }), form = () => view.find(node => node.type === ui.Form)!;
+  let prevented = 0;
+  // A stand-in for the combobox input: its typed text, its placeholder and the option it highlights, if any.
+  const enter = (value: string, active: string | null = null, placeholder = 'Choose platforms') => { form().props.onKeyDown({ key: 'Enter', target: { value, placeholder, getAttribute: (name: string) => name === 'role' ? 'combobox' : name === 'aria-activedescendant' ? active : null }, preventDefault() { prevented++; } }); view.paint(); };
+  enter('Insta');
+  assert.deepEqual(view.snapshot().platforms, ['instagram'], 'The only match for "Insta" is added.');
+  assert.equal(prevented, 1, 'Enter still never submits the composer (#162).');
+  enter('Insta');
+  assert.deepEqual(view.snapshot().platforms, ['instagram'], 'Enter adds; it never removes an already picked match.');
+  enter('book', 'composer-option-0');
+  assert.deepEqual(view.snapshot().platforms, ['instagram'], 'With an option highlighted the combobox picks it itself.');
+  enter('zzz'); enter('');
+  assert.deepEqual(view.snapshot().platforms, ['instagram'], 'No match, or no text, picks nothing.');
+  enter('book', null, 'Another combobox');
+  assert.deepEqual(view.snapshot().platforms, ['instagram'], 'Only the platform picker reacts.');
+  enter('book');
+  assert.deepEqual(view.snapshot().platforms, ['instagram', 'facebook']);
+  assert.equal(prevented, 7, 'Every Enter in a combobox is kept from submitting.');
+});
