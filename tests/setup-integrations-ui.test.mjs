@@ -71,11 +71,11 @@ test('Calendar retains event workflows and navigates to Integrations without a s
     const tree = h.render(options), html = renderToStaticMarkup(tree);
     assert.doesNotMatch(html, /Save calendar connection|Shared calendar ID|service account|type="password"/);
     assert.equal(elements(tree).filter(node => node.type === 'input' && node.props.name === 'calendarId').length, 0);
-    calendarButton(tree, 'Open integrations').props.onClick(); assert.equal(opened, 1);
+    calendarButton(tree, 'Open Connections').props.onClick(); assert.equal(opened, 1);
     assert.deepEqual(calls, [['/projects/project-a/calendar/status']]);
     if (connected) { calendarButton(tree, 'Load Google events'); calendarButton(tree, 'Review campaign plan for Google'); assert.match(html, /Create a Google event/); }
-    else assert.match(html, /Connect this project’s Google Calendar in Integrations/);
-    assert.doesNotMatch(renderToStaticMarkup(h.render({ ...options, onOpenIntegrations: undefined })), /Open integrations/i);
+    else assert.match(html, /Connect this project’s Google Calendar in Settings › Connections/);
+    assert.doesNotMatch(renderToStaticMarkup(h.render({ ...options, onOpenIntegrations: undefined })), /Open Connections/i);
     h.unmount();
   }
 });
@@ -86,7 +86,7 @@ test('Calendar renders the agenda without a Google connection and offers Edit an
   disconnected.render(offline); disconnected.flush(); await settle();
   const offlineHtml = renderToStaticMarkup(disconnected.render(offline));
   assert.match(offlineHtml, /^<div>Publishing agenda<\/div>/, 'The agenda renders first, even before Google is connected.');
-  assert.match(offlineHtml, /Connect this project’s Google Calendar in Integrations/);
+  assert.match(offlineHtml, /Connect this project’s Google Calendar in Settings › Connections/);
   assert.doesNotMatch(offlineHtml, /Load Google events/);
   disconnected.unmount();
 

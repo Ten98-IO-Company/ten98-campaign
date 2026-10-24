@@ -74,7 +74,7 @@ test('connection mode mounts and refreshes status only, even with mapped account
     const instance = view(variant.Component, { ...props(async path => { requests.push(path); assert.equal(path, prefix + '/status'); return variant.status; }), mode: 'connection' });
     let tree = await instance.update();
     const html = renderToStaticMarkup(tree);
-    assert.doesNotMatch(html, /Create paused|Performance export|Shopping and standard Video performance|Check report status|Open integrations/);
+    assert.doesNotMatch(html, /Create paused|Performance export|Shopping and standard Video performance|Check report status|Open Connections/);
     assert.equal(elements(tree).some(isShoppingAccount), false, 'Connection mode must not mount the Google account reader.');
     assert.deepEqual(requests, [prefix + '/status']);
     await button(tree, variant.name === 'NativeGoogleAds' ? 'Refresh Google Shopping' : 'Refresh Microsoft account').props.onClick();
@@ -98,9 +98,9 @@ test('default workflow hides all mapping editors, opens integrations, and preser
     const instance = view(variant.Component, { ...props(request), onOpenIntegrations: () => { opened++; } });
     const tree = await instance.update();
     assert.equal(elements(tree).some(node => node.type === ui.Input && ['customerId', 'accountId'].includes(node.props.name)), false);
-    const opening = button(tree, 'Open integrations'); assert.ok(opening); assert.equal(opening.props.type, 'button');
+    const opening = button(tree, 'Open Connections'); assert.ok(opening); assert.equal(opening.props.type, 'button');
     const reads = requests.length; opening.props.onClick(); assert.equal(opened, 1); assert.equal(requests.length, reads);
-    assert.equal(button(instance.render({ onOpenIntegrations: undefined }), 'Open integrations'), undefined);
+    assert.equal(button(instance.render({ onOpenIntegrations: undefined }), 'Open Connections'), undefined);
     if (variant.name === 'NativeGoogleAds') {
       const account = elements(tree).find(isShoppingAccount); assert.ok(account);
       const child = view(account.type, account.props), accountTree = await child.update();

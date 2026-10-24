@@ -116,7 +116,7 @@ test('detail actions reuse the existing editors and keep samples away from provi
   assert.match(text(page([undefined, 'a2']).render()), /Replace publishing copy/);
   const sample = page([undefined, 's1']).render();
   assert.equal(buttons(sample, /Prepare for publishing|Replace publishing copy/).length, 0);
-  assert.match(text(sample), /never sent to providers/);
+  assert.match(text(sample), /never sent to networks/);
   const viewer = page([undefined, 'a1']).render({ canWrite: false });
   assert.equal(buttons(viewer, /Prepare for publishing|Edit details/).length, 0);
   assert.match(text(viewer), /view-only access/);

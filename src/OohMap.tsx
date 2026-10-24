@@ -90,19 +90,19 @@ export default function OohMap({ projectId, request, locations, placements, visi
       <Button variant="secondary" size="sm" aria-label={(editable(placement) ? 'Edit booking for ' : 'View booking for ') + placement.name} onClick={() => onOpen(placement)}>{editable(placement) ? 'Edit booking' : 'View booking'}</Button>
       {placement.proofUrl && <Link href={placement.proofUrl} target="_blank" rel="noreferrer" aria-label={'Proof of display for ' + placement.name}>Proof</Link>}
     </Inline>}
-    emptyState={<EmptyState icon="billboard" title={placements.length ? 'No placements match this search' : 'No OOH placements'} description={placements.length ? 'Try another location, provider, or placement name.' : 'Add a billboard, digital screen, or transit booking to your campaign.'}/>}/>;
+    emptyState={<EmptyState icon="billboard" title={placements.length ? 'No bookings match this search' : 'No billboard bookings'} description={placements.length ? 'Try another location, partner or booking name.' : 'Add a billboard, digital screen, or transit booking to your campaign.'}/>}/>;
   return <Stack gap={5}>
     <MetricGrid list label="OOH summary">
-      <MetricCard label="Live placements" value={String(placements.filter(placement => placement.status === 'live').length)} hint="Currently on display"/>
+      <MetricCard label="Live billboards" value={String(placements.filter(placement => placement.status === 'live').length)} hint="Currently on display"/>
       <MetricCard label="Media partners" value={String(partners.length)} hint="In this project"/>
       <MetricCard label="Locations" value={String(new Set(placements.map(placement => placement.location)).size)} hint="Distinct booking locations"/>
     </MetricGrid>
     {mapShown ? <Grid columns={2} gap={4} align="start">{list}<Stack gap={2}>
-      <EmbedHost ref={container} label="Google map of OOH bookings" size="lg" narrowSize="md" busy={!ready} loadingLabel="Loading map…"/>
+      <EmbedHost ref={container} label="Map of billboard bookings" size="lg" narrowSize="md" busy={!ready} loadingLabel="Loading map…"/>
       <Text size="sm" tone="muted">{`${located.length} on map · ${locations.length - located.length} not on map`}</Text>
     </Stack></Grid> : list}
     {/* Only whoever can configure Maps is told why it is missing; everyone else sees the list alone. */}
-    {canManageMaps && (error || config?.configured === false) && <Text size="sm" tone="muted">{error || 'Google Maps is off. Add a browser API key under Integrations › Google Maps to show bookings on a map.'}</Text>}
+    {canManageMaps && (error || config?.configured === false) && <Text size="sm" tone="muted">{error || 'The map is off. Turn on Google Maps in Settings › Connections to show bookings on a map.'}</Text>}
   </Stack>;
 }
 /** Grouped booking editor fields. The host form submits them by name, so each name is the placement record field. */
@@ -124,7 +124,7 @@ export function BookingFields({ item, partners, campaigns, defaultCampaignId, de
           <Field label="Latitude"><Input name="latitude" type="number" min="-90" max="90" step="any" defaultValue={item?.latitude ?? ''}/></Field>
           <Field label="Longitude"><Input name="longitude" type="number" min="-180" max="180" step="any" defaultValue={item?.longitude ?? ''}/></Field>
         </FormGrid>
-        <Text tone="muted" size="sm">Add both coordinates to show this booking on the map. Provider inventory keeps its supplied coordinates.</Text>
+        <Text tone="muted" size="sm">Add both coordinates to show this booking on the map. Partner screens keep their own coordinates.</Text>
       </Stack></Disclosure>
     </Fieldset>
     <Fieldset legend="When & cost">
