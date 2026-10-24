@@ -326,8 +326,10 @@ test('the first setup step follows where setup stands and gives the action only 
     result.onAction?.(); return { ...result, calls };
   };
   const member = step({ key: false });
-  assert.equal(member.title, 'Turn on social publishing'); assert.equal(member.onAction, undefined, 'A member is told to ask, not sent to credentials.');
-  assert.deepEqual(step({ key: false, operator: true }).calls, [['page', 'Integrations', 'keys']], 'The operator lands on Settings › Advanced › Service keys.'); assert.equal(step({ key: false, operator: true }).action, 'Add your Zernio key');
+  assert.equal(member.title, 'Connect your social accounts'); assert.equal(member.onAction, undefined, 'A member is told to ask, not sent to credentials.');
+  assert.deepEqual(step({ key: false, operator: true }).calls, [['page', 'Integrations', 'keys']], 'The operator lands on Settings › Advanced › Service keys.'); assert.equal(step({ key: false, operator: true }).action, 'Set up social accounts');
+  // Home speaks the marketer's language; the key wording lives only in Settings › Advanced › Service keys.
+  for (const state of [{ key: false }, { key: false, operator: true }, { linked: false }, { linked: false, map: true }, { admin: true }, { admin: true, accounts: 1 }]) { const shown = step(state); assert.doesNotMatch([shown.title, shown.detail, shown.action || ''].join(' '), /Zernio|\bkeys?\b/i, JSON.stringify(state)); }
   assert.equal(step({ linked: false, admin: true }).onAction, undefined, 'Linking a brand profile needs an operator who manages the workspace.');
   assert.equal(step({ linked: false, map: true }).action, 'Link brand profile');
   const admin = step({ admin: true });

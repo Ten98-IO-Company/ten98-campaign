@@ -578,7 +578,7 @@ function App() {
   // The first step follows where setup really stands, and offers an action only to someone who can take it.
   const zernioLinked = !!(remote.status?.zernio?.configured && remote.status.zernio.mapped);
   const accountsStep: SetupStep = !state.connections.zernio
-    ? { id: 'accounts', title: 'Turn on social publishing', detail: state.user.isOperator ? 'Add the Zernio key for this installation once; then connect your accounts.' : 'Your Campaign administrator turns this on once for everyone.', done: false, ...(state.user.isOperator ? { action: 'Add your Zernio key', onAction: () => setPage('Integrations', 'keys') } : {}) }
+    ? { id: 'accounts', title: 'Connect your social accounts', detail: state.user.isOperator ? 'Social publishing is not set up for this installation yet. Set it up once, then connect your accounts.' : 'Your Campaign administrator turns on social publishing once for everyone.', done: false, ...(state.user.isOperator ? { action: 'Set up social accounts', onAction: () => setPage('Integrations', 'keys') } : {}) }
     : !zernioLinked
       ? { id: 'accounts', title: 'Link this project to a brand profile', detail: canMap ? 'Choose the brand profile this project publishes from.' : 'Your Campaign administrator links this project once.', done: false, ...(canMap ? { action: 'Link brand profile', onAction: () => setPage('Integrations') } : {}) }
       : { id: 'accounts', title: 'Connect your social and ad accounts', detail: canAdmin ? 'Publish posts and run ads from one place.' : 'An owner or administrator connects the accounts.', done: !!remote.accounts?.accounts?.length, ...(canAdmin ? { action: 'Connect accounts', onAction: () => setModal({ type: 'connect' }) } : {}) };
