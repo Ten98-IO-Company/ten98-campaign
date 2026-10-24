@@ -19,12 +19,13 @@ test('first boot is one screen: name, email, password, a prefilled workspace nam
   let submitted;
   const screen = Auth({ session: { setupRequired: true, oidcEnabled: true }, error: '', busy: false, onSubmit: values => { submitted = values; } });
   assert.equal(screen.type, FirstUserSetupFlow);
-  assert.equal(screen.props.setupToken, false, 'Token-less first sign-up (@ten98/ui 0.24.0).'); assert.equal(screen.props.workspaceName, true); assert.deepEqual(screen.props.defaultValues, { workspaceName: 'My workspace' });
+  assert.equal(screen.props.setupToken, false, 'Token-less first sign-up (@ten98/ui 0.24.0).'); assert.equal(screen.props.workspaceName, true); assert.equal(screen.props.workspaceNameRequired, false, 'A cleared name becomes "My workspace" on the server (@ten98/ui 0.25.0).'); assert.deepEqual(screen.props.defaultValues, { workspaceName: 'My workspace' });
   for (const absent of ['aside', 'description', 'eyebrow', 'sampleOptIn', 'signInInstead', 'tokenHint']) assert.equal(screen.props[absent], undefined, `No ${absent} on the first-boot screen.`);
   const html = renderToStaticMarkup(screen);
   assert.match(html, /<h1[^>]*>Create owner account<\/h1>/);
   for (const field of ['name', 'email', 'password']) assert.match(html, new RegExp(`<input[^>]*required[^>]*name="${field}"|<input[^>]*name="${field}"[^>]*required`), `${field} is required`);
   assert.match(html, /name="workspaceName"[^>]*value="My workspace"|value="My workspace"[^>]*name="workspaceName"/);
+  assert.doesNotMatch(html.match(/<input[^>]*name="workspaceName"[^>]*>/)?.[0] || '', /required/, 'The workspace name may be left blank.');
   assert.match(html, /name="password"[^>]*minLength="12"|minLength="12"[^>]*name="password"/i);
   assert.equal(html.match(/<button[^>]*type="submit"[^>]*>/g)?.length, 1, 'One button.'); assert.match(html, /<button[^>]*type="submit"[^>]*>Create owner account<\/button>/);
   assert.doesNotMatch(html, /<button[^>]*type="button"/, 'No other actions.');

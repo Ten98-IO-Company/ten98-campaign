@@ -15,9 +15,9 @@ const library = ui as unknown as Record<string, unknown>;
 const strip = (text: string) => text.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, '');
 const compiled = async (text: string, file: string) => (await transformWithOxc(strip(text), file, { jsx: { runtime: 'classic' } })).code;
 const templateModule = new Function('React', ...Object.keys(library), await compiled(templateSource, 'WhatsAppTemplate.tsx') + '; return { WhatsAppTemplate, templateRestriction, templatePreviewText, templateParameter, templateMissing };')(React, ...Object.values(library));
-const module = new Function('React', 'useEffect', 'useRef', 'useState', 'WhatsAppTemplate', 'templateRestriction', 'templatePreviewText', 'templateMissing', 'useFocusReturn', 'useRevealPanel', ...Object.keys(library),
+const module = new Function('React', 'useEffect', 'useRef', 'useState', 'WhatsAppTemplate', 'templateRestriction', 'templatePreviewText', 'templateMissing', 'useRevealPanel', ...Object.keys(library),
   await compiled(source, 'DirectCampaigns.tsx') + '; return { DirectCampaigns, localAudience, exclusionGroups, campaignChecks, campaignProgress, ChecklistRow, CampaignStatus, CampaignResults, defaultName };',
-)(React, useEffect, useRef, useState, templateModule.WhatsAppTemplate, templateModule.templateRestriction, templateModule.templatePreviewText, templateModule.templateMissing, () => () => {}, () => {}, ...Object.values(library));
+)(React, useEffect, useRef, useState, templateModule.WhatsAppTemplate, templateModule.templateRestriction, templateModule.templatePreviewText, templateModule.templateMissing, () => {}, ...Object.values(library));
 
 const draft = (changes: Row = {}) => ({ name: 'Autumn notice', channel: 'email', emailPurpose: 'transactional', subject: 'Your receipt', text: 'Thanks {{name}}', html: '', accountId: '', templateName: '', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [], ...changes });
 const person = (id: string, changes: Row = {}) => ({ id, name: id, email: `${id}@example.com`, phone: '+971501234567', tags: ['customer'], consents: { email: true, sms: true, whatsapp: true, emailMarketing: false }, ...changes });

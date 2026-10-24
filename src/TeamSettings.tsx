@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { TeamFlow, type AuthNotice, type TeamInvitation, type TeamMember } from '@ten98/ui';
-import { useFocusReturn } from './focus-return';
+import { TeamFlow, type AuthNotice, type TeamInvitation, type TeamMember, useFocusReturn } from '@ten98/ui';
 import { workspaceRoles } from './workspace-roles';
 
 type Props = { workspaceId: string; role: string; currentUserId: string; request: (path: string, method?: string, body?: unknown) => Promise<any> };

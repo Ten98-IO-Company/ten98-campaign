@@ -1,9 +1,8 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, DetailWorkspace, Disclosure, EmptyState, FeatureControls, Field, FormActions, Grid, Heading, Inline, Link, List, ListItem, Option, Progress, ReviewSummary, SegmentedControl, Select, SelectableList, StatusLine, Stack, Text, Textarea, ValidationSummary, type ReviewChange, type SelectableListItem, type ValidationTarget } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, DetailWorkspace, Disclosure, EmptyState, FeatureControls, Field, FormActions, Grid, Heading, Inline, Link, List, ListItem, Option, Progress, ReviewSummary, SegmentedControl, Select, SelectableList, StatusLine, Stack, Text, Textarea, ValidationSummary, type ReviewChange, type SelectableListItem, type ValidationTarget, useFocusReturn } from '@ten98/ui';
 import { PostVariantPreview } from './PostComposer';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { reviewKeyAction } from './review-keys';
-import { useFocusReturn } from './focus-return';
 import { adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits } from './approval-status';
 
 type Props = { projectId: string; role: string; currentUserId?: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; onOpenSettings?: () => void };
@@ -160,7 +159,20 @@ export default function ContentApprovals({ projectId, role, currentUserId = '', 
     const rows = problem?.code === 'APPROVAL_POST_RESTRICTIONS' && Array.isArray(problem.details) ? problem.details.filter((row: any) => row && typeof row.message === 'string' && row.message && ['platform', 'field', 'accountId'].every(key => row[key] === undefined || typeof row[key] === 'string')).slice(0, 100) : [];
     setRestrictions(previous => { const { [postId]: _previous, ...rest } = previous; return rows.length ? { ...rest, [postId]: rows } : rest; });
   }
-  const rememberFocus = useFocusReturn(busy);
+  // The library hook returns focus to the clicked control. When a review removes that card's buttons, the review card
+  // takes focus instead (#151); the library's effect runs first, so a control that is still there keeps priority.
+  const returnFocus = useFocusReturn(busy), reviewCard = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const card = reviewCard.current;
+    if (busy || !card) return;
+    reviewCard.current = null;
+    const active = document.activeElement;
+    if (card.isConnected && (!active || active === document.body)) card.focus();
+  }, [busy]);
+  function rememberFocus(card: HTMLElement | null) {
+    const active = document.activeElement;
+    returnFocus(); reviewCard.current = active && active !== document.body ? card : null;
+  }
   // Waiting on me (ten98-campaign#125): a review someone else asked an owner or administrator for, or my own request
   // returned with changes. The server still decides who may approve; this only chooses what to show first.
   const requester = (row: any) => String(row?.requestedBy?.id || ''), mine = (entry: any) => Boolean(currentUserId) && entry.requester === currentUserId;

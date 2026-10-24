@@ -52,9 +52,10 @@ test('the first-project step is one project name, the sample opt-in and Skip for
   for (const label of ['Project name', 'Add sample data', 'Create project', 'Skip for now']) assert.ok(text.includes(label), label);
   element.props.onSubmit({ name: 'Spring launch', sample: true }); element.props.onSubmit({ name: 'Own work' });
   assert.deepEqual(created, [{ name: 'Spring launch', sample: true }, { name: 'Own work', sample: false }]);
-  const skip = element.props.children;
-  assert.equal(skip.type, Button); assert.equal(skip.props.variant, 'secondary'); assert.equal(skip.props.children, 'Skip for now');
-  skip.props.onClick(); assert.deepEqual(changes, [true]);
+  // The library's own Skip action (@ten98/ui 0.25.0), not a stand-in Button passed as children.
+  assert.equal(element.props.children, undefined); assert.equal(element.props.skipLabel, 'Skip for now');
+  assert.match(html, /<button[^>]*type="button"[^>]*>Skip for now<\/button>/);
+  element.props.onSkip(); assert.deepEqual(changes, [true]);
 });
 
 test('skipping lands on Home with no project, where the setup checklist starts with Create your first project', () => {

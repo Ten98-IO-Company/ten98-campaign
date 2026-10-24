@@ -12,7 +12,8 @@ import { hooks, nodes } from './hook-recorder.ts';
 type Row = Record<string, any>;
 const strip = (text: string) => text.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, '');
 const compile = async (file: string) => (await transformWithOxc(strip(await readFile(new URL('../src/' + file, import.meta.url), 'utf8')), file, { jsx: { runtime: 'classic' } })).code;
-const library = ui as unknown as Record<string, unknown>;
+// The recorded hooks are not React's, so the library's useFocusReturn (React hooks inside) is replaced by a no-op.
+const library: Record<string, unknown> = { ...ui, useFocusReturn: () => () => {} };
 const campaigns = [{ id: 'c1', name: 'Autumn launch', currency: 'AED' }, { id: 'c2', name: 'Spring sampling', currency: 'AED', startDate: '2026-10-26', endDate: '2026-11-30' }];
 const request = () => new Promise(() => {});
 
@@ -75,8 +76,8 @@ test('Link or QR code sets the new link’s campaign and focuses its destination
 const templateCode = await compile('WhatsAppTemplate.tsx'), directCode = await compile('DirectCampaigns.tsx');
 const template = new Function('React', ...Object.keys(library), templateCode + '; return { WhatsAppTemplate, templateRestriction, templatePreviewText, templateMissing };')(React, ...Object.values(library));
 function mountDirect(props: Row) {
-  const h = hooks(), { DirectCampaigns } = new Function('React', 'useEffect', 'useRef', 'useState', 'WhatsAppTemplate', 'templateRestriction', 'templatePreviewText', 'templateMissing', 'useFocusReturn', 'useRevealPanel', ...Object.keys(library), directCode + '; return { DirectCampaigns };')(
-    React, h.useEffect, h.useRef, h.useState, template.WhatsAppTemplate, template.templateRestriction, template.templatePreviewText, template.templateMissing, () => () => {}, () => {}, ...Object.values(library));
+  const h = hooks(), { DirectCampaigns } = new Function('React', 'useEffect', 'useRef', 'useState', 'WhatsAppTemplate', 'templateRestriction', 'templatePreviewText', 'templateMissing', 'useRevealPanel', ...Object.keys(library), directCode + '; return { DirectCampaigns };')(
+    React, h.useEffect, h.useRef, h.useState, template.WhatsAppTemplate, template.templateRestriction, template.templatePreviewText, template.templateMissing, () => {}, ...Object.values(library));
   const all = { projectId: 'p1', request, ...props };
   h.render(DirectCampaigns, all); h.flush();
   return nodes(h.render(DirectCampaigns, all));
