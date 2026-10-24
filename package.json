@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@ten98/runtime": "file:vendor/ten98-runtime-0.4.2.tgz",
-    "@ten98/ui": "file:vendor/ten98-ui-0.25.0.tgz",
+    "@ten98/ui": "file:vendor/ten98-ui-0.26.0.tgz",
     "drizzle-orm": "0.45.2",
     "openid-client": "6.8.8",
     "pg": "8.23.0",
