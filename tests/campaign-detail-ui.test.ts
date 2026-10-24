@@ -5,6 +5,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { postDisplayStatus } from '../shared/post-schedule.ts';
 
 // The campaign page with controlled hook state; it only calls the callbacks the app passes in.
 type Row = { id: string; [key: string]: any };
@@ -12,8 +13,8 @@ const raw = await readFile(new URL('../src/CampaignDetail.tsx', import.meta.url)
 const body = raw.replace(/^import .*;\r?\n/gm, '').replace(/^export type .*;\r?\n/gm, '').replace('export function campaignItems', 'function campaignItems').replace('export default function', 'function');
 const { code } = await transformWithOxc(body, 'CampaignDetail.tsx', { jsx: { runtime: 'classic' }, lang: 'tsx' });
 const names = ['Button', 'Card', 'DataTable', 'EmptyState', 'Heading', 'Icon', 'Inline', 'MetricCard', 'MetricGrid', 'Popover', 'SegmentedControl', 'Stack', 'Tabs', 'Text'] as const;
-const { CampaignDetail, campaignItems } = new Function('React', 'useState', ...names, code + '; return { CampaignDetail, campaignItems };')(
-  React, (initial: unknown) => [initial, () => {}], ...names.map(name => (ui as Record<string, unknown>)[name]));
+const { CampaignDetail, campaignItems } = new Function('React', 'useState', 'postDisplayStatus', ...names, code + '; return { CampaignDetail, campaignItems };')(
+  React, (initial: unknown) => [initial, () => {}], postDisplayStatus, ...names.map(name => (ui as Record<string, unknown>)[name]));
 
 const campaign = { id: 'c1', name: 'Autumn launch', status: 'active', startDate: '2030-10-01', endDate: '2030-10-31', budget: 1000, spent: 250, currency: 'AED' };
 const posts = [{ id: 'p1', campaignId: 'c1', status: 'scheduled', scheduledAt: '2999-01-02T09:00:00.000Z', content: 'Hello' }, { id: 'p2', campaignId: 'other', status: 'draft', content: 'Elsewhere' }];
@@ -54,4 +55,13 @@ test('Add lists every kind of work, and choosing one hands that kind to the app'
   assert.deepEqual(choices.map(node => node.props.children), ['Post', 'Billboard booking', 'Field activity', 'Email or SMS', 'Ad', 'Link or QR code']);
   for (const choice of choices) choice.props.onClick();
   assert.deepEqual(added, ['post', 'placement', 'activation', 'message', 'ad', 'link']);
+});
+
+test('a dated local post reads Planned; only a post a network holds reads Scheduled', () => {
+  assert.equal(postDisplayStatus({ status: 'scheduled' }), 'planned');
+  assert.equal(postDisplayStatus({ status: 'scheduled', externalId: 'zernio-1' }), 'scheduled');
+  assert.equal(postDisplayStatus({ status: 'published', externalId: 'zernio-1' }), 'published');
+  assert.equal(postDisplayStatus({}), 'draft');
+  const items = campaignItems('c1', [{ id: 'p1', campaignId: 'c1', status: 'scheduled', scheduledAt: '2999-01-02T09:00:00.000Z' }, { id: 'p2', campaignId: 'c1', status: 'scheduled', externalId: 'x', scheduledAt: '2999-01-03T09:00:00.000Z' }], [], [], () => 'Post');
+  assert.deepEqual(items.map((item: { row: Row; status: string }) => item.row.id + ':' + item.status), ['p2:scheduled', 'p1:planned']);
 });

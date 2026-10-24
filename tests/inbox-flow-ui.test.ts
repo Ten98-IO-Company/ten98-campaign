@@ -5,6 +5,7 @@ import React from 'react';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { assertNoMarkup, readText } from './read-text.ts';
 
 // Issue #129: the inbox loads on view, offers views by state, separates "All caught up" from "No matches", shows one
 // banner per affected account and answers j/k/e/r. The actual components run with ordered hook stubs and a stub transport.
@@ -149,7 +150,7 @@ test('an inbox without a connected account shows only Connect social accounts, w
 
 // The page header is the h1 and names the page, so the inbox starts at h2 and each heading nests at most one level deeper.
 // Heading text is read by splitting on tags in one pass (not a sanitiser): any markup left behind fails the assertion.
-const headingText = (html: string) => { const text = html.split(/<[^>]*>/).join(''); assert.ok(!text.includes('<'), 'Heading text still contains markup: ' + html); return text; };
+const headingText = (html: string) => { const text = readText(html, ''); assertNoMarkup(text, 'Heading text still contains markup: ' + html); return text; };
 const headings = (tree: any) => [...renderToStaticMarkup(tree).matchAll(/<h([1-6])[^>]*>(.*?)<\/h\1>/g)].map(([, level, name]) => ({ level: Number(level), name: headingText(name) }));
 test('inbox headings start below the page heading, nest in order and never repeat', async () => {
   const commentAccounts = [{ id: 'fb', platform: 'facebook', name: 'Studio page', capabilities: { comments: true } }];

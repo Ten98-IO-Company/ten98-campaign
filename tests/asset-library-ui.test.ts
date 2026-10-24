@@ -8,6 +8,7 @@ import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import * as app from '@ten98/ui/app';
 import { assetDeliveryIssue } from '../shared/social-posts.ts';
+import { readText } from './read-text.ts';
 
 type Row = Record<string, any>;
 const library = ui as unknown as Record<string, any>;
@@ -48,7 +49,7 @@ const elements = (node: any): any[] => Array.isArray(node) ? node.flatMap(elemen
     ...((node.props as Row).items || []).flatMap((item: Row) => elements(item.content)),
     ...(node.type === DataTable ? elements((node.props as Row).rows.flatMap((row: Row) => [...(node.props as Row).columns.map((column: Row) => column.render?.(row)), (node.props as Row).rowActions?.(row)])) : [])] : [];
 // Visible text read by splitting on tags in one pass (not a sanitiser).
-const text = (node: any): string => renderToStaticMarkup(React.createElement(React.Fragment, null, node)).split(/<[^>]*>/).join(' ').replace(/\s+/g, ' ');
+const text = (node: any): string => readText(renderToStaticMarkup(React.createElement(React.Fragment, null, node)));
 const buttons = (node: any, label: RegExp) => elements(node).filter(item => item.type === Button && (label.test(text((item.props as Row).children)) || label.test((item.props as Row)['aria-label'] || '')));
 const file = (name: string, type: string, size = 10) => ({ name, type, size }) as File;
 const drop = (files: File[], defaultPrevented = false) => { let prevented = false; return { event: { defaultPrevented, preventDefault() { prevented = true; }, dataTransfer: { files, types: ['Files'] } }, prevented: () => prevented }; };

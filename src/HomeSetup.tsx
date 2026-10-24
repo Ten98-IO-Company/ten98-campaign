@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Badge, Button, Card, Inline, List, ListItem, Progress, Stack, Text } from '@ten98/ui';
 
-export type SetupStep = { id: string; title: string; detail: string; done: boolean; action: string; onAction: () => void };
+// A step without an action belongs to someone else (an administrator); it says so instead of offering a button.
+export type SetupStep = { id: string; title: string; detail: string; done: boolean; action?: string; onAction?: () => void };
 type Props = { projectId: string; steps: SetupStep[] };
 
 // Home's first-run checklist, composed from library primitives until the shared SetupChecklist
@@ -22,7 +23,7 @@ export default function HomeSetup({ projectId, steps }: Props) {
       <Progress value={done / steps.length * 100} label="Setup progress"/>
       <List gap={3}>{steps.map(step => <ListItem key={step.id}><Inline justify="between" align="center" gap={3}>
         <Stack gap={0}><Text weight="semibold">{step.title}</Text><Text tone="muted" size="sm">{step.detail}</Text></Stack>
-        {step.done ? <Badge tone="success">Done</Badge> : <Button variant="secondary" size="sm" onClick={step.onAction}>{step.action}</Button>}
+        {step.done ? <Badge tone="success">Done</Badge> : step.onAction ? <Button variant="secondary" size="sm" onClick={step.onAction}>{step.action}</Button> : <Badge>Ask your admin</Badge>}
       </Inline></ListItem>)}</List>
     </Stack>
   </Card>;

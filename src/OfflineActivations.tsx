@@ -4,7 +4,7 @@ import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LAB
 
 type Row = { id: string; [key: string]: any };
 type Material = { label: string; done: boolean };
-type Props = { projectId: string; brand: string; campaigns: Row[]; activations: Row[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; readOnly?: boolean; onChanged: () => Promise<void> | void };
+type Props = { projectId: string; brand: string; campaigns: Row[]; activations: Row[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; readOnly?: boolean; onChanged: () => Promise<void> | void; createFor?: string; onCreateHandled?: () => void };
 type Draft = { name: string; type: ActivationType; campaignId: string; status: string; startAt: string; endAt: string; location: string; notes: string; ownerId: string; teamIds: string[]; materials: Material[]; budget: string; spent: string; reached: string; promoCode: string };
 
 const STATUS_LABELS: Record<string, string> = { planned: 'Planned', completed: 'Completed', cancelled: 'Cancelled' };
@@ -107,7 +107,7 @@ export function patchBody(draft: Draft, existing: Row | null) {
   return body;
 }
 
-export default function OfflineActivations({ projectId, brand, campaigns, activations, request, readOnly = false, onChanged }: Props) {
+export default function OfflineActivations({ projectId, brand, campaigns, activations, request, readOnly = false, onChanged, createFor, onCreateHandled }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/activations`, requester = useRef(request); requester.current = request;
   const [filter, setFilter] = useState(''), [members, setMembers] = useState<Row[]>([]), [editing, setEditing] = useState<Row | 'new' | null>(null), [draft, setDraft] = useState<Draft>(blankDraft()), [dirty, setDirty] = useState(false);
   const [link, setLink] = useState<Row | null>(null), [linkLoading, setLinkLoading] = useState(false), opened = useRef(''), [landing, setLanding] = useState(''), [linkError, setLinkError] = useState(''), [linking, setLinking] = useState(false);
@@ -117,7 +117,7 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
   const campaignOf = (id: string) => campaigns.find(campaign => campaign.id === id);
   const rows = activations.filter(activation => !filter || activation.campaignId === filter).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
   const change = (patch: Partial<Draft>) => { setDraft(current => ({ ...current, ...patch })); setDirty(true); };
-  function open(activation: Row | 'new') { setDraft(activation === 'new' ? blankDraft(filter || campaigns[0]?.id || '') : draftFrom(activation)); setEditing(activation); setDirty(false); setMaterial(''); setError(''); setNotice(''); setLink(null); setLanding(''); setLinkError('');
+  function open(activation: Row | 'new', campaignId = filter || campaigns[0]?.id || '') { setDraft(activation === 'new' ? blankDraft(campaignId) : draftFrom(activation)); setEditing(activation); setDirty(false); setMaterial(''); setError(''); setNotice(''); setLink(null); setLanding(''); setLinkError('');
     const id = activation === 'new' ? '' : activation.id; opened.current = id; setLinkLoading(Boolean(id && activation !== 'new' && activation.linkId));
     if (activation !== 'new' && activation.linkId) request(`/projects/${encodeURIComponent(projectId)}/links`).then(result => {
       if (opened.current !== id) return;
@@ -125,6 +125,8 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
       setLink(found || null); if (!found) setLinkError('The saved tracking link is no longer available. Create a new one below.');
     }, () => { if (opened.current === id) setLinkError('The tracking link could not be loaded.'); }).finally(() => { if (opened.current === id) setLinkLoading(false); });
   }
+  // createFor: a campaign page's Add menu asked for a new item in this campaign; start it once, then tell the app.
+  useEffect(() => { if (!createFor) return; if (editable && campaigns.some(campaign => campaign.id === createFor)) { setFilter(createFor); open('new', createFor); } onCreateHandled?.(); }, [createFor]);
   // Creates (or reuses) the campaign short link for this activation's tagged landing page and keeps it on the activation.
   async function createLink(activation: Row) {
     setLinkError(''); setLinking(true);

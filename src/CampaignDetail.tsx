@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import { postDisplayStatus } from '../shared/post-schedule.ts';
 import { Button, Card, DataTable, EmptyState, Heading, Icon, Inline, MetricCard, MetricGrid, Popover, SegmentedControl, Stack, Tabs, Text } from '@ten98/ui';
 
 type Row = { id: string; [key: string]: any };
@@ -19,7 +20,7 @@ const addChoices: [CampaignAddKind, string][] = [['post', 'Post'], ['placement',
 // Every record that names this campaign, newest plan first. Dates are the moment each item goes out or starts.
 export function campaignItems(campaignId: string, posts: Row[], placements: Row[], activations: Row[], postTitle: (post: Row) => string): Item[] {
   return [
-    ...posts.filter(post => post.campaignId === campaignId).map(row => ({ kind: 'post' as const, row, title: postTitle(row), status: row.status || 'draft', when: row.publishedAt || row.scheduledAt || '' })),
+    ...posts.filter(post => post.campaignId === campaignId).map(row => ({ kind: 'post' as const, row, title: postTitle(row), status: postDisplayStatus(row), when: row.publishedAt || row.scheduledAt || '' })),
     ...placements.filter(placement => placement.campaignId === campaignId).map(row => ({ kind: 'placement' as const, row, title: row.name || 'Billboard booking', status: row.status || 'draft', when: row.startDate || '' })),
     ...activations.filter(activation => activation.campaignId === campaignId).map(row => ({ kind: 'activation' as const, row, title: row.name || 'Field activity', status: row.status || 'draft', when: row.startAt || '' })),
   ].sort((a, b) => (b.when || '').localeCompare(a.when || ''));
