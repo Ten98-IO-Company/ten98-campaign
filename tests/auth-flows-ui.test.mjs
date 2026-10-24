@@ -9,11 +9,14 @@ import { AppBrand } from '@ten98/ui/app';
 
 // Evaluate Campaign's real adapter against the shared flows.
 const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
-// From the shared story panel through Auth, so both evaluate together.
-const start = source.indexOf('const authStory = '), end = source.indexOf('\n}\n', source.indexOf('function Auth({')) + 2;
+const start = source.indexOf('function Auth({'), end = source.indexOf('\n}\n', start) + 2;
 const { code } = await transformWithOxc(source.slice(start, end), 'Auth.tsx', { jsx: { runtime: 'classic' } });
+// The shared story panel from src/auth-story.tsx, evaluated the same way.
+const storySource = await readFile(new URL('../src/auth-story.tsx', import.meta.url), 'utf8');
+const { code: storyCode } = await transformWithOxc(storySource.replace(/^import .*?;\r?\n/gm, '').replace('export const', 'const'), 'auth-story.tsx', { jsx: { runtime: 'classic' } });
+const authStory = new Function('React', 'AuthStory', storyCode + '; return authStory;')(React, AuthStory);
 // startupAuthError is the module-level message read once from ?auth_error at startup.
-const load = (startupAuthError = '') => new Function('React', 'Brand', 'AuthStory', 'FirstUserSetupFlow', 'OidcProviderButtons', 'SignInFlow', 'startupAuthError', code + '; return Auth;')(React, AppBrand, AuthStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow, startupAuthError);
+const load = (startupAuthError = '') => new Function('React', 'Brand', 'authStory', 'FirstUserSetupFlow', 'OidcProviderButtons', 'SignInFlow', 'startupAuthError', code + '; return Auth;')(React, AppBrand, authStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow, startupAuthError);
 const Auth = load();
 
 test('first boot is one screen: name, email, password, a prefilled workspace name and one Create owner account button', () => {
@@ -22,9 +25,10 @@ test('first boot is one screen: name, email, password, a prefilled workspace nam
   assert.equal(screen.type, FirstUserSetupFlow);
   assert.equal(screen.props.setupToken, false, 'Token-less first sign-up (@ten98/ui 0.24.0).'); assert.equal(screen.props.workspaceName, true); assert.equal(screen.props.workspaceNameRequired, false, 'A cleared name becomes "My workspace" on the server (@ten98/ui 0.25.0).'); assert.deepEqual(screen.props.defaultValues, { workspaceName: 'My workspace' });
   for (const absent of ['eyebrow', 'sampleOptIn', 'signInInstead', 'tokenHint', 'surface']) assert.equal(screen.props[absent], undefined, `No ${absent} on the first-boot screen.`);
-  // Discover's wording (#265): who the first account becomes, and the shared password hint.
+  // Discover's wording (#265): who the first account becomes. No custom hint, so the library's policy hint shows here
+  // as on the invitation screen (#273).
   assert.equal(screen.props.description, 'The first account becomes the owner of this installation and its workspace. You can rename the workspace later.');
-  assert.equal(screen.props.passwordPolicy.hint, 'At least 12 characters.');
+  assert.deepEqual(screen.props.passwordPolicy, { minLength: 12, maxLength: 128 });
   // Like Discover's, the screen sits beside the story panel in the shared split layout with the open form column.
   assert.equal(screen.props.aside.type, AuthStory);
   const html = renderToStaticMarkup(screen);
@@ -169,4 +173,22 @@ test('the sign-in screen shows the startup error through SignInFlow, keeps the s
   let submitted; WithError({ session: { oidcEnabled: true }, error: '', busy: false, onSubmit: values => { submitted = values; } }).props.onSubmit({ email: 'member@example.test', password: 'secret' });
   assert.deepEqual(submitted, { email: 'member@example.test', password: 'secret' });
   assert.equal(WithError({ session: { oidcEnabled: true }, error: '', busy: true, onSubmit() {} }).props.error, undefined, 'A new attempt replaces the earlier identity error.');
+});
+
+// #272: when owner setup finds the installation already claimed (409), the screen offers Sign in instead, which opens
+// sign-in with the typed email. The story eyebrow is sentence case, as in Discover.
+test('a claimed installation offers Sign in instead, which carries the typed email to sign-in', () => {
+  const signedIn = [];
+  const before = Auth({ session: { setupRequired: true }, error: '', busy: false, onSubmit() {}, onSignInInstead: email => signedIn.push(email) });
+  assert.equal(before.props.signInInstead, undefined, 'Nothing to offer before the server says the owner exists.');
+  const claimed = Auth({ session: { setupRequired: true }, error: 'This installation already has an owner.', busy: false, onSubmit() {}, signInInstead: { offered: true, email: 'me@example.test' }, onSignInInstead: email => signedIn.push(email) });
+  claimed.props.signInInstead.onClick('me@example.test'); assert.deepEqual(signedIn, ['me@example.test']);
+  const signIn = Auth({ session: { setupRequired: false }, error: '', busy: false, onSubmit() {}, signInInstead: { offered: false, email: 'me@example.test' } });
+  assert.equal(signIn.type, SignInFlow); assert.deepEqual(signIn.props.defaultValues, { email: 'me@example.test' });
+  assert.equal(claimed.props.aside.props.eyebrow, 'Campaign management');
+});
+
+test('the 409 path and the startup retry are wired in the app', () => {
+  assert.match(source, /\.catch\(\(err: any\) => \{ if \(session\.setupRequired && err\?\.status === 409\) setSignInInstead\(\{ offered: true, email: values\.email \|\| '' \}\); throw err; \}\)/);
+  assert.match(source, /message=\{error \|\| 'Loading Campaign…'\} onRetry=\{error \? \(\) => \{ setError\(''\); loadSession\(\); \} : undefined\}/);
 });
