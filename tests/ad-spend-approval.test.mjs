@@ -347,8 +347,17 @@ test('two parallel activations with one approval send at most one provider write
   await f.policy(true); await f.approve(route.change);
   // Both requests reach the receipt claim together; operation() admits one per provider resource.
   const blocked = await blockWrites(f.pool, 'integration_operations');
+  // The admitted request holds its provider write until the other has answered. Otherwise the other could check the
+  // receipts only after the first had completed and consumed the approval, and be refused 403 rather than 409 (a timing
+  // flake). If both reach the provider, the second never answers and the test fails on the timeout instead of hanging.
+  let releaseWrite = () => {}; const writeHeld = new Promise(resolve => { releaseWrite = resolve; });
+  f.hooks.write = () => writeHeld;
   const pending = [route.send(f)({ key: 'parallel-activation-a' }), route.send(f)({ key: 'parallel-activation-b' })];
   await blocked.waiting(2); await blocked.release();
+  let timer; const timeout = new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), 5000); });
+  const first = await Promise.race([...pending, timeout]); clearTimeout(timer); releaseWrite(); delete f.hooks.write;
+  assert.notEqual(first, 'timeout', 'Both parallel activations reached the provider write.');
+  assert.equal(first.status, 409, `The refused activation answers while the other's write is pending: ${JSON.stringify(first)}`);
   const results = await Promise.all(pending);
   assert.deepEqual(results.map(result => result.status).sort(), [200, 409], JSON.stringify(results));
   assert.equal(f.writes.length, 1);
