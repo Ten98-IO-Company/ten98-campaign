@@ -71,8 +71,9 @@ test('staff capture leads at an activation with explicit per-channel consent, an
   assert.equal(response.status, 201, JSON.stringify(response.body)); assert.deepEqual([response.body.recorded, response.body.refused], [['email', 'sms'], []]);
   assert.equal(JSON.stringify(response.body).includes('pat@example.test'), false, 'The staff phone gets no contact details back.');
   let contact = (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.email === 'pat@example.test');
-  assert.deepEqual(contact.consents, { email: true, sms: true, whatsapp: false }); assert.deepEqual(contact.tags, [tag]);
-  for (const channel of ['email', 'sms']) assert.match(contact.consentEvidence[channel].source, /In person at Roadshow stop “Mall roadshow — Saturday” .* recorded by Erin\. Wording shown: “.*Brand launch.*”/);
+  // The field wording asks for news and offers, so an email opt-in is also marketing permission (#165).
+  assert.deepEqual(contact.consents, { email: true, sms: true, whatsapp: false, emailMarketing: true }); assert.deepEqual(contact.tags, [tag]);
+  for (const channel of ['email', 'sms', 'emailMarketing']) assert.match(contact.consentEvidence[channel].source, /In person at Roadshow stop “Mall roadshow — Saturday” .* recorded by Erin\. Wording shown: “.*Brand launch.*”/);
 
   const before = await count();
   assert.equal((await request(leads, 'POST', { name: 'No thanks', email: 'nothanks@example.test', consents: { email: false } }, editor.cookie)).status, 400, 'Without an opt-in nothing is stored.');
@@ -86,7 +87,7 @@ test('staff capture leads at an activation with explicit per-channel consent, an
   response = await request(leads, 'POST', { email: 'pat@example.test', consents: { email: true } }, editor.cookie);
   assert.equal(response.status, 409, 'A suppressed destination cannot be opted back in from the field.'); assert.match(response.body.error, /opted out/);
   contact = (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.id === contact.id);
-  assert.equal(contact.consents.email, false); assert.equal(contact.consents.sms, true, 'An unticked box never withdraws an existing opt-in.');
+  assert.equal(contact.consents.email, false); assert.equal(contact.consents.emailMarketing, false); assert.equal(contact.consents.sms, true, 'An unticked box never withdraws an existing opt-in.');
 
   const second = (await request(project + '/activations', 'POST', { ...stop(campaignId), name: 'Station flyering', type: 'street_team' }, owner)).body.record;
   response = await request(`${project}/activations/${second.id}/leads`, 'POST', { name: 'Someone else', phone: '+447700900123', consents: { whatsapp: true } }, editor.cookie);
