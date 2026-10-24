@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { renderToStaticMarkup } from 'react-dom/server';
 
 // Issue #129: the inbox loads on view, offers views by state, separates "All caught up" from "No matches", shows one
 // banner per affected account and answers j/k/e/r. The actual components run with ordered hook stubs and a stub transport.
@@ -35,7 +36,7 @@ function mount(name: string, globals: Record<string, unknown> = {}) {
 const accounts = [{ id: 'ig', platform: 'instagram', name: 'Studio IG', capabilities: { messages: true, reply: true } }, { id: 'tg', platform: 'telegram', name: 'Support TG', capabilities: { messages: true, reply: true } }];
 const rows = [{ id: 'a', participantName: 'Ada', lastMessage: 'Hello' }, { id: 'b', participantName: 'Ben', lastMessage: 'Price?' }, { id: 'c', participantName: 'Cy', lastMessage: 'Thanks' }, { id: 'd', participantName: 'Di', lastMessage: 'Later' }];
 const triage = [{ resourceId: 'a', status: 'open', assigneeId: 'me', updatedAt: null }, { resourceId: 'b', status: 'pending', assigneeId: null, updatedAt: null }, { resourceId: 'c', status: 'resolved', assigneeId: null, updatedAt: null }, { resourceId: 'd', status: 'snoozed', assigneeId: 'me', updatedAt: null }];
-function transport(calls: any[][], { conversations = rows, states = triage, meta, status = {} }: { conversations?: any[]; states?: any[]; meta?: any; status?: any } = {}) {
+function transport(calls: any[][], { conversations = rows, states = triage, meta, status = {}, pagination = {} }: { conversations?: any[]; states?: any[]; meta?: any; status?: any; pagination?: any } = {}) {
   return async (...args: any[]) => {
     calls.push(args); const [target, method, body] = args, url = new URL(target, 'https://app.test'), route = url.pathname;
     if (route.endsWith('/integrations/inbox/status')) return { configured: true, mapped: true, webhookConfigured: true, accounts, ...status };
@@ -45,19 +46,20 @@ function transport(calls: any[][], { conversations = rows, states = triage, meta
     if (route.endsWith('/item-states') && method === 'PATCH') return { state: { accountId: body.accountId, kind: body.kind, resourceId: body.resourceId, status: body.status ?? 'open', assigneeId: null, updatedAt: '2026-10-24T10:00:00.000Z' } };
     if (route.endsWith('/item-states')) return { states: url.searchParams.getAll('id').map(id => states.find(state => state.resourceId === id)).filter(Boolean).map(state => ({ accountId: url.searchParams.get('accountId'), kind: url.searchParams.get('kind'), ...state })) };
     if (route.endsWith('/item-notes')) return { notes: [] };
-    if (route.endsWith('/conversations')) return { conversations, pagination: {}, ...(meta ? { meta } : {}) };
+    if (route.endsWith('/conversations')) return { conversations, pagination, ...(meta ? { meta } : {}) };
+    if (route.endsWith('/integrations/inbox/comments')) return { posts: [{ id: 'post-1', content: 'Launch post', commentCount: 2 }], pagination: {} };
     if (/\/conversations\/[^/]+\/messages$/.test(route)) return { conversation: {}, messages: [], pagination: {} };
     throw new Error('Unexpected request ' + target);
   };
 }
-async function open(options: { conversations?: any[]; states?: any[]; meta?: any; status?: any; props?: any } = {}) {
+async function open(options: { conversations?: any[]; states?: any[]; meta?: any; status?: any; pagination?: any; props?: any } = {}) {
   const calls: any[][] = [], h = mount('ZernioInbox');
   const props = { projectId: 'project-a', request: transport(calls, options), role: 'editor', tab: 'messages', onDraftChange() {}, onSwitch: (change: () => unknown) => change(), ...options.props };
   const step = async (rounds = 8) => { for (let round = 0; round < rounds; round++) { h.render(props); h.flush(); await settle(); } return h.render(props); };
   return { calls, h, props, step, tree: await step() };
 }
 const listReads = (calls: any[][]) => calls.filter(([target, method]) => !method && /\/integrations\/inbox\/conversations\?/.test(target));
-const list = (tree: any) => find(tree, ui.SelectableList, props => props.label === 'Conversations')[0];
+const list = (tree: any) => find(tree, ui.SelectableList, props => props.label === 'Conversation list')[0];
 const shown = (tree: any) => list(tree).props.items.map((item: any) => item.id);
 
 test('opening the inbox lists the first connected account’s conversations without a click, with one list read', async () => {
@@ -81,10 +83,20 @@ test('a WhatsApp campaign link still loads only its own account, and an unavaila
 test('views by state: Open, Mine, Unassigned, Snoozed and Done filter the loaded conversations', async () => {
   const { h, props, step } = await open();
   const views = () => find(h.render(props), ui.SegmentedControl, control => control.label === 'View')[0];
-  assert.deepEqual(views().props.options.map((option: any) => option.label), ['Open', 'Mine', 'Unassigned', 'Snoozed', 'Done']);
+  assert.deepEqual(views().props.options.map((option: any) => option.value), ['active', 'mine', 'unassigned', 'snoozed', 'resolved']);
   for (const [view, expected] of [['mine', ['a']], ['unassigned', ['b']], ['snoozed', ['d']], ['resolved', ['c']], ['active', ['a', 'b']]] as const) {
     views().props.onValueChange(view); assert.deepEqual(shown(await step(1)), expected, view);
   }
+});
+
+test('the View switcher is sized to its content and counts each view once every page and state is loaded', async () => {
+  const { tree } = await open();
+  const sized = find(tree, ui.Inline, inline => React.isValidElement(inline.children) && inline.children.type === ui.SegmentedControl && (inline.children.props as any).label === 'View');
+  assert.equal(sized.length, 1, 'An Inline row keeps the control at its content width instead of the column width.');
+  const labels = (view: any) => find(view, ui.SegmentedControl, control => control.label === 'View')[0].props.options.map((option: any) => option.label);
+  assert.deepEqual(labels(tree), ['Open 2', 'Mine 1', 'Unassigned 1', 'Snoozed 1', 'Done 1'], 'Each count is what that view lists.');
+  assert.deepEqual(labels((await open({ conversations: [] })).tree), ['Open 0', 'Mine 0', 'Unassigned 0', 'Snoozed 0', 'Done 0']);
+  assert.deepEqual(labels((await open({ pagination: { hasMore: true, nextCursor: 'next' } })).tree), ['Open', 'Mine', 'Unassigned', 'Snoozed', 'Done'], 'More pages mean the counts are not known yet.');
 });
 
 test('an empty view says All caught up, while a search with no results says No matches and clears its filters', async () => {
@@ -119,9 +131,33 @@ test('each account the provider could not read gets its own banner with Reconnec
   assert.deepEqual(opened, ['Integrations', 'Integrations']);
 });
 
-test('an inbox that is not set up shows a single banner', async () => {
-  const { tree, calls } = await open({ status: { configured: false, mapped: false, webhookConfigured: false, accounts: [] } });
-  assert.equal(find(tree, ui.Alert).length, 1); assert.equal(listReads(calls).length, 0);
+// #129 visual direction §6: with nothing connected the page is one empty state; the inbox controls wait for an account.
+test('an inbox without a connected account shows only Connect social accounts, which opens Integrations', async () => {
+  for (const status of [{ configured: false, mapped: false, webhookConfigured: false, accounts: [] }, { configured: true, mapped: true, webhookConfigured: true, accounts: [] }]) {
+    const opened: string[] = [];
+    const { tree, calls } = await open({ status, props: { onOpenIntegrations: () => opened.push('Integrations') } });
+    const empty = find(tree, ui.EmptyState);
+    assert.deepEqual(empty.map(state => state.props.title), ['Connect social accounts'], JSON.stringify(status));
+    assert.equal(typeof empty[0].props.description, 'string', 'One muted line.');
+    const buttons = find(tree, ui.Button);
+    assert.deepEqual(buttons.map(button => text(button.props.children)), ['Open integrations'], 'The only control opens Integrations.');
+    buttons[0].props.onClick(); assert.deepEqual(opened, ['Integrations']);
+    for (const control of [ui.SegmentedControl, ui.Select, ui.Input, ui.Popover, ui.Disclosure, ui.DetailWorkspace, ui.Alert]) assert.equal(find(tree, control).length, 0, control.name + ' waits for an account.');
+    assert.equal(listReads(calls).length, 0);
+  }
+});
+
+// The page header is the h1 and names the page, so the inbox starts at h2 and each heading nests at most one level deeper.
+const headings = (tree: any) => [...renderToStaticMarkup(tree).matchAll(/<h([1-6])[^>]*>(.*?)<\/h\1>/g)].map(([, level, name]) => ({ level: Number(level), name: name.replace(/<[^>]+>/g, '') }));
+test('inbox headings start below the page heading, nest in order and never repeat', async () => {
+  const commentAccounts = [{ id: 'fb', platform: 'facebook', name: 'Studio page', capabilities: { comments: true } }];
+  for (const options of [{}, { conversations: [] }, { status: { accounts: commentAccounts }, props: { tab: 'comments' } }]) {
+    const found = headings((await open(options)).tree), names = found.map(({ name }) => name), summary = found.map(({ level, name }) => `h${level} ${name}`).join(', ');
+    assert.equal(names.includes('Unified inbox'), false, 'The page header already names the page: ' + summary);
+    assert.equal(new Set(names).size, names.length, 'No heading text repeats: ' + summary);
+    assert.equal(found[0].level, 2, summary);
+    found.forEach(({ level }, index) => assert.ok(index === 0 || level <= found[index - 1].level + 1, 'No heading skips a level: ' + summary));
+  }
 });
 
 test('j and k open the next and previous conversation, e marks it done and r moves to the reply', async () => {
