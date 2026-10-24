@@ -62,8 +62,8 @@ async function fixture(t: TestContext, sesEnv: Fields = SES) {
   t.after(() => { globalThis.fetch = originalFetch; });
   await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', () => resolve()));
   const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`; let cookie: string | undefined;
-  async function request(path: string, method = 'GET', body?: unknown): Promise<{ status: number; data: any; cookie?: string }> {
-    const response = await fetch(base + path, { method, headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  async function request(path: string, method = 'GET', body?: unknown, extra: Record<string, string> = {}): Promise<{ status: number; data: any; cookie?: string }> {
+    const response = await fetch(base + path, { method, headers: { ...extra, Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const text = await response.text(); return { status: response.status, data: text && response.headers.get('content-type')?.includes('json') ? JSON.parse(text) : text, cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   const setup = await request('/api/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'QA owner', email: 'ses-owner@example.test', password: 'fixture-passphrase-long-enough', sample: false }); assert.equal(setup.status, 201); cookie = setup.cookie;
@@ -251,5 +251,29 @@ test('marketing email is refused while Cloudflare is the sender, but its draft s
     assert.deepEqual([result.status, result.data.error?.code], [409, 'MARKETING_PROVIDER_REQUIRED'], action);
   }
   assert.equal((await f.request(f.path + '/campaigns', 'POST', { name: 'Odd', channel: 'email', emailPurpose: 'promotional', subject: 'x', text: 'y' })).status, 400);
+  assert.equal(f.calls.length, 0);
+});
+
+// #165 review follow-ups: a scheduled marketing campaign stops when the sender changes to Cloudflare, a marketing test
+// send needs SES like a real send, and the activity log names the purpose.
+test('a scheduled marketing campaign stops when the sender switches from SES to Cloudflare', { skip: postgresSkip }, async t => {
+  const f = await fixture(t);
+  const reader = (await f.request(f.path + '/contacts', 'POST', { name: 'Reader', email: 'reader@example.com', consents: { email: true, emailMarketing: true }, consentSource: 'Newsletter signup form' })).data.contact;
+  const id = (await f.request(f.path + '/campaigns', 'POST', { name: 'Autumn newsletter', channel: 'email', emailPurpose: 'marketing', subject: 'Autumn offers', text: 'New this autumn.', contactIds: [reader.id] })).data.campaign.id;
+  const preview = (await f.request(f.path + `/campaigns/${id}/preview`, 'POST', {})).data;
+  assert.equal((await f.request(f.path + `/campaigns/${id}/send`, 'POST', { confirmed: true, previewToken: preview.previewToken })).status, 200);
+  assert.deepEqual((await f.pool.query("SELECT message FROM activity WHERE message LIKE '%campaign scheduled%'")).rows.map(row => row.message), ['Marketing email campaign scheduled for 1 recipients.']);
+  f.env.EMAIL_PROVIDER = 'cloudflare';
+  await f.app.direct.processPending();
+  assert.equal(f.calls.some(call => call.url.hostname === 'email.us-east-1.amazonaws.com' || call.url.hostname === 'api.cloudflare.com'), false, 'Nothing is sent through either provider.');
+  const { campaign, deliveries } = (await f.request(f.path + `/campaigns/${id}`)).data;
+  assert.notEqual(campaign.status, 'completed'); assert.deepEqual(deliveries.map((row: Fields) => row.status), ['pending']);
+});
+
+test('a marketing test send needs Amazon SES as the sender', { skip: postgresSkip }, async t => {
+  const f = await fixture(t, { ...SES, EMAIL_PROVIDER: 'cloudflare' });
+  const id = (await f.request(f.path + '/campaigns', 'POST', { name: 'Autumn newsletter', channel: 'email', emailPurpose: 'marketing', subject: 'Autumn offers', text: 'New this autumn.' })).data.campaign.id;
+  const result = await f.request(f.path + `/campaigns/${id}/test`, 'POST', { confirmed: true }, { 'Idempotency-Key': randomUUID() });
+  assert.deepEqual([result.status, result.data.error?.code], [409, 'MARKETING_PROVIDER_REQUIRED']);
   assert.equal(f.calls.length, 0);
 });

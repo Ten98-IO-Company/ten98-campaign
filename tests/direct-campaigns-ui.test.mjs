@@ -380,10 +380,10 @@ test('the Marketing email purpose is offered only while Amazon SES sends, with a
   assert.equal(campaignBody({ ...blankDraft, channel: 'sms', emailPurpose: 'marketing' }, 'all').emailPurpose, undefined);
   assert.match(source, /<Option value="marketing" disabled=\{!status\?\.marketingAvailable\}>Marketing<\/Option>/);
   assert.match(source, /'Marketing email needs Amazon SES as the email sender\.'/);
-  assert.match(source, /\{!status\?\.marketingAvailable && editable && !readOnly && integrationsAction && <Inline>\{integrationsAction\}<\/Inline>\}/);
+  assert.match(source, /\{!status\?\.marketingAvailable && status\?\.emailProvider !== null && editable && !readOnly && integrationsAction && <Inline>\{integrationsAction\}<\/Inline>\}/);
   assert.match(source, /draft\.channel === 'email' && draft\.emailPurpose !== 'marketing' && <Checkbox label="This is an expected transactional message/, 'Marketing sends skip the transactional confirmation.');
   assert.match(source, /draft\.emailPurpose === 'marketing' \? 'Marketing email' : 'Transactional email only'/);
-  assert.match(source, /<Checkbox label="Email marketing permission \(newsletters and promotions\) is recorded for this contact\." checked=\{contact\.consents\.emailMarketing\}/);
+  assert.match(source, /<Checkbox label="Email marketing permission \(newsletters and promotions\) is recorded for this contact\. Marketing email also needs email permission\." checked=\{contact\.consents\.emailMarketing\}/);
   assert.match(source, /<Checkbox label="Email marketing permission is recorded for all applicable imported contacts\." checked=\{importConsent\.emailMarketing\}/);
 });
 

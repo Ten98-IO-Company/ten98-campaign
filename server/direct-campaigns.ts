@@ -316,6 +316,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       if (!body || typeof body !== 'object' || Object.keys(body).some(key => !['confirmed', 'contactId'].includes(key))) fail(400, 'INVALID_TEST_SEND', 'Use only the fields shown in the test send form.');
       if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Confirm the test send and its provider charge.');
       if (campaign.channel === 'email') requireEmailProvider(env);
+      requireMarketingProvider(campaign, env);
       if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
       if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending.');
       let contact: any;
@@ -353,7 +354,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
         if ((await preview(fresh, tx)).previewToken !== body.previewToken) fail(409, 'AUDIENCE_CHANGED', 'The campaign or audience changed during preparation. Review a fresh preview before confirming.');
         Object.assign(campaign, { status: 'scheduled', scheduledAt: new Date(scheduledAt).toISOString(), scheduledBy: user.id, profileId: project.zernioProfileId, credentialHash: fingerprint(env, campaign.channel), ...(campaign.channel === 'email' ? { emailProvider: emailProvider(env) } : {}), audienceCount: selected.eligible.length }); await save(campaign, tx);
         for (const contact of selected.eligible) { const delivery = { id: randomUUID(), campaignId: id, contactId: contact.id, recipient: campaign.channel === 'email' ? contact.email : contact.phone, status: 'pending', createdAt: nowISO() }; await tx.execute(sql`INSERT INTO direct_deliveries (id, campaign_id, contact_id, data) VALUES (${delivery.id}, ${id}, ${contact.id}, ${JSON.stringify(delivery)})`); }
-        await createStore(tx).activity(project.id, `${campaign.channel === 'email' ? 'Transactional email' : campaign.channel.toUpperCase()} campaign scheduled for ${selected.eligible.length} recipients.`);
+        await createStore(tx).activity(project.id, `${campaign.channel === 'email' ? campaign.emailPurpose === 'marketing' ? 'Marketing email' : 'Transactional email' : campaign.channel.toUpperCase()} campaign scheduled for ${selected.eligible.length} recipients.`);
       });
       send(200, { campaign: await decorate(await find(project.id, id)), deliveries: await deliveries(id) }); return true;
     }
