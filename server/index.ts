@@ -407,7 +407,7 @@ export async function createApp(options: AppOptions = {}) {
             if (!id && req.method === 'POST') {
               rejectProviderFields(body, collection);
               if (collection === 'posts' && body.status === 'published') bad('Publish through a connected provider to confirm publication.');
-              const data = validateRecord(collection, collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { ...body, locationSource: 'manual' } : body); await checkReferences(store, project.id, data); if (collection === 'activations') await checkActivation(db, project, data);
+              const data = validateRecord(collection, collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { ...body, locationSource: 'manual' } : body); await checkReferences(store, project.id, data); if (collection === 'activations') await checkActivation(db, project, data, body);
               if (collection === 'assets' && data.approval !== 'pending' && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
               const record = await store.create(project.id, collection, data); await store.activity(project.id, `${collection.slice(0, -1)} created.`); return send(201, { record });
             }
@@ -417,7 +417,7 @@ export async function createApp(options: AppOptions = {}) {
               if (req.method === 'DELETE') { await checkDependants(store, project.id, collection, id); await store.remove(project.id, collection, id); await store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
               rejectProviderFields(body, collection);
               if (collection === 'posts' && (body.status === 'published' || previous.status === 'published' || previous.externalId)) bad('Provider posts must be managed through their connected provider.');
-              const data = validateRecord(collection, { ...previous, ...body, ...(collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { locationSource: 'manual' } : {}) }); await checkReferences(store, project.id, data); if (collection === 'activations') await checkActivation(db, project, data);
+              const data = validateRecord(collection, { ...previous, ...body, ...(collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { locationSource: 'manual' } : {}) }); await checkReferences(store, project.id, data); if (collection === 'activations') await checkActivation(db, project, data, body);
               if (collection === 'assets') {
                 if (body.approval !== undefined && body.approval !== previous.approval && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
                 if (['url', 'deliveryUrl', 'kind'].some(key => data[key] !== previous[key])) data.approval = 'pending';
@@ -460,10 +460,16 @@ function projectInput(data: ProviderRecord): ProjectInput {
   const color = data.color || '#5943ce'; if (typeof color !== 'string' || !/^#[\da-f]{6}$/i.test(color)) bad('Use a six digit hex color.');
   return { name: text(data.name, 'Project name'), color, zernioProfileId: text(data.zernioProfileId, 'Zernio profile', 200, true), driveFolderId: text(data.driveFolderId, 'Drive folder', 200, true) };
 }
-// Activation people must be able to edit in the project's workspace; the tracking link must be one of the project's links.
-async function checkActivation(db: Executor, project: { id: string; workspaceId: string }, data: ProviderRecord): Promise<void> {
+// People chosen in this request must be editing members of the project's workspace. Stored people who have since left or
+// lost editing access are dropped, as inbox assignees are, so they never block an unrelated edit. The tracking link must
+// be one of the project's links.
+async function checkActivation(db: Executor, project: { id: string; workspaceId: string }, data: ProviderRecord, body: ProviderRecord): Promise<void> {
   const people = [...new Set([data.ownerId, ...data.teamIds].filter(Boolean))];
-  if (people.length && Number((await first<{ count: number }>(db.execute(sql`SELECT count(*)::int AS count FROM memberships WHERE workspace_id=${project.workspaceId} AND role IN ('owner','admin','editor') AND user_id IN ${people}`)))!.count) !== people.length) bad('Choose the owner and team from workspace members who can edit.');
+  const editors = new Set(people.length ? (await db.execute(sql`SELECT user_id FROM memberships WHERE workspace_id=${project.workspaceId} AND role IN ('owner','admin','editor') AND user_id IN ${people}`)).rows.map((row: any) => row.user_id) : []);
+  const chosen = [...(Object.hasOwn(body, 'ownerId') ? [data.ownerId] : []), ...(Object.hasOwn(body, 'teamIds') ? data.teamIds : [])];
+  if (chosen.some(id => id && !editors.has(id))) bad('Choose the owner and team from workspace members who can edit.');
+  if (data.ownerId && !editors.has(data.ownerId)) data.ownerId = '';
+  data.teamIds = data.teamIds.filter((id: string) => editors.has(id));
   if (data.linkId && !await first(db.execute(sql`SELECT id FROM campaign_links WHERE project_id=${project.id} AND id=${data.linkId}`))) bad('Choose a tracking link from this project.');
 }
 async function checkReferences(store: Store, projectId: string, data: ProviderRecord): Promise<void> {
