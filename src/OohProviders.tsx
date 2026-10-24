@@ -1,16 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
 import AdSpendNotice from './AdSpendNotice';
 import { adSpendBlock, type AdSpendBlock } from './approval-status';
-import { Alert, Button, Card, Checkbox, DataTable, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, ResourceCard, ReviewSummary, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
+import { Alert, Button, Card, Checkbox, DataTable, Disclosure, Field, Fieldset, FormActions, FormGrid, Heading, Inline, Input, Link, Option, ResourceCard, ReviewSummary, Select, Stack, StatusLine, Tabs, Text, Textarea } from '@ten98/ui';
 
-type Props = { projectId: string; role: string; isOperator: boolean; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void; onOpenApprovals?: () => void; onSpendReview?: () => void; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onInventory?: (items: any[]) => void; onChanged?: () => void | Promise<void> };
+/** In workflow mode this is the OOH page: `bookings` is its Bookings tab, and Inventory is added once Broadsign is connected. */
+type Props = { projectId: string; role: string; isOperator: boolean; mode?: 'workflow' | 'connection'; bookings?: React.ReactNode; onOpenIntegrations?: () => void; onOpenApprovals?: () => void; onSpendReview?: () => void; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onInventory?: (items: any[]) => void; onChanged?: () => void | Promise<void> };
 const statuses: Record<number, string> = { 1: 'Saved', 3: 'Processing', 4: 'Held', 5: 'Partially held', 9: 'Booked', 10: 'Submitted', 11: 'Live', 12: 'Cancelled', 14: 'Ended', 15: 'Cancelling' };
-export default function OohProviders({ projectId, role, isOperator, mode = 'workflow', onOpenIntegrations, onOpenApprovals, onSpendReview, request, onInventory, onChanged }: Props) {
+export default function OohProviders({ projectId, role, isOperator, mode = 'workflow', bookings: bookingsView, onOpenIntegrations, onOpenApprovals, onSpendReview, request, onInventory, onChanged }: Props) {
   const [status, setStatus] = useState<any>(null), [inventory, setInventory] = useState<any[]>([]), [bookings, setBookings] = useState<any[]>([]);
   const [selected, setSelected] = useState<number[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [availability, setAvailability] = useState<Record<string, string>>({});
   const [refreshRequired, setRefreshRequired] = useState(false), refreshNeeded = useRef(false);
   const [spendBlock, setSpendBlock] = useState<AdSpendBlock | null>(null);
+  const [view, setView] = useState('bookings');
   const inventoryCallback = useRef(onInventory); inventoryCallback.current = onInventory;
   const pendingKeys = useRef(new Map<string, string>()), active = useRef(true);
   const canWrite = ['owner', 'admin', 'editor'].includes(role), canMap = isOperator && ['owner', 'admin'].includes(role);
@@ -88,6 +90,11 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
       setNotice(result.cancellation.confirmed ? 'Broadsign confirmed cancellation. Review any charges or refunds with the media provider.' : 'Cancellation requested. Delivery may continue until Broadsign confirms it. Refresh the delivery report for its actual status.');
     });
   }
+  const inventoryTable = <DataTable ariaLabel="Approved Broadsign inventory" searchable={false} sortable={false} pagination={false} rows={inventory} rowKey={screen => String(screen.id)}
+    selectable={canWrite} selectedKeys={selected.map(String)} onSelectionChange={keys => { if (!busy) setSelected(inventory.filter(screen => keys.includes(String(screen.id))).map(screen => screen.id)); }} columns={[
+    { key: 'screen', header: 'Screen / face', render: screen => <Stack gap={1}><Text as="strong" weight="semibold">{screen.name}</Text><Text as="small" size="xs" tone="muted">{screen.id}</Text></Stack> },
+    { key: 'location', header: 'Location', render: screen => <Stack gap={1}><Text as="span">{screen.location || 'Location not supplied'}</Text>{screen.latitude !== null && screen.longitude !== null && <Text as="small" size="xs" tone="muted">{screen.latitude}, {screen.longitude}</Text>}</Stack> },
+    { key: 'resolution', header: 'Resolution', render: screen => screen.resolution || '—' }]}/>;
   const body = <>
     {mode === 'workflow' && <Text tone="muted">Upload and schedule creative bundles in <Link href="https://app.broadsign.com/campaigns" target="_blank" rel="noreferrer">Broadsign Guaranteed Campaigns</Link> using the proposal ID below. Your provider account controls creative permissions and approvals.</Text>}
     {error && <Alert tone="danger">{error}</Alert>}
@@ -97,7 +104,8 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
     {notice && <StatusLine>{notice}</StatusLine>}
     {refreshRequired && <Alert tone="warning" actions={<Button disabled={busy} onClick={refresh}>Refresh provider details</Button>}>Broadsign saved the action, but the latest details could not be loaded. Refresh provider details before making further changes.</Alert>}
     <Stack as="fieldset" disabled={refreshRequired}>
-    {mode === 'workflow' && status && <Inline gap={2}><Text tone="muted">{status.connection ? `${status.connection.clientName} · ${status.environment}` : 'Connect this project’s Broadsign inventory in Integrations.'}</Text>{onOpenIntegrations && <Button variant="ghost" size="sm" onClick={onOpenIntegrations}>Open integrations</Button>}</Inline>}
+    {mode === 'workflow' && status?.connection && <Inline gap={2} justify="between" align="center"><Inline gap={2} align="center"><Text tone="muted">{`${status.connection.clientName} · ${status.environment}`}</Text>{onOpenIntegrations && <Button variant="ghost" size="sm" onClick={onOpenIntegrations}>Open integrations</Button>}</Inline>
+      <Button disabled={busy || !canWrite || !status.configured} onClick={() => action(async () => { const result = await request(`${path}/sync`, 'POST', {}); if (!active.current) return; setInventory(result.inventory); setSelected(previous => previous.filter(id => result.inventory.some((screen: any) => screen.id === id))); inventoryCallback.current?.(result.inventory); await onChanged?.(); setNotice(`Synced ${result.inventory.length} approved screens.`); })}>{busy ? 'Working…' : 'Sync provider inventory'}</Button></Inline>}
     {mode === 'connection' && status && <ResourceCard title="Broadsign connection" description={status.configured ? `Credentials configured · ${status.environment}` : 'Configure Broadsign credentials above to connect this provider.'} status={status.connection ? 'Project inventory mapped' : 'Project mapping required'}>
     {status.connection && <Text tone="muted">Project {projectId} · Domain {status.connection.domainId} · {status.connection.clientName} · Client {status.connection.clientId}</Text>}
     {canMap && status && <Disclosure summary="Approve project inventory"><Stack gap={3}>
@@ -112,27 +120,23 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
     </Stack></Disclosure>}
     </ResourceCard>}
     {mode === 'workflow' && status?.connection && <>
-      <Inline><Button disabled={busy || !canWrite || !status.configured} onClick={() => action(async () => { const result = await request(`${path}/sync`, 'POST', {}); if (!active.current) return; setInventory(result.inventory); setSelected(previous => previous.filter(id => result.inventory.some((screen: any) => screen.id === id))); inventoryCallback.current?.(result.inventory); await onChanged?.(); setNotice(`Synced ${result.inventory.length} approved screens.`); })}>{busy ? 'Working…' : 'Sync provider inventory'}</Button></Inline>
       {!inventory.length && <Text tone="muted">Sync the approved inventory to load locations and start a provider proposal.</Text>}
-      {inventory.length > 0 && <DataTable ariaLabel="Approved Broadsign inventory" searchable={false} sortable={false} pagination={false} rows={inventory} rowKey={screen => String(screen.id)}
-        selectable={canWrite} selectedKeys={selected.map(String)} onSelectionChange={keys => { if (!busy) setSelected(inventory.filter(screen => keys.includes(String(screen.id))).map(screen => screen.id)); }} columns={[
-        { key: 'screen', header: 'Screen / face', render: screen => <Stack gap={1}><Text as="strong" weight="semibold">{screen.name}</Text><Text as="small" size="xs" tone="muted">{screen.id}</Text></Stack> },
-        { key: 'location', header: 'Location', render: screen => <Stack gap={1}><Text as="span">{screen.location || 'Location not supplied'}</Text>{screen.latitude !== null && screen.longitude !== null && <Text as="small" size="xs" tone="muted">{screen.latitude}, {screen.longitude}</Text>}</Stack> },
-        { key: 'resolution', header: 'Resolution', render: screen => screen.resolution || '—' }]}/>}
-      {canWrite && inventory.length > 0 && <Disclosure summary={`Create a provider proposal (${selected.length} selected)`}>
-        <Stack as="form" onSubmit={createDraft}><Stack as="fieldset" disabled={busy || !selected.length || !status?.configured}>
+      {inventory.length > 0 && (canWrite ? <Stack as="form" gap={4} onSubmit={createDraft}>
+        {/* Dates and budget come first: they decide what the selected screens can be booked for. */}
+        <Fieldset legend="Dates and budget" description="Creates a saved frequency proposal with one play per loop, all days, and full-day scheduling. The media provider manages creative trafficking in Broadsign." disabled={busy || !status.configured}>
           <FormGrid>
-            <Field label="Proposal name *"><Input name="name" required maxLength={200}/></Field>
-            <Field label="Inventory type"><Select name="inventoryType" defaultValue="digital"><Option value="digital">Digital screens</Option><Option value="static">Static faces</Option></Select></Field>
             <Field label="Start date *"><Input name="startDate" type="date" required/></Field>
             <Field label="End date *"><Input name="endDate" type="date" required/></Field>
-            <Field label="Ad duration (seconds) *"><Input name="slotDuration" type="number" required min="1" max="120" step="1" defaultValue="10"/></Field>
             <Field label="Provider quote (account currency) *"><Input name="price" type="number" required min="0" max="1000000000" step="0.01" defaultValue="0"/></Field>
+            <Field label="Ad duration (seconds) *"><Input name="slotDuration" type="number" required min="1" max="120" step="1" defaultValue="10"/></Field>
+            <Field label="Inventory type"><Select name="inventoryType" defaultValue="digital"><Option value="digital">Digital screens</Option><Option value="static">Static faces</Option></Select></Field>
+            <Field label="Proposal name *"><Input name="name" required maxLength={200}/></Field>
           </FormGrid>
-          <Text tone="muted">Creates a saved frequency proposal with one play per loop, all days, and full-day scheduling. The media provider manages creative trafficking in Broadsign.</Text>
-          <FormActions><Button type="submit" variant="primary">Save provider proposal</Button></FormActions>
-        </Stack></Stack>
-      </Disclosure>}
+        </Fieldset>
+        {/* The selection summary and its action sit above the list, so they stay in view however long the list is. */}
+        <Inline gap={3} justify="between" align="center"><Text weight="semibold">{`${selected.length} of ${inventory.length} screens selected`}</Text><Button type="submit" variant="primary" disabled={busy || !selected.length || !status.configured}>Save provider proposal</Button></Inline>
+        {inventoryTable}
+      </Stack> : inventoryTable)}
     </>}
     {mode === 'workflow' && bookings.length > 0 && <><Heading level={3} size="sm">Provider proposals</Heading>{bookings.map(booking => <Card as="article" headingLevel={3} title={booking.name} key={booking.id}><Stack gap={3}>
       <Text>{booking.startDate} – {booking.endDate} · {booking.screenIds.length} screens · Quote {booking.price} in account currency</Text>
@@ -160,6 +164,12 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
     </Stack>
   </>;
   // The Integrations provider card already names Broadsign, so connection mode adds no heading or panel of its own.
-  return mode === 'connection' ? <Stack gap={4}><Text tone="muted">Approve the client and inventory available to this project.</Text>{body}</Stack>
-    : <Card as="section" headingLevel={2} title="Broadsign OOH" description="Sync approved screens and static faces, prepare proposals, and submit confirmed bookings."><Stack gap={4}>{body}</Stack></Card>;
+  if (mode === 'connection') return <Stack gap={4}><Text tone="muted">Approve the client and inventory available to this project.</Text>{body}</Stack>;
+  // The provider status decides the page layout, so the bookings view waits for it and then mounts once.
+  if (!status) return error ? <Stack gap={4}><Alert tone="danger">{error}</Alert>{bookingsView}</Stack> : <StatusLine busy>Loading OOH media…</StatusLine>;
+  if (!status.connection) return <Stack gap={4}>
+    {canMap && <Inline gap={2} align="center"><Text tone="muted" size="sm">Connect this project’s Broadsign inventory in Integrations to plan screen bookings here.</Text>{onOpenIntegrations && <Button variant="ghost" size="sm" onClick={onOpenIntegrations}>Open integrations</Button>}</Inline>}
+    {bookingsView}
+  </Stack>;
+  return <Tabs label="OOH media" value={view} onValueChange={setView} items={[{ value: 'bookings', label: 'Bookings', content: bookingsView }, { value: 'inventory', label: 'Inventory', content: <Stack gap={4}>{body}</Stack> }]}/>;
 }
