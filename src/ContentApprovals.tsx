@@ -146,14 +146,14 @@ export default function ContentApprovals({ projectId, role, currentUserId = '', 
   }
   useEffect(() => { active.current = true; const loading = load(), read = readVersion.current; loading.catch(err => { if (active.current && read === readVersion.current) setError(err.message); }); return () => { active.current = false; }; }, [projectId]);
   // Spend reviews share the list. Changing the ad spend setting voids unused approvals and pending requests (council
-  // decision on #35 Q1), so the list reloads with it and voided reviews show as changes requested. The first read waits
-  // for the queue, which states the setting.
-  const required = data ? Boolean(data.requireAdApproval) : null;
+  // decision on #35 Q1), so the list reloads with it and voided reviews show as changes requested. The first read runs
+  // beside the queue's; the queue first stating the setting is no change.
+  const required = data ? Boolean(data.requireAdApproval) : null, spendSetting = useRef<boolean | null | undefined>(undefined);
   async function loadSpend() {
     const read = ++spendVersion.current, result = await request(path + '/ad-spend');
     if (active.current && read === spendVersion.current) setSpend(result);
   }
-  useEffect(() => { if (required !== null) loadSpend().catch(err => { if (active.current) setError(err.message); }); }, [path, required]);
+  useEffect(() => { const previous = spendSetting.current; spendSetting.current = required; if (previous === null) return; loadSpend().catch(err => { if (active.current) setError(err.message); }); }, [path, required]);
   // A refused approval returns the publishing restrictions that blocked it; keep them beside that post until its next attempt.
   function noteRestrictions(postId: string, failure: unknown) {
     const problem = failure as { code?: string; details?: unknown } | null;
@@ -229,7 +229,7 @@ export default function ContentApprovals({ projectId, role, currentUserId = '', 
       setBulkResult(null); setBulk({ done: 0, total: targets.length });
       try {
         for (const item of targets) {
-          try { const result = await request(`${path}/posts/${encodeURIComponent(item.post.id)}/review`, 'POST', { decision, note: notes[item.post.id] || (decision === 'rejected' ? bulkNote.trim() : ''), reviewId: item.review.id }); if (!active.current) return; acceptItem(result.item); succeeded.push(item.post.id); }
+          try { const result = await request(`${path}/posts/${encodeURIComponent(item.post.id)}/review`, 'POST', { decision, note: decision === 'rejected' && !(notes[item.post.id] || '').trim() ? bulkNote.trim() : notes[item.post.id] || '', reviewId: item.review.id }); if (!active.current) return; acceptItem(result.item); succeeded.push(item.post.id); }
           catch (err) { if (!active.current) return; noteRestrictions(item.post.id, err); failed.push({ id: item.post.id, name: postName(item), message: (err as Error).message || 'This review could not be saved.' }); }
           setBulk({ done: succeeded.length + failed.length, total: targets.length });
         }
@@ -287,7 +287,7 @@ export default function ContentApprovals({ projectId, role, currentUserId = '', 
     {bulkResult && <Alert tone={bulkResult.failed.length ? 'danger' : 'success'} title={`${bulkResult.decision === 'approved' ? 'Approved' : 'Requested changes on'} ${bulkResult.ok} post${bulkResult.ok === 1 ? '' : 's'}${bulkResult.failed.length ? `; ${bulkResult.failed.length} failed` : ''}${bulkResult.skipped ? `; ${bulkResult.skipped} skipped` : ''}`} onDismiss={() => setBulkResult(null)}>{bulkResult.failed.length > 0 ? <Stack gap={1}><Text>These posts were not reviewed and stay selected:</Text><List>{bulkResult.failed.map(row => <ListItem key={row.id}>{row.name} ({row.id}): {row.message}</ListItem>)}</List></Stack> : <Text>{bulkResult.decision === 'approved' ? 'Publishing remains a separate action.' : 'The authors can update these drafts and request another review.'}</Text>}</Alert>}
     {!data && !error && <StatusLine busy>Loading the review queue…</StatusLine>}
     {data && !visible.length && (filter === 'waiting' ? <EmptyState title="Nothing waiting for you" description="Reviews you can decide, and your posts returned with changes, appear here." action={<Button variant="secondary" onClick={() => switchView('all')}>Show all reviews</Button>}/> : <EmptyState title="Nothing in this view" description={canRequest ? 'Create a post in Publishing, then request review here.' : 'Reviews appear here once they are requested.'}/>)}
-    {data && visible.length > 0 && <DetailWorkspace label="Review queue" headingLevel={2} listLabel={viewLabels[filter]} detailLabel={open?.kind === 'spend' ? 'Spend change' : 'Post'} selected={Boolean(open)} backLabel="Back to the queue" onBack={() => setOpenId('#list')} emptyMessage="Choose a review from the list."
+    {(data || spend) && visible.length > 0 && <DetailWorkspace label="Review queue" headingLevel={2} listLabel={viewLabels[filter]} detailLabel={open?.kind === 'spend' ? 'Spend change' : 'Post'} selected={Boolean(open)} backLabel="Back to the queue" onBack={() => setOpenId('#list')} emptyMessage="Choose a review from the list."
       list={<SelectableList label={`${viewLabels[filter]} reviews`} selectedId={open?.key ?? null} onSelect={setOpenId} items={visible.map(queueRow)}/>}
       detail={open && (open.kind === 'spend' ? <SpendReview review={open.review} canReview={canReview} busy={Boolean(busy)} note={notes[open.key] || ''} noteError={noteError === open.key} onNote={value => setNote(open.key, value)} onDecide={decision => decideSpend(open.review, decision)} onKeyDown={event => onSpendKey(event, openIndex)}/> : (item => { const post = item.post, reviewData = item.review, edit = item.publishedEdit, proposed = item.proposedUpdate, creative = link(item.asset?.deliveryUrl || item.asset?.url), submitted = item.status === 'submitted' || Boolean(edit || proposed); return <Card as="article" key={post.id} id={'review-' + post.id} tabIndex={0} aria-keyshortcuts={canReview && item.status === 'pending' ? 'A R' : undefined} onKeyDown={event => onCardKey(event, item, openIndex)} headingLevel={4} title={edit ? 'Change to a published post' : proposed ? 'Proposed update to a submitted post' : post.platforms?.length ? platformNames(post.platforms) : 'Social post draft'} description={`${post.queueId && !submitted ? 'Provider queue · next free slot assigned on submission' : post.scheduledAt ? `Planned for ${when(post.scheduledAt)}` : 'No planned publishing time'}${post.accounts?.length ? ` · ${post.accounts.length} selected account${post.accounts.length === 1 ? '' : 's'}` : ''}`} actions={<Inline gap={2} align="center">{canReview && item.status === 'pending' && <Checkbox label="Select" aria-label={`Select ${postName(item)} for bulk review`} disabled={Boolean(busy)} checked={selected.includes(post.id)} onChange={event => setSelected(previous => event.target.checked ? [...previous.filter(id => id !== post.id), post.id] : previous.filter(id => id !== post.id))}/>}<Badge tone={statusTone(item.status)} dot>{statusLabel(item)}</Badge></Inline>}><Stack gap={3}>
         {edit && <PublishedEditComparison post={post} edit={edit}/>}

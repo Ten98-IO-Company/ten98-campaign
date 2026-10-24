@@ -111,6 +111,15 @@ test('a spend change opens from the same list with before, after and the change,
   assert.equal(button(editor, 'Approve spend change'), undefined, 'Editors see spend changes without decision controls.');
 });
 
+test('spend changes stay reviewable when the post queue cannot be read', async () => {
+  const spendOnly = transport([], [], [spendReview()]), calls: any[][] = [];
+  const request = async (...args: any[]) => { calls.push(args); if (args[0].endsWith('/posts')) throw new Error('Queue unavailable'); return spendOnly(...args); };
+  const tree = await mount({ projectId: 'project-one', role: 'owner', currentUserId: 'me', request }).settle();
+  assert.match(html(tree), /Queue unavailable/);
+  assert.deepEqual(find(tree, ui.SelectableList)[0]?.props.items.map((item: any) => item.id), ['spend:spend-1']);
+  assert.equal(calls.filter(call => call[0].endsWith('/ad-spend')).length, 1);
+});
+
 test('authors find their returned posts under "Waiting on me" and viewers start on everything', async () => {
   const posts = [post('returned-to-me', 'rejected', { review: { requestedBy: { id: 'ed', name: 'Ed' }, note: 'Fix the link.' } }), post('returned-to-other', 'rejected'), post('pending', 'pending')];
   const editor = await mount({ projectId: 'project-one', role: 'editor', currentUserId: 'ed', request: transport([], posts) }).settle();
