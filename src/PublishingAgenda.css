@@ -1,0 +1,26 @@
+/* Week-view post entry (PublishingAgenda).
+ *
+ * A post's calendar entry is a Button whose five parts -- time, platforms,
+ * caption, status and campaign -- sit in one inline-flex row. On a phone that
+ * row is only ~240 px wide, so every part is squeezed to a few characters per
+ * line ("0 / 9: / 0 / A / M", "Inst / agr / am"). At the kit's mobile width we
+ * stack the parts vertically, the way the month grid's t98-calendar-entry
+ * already does, so each one stays on its own readable line and the caption
+ * takes the full width and ellipses instead of wrapping. Wider screens keep
+ * the single row (desktop week view is already fine).
+ *
+ * Scoped to the mobile breakpoint so the desktop layout is untouched. */
+@media (max-width: 760px) {
+  .week-entry {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    inline-size: 100%;
+  }
+  .week-entry > .t98-text,
+  .week-entry > .t98-badge { flex: none; }
+  /* The caption is the one long part: give it the full entry width and let it
+     ellipsize on one line rather than wrap. */
+  .week-entry > .t98-truncate { inline-size: 100%; }
+}
