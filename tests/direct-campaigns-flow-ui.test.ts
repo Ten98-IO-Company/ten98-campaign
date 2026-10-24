@@ -53,7 +53,7 @@ test('each checklist row reports its status and the reason it blocks', () => {
   assert.equal(checks({ audienceMode: 'contacts' }).rows.to.reason, 'Choose at least one contact');
   assert.equal(checks({ audienceMode: 'tags' }).rows.to.reason, 'Enter at least one tag');
   assert.equal(checks({ validPreview: { previewToken: 't', audience: { total: 4, eligible: 0, excluded: 4 } } }).rows.to.reason, 'All 4 contacts are excluded');
-  assert.equal(checks({ status: status({ providers: { email: false } , emailProvider: 'cloudflare' }) }).rows.from.reason, 'Set up Email sending in Integrations');
+  assert.equal(checks({ status: status({ providers: { email: false } , emailProvider: 'cloudflare' }) }).rows.from.reason, 'Set up Email sending in Settings › Connections');
   assert.equal(checks({ status: status({ providers: { email: false }, emailProvider: null }) }).rows.from.reason, 'Choose which service sends email in Settings › Connections');
   assert.equal(checks({ draft: draft({ emailPurpose: 'marketing' }), status: status({ marketingAvailable: false, emailProvider: 'cloudflare' }) }).rows.from.reason, 'Marketing email needs Amazon SES');
   assert.equal(checks({ status: null }).rows.from.reason, undefined, 'An unknown status leaves the provider check to the server.');

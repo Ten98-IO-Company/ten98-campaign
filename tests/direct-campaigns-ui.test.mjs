@@ -391,9 +391,9 @@ test('the Marketing email purpose is offered only while Amazon SES sends, with a
 // plural, and the preview says a merge updates details but keeps recorded permissions.
 test('the import notice counts every processed row and the preview explains what a merge keeps', () => {
   const importNotice = compile(helper('importNotice'));
-  assert.equal(importNotice({ imported: 4, created: 3, updated: 1, skipped: 2 }), 'Processed 6 rows: 3 created, 1 merged, 2 skipped. Review contact hygiene before sending.');
-  assert.equal(importNotice({ created: 0, updated: 1, skipped: 0 }), 'Processed 1 row: 0 created, 1 merged, 0 skipped. Review contact hygiene before sending.');
-  assert.equal(importNotice({}), 'Processed 0 rows: 0 created, 0 merged, 0 skipped. Review contact hygiene before sending.');
+  assert.equal(importNotice({ imported: 4, created: 3, updated: 1, skipped: 2 }), 'Processed 6 rows: 3 created, 1 merged, 2 skipped. Check the contacts before sending.');
+  assert.equal(importNotice({ created: 0, updated: 1, skipped: 0 }), 'Processed 1 row: 0 created, 1 merged, 0 skipped. Check the contacts before sending.');
+  assert.equal(importNotice({}), 'Processed 0 rows: 0 created, 0 merged, 0 skipped. Check the contacts before sending.');
   assert.match(source, /\{importResult\.dryRun && importResult\.updated > 0 && <Text tone="muted" size="sm">Merging updates an existing contact's details from the file, such as name and company, and keeps the permissions and evidence already recorded\.<\/Text>\}/);
 });
 

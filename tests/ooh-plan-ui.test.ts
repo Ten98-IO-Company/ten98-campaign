@@ -91,7 +91,7 @@ test('the booking form is grouped, shows at most 8 fields before More, and submi
   const html = renderToStaticMarkup(fields());
   const legends = [...html.matchAll(/<legend[^>]*>(.*?)<\/legend>/g)].map(match => readText(match[1], ''));
   for (const legend of legends) assertNoMarkup(legend, 'Legend text still contains markup.');
-  assert.deepEqual(legends.filter(legend => legend !== 'Booking dates'), ['Placement', 'Where', 'When &amp; cost', 'Campaign &amp; status']);
+  assert.deepEqual(legends.filter(legend => legend !== 'Booking dates'), ['Billboard', 'Where', 'When &amp; cost', 'Campaign &amp; status']);
   const names = [...html.matchAll(/name="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual([...new Set(names)].sort(), ['campaignId', 'cost', 'currency', 'endDate', 'latitude', 'location', 'longitude', 'name', 'notes', 'proofUrl', 'providerId', 'startDate', 'status', 'type']);
   // Fields shown before More: every labelled control outside the two disclosures, with the date range as one field.
