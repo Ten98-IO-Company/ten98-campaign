@@ -517,6 +517,10 @@ function App() {
     { key: 'status', header: 'Delivery', sortValue: c => c.status || '', render: c => <Stack gap={1}><Badge value={(c.status || 'unknown').toLowerCase()}/>{c.reviewStatus === 'in_review' && <Text size="xs" tone="muted">In platform review</Text>}</Stack> },
     ...([['adCount', 'Ads', compact], ['spend', 'Spend', (value: number, c: Row) => hideAmounts ? hiddenAmount : money(value, c.currency || c.metrics?.currency || 'USD')], ['impressions', 'Impressions', compact], ['clicks', 'Clicks', compact], ['ctr', 'CTR', (value: number) => `${value.toFixed(2)}%`], ['conversions', 'Conversions', compact], ['roas', 'ROAS', (value: number) => `${value.toFixed(2)}×`]] as [string, string, (value: number, row: Row) => string][]).map(([key, header, format]): DataColumn<Row> => ({ key, header, numeric: true, hidden: key !== 'spend' && key !== 'impressions' && !rows.some(c => campaignFigure(c, key) !== undefined), sortValue: c => campaignSortValue(c, key), render: adsFigure(key, format) }))
   ];
+  async function createFirstProject(workspaceId: string, values: { name: string; sample: boolean }) {
+    if (pendingWork.current) return;
+    await run(async () => { const { project } = await api('/projects', 'POST', { workspaceId, ...values }); await reload(project.id); });
+  }
   async function createWorkspace(name: string) {
     if (pendingWork.current) return;
     await run(async () => { const result = await api('/workspaces', 'POST', { name }); await reload(result.projectId); });
@@ -539,6 +543,9 @@ function App() {
     window.location.assign(authorizationUrl);
   })} onSubmit={async values => { rememberFocus(); await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
   if (!state) return <AppStateScreen surface="card" state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading your campaigns…'} onRetry={error ? () => run(() => reload()) : undefined}/>;
+  // After the first sign-up, the owner's workspace has no project yet: the next step creates it.
+  const firstProjectWorkspace = !state.projects.length && state.workspaces.find(w => w.role === 'owner' || w.role === 'admin');
+  if (firstProjectWorkspace) return <FirstProject workspaceName={firstProjectWorkspace.name} user={state.user} busy={busy} error={error || undefined} onCreate={values => createFirstProject(firstProjectWorkspace.id, values)} onSignOut={signOut}/>;
   if (!state.projectId || !project) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} label="Workspace access" email={state.user.email} subheading="No project access yet." help="Ask a workspace owner for an invitation, refresh after access is granted, or create your own workspace." error={error || undefined} busy={busy} onSubmit={({ name }) => createWorkspace(name)} onRefresh={() => run(() => reload(''))} signOut={{ onClick: signOut }}><AccountSettings request={api} onChanged={() => { run(() => reload('')); }}/></WorkspaceOnboarding>;
   const campaigns = filtered(state.campaigns).filter(c => tab === 'all' || c.status === tab);
   const currencyCampaigns = state.campaigns.filter(c => (c.currency || 'AED') === currency);
@@ -713,12 +720,26 @@ function watchInvite(target: Pick<Window, 'location' | 'history' | 'addEventList
   target.addEventListener('hashchange', read);
   return () => target.removeEventListener('hashchange', read);
 }
-// Campaign adapter: the host-held setup token, sample opt-in and invitation continuation stay app-owned.
+// The step after the first sign-up: one project name, the sample opt-in and Skip for now (a stand-in Button until the
+// library's onSkip arrives in 0.25.0). Skipping opens Home with no project; Home's setup checklist then starts with
+// Create your first project, which returns to this step. Skip state lives here, not in App's hooks.
+function FirstProject({ workspaceName, user, busy, error, onCreate, onSignOut }: { workspaceName: string; user: Row; busy: boolean; error?: string; onCreate: (values: { name: string; sample: boolean }) => void; onSignOut: () => void }) {
+  const [skipped, setSkipped] = useState(false);
+  if (!skipped) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} label="Create your first project" title={workspaceName} email={user.email} subheading="Create your first project" nameLabel="Project name" submitLabel="Create project" busyLabel="Creating project…" sampleOptIn={{ label: 'Add sample data' }} error={error} busy={busy} onSubmit={({ name, sample }) => onCreate({ name, sample: sample === true })}><Button type="button" variant="secondary" onClick={() => setSkipped(true)}>Skip for now</Button></WorkspaceOnboarding>;
+  const createProject = () => setSkipped(false);
+  return <AppShell sidebarLabel="Campaign navigation" mainLabel="Home" skipLinkLabel="Skip to content" sidebar={<Brand product="Campaign" href="/"/>}
+    topbar={<AppTopbar breadcrumb={{ scope: workspaceName, current: 'Home' }} actions={<AccountMenu name={user.name} email={user.email} items={[{ id: 'sign-out', kind: 'button', label: 'Sign out', danger: true, onSelect: onSignOut }]}/>}/>}>
+    <PageHeader title="Home" actions={<Button variant="primary" onClick={createProject}>Create project</Button>}/>
+    <HomeSetup projectId={'no-project:' + workspaceName} steps={[{ id: 'project', title: 'Create your first project', detail: 'A project keeps the campaigns, posts, assets and connections for one brand together.', done: false, action: 'Create project', onAction: createProject }]}/>
+  </AppShell>;
+}
+// Campaign adapter: the first sign-up claims the installation as owner; invitation continuation stays app-owned.
 // With an invitation in memory the screen says so, prefills the invited email and offers a way back; signing in returns to the invitation.
 function Auth({ session, inviteToken = '', inviteEmail = '', onBackToInvitation, error, busy, onSubmit, onOidcStart }: { session: any; inviteToken?: string; inviteEmail?: string; onBackToInvitation?: () => void; error: string; busy: boolean; onSubmit: (data: any) => void; onOidcStart?: () => void }) {
   const frame = { surface: 'card' as const, brand: <Brand product="Campaign" href="/"/>, label: 'Campaign sign in', eyebrow: 'YOUR WORKSPACE', error: error || startupAuthError || undefined, busy, busyLabel: 'Signing in…',
     aside: <AuthStory label="Campaign overview" eyebrow="CAMPAIGN MANAGEMENT" title="Plan. Publish." emphasis="Measure." lead="Manage social posts, advertising and campaign assets." channels={[{ icon: 'send', label: 'Social' }, { icon: 'target', label: 'Advertising' }, { icon: 'billboard', label: 'Out of home' }]} footnote="ten98 Campaign"/> };
-  if (session.setupRequired) return <FirstUserSetupFlow {...frame} title="Create owner account" description="Create the owner account for this app." submitLabel="Create owner account" tokenLength={{ min: 32, max: 512 }} tokenHint="Ask the person running this app for the setup token." passwordPolicy={{ minLength: 12, maxLength: 128, hint: 'Use at least 12 characters.' }} sampleOptIn={{ label: 'Include a sample project to explore', defaultChecked: true }} onSubmit={({ name, token, email, password, sample }) => onSubmit({ name, token, email, password, sample })}/>;
+  // First boot is one screen: no token, story panel, single sign-on or sample opt-in. A blank workspace name becomes "My workspace" on the server.
+  if (session.setupRequired) return <FirstUserSetupFlow surface="card" brand={frame.brand} label="Create owner account" title="Create owner account" error={frame.error} busy={busy} busyLabel="Creating account…" submitLabel="Create owner account" setupToken={false} workspaceName defaultValues={{ workspaceName: 'My workspace' }} passwordPolicy={{ minLength: 12, maxLength: 128 }} onSubmit={({ name, email, password, workspaceName }) => onSubmit({ name, email, password, workspaceName })}/>;
   // Invitation sign-in starts with a POST that carries the token; plain sign-in stays a link.
   const sso = inviteToken ? { id: 'sso', name: 'Organization single sign-on' } : { id: 'sso', name: 'Organization single sign-on', href: '/api/auth/oidc/start' };
   const invitation = inviteToken ? { title: 'Sign in to join', description: inviteEmail ? `Sign in as ${inviteEmail} to accept your workspace invitation.` : 'Sign in with the invited email to accept your workspace invitation.', defaultValues: inviteEmail ? { email: inviteEmail } : undefined, cancel: onBackToInvitation ? { label: 'Back to invitation', onClick: onBackToInvitation } : undefined } : { title: 'Sign in', description: 'Use your account to access your workspaces.' };
