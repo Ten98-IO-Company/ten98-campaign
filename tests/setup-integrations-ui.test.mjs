@@ -127,7 +127,7 @@ test('SMS inbox keeps consent and STOP guidance, history and setup navigation wi
   assert.match(html, /Replies do not grant marketing permission\. STOP opt-outs block further replies\./);
   assert.match(html, /Previously received messages remain available/);
   assert.doesNotMatch(html, /Incoming-message webhook|must-stay-in-integrations|Configure the Twilio/);
-  button(tree, 'Refresh SMS replies'); button(tree, 'Open integrations').props.onClick(); assert.equal(opened, 1);
+  button(tree, 'Refresh SMS replies'); button(tree, 'Open Connections').props.onClick(); assert.equal(opened, 1);
   h.unmount();
 });
 
