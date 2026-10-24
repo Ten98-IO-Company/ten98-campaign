@@ -125,8 +125,13 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
       setLink(found || null); if (!found) setLinkError('The saved tracking link is no longer available. Create a new one below.');
     }, () => { if (opened.current === id) setLinkError('The tracking link could not be loaded.'); }).finally(() => { if (opened.current === id) setLinkLoading(false); });
   }
-  // createFor: a campaign page's Add menu asked for a new item in this campaign; start it once, then tell the app.
-  useEffect(() => { if (!createFor) return; if (editable && campaigns.some(campaign => campaign.id === createFor)) { setFilter(createFor); open('new', createFor); } onCreateHandled?.(); }, [createFor]);
+  // createFor: a campaign page's Add menu asked for a new item in this campaign; start it once, inside the campaign's
+  // dates (a working day from 09:00 to 17:00 local time), then tell the app.
+  useEffect(() => {
+    if (!createFor) return; const campaign = campaignOf(createFor);
+    if (editable && campaign) { const start = campaign.startDate?.slice(0, 10), end = campaign.endDate?.slice(0, 10); setFilter(createFor); open('new', createFor); if (start && end) setDraft(current => ({ ...current, startAt: start + 'T09:00', endAt: end + 'T17:00' })); }
+    onCreateHandled?.();
+  }, [createFor]);
   // Creates (or reuses) the campaign short link for this activation's tagged landing page and keeps it on the activation.
   async function createLink(activation: Row) {
     setLinkError(''); setLinking(true);
