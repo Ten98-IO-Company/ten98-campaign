@@ -8,6 +8,7 @@ import { advisoryLock, HttpError } from './auth.ts';
 import type { Database, Executor } from './database.ts';
 import type { PublicUser } from './auth.ts';
 import { reportObject as object, type ProviderRecord } from './provider-core.ts';
+import { readRequestJson } from './json-body.ts';
 
 function fail(status: number, message: string): never { throw new HttpError(status, message); }
 const rows = async (query: Promise<{ rows: unknown[] }>) => (await query).rows as ProviderRecord[];
@@ -46,12 +47,8 @@ function linkPage(res: ServerResponse, status: 404 | 410) {
   const { title, message } = LINK_PAGES[status];
   respond(res, status, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${title}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif;color:#1f1d2b;background:#f7f6fb}main{max-width:32rem;padding:2rem}h1{font-size:1.5rem;margin:0 0 .5rem}p{margin:0;color:#4a4760}@media (prefers-color-scheme:dark){body{color:#f2f1f7;background:#17161f}p{color:#c4c1d6}}</style></head><body><main><h1>${title}</h1><p>${message}</p></main></body></html>`, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': LINK_PAGE_POLICY });
 }
-async function eventBody(req: IncomingMessage) {
-  if (!(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) fail(415, 'Send JSON events.');
-  if (Number(req.headers['content-length']) > 2048) { req.resume(); fail(413, 'This event is too large.'); }
-  const chunks: Buffer[] = []; let size = 0;
-  for await (const chunk of req.iterator({ destroyOnReturn: false })) { size += chunk.length; if (size > 2048) { req.resume(); fail(413, 'This event is too large.'); } chunks.push(chunk); }
-  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); } catch { fail(400, 'Send a valid JSON event.'); }
+async function eventBody(req: IncomingMessage): Promise<any> {
+  return readRequestJson(req, 2048).catch((error: { status?: number }) => fail(error?.status ?? 400, ({ 413: 'This event is too large.', 415: 'Send JSON events.' } as Record<number, string>)[error?.status ?? 0] ?? 'Send a valid JSON event.'));
 }
 function websiteScript(endpoint: string) {
   return `(()=>{if(window.ten98Track)return;const disabled=()=>navigator.doNotTrack==='1'||window.doNotTrack==='1'||navigator.globalPrivacyControl===true;let last='';function track(name){if(disabled()||typeof name!=='string'||!/^[a-z][a-z0-9_]{0,63}$/.test(name)||!crypto.randomUUID)return;const path=location.pathname;if(name==='pageview'&&last===path)return;if(name==='pageview')last=path;fetch(${JSON.stringify(endpoint).replace(/</g, '\\u003c')},{method:'POST',mode:'cors',credentials:'omit',referrerPolicy:'no-referrer',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({eventId:crypto.randomUUID(),name,path})}).catch(()=>{});}window.ten98Track=track;track('pageview');addEventListener('popstate',()=>track('pageview'));for(const method of ['pushState','replaceState']){const original=history[method];history[method]=function(...args){const result=original.apply(this,args);track('pageview');return result;};}})();`;

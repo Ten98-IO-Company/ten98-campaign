@@ -13,6 +13,7 @@ import { handleIntegration } from './integrations.ts';
 import { IntegrationError, mediaUrl, type ProviderRecord, type OperationContext } from './provider-core.ts';
 import { createIntegrationSettings } from './integration-settings.ts';
 import { handleInvitations, revokeMemberInvitations } from './invitations.ts';
+import { readRequestJson } from './json-body.ts';
 import { handleOperationRecovery } from './operation-recovery.ts';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit, recordApprovedReschedule } from './approvals.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.ts';
@@ -135,10 +136,8 @@ async function readRawBody(req: IncomingMessage, maximum: number): Promise<Buffe
   return Buffer.concat(chunks);
 }
 async function readBody(req: IncomingMessage, maximum = 65536): Promise<ProviderRecord> {
-  if (req.headers['content-length'] === '0' || (!req.headers['content-length'] && !req.headers['transfer-encoding'])) return {};
-  if (!(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new HttpError(415, 'Send JSON content.');
-  const raw = await readRawBody(req, maximum);
-  try { return object(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw))); } catch (error) { if (error instanceof HttpError) throw error; bad('Send valid UTF-8 JSON.'); }
+  const value = await readRequestJson(req, maximum, true).catch((error: { status?: number }) => { throw new HttpError(error?.status ?? 400, ({ 413: 'Request is too large.', 415: 'Send JSON content.' } as Record<number, string>)[error?.status ?? 0] ?? 'Send valid UTF-8 JSON.'); });
+  return value === undefined ? {} : object(value);
 }
 
 export async function createApp(options: AppOptions = {}) {
