@@ -1,5 +1,16 @@
 import { Alert, ContentPreview, Field, Input, Stack, Text } from '@ten98/ui';
 
+// Counts the required values the form below asks for that are still empty: text placeholders, a media header link and URL suffixes.
+export function templateMissing(template: any, components: any[]) {
+  let missing = 0;
+  for (const component of template?.components || []) {
+    const type = String(component.type || '').toLowerCase(), mediaType = String(component.format || '').toLowerCase(), values = components.find(item => item.type?.toLowerCase() === type)?.parameters || [];
+    if (['header', 'body'].includes(type)) for (const index of new Set([...String(component.text || '').matchAll(/\{\{(\d+)\}\}/g)].map(match => Number(match[1]) - 1))) if (!String(values[index]?.text || '').trim()) missing++;
+    if (type === 'header' && ['image', 'video', 'document'].includes(mediaType) && !values[0]?.[mediaType]?.link) missing++;
+    (component.buttons || []).forEach((button: any, index: number) => { if (String(button.type).toUpperCase() === 'URL' && /\{\{1\}\}$/.test(button.url || '') && !String(components.find(item => item.type === 'button' && String(item.index) === String(index))?.parameters?.[0]?.text || '').trim()) missing++; });
+  }
+  return missing;
+}
 export function templateRestriction(template: any) {
   for (const component of template.components || []) {
     const type = String(component.type || '').toUpperCase();
