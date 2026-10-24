@@ -503,6 +503,12 @@ test('a time-only move to a future time keeps the approval; a move to now or the
   const reopened = (await invoke(`posts/${post.id}/request`, 'editor')).data.item;
   assert.equal(reopened.status, 'pending'); assert.notEqual(reopened.review.id, firstReview);
 
+  // A post approved with no time (to publish on demand) that gains one, even a future one, is a different instruction.
+  await store.update(project.id, 'posts', post.id, { scheduledAt: '' }); await approve();
+  assert.deepEqual([await status(), await publishes()], ['approved', 'passed']);
+  await move({ scheduledAt: '2099-11-01T09:00:00Z' });
+  assert.deepEqual([await status(), await publishes()], ['stale', 'PUBLISHING_APPROVAL_STALE'], 'No time, then a time, needs a new review.');
+
   // Content changes stay stale whatever the time.
   await store.update(project.id, 'posts', post.id, { scheduledAt: '2099-11-01T09:00:00Z' }); await approve();
   await move({ content: 'Edited caption', scheduledAt: '2099-11-02T09:00:00Z' });
