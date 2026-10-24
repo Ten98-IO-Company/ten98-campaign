@@ -140,7 +140,9 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     assert.equal((await post(`${project}/approvals/policy`, { requireApproval: true })).status, 200); await approve(scheduled);
     remote.platforms.find(copy => copy.accountId === 'second-facebook-fixture').scheduledFor = '2070-03-03T09:00:00Z';
     result = await post(integrations + '/retry', { postId: scheduled.id, confirmPublish: true }, { key: 'reject-stale-account-schedule' }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'APPROVAL_POST_CHANGED'); assert.equal(writes.length, beforeWrites);
-    assert.equal((await request(`${integrations}/status?postId=${scheduled.id}`)).status, 200); const reviewedSchedules = await approve(scheduled); assert.equal(reviewedSchedules.post.accountOverrides['second-facebook-fixture'].scheduledAt, '2070-03-03T09:00:00Z');
+    assert.equal((await request(`${integrations}/status?postId=${scheduled.id}`)).status, 200); 
+    // The refresh took the provider copy's new future time; a time-only move keeps the approval (#125).
+    const keptSchedule = (await request(`${project}/approvals/posts`)).data.posts.find(row => row.post.id === scheduled.id); assert.equal(keptSchedule.status, 'approved'); assert.equal(keptSchedule.post.accountOverrides['second-facebook-fixture'].scheduledAt, '2070-03-03T09:00:00Z');
     remote.platforms.find(copy => copy.platform === 'instagram').customContent = 'Unreviewed provider variant';
     result = await post(integrations + '/retry', { postId: scheduled.id, confirmPublish: true }, { key: 'reject-stale-provider-variant' }); assert.equal(result.status, 409); assert.equal(result.data.error.code, 'APPROVAL_POST_CHANGED'); assert.equal(writes.length, beforeWrites);
     assert.equal((await request(`${integrations}/status?postId=${scheduled.id}`)).status, 200); await approve(scheduled);

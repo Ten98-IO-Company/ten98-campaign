@@ -123,8 +123,9 @@ test('applied filters show as removable chips above the list', async () => {
 
 test('each account the provider could not read gets its own banner with Reconnect', async () => {
   const opened: string[] = [];
-  const failedAccounts = [{ accountId: 'ig', platform: 'instagram', error: 'The provider could not read this account. Check its connection and permissions.' }, { accountId: 'tg', platform: 'telegram', error: 'The provider could not read this account. Check its connection and permissions.', retryAfter: 30 }];
-  const { tree } = await open({ meta: { failedAccounts }, props: { onOpenIntegrations: () => opened.push('Integrations') } });
+  const failedAccounts = [{ accountId: 'ig', platform: 'instagram', error: 'This account could not be read. Check its connection and permissions.' }, { accountId: 'tg', platform: 'telegram', error: 'This account could not be read. Check its connection and permissions.', retryAfter: 30 }];
+  // The same account named twice still gets one banner (#268).
+  const { tree } = await open({ meta: { failedAccounts: [failedAccounts[0], ...failedAccounts] }, props: { onOpenIntegrations: () => opened.push('Integrations') } });
   const banners = find(tree, ui.Alert, alert => alert.tone === 'warning' && /could not be loaded/.test(String(alert.title)));
   assert.deepEqual(banners.map(alert => alert.props.title), ['Studio IG · Instagram could not be loaded', 'Support TG · Telegram could not be loaded']);
   assert.match(text(banners[1].props.children), /Retry after 30 seconds/);

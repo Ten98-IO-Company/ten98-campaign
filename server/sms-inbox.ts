@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { readResponseBytes } from '@ten98/runtime';
 import { IntegrationError, fail, operation } from './provider-core.ts';
 import { sql } from 'drizzle-orm';
 import type { Database, Executor } from './database.ts';
@@ -109,11 +110,11 @@ export function createSmsInbox({ db, env, appUrl, contacts = createContacts({ db
           response = await fetch(location, { redirect: 'error', signal });
           await context.assertIntegrationSettings();
         }
-        if (!response.ok || response.headers.get('content-type')?.split(';')[0].toLowerCase() !== attachment.contentType.toLowerCase() || Number(response.headers.get('content-length') || 0) > maximum) fail(502, 'SMS_MEDIA_UNAVAILABLE', 'Twilio did not return the expected attachment within the 20 MB download limit.');
-        const chunks: any[] = []; let size = 0;
-        for await (const chunk of response.body || []) { size += chunk.length; if (size > maximum) fail(502, 'SMS_MEDIA_UNAVAILABLE', 'This SMS attachment exceeds the 20 MB download limit.'); chunks.push(chunk); }
+        if (!response.ok || response.headers.get('content-type')?.split(';')[0].toLowerCase() !== attachment.contentType.toLowerCase()) fail(502, 'SMS_MEDIA_UNAVAILABLE', 'Twilio did not return the expected attachment.');
+        // A declared or streamed size over the limit is refused before or while reading; other read failures fall to the catch below.
+        const bytes = await readResponseBytes(response, { maxBytes: maximum, signal, contentLength: 'limit' }).catch((error: any) => error?.code === 'RESPONSE_TOO_LARGE' ? fail(502, 'SMS_MEDIA_UNAVAILABLE', 'This SMS attachment exceeds the 20 MB download limit.') : Promise.reject(error));
         await context.assertIntegrationSettings();
-        const extension = attachment.contentType.split('/')[1].replace(/[^a-z0-9.+-]/gi, '').slice(0, 80), bytes = Buffer.concat(chunks);
+        const extension = attachment.contentType.split('/')[1].replace(/[^a-z0-9.+-]/gi, '').slice(0, 80);
         context.res.writeHead(200, { 'Content-Type': attachment.contentType, 'Content-Disposition': `attachment; filename="sms-attachment.${extension}"`, 'Content-Length': bytes.length, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' }); context.res.end(bytes);
       } catch (error: any) {
         response?.body?.cancel().catch(() => {});

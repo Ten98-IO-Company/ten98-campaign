@@ -507,7 +507,7 @@ test('optional history search keeps conversation actions, active results and pro
   const html = render(), disclosure = html.match(/<details[\s\S]*?<\/details>/)?.[0]; assert.ok(disclosure, 'Search fields must stay mounted inside a native disclosure.');
   assert.match(disclosure, /<summary[^>]*><span[^>]*>Search message history<\/span>/); assert.doesNotMatch(disclosure.match(/^<details[^>]*>/)[0], /\bopen=/);
   assert.match(disclosure, /value="kept search draft"/); assert.match(disclosure, /value="incoming" selected=""/); assert.match(disclosure, />Search history<\/button>/); assert.match(disclosure, /whole tokens/);
-  const outside = html.replace(disclosure, ''); for (const text of ['Return to conversations', 'New conversation', 'History results for', 'up to three recent matching messages', 'Live-only accounts may be skipped', 'history stored by Zernio']) assert.ok(outside.includes(text), text);
+  const outside = html.replace(disclosure, ''); for (const text of ['Return to conversations', 'New conversation', 'History results for', 'up to three recent matching messages', 'Live-only accounts may be skipped', 'your message history']) assert.ok(outside.includes(text), text);
   assert.doesNotMatch(disclosure, /Return to conversations|New conversation|History results for|Live-only accounts|up to three/);
   const viewer = render({ readOnly: true }); assert.doesNotMatch(viewer, /New conversation/); assert.match(viewer, /Return to conversations/); assert.match(viewer, /Search history/);
   assert.doesNotMatch(render({ historyFilter: null, capabilities: {} }), /Return to conversations|New conversation|History results for/);
