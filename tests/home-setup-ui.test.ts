@@ -10,7 +10,7 @@ import * as ui from '@ten98/ui';
 const source = (await readFile(new URL('../src/HomeSetup.tsx', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace(/^export type .*;\r?\n/m, '').replace('export default function', 'function');
 const { code } = await transformWithOxc(source, 'HomeSetup.tsx', { jsx: { runtime: 'classic' }, lang: 'tsx' });
 type Storage = { getItem: (key: string) => string | null; setItem: (key: string, value: string) => void };
-type Step = { id: string; title: string; detail: string; done: boolean; action: string; onAction: () => void };
+type Step = { id: string; title: string; detail: string; done: boolean; action?: string; onAction?: () => void };
 function load(storage: Storage) {
   let hidden: unknown; const setters: unknown[] = [];
   const useState = (initial: unknown) => { hidden ??= typeof initial === 'function' ? initial() : initial; return [hidden, (value: unknown) => { hidden = value; setters.push(value); }]; };
@@ -41,4 +41,11 @@ test('the checklist disappears when every step is done, and Hide is remembered p
   assert.notEqual(load(storage).render({ projectId: 'project-b', steps: steps() }), null, 'Other projects still show their checklist.');
   const blocked: Storage = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
   assert.notEqual(load(blocked).render({ projectId: 'p', steps: steps() }), null, 'Blocked storage still renders the checklist.');
+});
+
+test('a step that belongs to an administrator says Ask your admin instead of offering a button', () => {
+  const view = load(store()), tree = view.render({ projectId: 'p', steps: [{ id: 'accounts', title: 'Turn on social publishing', detail: 'Your Campaign administrator turns this on once for everyone.', done: false }, ...steps()] });
+  const html = renderToStaticMarkup(tree);
+  assert.match(html, /Turn on social publishing[\s\S]*Ask your admin/);
+  assert.equal(nodes(tree).filter(node => node.type === ui.Button && node.props.children !== 'Hide').length, 2, 'Only the two steps with an action have a button.');
 });
