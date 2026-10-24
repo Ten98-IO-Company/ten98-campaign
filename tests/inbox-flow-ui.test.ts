@@ -148,7 +148,9 @@ test('an inbox without a connected account shows only Connect social accounts, w
 });
 
 // The page header is the h1 and names the page, so the inbox starts at h2 and each heading nests at most one level deeper.
-const headings = (tree: any) => [...renderToStaticMarkup(tree).matchAll(/<h([1-6])[^>]*>(.*?)<\/h\1>/g)].map(([, level, name]) => ({ level: Number(level), name: name.replace(/<[^>]+>/g, '') }));
+// Heading text is read by splitting on tags in one pass (not a sanitiser): any markup left behind fails the assertion.
+const headingText = (html: string) => { const text = html.split(/<[^>]*>/).join(''); assert.ok(!text.includes('<'), 'Heading text still contains markup: ' + html); return text; };
+const headings = (tree: any) => [...renderToStaticMarkup(tree).matchAll(/<h([1-6])[^>]*>(.*?)<\/h\1>/g)].map(([, level, name]) => ({ level: Number(level), name: headingText(name) }));
 test('inbox headings start below the page heading, nest in order and never repeat', async () => {
   const commentAccounts = [{ id: 'fb', platform: 'facebook', name: 'Studio page', capabilities: { comments: true } }];
   for (const options of [{}, { conversations: [] }, { status: { accounts: commentAccounts }, props: { tab: 'comments' } }]) {
