@@ -4,6 +4,7 @@ import { createHash, createHmac } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { clientLimitKey } from '@ten98/runtime';
 import { createAuth, hashPassword, signInLimits } from '../server/auth.ts';
 import { blockWrites, postgresSkip, signInRedirectError, testApp, testDatabase } from './postgres.mjs';
 
@@ -78,7 +79,7 @@ test('parallel sign-ins cannot exceed the per-client or per-account limits', pg,
   const tally = outcomes => [outcomes.filter(outcome => outcome === 401).length, outcomes.filter(outcome => outcome === 429).length];
   assert.deepEqual(tally(await Promise.all(oneClient)), [signInLimits.client, 10]); assert.deepEqual(tally(await Promise.all(oneAccount)), [signInLimits.account, 10]);
   const counter = async key => (await db.$client.query('SELECT count FROM login_limits WHERE key = $1', [key])).rows[0].count;
-  assert.equal(await counter('ip:203.0.113.7'), signInLimits.client);
+  assert.equal(await counter(clientLimitKey('ip', '203.0.113.7', config.sessionSecret)), signInLimits.client);
   assert.equal(await counter('email:' + createHmac('sha256', config.sessionSecret).update('member@example.test').digest('hex')), signInLimits.account);
 });
 
