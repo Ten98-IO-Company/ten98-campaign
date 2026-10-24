@@ -5,7 +5,9 @@ import { loadGoogleMaps } from './OohMap';
 import ZernioWebhooks from './ZernioWebhooks';
 
 type Project = { id: string; zernioProfileId?: string; driveFolderId?: string };
-type Props = { project: Project; isOperator: boolean; canManageProject: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; sections?: Partial<Record<string, ReactNode>>; extraCards?: { id: string; title: string; description: string; body: ReactNode }[] };
+type Props = { project: Project; isOperator: boolean; canManageProject: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; sections?: Partial<Record<string, ReactNode>>; extraCards?: { id: string; title: string; description: string; body: ReactNode }[];
+  // Connections shows what this project uses and links; Service keys (Settings › Advanced, operators) holds the installation's credentials.
+  mode?: 'connections' | 'keys'; onOpenKeys?: () => void };
 type Provider = { id: string; label: string; configured: boolean; source: string; fields: Record<string, string | number>; secretFields: Record<string, { configured: boolean; source: string }>; options?: Record<string, string[]>; updatedAt?: string };
 type Result = { ok: boolean; status: string; message: string; checkedAt?: string };
 type Field = { name: string; label: string; secret?: boolean; multiline?: boolean; type?: string; placeholder?: string; min?: number; max?: number; help?: string; options?: { value: string; label: string }[]; serverOptions?: string };
@@ -25,7 +27,7 @@ const definitions: Record<string, { label: string; description: string; note?: s
 };
 const sourceLabel = (source: string) => ({ saved: 'Saved in this app', environment: 'Deployment settings', mixed: 'App + deployment settings', unconfigured: 'Not configured', disabled: 'Disabled in this app' }[source] || source);
 
-export default function IntegrationSettings({ project, isOperator, canManageProject, request, onChanged, sections, extraCards }: Props) {
+export default function IntegrationSettings({ project, isOperator, canManageProject, request, onChanged, sections, extraCards, mode = 'connections', onOpenKeys }: Props) {
   const [providers, setProviders] = useState<Provider[]>([]), [drafts, setDrafts] = useState<Record<string, Record<string, string | null>>>({}), [results, setResults] = useState<Record<string, Result>>({});
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [loaded, setLoaded] = useState(false), [mapsReload, setMapsReload] = useState(false), [confirming, setConfirming] = useState<Provider>();
   const [mapping, setMapping] = useState({ zernioProfileId: project.zernioProfileId || '', driveFolderId: project.driveFolderId || '', calendarId: '' }), [calendarLoaded, setCalendarLoaded] = useState(false);
@@ -158,22 +160,30 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
   }
   const resultTitle = (status: string) => ({ connected: 'Connection verified', needs_mapping: 'Link this project', browser_verification_required: 'Browser check required', browser_loaded: 'Map connection verified' } as Record<string, string>)[status] || 'Connection check';
   const card = (id: string, title: string, description: string, status: ReactNode, body: ReactNode) => <Card as="section" key={id} id={`integration-${id}`} title={title} description={description} actions={status}><Stack gap={3}>{body}</Stack></Card>;
+  if (mode === 'keys' && !isOperator) return <Alert tone="info" title="Only your Campaign administrator manages service keys."/>;
+  const keys = mode === 'keys';
   return <Stack gap={4}>
-    <Inline gap={2}><Text tone="muted">Connect the tools this project uses. Each card shows whether it’s ready.</Text><Badge>{isOperator ? 'Administrator' : 'Project access'}</Badge></Inline>
+    {keys ? <Text tone="muted">Keys and credentials for this Campaign installation. They apply to every workspace; each project links to them in Connections.</Text>
+      : <Inline gap={2}><Text tone="muted">Connect the tools this project uses. Each card shows whether it’s ready.</Text><Badge>{isOperator ? 'Administrator' : 'Project access'}</Badge></Inline>}
     {error && <Alert tone="danger" title={error}/>}{notice && <StatusLine tone="success">{notice}</StatusLine>}
-    {!isOperator && <Alert tone="info" title="Your Campaign administrator adds the accounts and keys. Each card shows what’s connected for this project."/>}
-    {!canMap && <Text size="sm" tone="muted">Only a Campaign administrator who also manages this workspace can change these connections.</Text>}
-    {isOperator && !loaded && !error && <StatusLine busy>Loading connections…</StatusLine>}
+    {!keys && !isOperator && <Alert tone="info" title="Your Campaign administrator adds the accounts and keys. Each card shows what’s connected for this project."/>}
+    {!keys && !canMap && <Text size="sm" tone="muted">Only a Campaign administrator who also manages this workspace can change these connections.</Text>}
+    {isOperator && !loaded && !error && <StatusLine busy>{keys ? 'Loading service keys…' : 'Loading connections…'}</StatusLine>}
     <Grid gap={4} minItemWidth="lg">
       {Object.entries(definitions).map(([id, definition]) => {
-        const provider = providers.find(item => item.id === id), result = results[id];
-        return card(id, provider?.label || definition.label, definition.description, provider && <Badge tone={provider.configured ? 'success' : 'neutral'}>{provider.configured ? 'Set up' : 'Not set up'}</Badge>, <>
-          {provider && credentials(provider, definition)}
+        const provider = providers.find(item => item.id === id), result = results[id], status = provider && <Badge tone={provider.configured ? 'success' : 'neutral'}>{provider.configured ? 'Set up' : 'Not set up'}</Badge>;
+        if (keys) return provider && card(id, provider.label || definition.label, definition.description, status, <>
+          {credentials(provider, definition)}
           {result && <Alert tone={result.ok ? 'success' : 'warning'} title={resultTitle(result.status)}>{result.message}{result.checkedAt && <Text size="xs" tone="muted">Checked {new Date(result.checkedAt).toLocaleString()}</Text>}</Alert>}
-          {adapters[id]}{sections?.[id]}
+        </>);
+        // One line per tool; this project's links and actions open under Manage.
+        const manage = <>{adapters[id]}{sections?.[id]}</>;
+        return card(id, provider?.label || definition.label, definition.description, status, <>
+          {provider && !provider.configured && onOpenKeys && <Inline><Button variant="ghost" onClick={onOpenKeys}>Add keys in Service keys</Button></Inline>}
+          {(adapters[id] || sections?.[id]) && <Disclosure summary="Manage">{manage}</Disclosure>}
         </>);
       })}
-      {extraCards?.map(extra => card(extra.id, extra.title, extra.description, null, extra.body))}
+      {!keys && extraCards?.map(extra => card(extra.id, extra.title, extra.description, null, extra.body))}
     </Grid>
     <ConfirmDialog open={!!confirming} onOpenChange={open => { if (!open) setConfirming(undefined); }} title={`Use deployment settings for ${confirming?.label || 'this provider'}?`} description={`Remove the saved ${confirming?.label || ''} settings and use the deployment settings.${confirming?.id === 'googleDrive' || confirming?.id === 'googleCalendar' ? ' This changes both Google Drive and Calendar.' : ''}`} confirmLabel="Use deployment settings" danger onConfirm={() => reset(confirming!)}/>
   </Stack>;
