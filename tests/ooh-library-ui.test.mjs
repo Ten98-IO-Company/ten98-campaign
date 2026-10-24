@@ -12,8 +12,8 @@ const { Button, Checkbox, DataTable, ReviewSummary, Stack } = ui;
 const source = await readFile(new URL('../src/OohProviders.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace('export default function', 'function'), 'OohProviders.tsx', { jsx: { runtime: 'classic' } });
 const libraryImports = source.match(/^import \{([^}]+)\} from '@ten98\/ui';/m)[1];
-// DataTable cells are column render callbacks, so expand them to reach the per-row selection controls.
-const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children), ...elements(node.props.actions), ...(node.type === DataTable ? elements(node.props.rows.flatMap(row => node.props.columns.map(column => column.render?.(row)))) : [])] : [];
+// DataTable cells are column render callbacks, so expand them to reach the per-row selection controls; tab panels are item content.
+const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children), ...elements(node.props.actions), ...(node.props.items || []).flatMap(item => elements(item.content)), ...(node.type === DataTable ? elements(node.props.rows.flatMap(row => node.props.columns.map(column => column.render?.(row)))) : [])] : [];
 const isForm = node => node.type === Stack && node.props.as === 'form', isFieldset = node => node.type === Stack && node.props.as === 'fieldset';
 
 test('OOH shared reviews render and submit only their exact booking while native guards and uncertain cancellation keys remain intact', async () => {
