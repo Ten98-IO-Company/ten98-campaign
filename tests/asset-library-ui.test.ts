@@ -77,7 +77,7 @@ test('the toolbar explains why Drive cannot sync, and viewers see no Upload butt
   assert.equal(buttons(viewer, /^Upload$/).length, 0);
   assert.match(text(viewer), /Viewers can review assets but not sync Drive\./);
   assert.equal((buttons(viewer, /Sync Drive/)[0].props as Row).disabled, true);
-  const unmapped = page().render({ drive: { configured: true, mapped: false }, connected: false, driveSyncReason: 'Map a Drive folder to this project in Integrations to sync files.' });
+  const unmapped = page().render({ drive: { configured: true, mapped: false }, connected: false, driveSyncReason: 'Link a Drive folder to this project in Settings › Connections to sync files.' });
   assert.equal(buttons(unmapped, /^Upload$/).length, 0, 'No Upload button when neither Drive nor hosted upload can accept a file.');
   assert.equal((buttons(unmapped, /Sync Drive/)[0].props as Row).disabled, true);
 });

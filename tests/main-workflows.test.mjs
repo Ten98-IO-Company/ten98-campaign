@@ -51,12 +51,14 @@ test('browser-pass copy: connection empty states, disabled-control reasons, resu
   for (const subject of (appSource.match(/subject="[^"]+"/g) || [])) assert.match(subject, /^subject="(?:the |[a-z]|WhatsApp|Google)/, subject);
   assert.doesNotMatch(appSource, /Open Integrations/, 'Button and prose casing is consistent within the shell.');
   for (const name of ['GoogleCalendar', 'UnifiedInbox']) assert.doesNotMatch(readFileSync(new URL(`../src/${name}.tsx`, import.meta.url), 'utf8'), /Open Integrations/, name + ' uses the same "Open integrations" casing.');
-  assert.match(appSource, /\{!connected && <Text tone="muted" size="sm">Connect Zernio in Integrations to load channels\.<\/Text>\}<Button[^\r\n]*?disabled=\{busy \|\| !connected\}[^\r\n]*?>Load channels<\/Button>/);
+  assert.match(appSource, /\{!connected && <Text tone="muted" size="sm">Connect your social accounts in Settings › Connections to load them\.<\/Text>\}<Button[^\r\n]*?disabled=\{busy \|\| !connected\}[^\r\n]*?>Load channels<\/Button>/);
   // src/AssetLibrary.tsx shows this reason beside its Sync Drive control (asset-library-ui.test.ts renders it).
   assert.match(appSource, /<AssetLibrary [^\r\n]*driveSyncReason=\{driveSyncReason\}[^\r\n]*onSync=\{\(\) => run\(async \(\) => \{ await integrate\('drive\/sync', \{\}\); await reload\(\); \}, 'Drive assets synced'\)\}/);
-  const reason = new Function('canWrite', 'remote', appSource.match(/const driveSyncReason = ([^\r\n]+);/)[1].replace(/^/, 'return ') + ';');
+  const driveReason = new Function('canWrite', 'remote', 'state', appSource.match(/const driveSyncReason = ([^\r\n]+);/)[1].replace(/^/, 'return ') + ';');
+  const reason = (canWrite, remote, operator = false) => driveReason(canWrite, remote, { user: { isOperator: operator } });
   assert.match(reason(false, {}), /Viewers/); assert.equal(reason(true, {}), '', 'No reason before the status loads.');
-  assert.match(reason(true, { status: { drive: { configured: false } } }), /Configure Google Drive/); assert.match(reason(true, { status: { drive: { configured: true, mapped: false } } }), /Map a Drive folder/);
+  assert.match(reason(true, { status: { drive: { configured: false } } }), /Ask your admin to connect Google Drive/); assert.match(reason(true, { status: { drive: { configured: true, mapped: false } } }), /Link a Drive folder/);
+  assert.match(reason(true, { status: { drive: { configured: false } } }, true), /^Connect Google Drive in Settings › Connections/, 'An operator is the admin, so the reason tells them what to do.');
   assert.equal(reason(true, { status: { drive: { configured: true, mapped: true } } }), '');
   assert.match(appSource, /<DataTable ariaLabel="Campaign results"[^\r\n]*?emptyTitle=\{state\.campaigns\.length \? 'No campaigns match this search' : 'No campaign results yet'\} emptyDescription=/);
   // The OOH booking rows and their per-placement Edit/View buttons are covered with the plan view in ooh-plan-ui.test.ts.
@@ -298,7 +300,7 @@ test('post card publishing asks once and names every destination before calling 
   assert.match(appSource, /disabled=\{busy \|\| !connected\} onClick=\{\(\) => setPublishing\(p\)\}>/);
   // A disabled Publish says why in visible text rather than a hover-only title.
   assert.doesNotMatch(appSource, /Connect Zernio in Settings/);
-  assert.match(appSource, /\(!approval \|\| approval\.publishable\) && !connected && <Text tone="muted" size="sm">Connect Zernio in Integrations to publish this post\.<\/Text>\}<FormActions>/);
+  assert.match(appSource, /\(!approval \|\| approval\.publishable\) && !connected && <Text tone="muted" size="sm">Connect your social accounts in Settings › Connections to publish this post\.<\/Text>\}<FormActions>/);
   const dialog = appSource.match(/<ConfirmDialog open=\{!!publishing\}[^\r\n]+?<\/ConfirmDialog>/)?.[0]; assert.ok(dialog);
   assert.match(dialog, /onConfirm=\{async \(\) => \{ const post = publishing; if \(post\) await publish\(post\); setPublishing\(null\); \}\}/);
   assert.match(dialog, /Accounts:<\/Text> \{postRecipients\(publishing, remote\.accounts\?\.accounts \|\| \[\]\)\}/);
@@ -348,4 +350,11 @@ test('a new campaign asks for name, dates and budget first; editing keeps every 
   const editing = render({ id: 'c1', name: 'Launch', channel: 'social', status: 'active', spent: 10 });
   assert.deepEqual(new Set(names(editing)), new Set(['name', 'startDate', 'endDate', 'budget', 'currency', 'channel', 'status', 'description', 'spent', 'impressions', 'clicks', 'conversions']));
   assert.match(editing, /<details[^>]*open/, 'Editing or viewing opens More details, so every saved value is visible.');
+});
+
+test('the read-only editor alert names what manages the record: Broadsign for bookings, the ad network for campaigns', () => {
+  const appSource = source(), alert = appSource.match(/\{providerManaged && <Alert tone="warning">(\{[^\r\n]*?\})<\/Alert>\}/)?.[1]; assert.ok(alert);
+  const text = type => new Function('modal', 'return ' + alert.slice(1, -1) + ';')({ type });
+  assert.equal(text('placement'), 'This booking is managed in Broadsign. Change it there.');
+  assert.equal(text('campaign'), 'This campaign is managed by its ad network. Change delivery, dates or budget under Ads.');
 });
