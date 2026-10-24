@@ -9,7 +9,8 @@ import { AppBrand } from '@ten98/ui/app';
 
 // Evaluate Campaign's real adapter against the shared flows.
 const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
-const start = source.indexOf('function Auth({'), end = source.indexOf('\n}\n', start) + 2;
+// From the shared story panel through Auth, so both evaluate together.
+const start = source.indexOf('const authStory = '), end = source.indexOf('\n}\n', source.indexOf('function Auth({')) + 2;
 const { code } = await transformWithOxc(source.slice(start, end), 'Auth.tsx', { jsx: { runtime: 'classic' } });
 // startupAuthError is the module-level message read once from ?auth_error at startup.
 const load = (startupAuthError = '') => new Function('React', 'Brand', 'AuthStory', 'FirstUserSetupFlow', 'OidcProviderButtons', 'SignInFlow', 'startupAuthError', code + '; return Auth;')(React, AppBrand, AuthStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow, startupAuthError);
@@ -20,8 +21,11 @@ test('first boot is one screen: name, email, password, a prefilled workspace nam
   const screen = Auth({ session: { setupRequired: true, oidcEnabled: true }, error: '', busy: false, onSubmit: values => { submitted = values; } });
   assert.equal(screen.type, FirstUserSetupFlow);
   assert.equal(screen.props.setupToken, false, 'Token-less first sign-up (@ten98/ui 0.24.0).'); assert.equal(screen.props.workspaceName, true); assert.equal(screen.props.workspaceNameRequired, false, 'A cleared name becomes "My workspace" on the server (@ten98/ui 0.25.0).'); assert.deepEqual(screen.props.defaultValues, { workspaceName: 'My workspace' });
-  for (const absent of ['aside', 'description', 'eyebrow', 'sampleOptIn', 'signInInstead', 'tokenHint']) assert.equal(screen.props[absent], undefined, `No ${absent} on the first-boot screen.`);
+  for (const absent of ['description', 'eyebrow', 'sampleOptIn', 'signInInstead', 'tokenHint', 'surface']) assert.equal(screen.props[absent], undefined, `No ${absent} on the first-boot screen.`);
+  // Like Discover's, the screen sits beside the story panel in the shared split layout with the open form column.
+  assert.equal(screen.props.aside.type, AuthStory);
   const html = renderToStaticMarkup(screen);
+  assert.match(html, /auth-split/); assert.match(html, /Plan\. Publish\./); assert.doesNotMatch(html, /t98-auth-layout--card/);
   assert.match(html, /<h1[^>]*>Create owner account<\/h1>/);
   for (const field of ['name', 'email', 'password']) assert.match(html, new RegExp(`<input[^>]*required[^>]*name="${field}"|<input[^>]*name="${field}"[^>]*required`), `${field} is required`);
   assert.match(html, /name="workspaceName"[^>]*value="My workspace"|value="My workspace"[^>]*name="workspaceName"/);
@@ -32,7 +36,7 @@ test('first boot is one screen: name, email, password, a prefilled workspace nam
   assert.doesNotMatch(html, /name="token"|Setup token/, 'No setup token field.');
   assert.equal((html.match(/<input[^>]*name="/g) || []).length, 4, 'Exactly name, email, password and workspace name.');
   assert.doesNotMatch(html, /name="sample"/, 'The sample opt-in moved to the first-project step.');
-  assert.doesNotMatch(html, /Organization single sign-on|Plan\. Publish\./, 'No single sign-on or story panel before the owner exists.');
+  assert.doesNotMatch(html, /Organization single sign-on/, 'No single sign-on before the owner exists.');
   screen.props.onSubmit({ name: 'Owner', token: 'typed anyway', email: 'owner@example.test', password: 'p'.repeat(12), sample: true, workspaceName: 'Northwind' });
   assert.deepEqual(submitted, { name: 'Owner', email: 'owner@example.test', password: 'p'.repeat(12), workspaceName: 'Northwind' });
 });
@@ -41,6 +45,9 @@ test('sign-in submits credentials, and invitation single sign-on starts through 
   let submitted, started = 0;
   const screen = Auth({ session: { setupRequired: false, oidcEnabled: true }, inviteToken: 'A'.repeat(43), error: 'Email or password is incorrect.', busy: false, onSubmit: values => { submitted = values; }, onOidcStart: () => { started++; } });
   assert.equal(screen.type, SignInFlow);
+  // Sign-in and first boot share one story panel and the default split layout, as in Discover.
+  const setup = Auth({ session: { setupRequired: true }, error: '', busy: false, onSubmit() {} });
+  assert.equal(screen.props.aside, setup.props.aside); assert.equal(screen.props.surface, undefined);
   const html = renderToStaticMarkup(screen);
   assert.match(html, /<h1[^>]*>Sign in to join<\/h1>/); assert.match(html, /role="alert"[^>]*>[^<]*Email or password is incorrect\.|Email or password is incorrect\./);
   assert.match(html, /Organization single sign-on/);

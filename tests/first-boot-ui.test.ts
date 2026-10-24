@@ -19,11 +19,12 @@ const { code: homeCode } = await transformWithOxc(homeSource, 'HomeSetup.tsx', {
 const HomeSetup = new Function('React', 'useState', 'globalThis', 'Badge', 'Button', 'Card', 'Inline', 'List', 'ListItem', 'Progress', 'Stack', 'Text', homeCode + '; return HomeSetup;')(React, React.useState, { localStorage: undefined }, ui.Badge, ui.Button, ui.Card, ui.Inline, ui.List, ui.ListItem, ui.Progress, ui.Stack, ui.Text);
 
 // FirstProject with its one useState replaced, so each test chooses the skipped state and sees the requested change.
-const { code: firstProjectCode } = await transformWithOxc(slice('function FirstProject(', '\n// Campaign adapter'), 'FirstProject.tsx', { jsx: { runtime: 'classic' } });
+const { code: firstProjectCode } = await transformWithOxc(slice('function FirstProject(', '\n// The story panel beside'), 'FirstProject.tsx', { jsx: { runtime: 'classic' } });
+const story = React.createElement(ui.AuthStory, { eyebrow: 'STORY', title: 'Story panel', lead: 'Lead line.', footnote: 'Footnote' });
 function firstProject(skipped: boolean) {
   const changes: boolean[] = [], created: unknown[] = []; let signedOut = 0;
-  const FirstProject = new Function('React', 'useState', 'Brand', 'WorkspaceOnboarding', 'Button', 'AppShell', 'AppTopbar', 'AccountMenu', 'PageHeader', 'HomeSetup', firstProjectCode + '; return FirstProject;')(
-    React, () => [skipped, (next: boolean) => { changes.push(next); }], AppBrand, WorkspaceOnboarding, Button, AppShell, AppTopbar, AccountMenu, PageHeader, HomeSetup);
+  const FirstProject = new Function('React', 'useState', 'Brand', 'WorkspaceOnboarding', 'Button', 'AppShell', 'AppTopbar', 'AccountMenu', 'PageHeader', 'HomeSetup', 'authStory', firstProjectCode + '; return FirstProject;')(
+    React, () => [skipped, (next: boolean) => { changes.push(next); }], AppBrand, WorkspaceOnboarding, Button, AppShell, AppTopbar, AccountMenu, PageHeader, HomeSetup, story);
   const element = FirstProject({ workspaceName: 'My workspace', user: { id: 'u1', name: 'Owner', email: 'owner@example.test' }, busy: false, onCreate: (values: unknown) => { created.push(values); }, onSignOut: () => { signedOut++; } });
   return { element, changes, created, signedOut: () => signedOut };
 }
@@ -43,6 +44,7 @@ test('after the first sign-up an owner or administrator without projects lands o
 test('the first-project step is one project name, the sample opt-in and Skip for now', () => {
   const { element, changes, created } = firstProject(false);
   assert.equal(element.type, WorkspaceOnboarding);
+  assert.equal(element.props.aside, story, 'The step keeps the story panel from the sign-up screen, as Discover does.');
   assert.equal(element.props.subheading, 'Create your first project'); assert.equal(element.props.nameLabel, 'Project name'); assert.equal(element.props.submitLabel, 'Create project');
   assert.deepEqual(element.props.sampleOptIn, { label: 'Add sample data' });
   assert.equal(element.props.help, undefined, 'No extra explanation text.'); assert.equal(element.props.signOut, undefined);
