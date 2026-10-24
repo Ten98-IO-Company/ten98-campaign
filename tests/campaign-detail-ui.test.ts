@@ -81,3 +81,34 @@ test('the campaign page has a Results tab next to Overview and Items', () => {
   const tabs = walk(CampaignDetail(props())).find(node => node.type === ui.Tabs);
   assert.deepEqual(tabs.props.items.map((item: Row) => item.value), ['overview', 'results', 'items']);
 });
+
+test('Results reads this campaign’s links and field results only when its tab opens, and says when a read fails', async () => {
+  const { hooks, nodes } = await import('./hook-recorder.ts');
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  const mount = async (extra: Record<string, unknown>, answer: (path: string) => Promise<unknown>) => {
+    const h = hooks(), reads: string[] = [];
+    const { CampaignDetail: Detail } = new Function('React', 'useState', 'useEffect', 'postDisplayStatus', ...names, code + '; return { CampaignDetail };')(React, h.useState, h.useEffect, postDisplayStatus, ...names.map(name => (ui as Record<string, unknown>)[name]));
+    const all = props({ projectId: 'p 1', request: (path: string) => { reads.push(path); return answer(path); }, ...extra });
+    const tabs = () => nodes(h.render(Detail, all)).find(node => node.type === ui.Tabs);
+    tabs(); h.flush(); await tick();
+    const closed = [...reads];
+    tabs().props.onValueChange('results'); tabs(); h.flush(); await tick(); await tick();
+    const shown = nodes(nodes(h.render(Detail, all)).find(node => node.type === ui.Tabs).props.items.find((item: Row) => item.value === 'results').content);
+    const card = (label: string) => shown.find(node => node.type === ui.MetricCard && node.props.label === label).props;
+    return { closed, reads, card };
+  };
+  const day = 86400000, ago = (days: number) => new Date(Date.now() - days * day).toISOString().slice(0, 10);
+  const ok = async (path: string) => path.includes('/links/analytics') ? { totals: { clicks: 7, qrScans: 3 } } : { results: { a1: { leads: 2 } } };
+  const opened = await mount({ campaign: { ...campaign, id: 'c/1', startDate: ago(9) } }, ok);
+  assert.deepEqual(opened.closed, [], 'Nothing is read while the Results tab is closed.');
+  assert.deepEqual(opened.reads, ['/projects/p%201/links/analytics?days=10&campaignId=c%2F1', '/projects/p%201/activations/results'], 'Links are filtered to this campaign, over the campaign so far.');
+  assert.equal(opened.card('Link clicks').value, '7'); assert.equal(opened.card('QR scans').value, '3');
+  for (const [start, days] of [[ago(900), 365], [new Date(Date.now() + 5 * day).toISOString().slice(0, 10), 1], ['', 30]] as const) {
+    const view = await mount({ campaign: { ...campaign, startDate: start } }, ok);
+    assert.match(view.reads[0], new RegExp('[?]days=' + days + '&'), `start ${start || 'unset'} reads ${days} days`);
+  }
+  const refused = await mount({ campaign: { ...campaign }, activations: [{ id: 'a1', campaignId: 'c1', reached: 4 }] }, async () => { throw new Error('Forbidden'); });
+  assert.equal(refused.card('Link clicks').unavailable, 'Couldn’t load', 'A refused read says so instead of looking like no data.');
+  assert.equal(refused.card('Leads captured').unavailable, 'Couldn’t load');
+  assert.equal(refused.card('Conversions').unavailable, 'Not reported yet', 'A total nobody entered is simply not reported.');
+});
