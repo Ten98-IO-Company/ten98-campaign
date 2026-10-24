@@ -24,11 +24,13 @@ test('sign-in limits charge the client a trusted proxy reports and otherwise the
     ['::ffff:10.0.0.2', '2001:DB8::9', key('2001:db8::9')],
     ['2001:db8:1:ab::1', undefined, key('2001:db8:1:ab::1')], ['2001:db8:1:cd::2', undefined, key('2001:db8:1:ab::1')], // one IPv6 /56 is one client
     ['10.0.0.2', undefined, 'ip:unresolved'], ['10.0.0.2', '203.0.113.9, not-an-address', 'ip:unresolved'], // unresolved clients get their own key
+    // runtime 0.10.0: entries a client puts left of its own hop are not read, so junk there no longer hides the client.
+    ['10.0.0.2', 'unknown, not-an-address, 198.51.100.77', key('198.51.100.77')],
   ];
   for (const [peer, forwarded] of cases) await assert.rejects(auth.login(request(peer, forwarded), response(), { email: 'nobody@example.test', password: 'wrong password guess' }), error => error.status === 401);
   const { rows } = await db.$client.query("SELECT key FROM login_limits WHERE key LIKE 'ip:%' ORDER BY key");
   assert.deepEqual(rows.map(row => row.key).sort(), [...new Set(cases.map(([, , expected]) => expected))].sort());
-  assert.equal(new Set(rows.map(row => row.key)).size, 7, 'Two IPv6 hosts in one /56 share a key.');
+  assert.equal(new Set(rows.map(row => row.key)).size, 8, 'Two IPv6 hosts in one /56 share a key.');
   assert.doesNotMatch(rows.map(row => row.key).join(' '), /198.51|203.0|2001:/, 'Stored keys never reveal an address.');
 });
 
