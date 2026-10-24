@@ -29,7 +29,7 @@ function mount(props: Record<string, unknown>) {
   const useRef = (initial: any) => refs[refIndex++] ||= { current: initial };
   const useEffect = (callback: () => any, deps: any[]) => { const index = effectIndex++, previous = effects[index]; if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) effects[index] = { deps, callback, cleanup: previous?.cleanup }; };
   const document = { getElementById: (id: string) => ({ id, focus: () => focused.push(id) }), activeElement: null, body: {} };
-  const scope = { React, useState, useRef, useEffect, useFocusReturn: () => () => {}, PostVariantPreview: ({ platform, variant }: any) => React.createElement('output', null, `Preview ${platform}: ${variant.content}`), PLATFORM_RULES, reviewKeyAction, adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits, document, ...ui };
+  const scope = { React, useState, useRef, useEffect, PostVariantPreview: ({ platform, variant }: any) => React.createElement('output', null, `Preview ${platform}: ${variant.content}`), PLATFORM_RULES, reviewKeyAction, adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits, document, ...ui, useFocusReturn: () => () => {} };
   const Component = new Function(...Object.keys(scope), code + '; return ContentApprovals;')(...Object.values(scope));
   const render = () => { stateIndex = refIndex = effectIndex = 0; return Component(props); };
   const flush = () => { for (const effect of effects) if (effect.callback) { effect.cleanup?.(); effect.cleanup = effect.callback(); effect.callback = null; } };

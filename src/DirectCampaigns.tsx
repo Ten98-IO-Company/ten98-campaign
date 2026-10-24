@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, AudienceSummary, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, ContentPreview, CopyButton, DataTable, DateTimeField, DescriptionList, Disclosure, EmptyState, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Inline, Input, List, ListItem, LoadMore, OperationResults, Option, Popover, Progress, RadioGroup, ReviewConfirm, SandboxedPreview, Select, Stack, StatusLine, Text, Textarea, Tooltip, type OperationStatus, type Tone } from '@ten98/ui';
+import { Alert, AudienceSummary, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, ContentPreview, CopyButton, DataTable, DateTimeField, DescriptionList, Disclosure, EmptyState, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Inline, Input, List, ListItem, LoadMore, OperationResults, Option, Popover, Progress, RadioGroup, ReviewConfirm, SandboxedPreview, Select, Stack, StatusLine, Text, Textarea, Tooltip, type OperationStatus, type Tone, useFocusReturn } from '@ten98/ui';
 import WhatsAppTemplate, { templateMissing, templateRestriction, templatePreviewText } from './WhatsAppTemplate';
-import { useFocusReturn, useRevealPanel } from './focus-return';
+import { useRevealPanel } from './focus-return';
 
 // Provider deliverability reports that are not a recipient's own suppression, such as a Cloudflare policy block (#77).
 type DeliverabilityAlert = { provider: string; kind: string; contacts: number; expiresAt: string | null };

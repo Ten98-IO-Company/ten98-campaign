@@ -11,7 +11,8 @@ import { hooks, nodes } from './hook-recorder.ts';
 type Row = Record<string, any>;
 const strip = (text: string) => text.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, '');
 const compile = async (file: string) => (await transformWithOxc(strip(await readFile(new URL('../src/' + file, import.meta.url), 'utf8')), file, { jsx: { runtime: 'classic' } })).code;
-const library = ui as unknown as Record<string, unknown>;
+// The recorded hooks are not React's, so the library's useFocusReturn (React hooks inside) is replaced by a no-op.
+const library: Record<string, unknown> = { ...ui, useFocusReturn: () => () => {} };
 const templateCode = await compile('WhatsAppTemplate.tsx'), directCode = await compile('DirectCampaigns.tsx');
 const template = new Function('React', ...Object.keys(library), templateCode + '; return { WhatsAppTemplate, templateRestriction, templatePreviewText, templateMissing };')(React, ...Object.values(library));
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -19,8 +20,8 @@ const text = (node: any): string => Array.isArray(node) ? node.map(text).join(''
 
 test('Review and send saves the draft, checks the audience and opens the final confirmation, sending nothing', async () => {
   const h = hooks(), calls: [string, string | undefined][] = [];
-  const { DirectCampaigns } = new Function('React', 'useEffect', 'useRef', 'useState', 'WhatsAppTemplate', 'templateRestriction', 'templatePreviewText', 'templateMissing', 'useFocusReturn', 'useRevealPanel', ...Object.keys(library), directCode + '; return { DirectCampaigns };')(
-    React, h.useEffect, h.useRef, h.useState, template.WhatsAppTemplate, template.templateRestriction, template.templatePreviewText, template.templateMissing, () => () => {}, () => {}, ...Object.values(library));
+  const { DirectCampaigns } = new Function('React', 'useEffect', 'useRef', 'useState', 'WhatsAppTemplate', 'templateRestriction', 'templatePreviewText', 'templateMissing', 'useRevealPanel', ...Object.keys(library), directCode + '; return { DirectCampaigns };')(
+    React, h.useEffect, h.useRef, h.useState, template.WhatsAppTemplate, template.templateRestriction, template.templatePreviewText, template.templateMissing, () => {}, ...Object.values(library));
   const saved = { id: 'm1', name: 'Your receipt', channel: 'email', status: 'draft', subject: 'Your receipt', text: 'Thanks', html: '', emailPurpose: 'transactional', contactIds: [], tags: [] };
   const request = async (path: string, method?: string) => {
     calls.push([path, method]);
