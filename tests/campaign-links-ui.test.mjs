@@ -85,6 +85,6 @@ test('link setup discloses configured administration while keeping unconfigured 
   for (const domainStatus of ['app_origin', 'unknown', undefined]) assert.match(render({ settings: { ...settings, domainStatus } }).replace(/<details[\s\S]*?<\/details>/, ''), /Saving only stores the address/);
   for (const value of [null, { ...settings, shortBaseUrl: 'http://localhost:3018' }, { ...settings, allowedWebsiteOrigins: [] }, { scriptUrl: settings.scriptUrl }]) assert.match(render({ settings: value }), /<details[^>]*\bopen=""/, JSON.stringify(value));
   const local = render({ settings: { ...settings, shortBaseUrl: 'http://localhost:3018' } }); assert.match(local.replace(/<details[\s\S]*?<\/details>/, ''), /will work only on this computer/);
-  for (const change of [{ readOnly: true }, { canManageSettings: false }]) { const viewer = render(change); assert.doesNotMatch(viewer, /<form|Save link settings/); assert.match(viewer, /Project administrators manage this setup/); assert.match(viewer, /Copy tracking code/); }
+  for (const change of [{ readOnly: true }, { canManageSettings: false }]) { const viewer = render(change); assert.doesNotMatch(viewer, /<form|Save link settings/); assert.match(viewer, /Ask your admin to change them/); assert.match(viewer, /Copy tracking code/); }
   assert.match(render({ canChangeDomain: false }), /type="url"[^>]*disabled=""/);
 });

@@ -6,7 +6,7 @@ import { useFocusReturn, useRevealPanel } from './focus-return';
 // Provider deliverability reports that are not a recipient's own suppression, such as a Cloudflare policy block (#77).
 type DeliverabilityAlert = { provider: string; kind: string; contacts: number; expiresAt: string | null };
 // Every CSV row is created, merged or skipped; the count says how many rows were processed, with a correct plural (#135).
-const importNotice = (result: any) => { const created = result.created || 0, updated = result.updated || 0, skipped = result.skipped || 0, total = created + updated + skipped; return `Processed ${total} ${total === 1 ? 'row' : 'rows'}: ${created} created, ${updated} merged, ${skipped} skipped. Review contact hygiene before sending.`; };
+const importNotice = (result: any) => { const created = result.created || 0, updated = result.updated || 0, skipped = result.skipped || 0, total = created + updated + skipped; return `Processed ${total} ${total === 1 ? 'row' : 'rows'}: ${created} created, ${updated} merged, ${skipped} skipped. Check the contacts before sending.`; };
 const emailProviderName = (provider: string) => ({ cloudflare: 'Cloudflare', ses: 'Amazon SES' }[provider] || provider);
 const emailProviderConsole = (provider: string) => ({ cloudflare: 'Cloudflare Email Sending', ses: 'the Amazon SES console' }[provider] || provider);
 // SES `undetermined` feedback is a bounce SES could not classify; other kinds are sender-side policy blocks.
@@ -17,13 +17,13 @@ const deliverabilityAlerts = (status: any): DeliverabilityAlert[] => (Array.isAr
 
 type Row = { id: string; [key: string]: any };
 type Channel = 'email' | 'sms' | 'whatsapp';
-type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string>; onOpenIntegrations?: () => void; view?: 'campaigns' | 'contacts'; isOperator?: boolean; createNew?: boolean; onCreateHandled?: () => void };
+type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string>; onOpenIntegrations?: () => void; view?: 'campaigns' | 'contacts'; isOperator?: boolean; plannerCampaigns?: Row[]; createFor?: string; onCreateHandled?: () => void };
 type EmailPurpose = 'transactional' | 'marketing';
-type Draft = { name: string; channel: Channel; emailPurpose: EmailPurpose; subject: string; text: string; html: string; accountId: string; templateName: string; templateLanguage: string; templateComponents: any[]; contactIds: string[]; tags: string[] };
+type Draft = { name: string; campaignId: string; channel: Channel; emailPurpose: EmailPurpose; subject: string; text: string; html: string; accountId: string; templateName: string; templateLanguage: string; templateComponents: any[]; contactIds: string[]; tags: string[] };
 const labels = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
 const channels: Channel[] = ['email', 'sms', 'whatsapp'];
 const split = (value = '') => [...new Set(value.split(',').map(item => item.trim()).filter(Boolean))];
-const blank = (): Draft => ({ name: '', channel: 'email', emailPurpose: 'transactional', subject: '', text: '', html: '', accountId: '', templateName: '', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [] });
+const blank = (): Draft => ({ name: '', campaignId: '', channel: 'email', emailPurpose: 'transactional', subject: '', text: '', html: '', accountId: '', templateName: '', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [] });
 const contactBlank = () => ({ name: '', email: '', phone: '', company: '', tags: '', consents: { email: false, sms: false, whatsapp: false, emailMarketing: false }, consentSource: '' });
 function campaignDraft(campaign?: Row): Draft { return { ...blank(), ...Object.fromEntries(Object.keys(blank()).filter(key => campaign?.[key] !== undefined).map(key => [key, campaign![key]])) }; }
 // A message without its own name is listed by what recipients see first.
@@ -35,7 +35,7 @@ function campaignBody(draft: Draft, audienceMode: string) {
   const audience = { contactIds: audienceMode === 'contacts' ? draft.contactIds : [], tags: audienceMode === 'tags' ? draft.tags : [] };
   if (audienceMode === 'contacts' && !audience.contactIds.length) throw new Error('Choose at least one contact, or switch to all eligible contacts.');
   if (audienceMode === 'tags' && !audience.tags.length) throw new Error('Enter at least one audience tag, or switch to all eligible contacts.');
-  return { name: draft.name.trim() || defaultName(draft), channel: draft.channel, ...audience, ...(draft.channel === 'email' ? { subject: draft.subject, text: draft.text, html: draft.html, emailPurpose: draft.emailPurpose === 'marketing' ? 'marketing' : 'transactional' } : draft.channel === 'sms' ? { text: draft.text } : { accountId: draft.accountId, templateName: draft.templateName, templateLanguage: draft.templateLanguage, templateComponents: draft.templateComponents }) };
+  return { name: draft.name.trim() || defaultName(draft), channel: draft.channel, ...audience, campaignId: draft.campaignId, ...(draft.channel === 'email' ? { subject: draft.subject, text: draft.text, html: draft.html, emailPurpose: draft.emailPurpose === 'marketing' ? 'marketing' : 'transactional' } : draft.channel === 'sms' ? { text: draft.text } : { accountId: draft.accountId, templateName: draft.templateName, templateLanguage: draft.templateLanguage, templateComponents: draft.templateComponents }) };
 }
 const when = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : 'Not scheduled';
 const contactName = (contact: any = {}) => contact.name || contact.email || contact.phone || contact.id || 'Contact';
@@ -84,7 +84,7 @@ function campaignChecks({ draft, audienceMode, status, selectedTemplate, estimat
   const account = (status?.accounts || []).find((item: any) => (item.id || item._id) === draft.accountId);
   const from: Check = {
     summary: channel === 'email' ? `${status?.emailProvider ? emailProviderName(status.emailProvider) : 'Email'} · ${draft.emailPurpose === 'marketing' ? 'Marketing' : 'Transactional'}` : channel === 'sms' ? 'SMS provider' : account ? account.name || account.displayName || account.username || draft.accountId : draft.accountId || 'No account chosen',
-    reason: channel === 'whatsapp' && !draft.accountId ? 'Choose a WhatsApp account' : !status ? undefined : channel === 'email' && status.emailProvider === null ? 'Choose which service sends email in Settings › Connections' : !status.providers?.[channel] ? `Set up ${label} sending in Integrations` : channel === 'email' && draft.emailPurpose === 'marketing' && !status.marketingAvailable ? 'Marketing email needs Amazon SES' : undefined,
+    reason: channel === 'whatsapp' && !draft.accountId ? 'Choose a WhatsApp account' : !status ? undefined : channel === 'email' && status.emailProvider === null ? 'Choose which service sends email in Settings › Connections' : !status.providers?.[channel] ? `Set up ${label} sending in Settings › Connections` : channel === 'email' && draft.emailPurpose === 'marketing' && !status.marketingAvailable ? 'Marketing email needs Amazon SES' : undefined,
   };
   const subject: Check | undefined = channel === 'email' ? { label: 'Subject', summary: draft.subject.trim() || 'No subject yet', reason: draft.subject.trim() ? undefined : 'Add a subject' } : channel === 'whatsapp' ? { label: 'Template', summary: selectedTemplate ? `${selectedTemplate.name} · ${selectedTemplate.language || selectedTemplate.languageCode}` : draft.templateName ? `${draft.templateName} · ${draft.templateLanguage}` : 'No template yet', reason: selectedTemplate ? templateRestriction(selectedTemplate) || undefined : draft.templateName ? 'Load approved templates to check the saved template' : 'Choose an approved template' } : undefined;
   const missing = selectedTemplate ? templateMissing(selectedTemplate, draft.templateComponents) : 0;
@@ -117,7 +117,7 @@ function CampaignResults({ campaign }: { campaign: Row }) {
   return <Text as="span" size="sm" tone="muted">{parts.join(' · ')}</Text>;
 }
 
-export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations, view = 'campaigns', isOperator = false, createNew = false, onCreateHandled }: Props) {
+export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations, view = 'campaigns', isOperator = false, plannerCampaigns = [], createFor, onCreateHandled }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/direct`, requester = useRef(request), version = useRef(0), csvRead = useRef(0), pending = useRef(false), actionVersion = useRef(0), formRef = useRef<HTMLFormElement>(null);
   requester.current = request;
   const [status, setStatus] = useState<any>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [contacts, setContacts] = useState<Row[]>([]);
@@ -186,8 +186,9 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
     setEditingId(campaign?.id || ''); setDraft(campaignDraft(campaign)); setAudienceMode(campaign?.contactIds?.length ? 'contacts' : campaign?.tags?.length ? 'tags' : 'all'); setAudienceTags((campaign?.tags || []).join(', ')); setScheduledAt(''); setPreview(null); setDetail(campaign ? { campaign } : null); setTemplates([]); setTemplateAccount(''); setError(''); setSendMode('now'); setOpenRow('');
   }
   function startCampaign(channel: Channel) { openDraft(); setDraft({ ...blank(), channel }); setComposing(true); setOpenRow('to'); setChoosingChannel(false); }
-  // createNew: a campaign page's Add menu asked for a new message; open the channel choice once, then tell the app.
-  useEffect(() => { if (!createNew) return; if (!readOnly) setChoosingChannel(true); onCreateHandled?.(); }, [createNew]);
+  // createFor: a campaign page's Add menu asked for a new message in this campaign; open an email draft linked to it
+  // once (its channel can still change under From), then tell the app.
+  useEffect(() => { if (!createFor) return; if (!readOnly && plannerCampaigns.some(campaign => campaign.id === createFor)) { startCampaign('email'); setDraft(previous => ({ ...previous, campaignId: createFor })); } onCreateHandled?.(); }, [createFor]);
   function closeCampaign() { openDraft(); setComposing(false); }
   async function saveDraft(generation: number) {
     if (readOnly || !editable) throw new Error('Create or edit a draft before saving.');
@@ -326,6 +327,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
     </Stack>
     <Form ref={formRef} onSubmit={(_, event) => save(event)}><Stack as="fieldset" gap={4} disabled={!!busy || readOnly || !editable}>
       <Field label="Name (optional)" description="Only your team sees this. Left empty, the subject or first line is used."><Input maxLength={120} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })}/></Field>
+      <Field label="Campaign (optional)"><Select value={draft.campaignId} onChange={event => setDraft({ ...draft, campaignId: event.target.value })}><Option value="">No campaign</Option>{plannerCampaigns.map(campaign => <Option key={campaign.id} value={campaign.id}>{campaign.name}</Option>)}</Select></Field>
       <Stack gap={2}>
         <ChecklistRow label="To" check={row('to')} open={openRow === 'to'} onOpenChange={toggle('to')}>
           <Fieldset legend="Audience" description="The audience check excludes contacts without channel permission, missing or invalid addresses, and suppressions. Permission and suppression are checked again when sending.">

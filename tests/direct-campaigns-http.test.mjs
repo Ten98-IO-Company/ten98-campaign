@@ -252,6 +252,20 @@ test('a WhatsApp draft saves without an account or template, and preview and sen
   } finally { await f.close(); }
 });
 
+// ten98-campaign#216: a message started from a campaign page is linked to that planner campaign, in the same project only.
+test('a direct draft keeps the planner campaign it belongs to and refuses one from elsewhere', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const planner = await f.request(`/api/projects/${f.projectId}/campaigns`, 'POST', { name: 'Autumn launch' }); assert.equal(planner.status, 201, JSON.stringify(planner.data));
+    const linked = await f.draft({ campaignId: planner.data.record.id }); assert.equal(linked.campaignId, planner.data.record.id);
+    assert.equal((await f.request(f.path + `/campaigns/${linked.id}`, 'PATCH', { name: 'Renamed' })).data.campaign.campaignId, planner.data.record.id, 'An edit without the field keeps the link.');
+    assert.equal((await f.request(f.path + `/campaigns/${linked.id}`, 'PATCH', { campaignId: '' })).data.campaign.campaignId, '', 'Choosing no campaign clears it.');
+    for (const result of [await f.request(f.path + '/campaigns', 'POST', { name: 'Elsewhere', channel: 'sms', text: 'Hello', campaignId: 'not-in-this-project' }), await f.request(f.path + `/campaigns/${linked.id}`, 'PATCH', { campaignId: 'not-in-this-project' })])
+      assert.deepEqual([result.status, result.data.error?.code], [400, 'INVALID_CAMPAIGN'], JSON.stringify(result.data));
+    assert.equal((await f.draft()).campaignId, '', 'A message without a campaign stays unlinked.');
+  } finally { await f.close(); }
+});
+
 test('direct schedules reject normalized dates and invalid clock times without queuing recipients', pg, async t => {
   const f = await fixture(t);
   try {

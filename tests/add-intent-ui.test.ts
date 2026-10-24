@@ -13,7 +13,7 @@ type Row = Record<string, any>;
 const strip = (text: string) => text.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, '');
 const compile = async (file: string) => (await transformWithOxc(strip(await readFile(new URL('../src/' + file, import.meta.url), 'utf8')), file, { jsx: { runtime: 'classic' } })).code;
 const library = ui as unknown as Record<string, unknown>;
-const campaigns = [{ id: 'c1', name: 'Autumn launch', currency: 'AED' }, { id: 'c2', name: 'Spring sampling', currency: 'AED' }];
+const campaigns = [{ id: 'c1', name: 'Autumn launch', currency: 'AED' }, { id: 'c2', name: 'Spring sampling', currency: 'AED', startDate: '2026-10-26', endDate: '2026-11-30' }];
 const request = () => new Promise(() => {});
 
 const offlineCode = await compile('OfflineActivations.tsx'), offlineLibrary = { ...shared, ...library };
@@ -37,6 +37,14 @@ test('Field activity opens a new activation in the campaign it was asked for, on
     assert.equal(calls, 1, 'The app still clears the intent.');
   }
   let none = 0; mountOffline({ onCreateHandled: () => none++ }); assert.equal(none, 0, 'Without an intent nothing happens.');
+});
+const fieldTime = (tree: any[], label: string) => nodes(tree.find(node => node.type === ui.Dialog).props.children).find(node => node.type === ui.DateTimeField && node.props.label === label)?.props.value;
+test('a new activation from a campaign starts with the campaign’s dates', () => {
+  const dated = mountOffline({ createFor: 'c2' });
+  assert.equal(fieldTime(dated, 'Starts'), '2026-10-26T09:00', 'Starts on the campaign’s first day.');
+  assert.equal(fieldTime(dated, 'Ends'), '2026-11-30T17:00', 'Ends on the campaign’s last day.');
+  const undated = mountOffline({ createFor: 'c1' });
+  assert.equal(fieldTime(undated, 'Starts'), '', 'A campaign without dates leaves them for the user.'); assert.equal(fieldTime(undated, 'Ends'), '');
 });
 
 const linksCode = await compile('CampaignLinks.tsx');
@@ -73,12 +81,21 @@ function mountDirect(props: Row) {
   h.render(DirectCampaigns, all); h.flush();
   return nodes(h.render(DirectCampaigns, all));
 }
-const channelChoice = (tree: any[]) => tree.find(node => node.type === ui.Popover && nodes(node.props.children).some(item => item.type === ui.Button && String(item.props.children).includes('SMS')));
-test('Email or SMS opens the channel choice for a new message, once', () => {
-  let handled = 0;
-  assert.equal(channelChoice(mountDirect({ createNew: true, onCreateHandled: () => handled++ })).props.open, true); assert.equal(handled, 1);
-  let calls = 0; assert.equal(channelChoice(mountDirect({ createNew: true, readOnly: true, onCreateHandled: () => calls++ }))?.props.open ?? false, false, 'A viewer gets no new message.'); assert.equal(calls, 1);
-  let none = 0; assert.equal(channelChoice(mountDirect({ onCreateHandled: () => none++ })).props.open, false); assert.equal(none, 0);
+const campaignSelect = (tree: any[]) => { const field = tree.find(node => node.type === ui.Field && node.props.label === 'Campaign (optional)'); return field && nodes(field.props.children).find(node => node.type === ui.Select); };
+test('Email or SMS opens a new message draft linked to the campaign it was asked for, once', () => {
+  let handled = 0; const saved: Row[] = [];
+  const recording = (path: string, method?: string, body?: Row) => { if (method === 'POST' && path.endsWith('/direct/campaigns')) saved.push(body!); return request(); };
+  const tree = mountDirect({ createFor: 'c2', plannerCampaigns: campaigns, request: recording, onCreateHandled: () => handled++ });
+  assert.ok(tree.some(node => node.type === ui.Heading && node.props.children === 'New Email campaign'), 'A new draft is open, not the list.');
+  assert.equal(campaignSelect(tree)?.props.value, 'c2', 'The draft is linked to the campaign from the campaign page.');
+  assert.equal(handled, 1);
+  tree.find(node => node.type === ui.Form).props.onSubmit(undefined, { preventDefault() {} });
+  assert.equal(saved[0]?.campaignId, 'c2', 'Saving the draft keeps the link.');
+  for (const props of [{ readOnly: true }, { createFor: 'missing' }]) {
+    let calls = 0; const view = mountDirect({ createFor: 'c2', plannerCampaigns: campaigns, ...props, onCreateHandled: () => calls++ });
+    assert.equal(campaignSelect(view), undefined, JSON.stringify(props) + ' opens no draft'); assert.equal(calls, 1, 'The app still clears the intent.');
+  }
+  let none = 0; assert.equal(campaignSelect(mountDirect({ plannerCampaigns: campaigns, onCreateHandled: () => none++ })), undefined); assert.equal(none, 0);
 });
 
 test('an intent the target page did not use is dropped when the page changes', async () => {

@@ -77,3 +77,18 @@ test('Field activity totals spend per currency and never adds amounts in differe
   const single = await mount('FieldReport', { activations: activations.slice(0, 2), campaigns, money: (value: unknown, currency = 'AED') => `${currency} ${value}` }, async () => ({ results: {} }));
   assert.equal(nodes(single.render()).find(node => node.type === ui.MetricCard && node.props.label === 'Spent').props.value, 'AED 500');
 });
+
+test('Messages counts sends the provider never confirmed as needing review, apart from delivered and failed', async () => {
+  const campaigns = [{ id: 'm1', name: 'Receipt', channel: 'email', status: 'attention', counts: { delivered: 8, failed: 1, suppressed: 0, pending: 0, accepted: 0, uncertain: 2 } }, { id: 'm2', name: 'Reminder', channel: 'sms', status: 'completed', counts: { delivered: 5, failed: 0, suppressed: 0, pending: 0, accepted: 0 } }];
+  const tree = (await mount('MessageReport', {}, async () => ({ campaigns }))).render();
+  assert.deepEqual(cards(tree), { Sends: '2', Delivered: '13', 'Not delivered': '1', Skipped: '0', 'Needs review': '2' });
+  assert.match(nodes(tree).find(node => node.type === ui.MetricCard && node.props.label === 'Needs review').props.hint, /Not confirmed by the provider/);
+  const column = nodes(tree).find(node => node.type === ui.DataTable).props.columns.find((item: Row) => item.key === 'uncertain');
+  assert.deepEqual(campaigns.map(send => column.render(send)), ['2', '0']);
+});
+
+test('message and activity names keep a readable width on a phone instead of wrapping letter by letter', async () => {
+  const sends = (await mount('MessageReport', {}, async () => ({ campaigns: [{ id: 'm1', name: 'Receipt', channel: 'email', status: 'completed', counts: {} }] }))).render();
+  const field = (await mount('FieldReport', { activations: [{ id: 'a1', campaignId: 'c1' }], campaigns: [], money: String }, async () => ({ results: {} }))).render();
+  for (const tree of [sends, field]) assert.equal(nodes(tree).find(node => node.type === ui.DataTable).props.columns.find((column: Row) => column.key === 'name').minWidth, 'md');
+});

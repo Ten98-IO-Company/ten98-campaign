@@ -41,13 +41,16 @@ export function MessageReport({ projectId, request }: { projectId: string; reque
   const sends = read.value.filter(send => send.status !== 'draft'), sum = (key: string) => sends.reduce((total, send) => total + count(send.counts?.[key]), 0);
   if (!sends.length) return <EmptyState icon="mail" title="No messages sent yet" description="Results appear here after your first email, SMS or WhatsApp send."/>;
   const channel: Record<string, string> = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
+  // Sends the provider never confirmed are counted apart (never as delivered or failed), and only shown when there are any.
+  const review = sum('uncertain');
   return <Stack gap={4}>
-    <MetricGrid list label="Message results">{[metric('Sends', sends.length), metric('Delivered', sum('delivered')), metric('Not delivered', sum('failed'), 'Bounced or refused'), metric('Skipped', sum('suppressed'), 'Opted out or without permission')]}</MetricGrid>
+    <MetricGrid list label="Message results">{[metric('Sends', sends.length), metric('Delivered', sum('delivered')), metric('Not delivered', sum('failed'), 'Bounced or refused'), metric('Skipped', sum('suppressed'), 'Opted out or without permission'), ...(review ? [metric('Needs review', review, 'Not confirmed by the provider. Check it in Messages › Email & SMS.')] : [])]}</MetricGrid>
     <DataTable ariaLabel="Message sends" searchable={false} sortable={false} pagination={false} rows={sends} rowKey={send => send.id} columns={[
-      { key: 'name', header: 'Message', rowHeader: true, wrap: true, render: send => <Stack gap={0}><Text weight="semibold">{send.name || 'Untitled message'}</Text><Text as="small" size="sm" tone="muted">{channel[send.channel] || send.channel}</Text></Stack> },
+      { key: 'name', header: 'Message', rowHeader: true, wrap: true, minWidth: 'md', render: send => <Stack gap={0}><Text weight="semibold">{send.name || 'Untitled message'}</Text><Text as="small" size="sm" tone="muted">{channel[send.channel] || send.channel}</Text></Stack> },
       { key: 'delivered', header: 'Delivered', numeric: true, render: send => count(send.counts?.delivered).toLocaleString() },
       { key: 'failed', header: 'Not delivered', numeric: true, render: send => count(send.counts?.failed).toLocaleString() },
       { key: 'pending', header: 'Still sending', numeric: true, render: send => (count(send.counts?.pending) + count(send.counts?.accepted)).toLocaleString() },
+      ...(review ? [{ key: 'uncertain', header: 'Needs review', numeric: true, render: (send: Row) => count(send.counts?.uncertain).toLocaleString() }] : []),
     ]}/>
   </Stack>;
 }
@@ -65,7 +68,7 @@ export function FieldReport({ projectId, request, activations, campaigns, money 
   return <Stack gap={4}>
     <MetricGrid list label="Field activity results">{[metric('Activities', activations.length), metric('Leads captured', leads ?? (read.state === 'failed' ? 'Couldn’t load' : '…')), metric('People reached', activations.reduce((total, activation) => total + count(activation.reached), 0)), metric('Spent', spentText, spent.size > 1 ? 'Per currency, never added together' : undefined)]}</MetricGrid>
     <DataTable ariaLabel="Field activity results" searchable={false} sortable={false} pagination={false} rows={activations} rowKey={activation => activation.id} columns={[
-      { key: 'name', header: 'Activity', rowHeader: true, wrap: true, render: activation => <Stack gap={0}><Text weight="semibold">{activation.name || 'Field activity'}</Text><Text as="small" size="sm" tone="muted">{campaignName(activation.campaignId)}</Text></Stack> },
+      { key: 'name', header: 'Activity', rowHeader: true, wrap: true, minWidth: 'md', render: activation => <Stack gap={0}><Text weight="semibold">{activation.name || 'Field activity'}</Text><Text as="small" size="sm" tone="muted">{campaignName(activation.campaignId)}</Text></Stack> },
       { key: 'leads', header: 'Leads', numeric: true, render: activation => read.state === 'ready' ? count(read.value[activation.id]?.leads).toLocaleString() : '—' },
       { key: 'reached', header: 'Reached', numeric: true, render: activation => count(activation.reached).toLocaleString() },
     ]}/>

@@ -20,7 +20,7 @@ const templateParameter = compile(section('function templateParameter(', 'export
 const helper = name => source.match(new RegExp(`^const ${name} = [^\n]+;$`, 'm'))[0].replace(`const ${name} = `, '').replace(/;$/, '');
 const emailProviderChoice = compile(helper('emailProviderChoice'));
 const sendErrors = compile('(' + section('const testSendErrors', '\nconst testSendError =').replace(/^const testSendErrors[^=]*= /, '').replace(/;\s*$/, '') + ')', { emailProviderChoice });
-const blankDraft = { name: 'Launch notice', channel: 'email', subject: 'Receipt for {{name}}', text: 'Your receipt', html: '<p>Receipt</p>', accountId: 'wa-account', templateName: 'receipt', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [] };
+const blankDraft = { name: 'Launch notice', campaignId: 'c1', channel: 'email', subject: 'Receipt for {{name}}', text: 'Your receipt', html: '<p>Receipt</p>', accountId: 'wa-account', templateName: 'receipt', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [] };
 
 test('audience readiness renders the real library summary with app counts and preserves unknowns', async () => {
   const jsx = source.match(/<AudienceSummary[\s\S]*?\/>/)?.[0]; assert.ok(jsx);
@@ -39,8 +39,8 @@ test('audience readiness renders the real library summary with app counts and pr
 });
 
 test('actual campaign serialization keeps channel fields separate and never broadens an empty explicit audience', () => {
-  assert.deepEqual(campaignBody(blankDraft, 'all'), { name: 'Launch notice', channel: 'email', subject: 'Receipt for {{name}}', text: 'Your receipt', html: '<p>Receipt</p>', emailPurpose: 'transactional', contactIds: [], tags: [] });
-  assert.deepEqual(campaignBody({ ...blankDraft, channel: 'sms', contactIds: ['one'], tags: ['other'] }, 'contacts'), { name: 'Launch notice', channel: 'sms', text: 'Your receipt', contactIds: ['one'], tags: [] });
+  assert.deepEqual(campaignBody(blankDraft, 'all'), { name: 'Launch notice', channel: 'email', subject: 'Receipt for {{name}}', text: 'Your receipt', html: '<p>Receipt</p>', emailPurpose: 'transactional', contactIds: [], tags: [], campaignId: 'c1' });
+  assert.deepEqual(campaignBody({ ...blankDraft, channel: 'sms', contactIds: ['one'], tags: ['other'] }, 'contacts'), { name: 'Launch notice', channel: 'sms', text: 'Your receipt', contactIds: ['one'], tags: [], campaignId: 'c1' });
   const whatsapp = campaignBody({ ...blankDraft, channel: 'whatsapp', tags: ['customer'] }, 'tags');
   assert.deepEqual(whatsapp.tags, ['customer']); assert.equal(whatsapp.subject, undefined); assert.equal(whatsapp.text, undefined); assert.equal(whatsapp.accountId, 'wa-account');
   assert.throws(() => campaignBody(blankDraft, 'contacts'), /Choose at least one contact/);
@@ -391,9 +391,9 @@ test('the Marketing email purpose is offered only while Amazon SES sends, with a
 // plural, and the preview says a merge updates details but keeps recorded permissions.
 test('the import notice counts every processed row and the preview explains what a merge keeps', () => {
   const importNotice = compile(helper('importNotice'));
-  assert.equal(importNotice({ imported: 4, created: 3, updated: 1, skipped: 2 }), 'Processed 6 rows: 3 created, 1 merged, 2 skipped. Review contact hygiene before sending.');
-  assert.equal(importNotice({ created: 0, updated: 1, skipped: 0 }), 'Processed 1 row: 0 created, 1 merged, 0 skipped. Review contact hygiene before sending.');
-  assert.equal(importNotice({}), 'Processed 0 rows: 0 created, 0 merged, 0 skipped. Review contact hygiene before sending.');
+  assert.equal(importNotice({ imported: 4, created: 3, updated: 1, skipped: 2 }), 'Processed 6 rows: 3 created, 1 merged, 2 skipped. Check the contacts before sending.');
+  assert.equal(importNotice({ created: 0, updated: 1, skipped: 0 }), 'Processed 1 row: 0 created, 1 merged, 0 skipped. Check the contacts before sending.');
+  assert.equal(importNotice({}), 'Processed 0 rows: 0 created, 0 merged, 0 skipped. Check the contacts before sending.');
   assert.match(source, /\{importResult\.dryRun && importResult\.updated > 0 && <Text tone="muted" size="sm">Merging updates an existing contact's details from the file, such as name and company, and keeps the permissions and evidence already recorded\.<\/Text>\}/);
 });
 
