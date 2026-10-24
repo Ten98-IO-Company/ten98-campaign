@@ -245,9 +245,24 @@ test('parallel duplicate preparation, transfer and completion mint one grant, se
   const f = await fixture(t);
   try {
     const presigns = () => f.calls.filter(call => call.method === 'POST' && call.path === '/api/v1/media/presign').length, transfers = () => f.calls.filter(call => call.method === 'PUT' && call.origin === 'https://' + storageHost).length;
-    const attemptId = randomUUID(), prepared = await Promise.all([f.prepare({ attemptId }, 'parallel-prepare-key-one'), f.prepare({ attemptId }, 'parallel-prepare-key-two')]);
-    assert.ok(prepared.every(result => result.status === 200 || result.status === 409 && result.data.error.code === 'MEDIA_UPLOAD_IN_PROGRESS'), JSON.stringify(prepared.map(result => result.data)));
-    const ready = prepared.filter(result => result.status === 200); assert.ok(ready.length >= 1); assert.ok(ready.every(result => result.data.attempt.id === attemptId));
+    // The widest window for the duplicate: it reads the attempt while the first request is still preparing it, and only
+    // looks at that read after the first request has finished. Hold that one read on the pool to force exactly this order.
+    const pool = f.app.database.pool, query = pool.query, attemptId = randomUUID(); let holdRead = false, heldRead, releaseRead;
+    const readHeld = new Promise(resolve => { heldRead = resolve; }), readReleased = new Promise(resolve => { releaseRead = resolve; });
+    pool.query = async function (...args) {
+      const result = await query.apply(this, args), text = typeof args[0] === 'string' ? args[0] : args[0]?.text || '';
+      if (holdRead && text.startsWith('SELECT data FROM zernio_media_uploads WHERE id=')) { holdRead = false; heldRead(); await readReleased; }
+      return result;
+    };
+    let duplicate;
+    f.state.presignHook = async () => { f.state.presignHook = null; holdRead = true; duplicate = f.prepare({ attemptId }, 'parallel-prepare-key-two'); await readHeld; };
+    let prepared;
+    try {
+      const first = await f.prepare({ attemptId }, 'parallel-prepare-key-one'); releaseRead();
+      prepared = [first, await duplicate];
+    } finally { releaseRead(); pool.query = query; }
+    assert.ok(prepared.every(result => result.status === 200 && result.data.attempt.id === attemptId && result.data.attempt.status === 'awaiting_upload'), 'A duplicate that read the attempt mid-preparation must not mark the prepared attempt as failed: ' + JSON.stringify(prepared.map(result => result.data)));
+    const ready = prepared;
     assert.equal(presigns(), 1, 'Parallel preparation of one attempt ID reaches the provider presign endpoint exactly once.'); assert.equal((await f.app.sql.get('SELECT count(*) AS count FROM zernio_media_uploads WHERE id=?', attemptId)).count, 1);
     const attempt = ready[0].data.attempt, sent = await Promise.all([f.put(attempt), f.put(attempt)]); assert.ok(sent.some(result => result.status === 200 && result.data.attempt.status === 'uploaded'), JSON.stringify(sent.map(result => result.data)));
     assert.equal(transfers(), 1, 'Parallel duplicate content PUTs send the bytes to storage exactly once.'); assert.equal(f.state.storageCalls, 1);

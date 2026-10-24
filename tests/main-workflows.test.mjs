@@ -332,3 +332,20 @@ test('the first setup step follows where setup stands and gives the action only 
   assert.equal(admin.done, false); assert.deepEqual(admin.calls, [['modal', { type: 'connect' }]], 'An admin connects accounts directly.');
   assert.equal(step({ admin: true, accounts: 2 }).done, true); assert.equal(step({ accounts: 2 }).onAction, undefined);
 });
+
+test('a new campaign asks for name, dates and budget first; editing keeps every field and the tracked results', async () => {
+  const appSource = source(), expression = appSource.match(/\{modal\.type === 'campaign' && <>.*?<\/>\}/)?.[0]; assert.ok(expression);
+  const { code } = await transformWithOxc('const render = () => (<>' + expression + '</>);', 'CampaignForm.tsx', { jsx: { runtime: 'classic' } });
+  const ui = await import('@ten98/ui'), app = await import('@ten98/ui/app');
+  const Select = ({ label, name, value, options }) => React.createElement(app.AppSelect, { label, name, value, options: options.map(o => typeof o === 'string' ? [o, o] : o) });
+  const render = item => renderToStaticMarkup(new Function('React', 'modal', 'channels', 'Field', 'Select', 'FormGrid', 'Disclosure', 'Text', code + '; return render();')(React, { type: 'campaign', item }, { mixed: 'Cross-channel', social: 'Social media' }, app.AppField, Select, ui.FormGrid, ui.Disclosure, ui.Text));
+  const fresh = render(undefined), names = html => [...html.matchAll(/name="([^"]+)"/g)].map(match => match[1]);
+  const beforeMore = fresh.slice(0, fresh.indexOf('More details'));
+  assert.deepEqual(names(beforeMore), ['name', 'startDate', 'endDate', 'budget', 'currency'], 'Five fields before More details.');
+  assert.doesNotMatch(fresh, /name="budget"[^>]*required/, 'Budget is optional; the server defaults it to 0.');
+  assert.deepEqual(names(fresh).filter(name => ['spent', 'impressions', 'clicks', 'conversions'].includes(name)), [], 'No result fields when creating.');
+  assert.doesNotMatch(fresh, /<details[^>]*open/, 'More details starts closed for a new campaign.');
+  const editing = render({ id: 'c1', name: 'Launch', channel: 'social', status: 'active', spent: 10 });
+  assert.deepEqual(new Set(names(editing)), new Set(['name', 'startDate', 'endDate', 'budget', 'currency', 'channel', 'status', 'description', 'spent', 'impressions', 'clicks', 'conversions']));
+  assert.match(editing, /<details[^>]*open/, 'Editing or viewing opens More details, so every saved value is visible.');
+});

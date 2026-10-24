@@ -124,7 +124,7 @@ test('the OpenRouter setup warning in Draft content offers Open integrations whe
   const { code } = await transformWithOxc(`const render = (status, onOpenIntegrations) => (<>${jsx}</>);`, 'AgentSetup.tsx', { jsx: { runtime: 'classic' } });
   const render = new Function('React', 'Alert', 'Button', `${code}; return render;`)(React, ui.Alert, ui.Button), opened = [];
   const tree = render({ configured: false }, () => opened.push('Integrations')), html = renderToStaticMarkup(tree);
-  assert.match(html, /configure OpenRouter/); assert.match(html, /<button[^>]*>Open integrations<\/button>/);
+  assert.match(html, /Ask your admin to turn it on/); assert.match(html, /<button[^>]*>Open Connections<\/button>/);
   const button = (function find(node) { if (Array.isArray(node)) return node.map(find).find(Boolean); if (!React.isValidElement(node)) return undefined; return node.type === ui.Button ? node : find(node.props.children) || find(node.props.actions); })(tree);
   button.props.onClick(); assert.deepEqual(opened, ['Integrations']);
   assert.doesNotMatch(renderToStaticMarkup(render({ configured: false }, undefined)), /Open integrations/, 'Without the prop there is no dead button.');

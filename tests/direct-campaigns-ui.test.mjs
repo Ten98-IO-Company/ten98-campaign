@@ -282,7 +282,7 @@ test('the email provider choice offers a working Open integrations button wherev
   const make = new Function('React', 'Button', `${code}; return make;`)(React, ui.Button), opened = [], action = make(() => opened.push('Integrations'));
   assert.equal(make(undefined), undefined, 'Without the prop there is no button.');
   action.props.onClick(); assert.deepEqual(opened, ['Integrations']);
-  const button = /<button[^>]*>Open integrations<\/button>/, html = (pattern, scope) => renderSnippet(pattern, ['Alert', 'StatusLine'], { emailProviderChoice, testSendErrors: sendErrors, integrationsAction: action, ...scope }).then(renderToStaticMarkup);
+  const button = /<button[^>]*>Open Connections<\/button>/, html = (pattern, scope) => renderSnippet(pattern, ['Alert', 'StatusLine'], { emailProviderChoice, testSendErrors: sendErrors, integrationsAction: action, ...scope }).then(renderToStaticMarkup);
   const warning = scope => html(/\{status && \(draft\.channel === 'email' && status\.emailProvider === null[\s\S]*?<\/Alert>\)\}/, { status: { providers: { email: false }, emailProvider: null }, draft: { channel: 'email' }, labels: {}, emailProviderName: String, editable: true, readOnly: false, ...scope });
   assert.match(await warning({}), button);
   assert.doesNotMatch(await warning({ editable: false }), button, 'A campaign that is no longer a draft has a disabled form, so no dead button.');
@@ -344,13 +344,13 @@ test('the test send is disabled with a reason and an Open integrations action wh
   const check = (status, channel = 'email') => compile(`() => [${ready}, ${reason}]`, { status, current: { channel }, labels: { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' }, emailProviderChoice })();
   assert.equal(check({ providers: { email: true }, emailProvider: 'ses' })[0], true);
   assert.equal(check(null)[0], true, 'An unknown status leaves the check to the server.');
-  assert.deepEqual(check({ providers: { email: false }, emailProvider: 'cloudflare' }), [false, 'Set up Email sending in Integrations to send a test.']);
+  assert.deepEqual(check({ providers: { email: false }, emailProvider: 'cloudflare' }), [false, 'Set up Email sending in Settings › Connections to send a test.']);
   assert.deepEqual(check({ providers: { email: false }, emailProvider: null }), [false, emailProviderChoice]);
-  assert.deepEqual(check({ providers: { sms: false } }, 'sms'), [false, 'Set up SMS sending in Integrations to send a test.']);
+  assert.deepEqual(check({ providers: { sms: false } }, 'sms'), [false, 'Set up SMS sending in Settings › Connections to send a test.']);
   assert.match(source, /<Button variant="secondary" disabled=\{!!busy \|\| !testProviderReady \|\|[^}]*\} onClick=\{\(\) => setConfirmingTest\(true\)\}>/);
-  const action = React.createElement(ui.Button, { variant: 'secondary', size: 'sm' }, 'Open integrations'), pattern = /\{!testProviderReady && <Inline[\s\S]*?<\/Inline>\}/;
-  const html = renderToStaticMarkup(await renderSnippet(pattern, ['Inline', 'Text'], { testProviderReady: false, testProviderReason: 'Set up Email sending in Integrations to send a test.', integrationsAction: action }));
-  assert.match(html, /Set up Email sending in Integrations to send a test\.[\s\S]*<button[^>]*>Open integrations<\/button>/);
+  const action = React.createElement(ui.Button, { variant: 'secondary', size: 'sm' }, 'Open Connections'), pattern = /\{!testProviderReady && <Inline[\s\S]*?<\/Inline>\}/;
+  const html = renderToStaticMarkup(await renderSnippet(pattern, ['Inline', 'Text'], { testProviderReady: false, testProviderReason: 'Set up Email sending in Settings › Connections to send a test.', integrationsAction: action }));
+  assert.match(html, /Set up Email sending in Settings › Connections to send a test\.[\s\S]*<button[^>]*>Open Connections<\/button>/);
   assert.equal(renderToStaticMarkup(await renderSnippet(pattern, ['Inline', 'Text'], { testProviderReady: true, testProviderReason: '', integrationsAction: action })), '');
 });
 
@@ -367,7 +367,7 @@ test('a WhatsApp draft can be saved before its account and template are chosen',
 
 // ten98-campaign#137(a): the page says plainly that email campaigns are transactional only, and why.
 test('Direct campaigns says email campaigns are transactional only, with the reason', () => {
-  assert.match(source, /Email campaigns are transactional only\./);
+  assert.match(source, /Email campaigns are for transactional messages such as receipts and updates\./);
   assert.doesNotMatch(source, /Manage permission-based email, SMS and approved WhatsApp template campaigns/, 'The intro no longer implies newsletters.');
   assert.match(source, /title="Transactional email only">[^<]*because the configured email provider is for transactional mail\./);
 });
@@ -407,3 +407,8 @@ test('Messages shows campaigns and contacts as its own tabs, so a view hides the
   assert.match(app, /<SegmentedControl label="Contacts to show" value=\{directView\}[^\n]*'Your contacts'[^\n]*'From social accounts'/);
 });
 
+
+test('a lead captured at a field activity reads From field activity, never its internal tag', () => {
+  assert.match(source, /\(person\.tags \|\| \[\]\)\.filter\(\(tag: string\) => !tag\.startsWith\('offline:'\)\)\.join\(', '\)/, 'The internal offline:<id> tag is not shown under the name.');
+  assert.match(source, /\(person\.tags \|\| \[\]\)\.some\(\(tag: string\) => tag\.startsWith\('offline:'\)\) && <Text as="small" tone="muted">From field activity<\/Text>/);
+});

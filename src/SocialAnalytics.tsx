@@ -24,7 +24,7 @@ export default function SocialAnalytics({ request, connected }: Props) {
     try {
       const response = await request(`analytics/dashboard?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}`);
       const dashboard = response?.data?.totals ? response.data : response;
-      if (!dashboard?.totals || !Array.isArray(dashboard.daily)) throw new Error('The provider did not return a readable social performance report.');
+      if (!dashboard?.totals || !Array.isArray(dashboard.daily)) throw new Error('The network did not return a readable report.');
       setReport({ data: dashboard, from, to });
     } catch (err) { setError((err as Error).message || 'Social performance could not be loaded.'); }
     finally { setBusy(false); }
@@ -38,7 +38,7 @@ export default function SocialAnalytics({ request, connected }: Props) {
         </FormGrid>
         <FormActions><Button type="submit">{busy ? 'Loading report…' : report ? 'Refresh report' : 'Load social report'}</Button></FormActions>
       </Stack>
-      {!connected && <Text tone="muted" size="sm">Connect Zernio and map this project to a profile in settings to load social performance.</Text>}
+      {!connected && <Text tone="muted" size="sm">Connect your social accounts in Settings › Connections to see social results.</Text>}
       {error && <Alert tone="danger" role="alert">{error}{report ? ' The last successful report is still shown below.' : ''}</Alert>}
     </Stack>
     {data && <>
@@ -48,7 +48,7 @@ export default function SocialAnalytics({ request, connected }: Props) {
         <MetricCard label="Engagement rate" value={numeric(data.totals.engagementRate) ? `${number(data.totals.engagementRate, 2)}%` : '—'} hint="Rate reported by your channels"/>
         <MetricCard label="Followers" value={number(data.followers?.current)} hint={`Gained in this period: ${number(data.followers?.gained)}`}/>
       </MetricGrid>
-      <Stack gap={1}><Heading level={3}>Daily impressions</Heading><Text tone="muted" size="sm">Dates follow the provider’s reporting day.</Text></Stack>
+      <Stack gap={1}><Heading level={3}>Daily impressions</Heading><Text tone="muted" size="sm">Dates follow each network’s reporting day.</Text></Stack>
       {hasDaily ? <>
         <TimeSeriesChart label={`Daily social impressions, ${report?.from} to ${report?.to}`} summary={`Peak: ${number(Math.max(...daily.filter(day => numeric(day.impressions)).map(day => day.impressions!)))} impressions. Missing days have no bar.`} kind="bars" fit="compress" xHeader="Date" formatY={value => number(value)} series={[{ id: 'impressions', label: 'Impressions', points: daily.map((day, index) => ({ x: index, xLabel: day.date, y: numeric(day.impressions) ? day.impressions : null, state: numeric(day.impressions) ? 'observed' : 'unavailable' })) }]}/>
       </> : <Text>No daily impressions were returned for this date range.</Text>}
@@ -62,7 +62,7 @@ export default function SocialAnalytics({ request, connected }: Props) {
         { key: 'comments', header: 'Comments', render: post => number(post.metrics?.comments) },
         { key: 'shares', header: 'Shares', render: post => number(post.metrics?.shares) },
         { key: 'engagement', header: 'Engagement', render: post => numeric(post.metrics?.engagementRate) ? `${number(post.metrics.engagementRate, 2)}%` : '—' }]}/> : <Text>No top posts were returned for this date range.</Text>}
-      <Text tone="muted" size="sm">{data.dataAsOf ? `Provider data as of ${data.dataAsOf}.` : 'The provider did not report when this data was updated.'} Missing values appear as —.</Text>
+      <Text tone="muted" size="sm">{data.dataAsOf ? `Provider data as of ${data.dataAsOf}.` : 'The network did not say when this data was updated.'} Missing values appear as —.</Text>
     </>}
   </Stack></Card>;
 }

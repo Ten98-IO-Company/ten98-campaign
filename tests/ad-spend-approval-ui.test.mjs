@@ -155,7 +155,7 @@ test('an OOH booking held back by ad spend approval explains itself, and a missi
   assert.deepEqual(currency.blocks.map(block => block.review), [false]); assert.equal(currency.reviews.length, 0);
   const plain = make(); await plain.run(async () => { throw failure('INVALID_OOH_PRICE'); }); assert.deepEqual(plain.errors, ['Server message']); assert.deepEqual(plain.blocks, []);
   assert.match(ooh, /spendBlock\.review \? <AdSpendNotice block=\{spendBlock\} onOpenApprovals=\{onOpenApprovals\}/);
-  assert.match(ooh, /title="Set the Broadsign account currency"[^\n]*onClick=\{onOpenIntegrations\}>Open integrations</);
+  assert.match(ooh, /title="Set the Broadsign account currency"[^\n]*onClick=\{onOpenIntegrations\}>Open Connections</);
   assert.match(main, /<OohProviders onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\} onOpenApprovals=\{\(\) => setPage\('Approvals'\)\} onSpendReview=/);
   assert.equal(adSpendActionLabel('ooh/booking'), 'Submit OOH booking');
 });

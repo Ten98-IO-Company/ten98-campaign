@@ -54,7 +54,7 @@ test('each checklist row reports its status and the reason it blocks', () => {
   assert.equal(checks({ audienceMode: 'tags' }).rows.to.reason, 'Enter at least one tag');
   assert.equal(checks({ validPreview: { previewToken: 't', audience: { total: 4, eligible: 0, excluded: 4 } } }).rows.to.reason, 'All 4 contacts are excluded');
   assert.equal(checks({ status: status({ providers: { email: false } , emailProvider: 'cloudflare' }) }).rows.from.reason, 'Set up Email sending in Integrations');
-  assert.equal(checks({ status: status({ providers: { email: false }, emailProvider: null }) }).rows.from.reason, 'Choose which provider sends email in Integrations');
+  assert.equal(checks({ status: status({ providers: { email: false }, emailProvider: null }) }).rows.from.reason, 'Choose which service sends email in Settings › Connections');
   assert.equal(checks({ draft: draft({ emailPurpose: 'marketing' }), status: status({ marketingAvailable: false, emailProvider: 'cloudflare' }) }).rows.from.reason, 'Marketing email needs Amazon SES');
   assert.equal(checks({ status: null }).rows.from.reason, undefined, 'An unknown status leaves the provider check to the server.');
   const sms = checks({ draft: draft({ channel: 'sms', subject: '' }) });
@@ -90,9 +90,9 @@ test('the primary action lists every blocker, without operator setup text for ot
   assert.ok(checks({ draft: draft({ subject: '' }) }).sendBlockers.includes('Add a subject'));
   assert.deepEqual(checks({ readOnly: true }).sendBlockers, ['You have view-only access']);
   const member = checks({ status: status({ publicCallbacks: false }) }).sendBlockers, operator = checks({ isOperator: true, status: status({ publicCallbacks: false }) }).sendBlockers;
-  assert.deepEqual(member, ['Sending is unavailable until an administrator finishes setup']);
+  assert.deepEqual(member, ['Sending is unavailable until your admin finishes setup']);
   assert.doesNotMatch(member.join(' '), /APP_URL|operator/);
-  assert.deepEqual(operator, ['Set APP_URL to the public HTTPS address']);
+  assert.deepEqual(operator, ['Set the public web address (APP_URL) in the server settings']);
   assert.deepEqual(checks({ validPreview: { previewToken: 't', audience: { total: 900, eligible: 600, excluded: 300 } } }).sendBlockers, ['Choose at most 500 eligible recipients']);
   assert.deepEqual(checks({ current: undefined, validPreview: null }).sendBlockers, ['Check the audience'], 'Checking the audience saves a new draft first.');
 });

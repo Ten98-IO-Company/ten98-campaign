@@ -45,7 +45,7 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
     await action(async () => {
       const result = await write(path + '/campaigns', body); if (!active.current) return;
       setCampaigns(previous => [result.providerCampaign, ...previous.filter(row => row.id !== result.providerCampaign.id)]); form.reset(); setNotice('Paused search campaign, location targets, responsive ad and keywords were created and read back. Review targeting and editorial approval before activation.');
-      try { await onChanged?.(); } catch { if (active.current) setNotice('Microsoft confirmed the paused campaign. Refresh the shared campaign plan to see its local receipt.'); }
+      try { await onChanged?.(); } catch { if (active.current) setNotice('Microsoft confirmed the paused campaign. Refresh the campaign plan to see it here.'); }
     });
   }
   function reviewChange(event: React.FormEvent<HTMLFormElement>, campaign: Row) {
@@ -54,7 +54,7 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
     setConfirming({ campaign, body });
   }
   async function change(campaign: Row, body: Row) {
-    await action(async () => { const result = await write(path + '/campaigns/' + encodeURIComponent(campaign.id), body); if (!active.current) return; setCampaigns(previous => previous.map(row => row.id === result.campaign.id ? result.campaign : row)); setNotice('Microsoft confirmed the campaign change.'); try { await onChanged?.(); } catch { if (active.current) setNotice('Microsoft confirmed the change. Refresh the shared campaign plan to see its local receipt.'); } });
+    await action(async () => { const result = await write(path + '/campaigns/' + encodeURIComponent(campaign.id), body); if (!active.current) return; setCampaigns(previous => previous.map(row => row.id === result.campaign.id ? result.campaign : row)); setNotice('Microsoft confirmed the campaign change.'); try { await onChanged?.(); } catch { if (active.current) setNotice('Microsoft confirmed the change. Refresh the campaign plan to see it here.'); } });
   }
   async function requestReport(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const values = new FormData(event.currentTarget);
@@ -65,7 +65,7 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
     {mode === 'workflow' && <Text tone="muted">Campaigns start paused, in English, with a CPC cap. Copilot placement depends on Microsoft eligibility. Advanced targeting is available in <Link href="https://ads.microsoft.com/" target="_blank" rel="noreferrer">Microsoft Advertising</Link>.</Text>}
     {error && <Alert tone="danger">{error}</Alert>}{spendBlock && <AdSpendNotice block={spendBlock} onOpenApprovals={onOpenApprovals}/>}{notice && <StatusLine>{notice}</StatusLine>}{busy && <StatusLine busy>Checking Microsoft Advertising…</StatusLine>}
     {status && <Text tone="muted">{status.configured ? 'Credentials configured.' : 'Microsoft Advertising credentials are not configured.'} {status.mapping ? `${status.mapping.name} · ${status.mapping.accountId} · ${status.mapping.currency}` : 'No advertising account is mapped to this project.'}</Text>}
-    {mode === 'workflow' && onOpenIntegrations && <Inline><Button variant="secondary" type="button" disabled={busy} onClick={onOpenIntegrations}>Open integrations</Button></Inline>}
+    {mode === 'workflow' && onOpenIntegrations && <Inline><Button variant="secondary" type="button" disabled={busy} onClick={onOpenIntegrations}>Open Connections</Button></Inline>}
     {mode === 'connection' && canMap && status && !status.mapping && <Disclosure summary="Approve Microsoft account mapping"><Stack as="form" onSubmit={mapAccount}><Stack as="fieldset" gap={3} disabled={busy || !status.configured}>
       <Field label="Owning customer ID *"><Input name="customerId" inputMode="numeric" pattern="[1-9][0-9]{0,18}" required/></Field><Field label="Advertising account ID *"><Input name="accountId" inputMode="numeric" pattern="[1-9][0-9]{0,18}" required/></Field>
       <Text tone="muted">Use numeric IDs from Microsoft Advertising, not its alphanumeric account number. Microsoft must confirm the account’s owning customer. Each account belongs to one project and its mapping is fixed.</Text><Checkbox required label="I approve assigning this Microsoft account to this project."/><FormActions><Button variant="secondary" type="submit">Verify and approve account</Button></FormActions>
