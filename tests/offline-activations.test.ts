@@ -17,7 +17,8 @@ async function start(t: TestContext) {
     const response = await fetch(base + '/api' + path, { method, headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, body: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
-  const owner = (await request('/auth/setup', 'POST', { token: app.config.bootstrapToken, name: 'Field Owner', email: 'offline-owner@example.test', password: 'a long offline fixture password', sample: false })).cookie;
+  const setup = await request('/auth/setup', 'POST', { name: 'Field Owner', email: 'offline-owner@example.test', password: 'a long offline fixture password' }), owner = setup.cookie;
+  await request('/projects', 'POST', { workspaceId: setup.body.workspaceId, name: 'Brand launch' }, owner);
   const state = (await request('/state', 'GET', undefined, owner)).body, workspaceId = state.workspaces[0].id;
   // Adds a workspace member with the given role and returns their id and session cookie.
   async function member(role: string | null, name: string) {

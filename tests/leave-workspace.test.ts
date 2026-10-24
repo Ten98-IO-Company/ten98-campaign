@@ -20,7 +20,7 @@ async function team(t: TestContext) {
     const response = await fetch(`http://127.0.0.1:${(app.server.address() as AddressInfo).port}/api${path}`, { method, headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, data: await response.json() as Record<string, any>, cookie: response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ') };
   };
-  const setup = await request('/auth/setup', { method: 'POST', body: { token: app.config.bootstrapToken, name: 'First owner', email: 'first@example.test', password, sample: false } });
+  const setup = await request('/auth/setup', { method: 'POST', body: { name: 'First owner', email: 'first@example.test', password } });
   const workspaceId: string = (await request('/state', { cookie: setup.cookie })).data.workspaces[0].id;
   const member = async (role: string): Promise<Member> => {
     await pool.query('INSERT INTO users VALUES ($1, $2, $3, $4)', [role, role, `${role}@example.test`, await hashPassword(password)]);
