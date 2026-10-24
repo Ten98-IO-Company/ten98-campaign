@@ -94,7 +94,7 @@ export default function AssetLibrary({ projectId, assets, visibleAssets, busy, c
     </Inline>
     <Inline gap={2} align="center">
       <Text tone="muted" size="sm">{plural(assets.length, 'asset')}</Text>
-      <Button variant="secondary" icon={<Icon name="refresh" size={15}/>} disabled={busy || !canWrite || !drive?.configured || !drive?.mapped} onClick={onSync}>Sync Drive</Button>
+      <Button variant="secondary" icon={<Icon name="refresh" size={15}/>} disabled={busy || !canWrite || !drive?.configured || !drive?.mapped} onClick={onSync}>Update from Drive</Button>
       {onAddLink && <Button variant="secondary" onClick={onAddLink}>Add by link</Button>}{canUpload && <Button variant="primary" icon={<Icon name="arrow-up" size={15}/>} onClick={() => setUploadOpen(true)}>Upload</Button>}
     </Inline>
   </Inline>;

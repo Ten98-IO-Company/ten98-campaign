@@ -416,12 +416,12 @@ export async function createApp(options: AppOptions = {}) {
               if (collection === 'posts' && body.status === 'published') bad('Publish through a connected provider to confirm publication.');
               const data = validateRecord(collection, collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { ...body, locationSource: 'manual' } : body); await checkReferences(store, project.id, data); if (collection === 'activations') await checkActivation(db, project, data, body);
               if (collection === 'assets' && data.approval !== 'pending' && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'An owner or administrator must approve creative assets.');
-              const record = await store.create(project.id, collection, data); await store.activity(project.id, `${collection.slice(0, -1)} created.`); return send(201, { record });
+              const record = await store.create(project.id, collection, data); await store.activity(project.id, `${capitalise(recordKind(collection))} created.`); return send(201, { record });
             }
             if (id && ['PATCH', 'DELETE'].includes(req.method!)) {
               const previous = await store.get(project.id, collection, id); if (!previous) throw new HttpError(404, 'Record not found.');
               if ((collection === 'placements' && previous.source === 'broadsign') || (collection === 'campaigns' && (previous.externalId || previous.nativeProvider)) || (collection === 'posts' && (previous.externalId || previous.status === 'published'))) bad('Provider-managed records must be changed through their connected provider controls.');
-              if (req.method === 'DELETE') { await checkDependants(store, project.id, collection, id); await store.remove(project.id, collection, id); await store.activity(project.id, `${collection.slice(0, -1)} deleted.`); return send(200, { ok: true }); }
+              if (req.method === 'DELETE') { await checkDependants(store, project.id, collection, id); await store.remove(project.id, collection, id); await store.activity(project.id, `${capitalise(recordKind(collection))} deleted.`); return send(200, { ok: true }); }
               rejectProviderFields(body, collection);
               if (collection === 'posts' && (body.status === 'published' || previous.status === 'published' || previous.externalId)) bad('Provider posts must be managed through their connected provider.');
               const data = validateRecord(collection, { ...previous, ...body, ...(collection === 'placements' && (Object.hasOwn(body, 'latitude') || Object.hasOwn(body, 'longitude')) ? { locationSource: 'manual' } : {}) }); await checkReferences(store, project.id, data); if (collection === 'activations') await checkActivation(db, project, data, body);
@@ -430,7 +430,7 @@ export async function createApp(options: AppOptions = {}) {
                 if (['url', 'deliveryUrl', 'kind'].some(key => data[key] !== previous[key])) data.approval = 'pending';
                 if (Object.hasOwn(body, 'deliveryUrl') && data.deliveryUrl !== previous.deliveryUrl) for (const key of MEDIA_DELIVERY_FIELDS) data[key] = null;
               }
-              const record = await store.update(project.id, collection, id, data); await store.activity(project.id, `${collection.slice(0, -1)} updated.`); return send(200, { record });
+              const record = await store.update(project.id, collection, id, data); await store.activity(project.id, `${capitalise(recordKind(collection))} updated.`); return send(200, { record });
             }
           }
         }
@@ -492,11 +492,14 @@ async function checkDependants(store: Store, projectId: string, collection: stri
   const blocking = lists.flatMap(({ name, records }) => records.filter(uses).map(record => ({ name, record })))[0];
   if (!blocking) return;
   // The refusal names the record that still uses this one, so the person can find and unassign it.
-  const dependant = `${dependantKinds[blocking.name] || blocking.name.slice(0, -1)} "${recordLabel(blocking.record)}"`, kind = collection.slice(0, -1);
+  const dependant = `${recordKind(blocking.name)} "${recordLabel(blocking.record)}"`, kind = recordKind(collection);
   if (!realOnly) throw new HttpError(409, `This ${kind} is assigned to ${dependant}. Remove its assignments before deleting it.`);
-  throw new HttpError(409, `${dependant[0].toUpperCase() + dependant.slice(1)} uses sample ${kind} "${recordLabel(await store.get(projectId, collection, id))}". Remove that assignment before removing sample data.`);
+  throw new HttpError(409, `${capitalise(dependant)} uses sample ${kind} "${recordLabel(await store.get(projectId, collection, id))}". Remove that assignment before removing sample data.`);
 }
-const dependantKinds: Record<string, string> = { campaigns: 'campaign', posts: 'post', placements: 'booking', assets: 'asset', providers: 'provider', activations: 'activation' };
+// Activity lines and refusals name records the way the app labels them, not by their storage collection.
+const recordKinds: Record<string, string> = { campaigns: 'campaign', posts: 'post', placements: 'billboard booking', assets: 'asset', providers: 'partner', activations: 'field activity' };
+const recordKind = (collection: string) => recordKinds[collection] || collection.slice(0, -1);
+const capitalise = (text: string) => text[0].toUpperCase() + text.slice(1);
 function recordLabel(record: ProviderRecord | null | undefined): string {
   const text = String(record?.name || record?.content || 'Untitled').replace(/\s+/g, ' ').trim();
   return text.length > 40 ? text.slice(0, 39) + '…' : text;

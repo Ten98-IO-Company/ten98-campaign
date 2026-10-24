@@ -735,7 +735,7 @@ export async function handleInbox(context: ProviderRecord): Promise<boolean> {
       await assertMapping(); send(200, await context.webhooks?.updates?.(project.id, { accountId, after, limit: 100 }) || { updates: [], cursor: after || 0, hasMore: false, checkedAt: new Date().toISOString() }); return true;
     }
     if (path === 'status' && (!env.ZERNIO_API_KEY || !profileId)) { send(200, { configured: Boolean(env.ZERNIO_API_KEY), mapped: Boolean(profileId), webhookConfigured: Boolean(env.ZERNIO_WEBHOOK_SECRET), accounts: [] }); return true; }
-    if (!env.ZERNIO_API_KEY) fail(503, 'ZERNIO_NOT_CONFIGURED', 'Configure Zernio in Integrations to open the inbox.');
+    if (!env.ZERNIO_API_KEY) fail(503, 'ZERNIO_NOT_CONFIGURED', 'Configure Zernio in Settings › Connections to open the inbox.');
     if (!valid(profileId)) fail(409, 'ZERNIO_NOT_MAPPED', 'Map a Zernio profile to this project first.');
     const api = zernioClient(env.ZERNIO_API_KEY, assertMapping), accounts = await scopedAccounts(api, profileId);
     accounts.forEach(account => renderFields(account, ['_id', 'platform', 'displayName', 'username', 'name'], [], ['isActive']));

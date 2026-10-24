@@ -60,7 +60,7 @@ test('one toolbar holds the type filter, the view switch, Drive sync and the sin
   assert.equal(buttons(tree, /^Upload$/).length, 1, 'One primary Upload button.');
   assert.equal((buttons(tree, /^Upload$/)[0].props as Row).variant, 'primary');
   assert.doesNotMatch(html, /Upload a public delivery file|Google Drive assets|Upload to Drive/, 'No second or third way to add media on the page.');
-  (buttons(tree, /Sync Drive/)[0].props as Row).onClick(); assert.equal(calls.sync.length, 1);
+  (buttons(tree, /Update from Drive/)[0].props as Row).onClick(); assert.equal(calls.sync.length, 1);
   assert.match(html, /All assets · 3/); assert.match(html, /Images · 2/);
   const switches = elements(tree).filter(item => item.type === ui.SegmentedControl).map(item => (item.props as Row).label);
   assert.deepEqual(switches, ['Asset type', 'Layout']);
@@ -73,13 +73,13 @@ test('one toolbar holds the type filter, the view switch, Drive sync and the sin
 });
 
 test('the toolbar explains why Drive cannot sync, and viewers see no Upload button', () => {
-  const viewer = page().render({ canWrite: false, driveSyncReason: 'Viewers can review assets but not sync Drive.' });
+  const viewer = page().render({ canWrite: false, driveSyncReason: 'Viewers can review assets but not update them from Drive.' });
   assert.equal(buttons(viewer, /^Upload$/).length, 0);
-  assert.match(text(viewer), /Viewers can review assets but not sync Drive\./);
-  assert.equal((buttons(viewer, /Sync Drive/)[0].props as Row).disabled, true);
-  const unmapped = page().render({ drive: { configured: true, mapped: false }, connected: false, driveSyncReason: 'Link a Drive folder to this project in Settings › Connections to sync files.' });
+  assert.match(text(viewer), /Viewers can review assets but not update them from Drive\./);
+  assert.equal((buttons(viewer, /Update from Drive/)[0].props as Row).disabled, true);
+  const unmapped = page().render({ drive: { configured: true, mapped: false }, connected: false, driveSyncReason: 'Link a Drive folder to this project in Settings › Connections to bring in its files.' });
   assert.equal(buttons(unmapped, /^Upload$/).length, 0, 'No Upload button when neither Drive nor hosted upload can accept a file.');
-  assert.equal((buttons(unmapped, /Sync Drive/)[0].props as Row).disabled, true);
+  assert.equal((buttons(unmapped, /Update from Drive/)[0].props as Row).disabled, true);
 });
 
 test('cards show the thumbnail, name, approval chip and source, never provider names or delivery files', () => {
