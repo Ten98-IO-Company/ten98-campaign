@@ -52,8 +52,8 @@ test('browser-pass copy: connection empty states, disabled-control reasons, resu
   assert.doesNotMatch(appSource, /Open Integrations/, 'Button and prose casing is consistent within the shell.');
   for (const name of ['GoogleCalendar', 'UnifiedInbox']) assert.doesNotMatch(readFileSync(new URL(`../src/${name}.tsx`, import.meta.url), 'utf8'), /Open Integrations/, name + ' uses the same "Open integrations" casing.');
   assert.match(appSource, /\{!connected && <Text tone="muted" size="sm">Connect your social accounts in Settings › Connections to load them\.<\/Text>\}<Button[^\r\n]*?disabled=\{busy \|\| !connected\}[^\r\n]*?>Load channels<\/Button>/);
-  // src/AssetLibrary.tsx shows this reason beside its Sync Drive control (asset-library-ui.test.ts renders it).
-  assert.match(appSource, /<AssetLibrary [^\r\n]*driveSyncReason=\{driveSyncReason\}[^\r\n]*onSync=\{\(\) => run\(async \(\) => \{ await integrate\('drive\/sync', \{\}\); await reload\(\); \}, 'Drive assets synced'\)\}/);
+  // src/AssetLibrary.tsx shows this reason beside its Update from Drive control (asset-library-ui.test.ts renders it).
+  assert.match(appSource, /<AssetLibrary [^\r\n]*driveSyncReason=\{driveSyncReason\}[^\r\n]*onSync=\{\(\) => run\(async \(\) => \{ await integrate\('drive\/sync', \{\}\); await reload\(\); \}, 'Files updated from Drive'\)\}/);
   const driveReason = new Function('canWrite', 'remote', 'state', appSource.match(/const driveSyncReason = ([^\r\n]+);/)[1].replace(/^/, 'return ') + ';');
   const reason = (canWrite, remote, operator = false) => driveReason(canWrite, remote, { user: { isOperator: operator } });
   assert.match(reason(false, {}), /Viewers/); assert.equal(reason(true, {}), '', 'No reason before the status loads.');

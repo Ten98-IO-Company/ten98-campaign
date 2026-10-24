@@ -51,7 +51,7 @@ function validate(raw: any) {
 // Marketing email is sent only through a provider that permits it: Amazon SES. Cloudflare Email Sending is transactional only.
 const marketingAvailable = (env: any) => emailProvider(env) === 'ses';
 function requireMarketingProvider(campaign: any, env: any) {
-  if (campaign.channel === 'email' && campaign.emailPurpose === 'marketing' && !marketingAvailable(env)) fail(409, 'MARKETING_PROVIDER_REQUIRED', 'Marketing email needs Amazon SES as the email sender. Set it up in Integrations.');
+  if (campaign.channel === 'email' && campaign.emailPurpose === 'marketing' && !marketingAvailable(env)) fail(409, 'MARKETING_PROVIDER_REQUIRED', 'Marketing email needs Amazon SES as the email sender. Set it up in Settings › Connections.');
 }
 function requireWhatsAppTemplate(campaign: any) {
   if (campaign.channel === 'whatsapp' && (!campaign.accountId || !campaign.templateName || !campaign.templateLanguage)) fail(400, 'INVALID_CAMPAIGN', 'Choose a WhatsApp account, approved template and language.');
@@ -319,7 +319,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       if (body.confirmed !== true) fail(400, 'SEND_CONFIRMATION_REQUIRED', 'Confirm the test send and its provider charge.');
       if (campaign.channel === 'email') requireEmailProvider(env);
       requireMarketingProvider(campaign, env);
-      if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
+      if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Settings › Connections first.');
       if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending.');
       let contact: any;
       if (campaign.channel === 'email') { if (body.contactId !== undefined) fail(400, 'INVALID_TEST_RECIPIENT', 'Email tests go to your own address.'); contact = { name: user.name, email: user.email }; }
@@ -339,7 +339,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       requireMarketingProvider(campaign, env);
       if (campaign.channel === 'email' && campaign.emailPurpose !== 'marketing' && body.transactionalConfirmed !== true) fail(400, 'TRANSACTIONAL_CONFIRMATION_REQUIRED', 'Confirm this message is transactional and contains no marketing content.');
       if (campaign.channel === 'email') requireEmailProvider(env);
-      if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Integrations first.');
+      if (!ready(campaign.channel)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure this sending provider in Settings › Connections first.');
       if (!appUrl.startsWith('https://')) fail(409, 'PUBLIC_URL_REQUIRED', 'Set APP_URL to a public HTTPS address before sending so unsubscribe links and delivery callbacks can work.');
       const scheduledAt = action === 'send' ? nowISO() : body.scheduledAt;
       if (typeof scheduledAt !== 'string' || !/^\d{4}-\d\d-\d\dT(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(scheduledAt) || !Number.isFinite(Date.parse(scheduledAt)) || new Date(scheduledAt.slice(0, 10)).toISOString().slice(0, 10) !== scheduledAt.slice(0, 10) || (action === 'schedule' && (Date.parse(scheduledAt) <= Date.now() || Date.parse(scheduledAt) > Date.now() + 366 * 86400000))) fail(400, 'INVALID_SCHEDULE', 'Choose a valid future time within the next year.');

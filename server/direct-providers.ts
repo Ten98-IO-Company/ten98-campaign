@@ -14,7 +14,7 @@ const SMS_STATUSES = new Set(['accepted', 'queued', 'sending', 'sent', 'delivere
 const BROADCAST_STATUSES = new Set(['draft', 'scheduled', 'sending', 'completed', 'failed', 'cancelled']);
 
 function twilio(env: ProviderRecord) {
-  if (!sid(env.TWILIO_ACCOUNT_SID, 'AC') || !env.TWILIO_AUTH_TOKEN) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure the Twilio account and auth token in Integrations.');
+  if (!sid(env.TWILIO_ACCOUNT_SID, 'AC') || !env.TWILIO_AUTH_TOKEN) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure the Twilio account and auth token in Settings › Connections.');
   return { base: `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}`, headers: { Authorization: `Basic ${Buffer.from(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`).toString('base64')}` } };
 }
 function smsReceipt(data: any, env: ProviderRecord, uncertain: boolean, expectedId?: string, expectedRecipient?: string) {
@@ -32,7 +32,7 @@ export function emailProvider(env: ProviderRecord): 'ses' | 'cloudflare' | null 
   if (ses && cloudflare) return env.EMAIL_PROVIDER === 'ses' || env.EMAIL_PROVIDER === 'cloudflare' ? env.EMAIL_PROVIDER : null;
   return ses ? 'ses' : 'cloudflare';
 }
-export const requireEmailProvider = (env: ProviderRecord) => emailProvider(env) ?? fail(409, 'EMAIL_PROVIDER_REQUIRED', 'Amazon SES and Cloudflare are both configured. Choose the email provider in Integrations.');
+export const requireEmailProvider = (env: ProviderRecord) => emailProvider(env) ?? fail(409, 'EMAIL_PROVIDER_REQUIRED', 'Amazon SES and Cloudflare are both configured. Choose the email provider in Settings › Connections.');
 // SES refuses every message from a suspended, paused or misconfigured sender, so these stop the campaign for review
 // instead of failing one recipient after another. https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html
 const SES_SENDER_BLOCKS = new Set(['AccountSuspendedException', 'SendingPausedException', 'MailFromDomainNotVerifiedException', 'NotFoundException', 'LimitExceededException']);
@@ -67,7 +67,7 @@ async function sendSes(env: ProviderRecord, body: ProviderRecord, recipient: str
   return { providerId: result.messageId, status: 'accepted', recipient };
 }
 function cloudflare(env: ProviderRecord) {
-  if (!/^[a-fA-F0-9]{32}$/.test(env.CLOUDFLARE_ACCOUNT_ID || '') || !env.CLOUDFLARE_EMAIL_API_TOKEN || !email(env.CLOUDFLARE_EMAIL_FROM_ADDRESS)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure the Cloudflare account, Email Sending API token, and sender address in Integrations.');
+  if (!/^[a-fA-F0-9]{32}$/.test(env.CLOUDFLARE_ACCOUNT_ID || '') || !env.CLOUDFLARE_EMAIL_API_TOKEN || !email(env.CLOUDFLARE_EMAIL_FROM_ADDRESS)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure the Cloudflare account, Email Sending API token, and sender address in Settings › Connections.');
   return { base: `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/email/sending`, headers: { Authorization: `Bearer ${env.CLOUDFLARE_EMAIL_API_TOKEN}`, 'Content-Type': 'application/json' } };
 }
 
@@ -80,7 +80,7 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
       if (!sid(env.TWILIO_MESSAGING_SERVICE_SID, 'MG')) fail(409, 'INVALID_SETTING', 'Configure a valid Twilio Messaging Service SID.');
       body.set('MessagingServiceSid', env.TWILIO_MESSAGING_SERVICE_SID);
     } else {
-      if (!phone(env.TWILIO_FROM_NUMBER)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure a Twilio sender number or Messaging Service in Integrations.');
+      if (!phone(env.TWILIO_FROM_NUMBER)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure a Twilio sender number or Messaging Service in Settings › Connections.');
       body.set('From', env.TWILIO_FROM_NUMBER);
     }
     if (delivery.sender !== undefined) { if (!phone(delivery.sender)) fail(400, 'INVALID_SENDER', 'Choose the original Twilio sender.'); body.set('From', delivery.sender); }
