@@ -65,16 +65,16 @@ test('#113 a refused website origin shows at the origins field with focus, not a
   assert.deepEqual(await saveWith('http://127.0.0.1:4101', reject(refused)), { calls: 1, fieldErrors: [refused], formErrors: [], focused: [], deferredFocus: true }, 'Focus moves to the field once the fieldset re-enables.');
   assert.deepEqual(await saveWith('http://127.0.0.1:4101', reject(refused), { canChangeDomain: true }), { calls: 1, fieldErrors: [refused], formErrors: [], focused: [], deferredFocus: true }, 'An unchanged short address cannot be the refused value.');
   const many = Array.from({ length: 11 }, (_, index) => `https://site${index}.example.com`).join('\n');
-  assert.deepEqual(await saveWith(many, () => assert.fail('Too many origins are never sent.')), { calls: 0, fieldErrors: ['Use at most 10 website origins.'], formErrors: [], focused: ['origins'], deferredFocus: false });
+  assert.deepEqual(await saveWith(many, () => assert.fail('Too many origins are never sent.')), { calls: 0, fieldErrors: ['Add at most 10 website addresses.'], formErrors: [], focused: ['origins'], deferredFocus: false });
   const domain = await saveWith('https://www.example.com', reject(refused), { canChangeDomain: true, settingsForm: { shortBaseUrl: 'https://10.0.0.1', allowedWebsiteOrigins: 'https://www.example.com' } });
-  assert.deepEqual([domain.fieldErrors, domain.formErrors], [[], ['Short address or website origins: ' + refused]], 'With both changed the refused value is ambiguous, so it stays form-level and names both fields.');
+  assert.deepEqual([domain.fieldErrors, domain.formErrors], [[], ['Short address or website addresses: ' + refused]], 'With both changed the refused value is ambiguous, so it stays form-level and names both fields.');
   const onlyDomain = await saveWith('https://www.example.com', reject(refused), { canChangeDomain: true, settings: { shortBaseUrl: 'https://go.example.com', allowedWebsiteOrigins: ['https://www.example.com'] }, settingsForm: { shortBaseUrl: 'https://10.0.0.1', allowedWebsiteOrigins: 'https://www.example.com' } });
   assert.deepEqual([onlyDomain.fieldErrors, onlyDomain.formErrors], [[], ['Short address: ' + refused]], 'Saved origins were already accepted, so with only the short address changed the error names it.');
   const role = await saveWith('https://www.example.com', reject('Only workspace administrators can change tracking settings.', 403));
   assert.deepEqual([role.fieldErrors, role.formErrors], [[], ['Only workspace administrators can change tracking settings.']]);
-  assert.match(source, /<Field label="Websites allowed to send analytics \(one origin per line\)" description="[^"]*public HTTPS[^"]*Local http:\/\/ and localhost sites cannot send analytics\.[^"]*" error=\{originsError \|\| undefined\}><Textarea ref=\{originsRef\}/);
+  assert.match(source, /<Field label="Your website addresses \(one per line\)" description="[^"]*https:\/\/www\.example\.com[^"]*Local and http:\/\/ sites can’t send analytics\.[^"]*" error=\{originsError \|\| undefined\}><Textarea ref=\{originsRef\}/);
   assert.match(source, /useEffect\(\(\) => \{ if \(focusOrigins\.current && !busy\) \{ focusOrigins\.current = false; originsRef\.current\?\.focus\(\); \} \}, \[busy, originsError\]\);/);
-  const html = renderToStaticMarkup(React.createElement(UI.Field, { label: 'Websites allowed to send analytics (one origin per line)', description: 'Hint', error: refused }, React.createElement(UI.Textarea)));
+  const html = renderToStaticMarkup(React.createElement(UI.Field, { label: 'Your website addresses (one per line)', description: 'Hint', error: refused }, React.createElement(UI.Textarea)));
   assert.match(html, /<textarea[^>]*aria-invalid="true"/); assert.match(html, /role="alert"[^>]*>Use a public HTTPS domain/);
 });
 
