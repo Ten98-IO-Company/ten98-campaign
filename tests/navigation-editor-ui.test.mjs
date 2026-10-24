@@ -184,7 +184,8 @@ test('seven work areas plus Settings give every page and section exactly one tab
     const route = readNavigation(url.search); assert.equal(areaTab(route.page, route.section), tab);
   }
   assert.equal(areaTab('Publishing', 'recycling').label, 'Posts'); assert.equal(areaOf('Publishing', 'queues').label, 'Settings'); assert.equal(areaOf('Publishing', 'destinations').label, 'Settings');
-  assert.equal(areaOf('Publishing', 'library').label, 'Library'); assert.equal(areaTab('Publishing', 'library').label, 'From your accounts'); assert.equal(areaTab('Ads manager', 'shopping').label, 'Ads');
+  assert.equal(areaOf('Publishing', 'library').label, 'Library'); assert.equal(areaTab('Publishing', 'library').label, 'From your accounts'); assert.equal(areaTab('Ads manager', 'shopping').label, 'Search & shopping');
+  assert.deepEqual(areas.find(area => area.id === 'ads').tabs.map(tab => tab.label), ['Ad campaigns', 'Leads', 'Conversions', 'Search & shopping', 'Activity'], 'No ads tab is named after a network.');
   assert.equal(areaTab('Direct campaigns', 'templates').label, 'WhatsApp templates'); assert.equal(areaTab('Direct campaigns', 'people').label, 'Contacts'); assert.equal(areaTab('Direct campaigns', 'contacts').label, 'Contacts', 'The old social-contacts URL opens the Contacts tab.'); assert.equal(areaTab('Analytics', 'accounts').label, 'Social accounts');
   assert.equal(areaOf(readNavigation('?view=assistant').page, '').label, 'Planner');
   assert.deepEqual(areas.find(area => area.id === 'offline').tabs.map(tab => tab.label), ['Billboards', 'Field activity', 'Partners']);
