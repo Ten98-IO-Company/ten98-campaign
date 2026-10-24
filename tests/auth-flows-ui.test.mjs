@@ -21,7 +21,10 @@ test('first boot is one screen: name, email, password, a prefilled workspace nam
   const screen = Auth({ session: { setupRequired: true, oidcEnabled: true }, error: '', busy: false, onSubmit: values => { submitted = values; } });
   assert.equal(screen.type, FirstUserSetupFlow);
   assert.equal(screen.props.setupToken, false, 'Token-less first sign-up (@ten98/ui 0.24.0).'); assert.equal(screen.props.workspaceName, true); assert.equal(screen.props.workspaceNameRequired, false, 'A cleared name becomes "My workspace" on the server (@ten98/ui 0.25.0).'); assert.deepEqual(screen.props.defaultValues, { workspaceName: 'My workspace' });
-  for (const absent of ['description', 'eyebrow', 'sampleOptIn', 'signInInstead', 'tokenHint', 'surface']) assert.equal(screen.props[absent], undefined, `No ${absent} on the first-boot screen.`);
+  for (const absent of ['eyebrow', 'sampleOptIn', 'signInInstead', 'tokenHint', 'surface']) assert.equal(screen.props[absent], undefined, `No ${absent} on the first-boot screen.`);
+  // Discover's wording (#265): who the first account becomes, and the shared password hint.
+  assert.equal(screen.props.description, 'The first account becomes the owner of this installation and its workspace. You can rename the workspace later.');
+  assert.equal(screen.props.passwordPolicy.hint, 'At least 12 characters.');
   // Like Discover's, the screen sits beside the story panel in the shared split layout with the open form column.
   assert.equal(screen.props.aside.type, AuthStory);
   const html = renderToStaticMarkup(screen);
@@ -47,7 +50,7 @@ test('sign-in submits credentials, and invitation single sign-on starts through 
   assert.equal(screen.type, SignInFlow);
   // Sign-in and first boot share one story panel and the default split layout, as in Discover.
   const setup = Auth({ session: { setupRequired: true }, error: '', busy: false, onSubmit() {} });
-  assert.equal(screen.props.aside, setup.props.aside); assert.equal(screen.props.surface, undefined);
+  assert.equal(screen.props.aside, setup.props.aside); assert.equal(screen.props.surface, undefined); assert.equal(screen.props.eyebrow, undefined, 'No eyebrow above the form, as in Discover (#265).');
   const html = renderToStaticMarkup(screen);
   assert.match(html, /<h1[^>]*>Sign in to join<\/h1>/); assert.match(html, /role="alert"[^>]*>[^<]*Email or password is incorrect\.|Email or password is incorrect\./);
   assert.match(html, /Organization single sign-on/);
