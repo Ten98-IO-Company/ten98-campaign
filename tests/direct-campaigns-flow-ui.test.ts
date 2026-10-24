@@ -117,6 +117,13 @@ test('campaign rows show status, live progress and results', () => {
   assert.equal(renderToStaticMarkup(React.createElement(module.CampaignResults, { campaign: { status: 'draft' } })), '');
 });
 
+test('fields inside the draft form never stop Save draft for send-only choices, and changing when to send closes an open review', () => {
+  const field = (label: string, end: string) => { const start = source.indexOf(`label="${label}"`); assert.ok(start > 0, label); return source.slice(start, source.indexOf(end, start)); };
+  assert.doesNotMatch(field('Send at (your local timezone)', '/>'), /\brequired\b/);
+  assert.doesNotMatch(field('Test recipient', 'onChange'), /\brequired\b/);
+  assert.match(source, /<RadioGroup legend="When to send"[^\n]*onValueChange=\{value => \{ setSendMode\([^)]*\); setConfirmationMode\(''\); \}\}/);
+});
+
 const page = (props: Row) => renderToStaticMarkup(React.createElement(module.DirectCampaigns, { projectId: 'p1', request: async () => ({}), ...props }));
 test('one tab level: campaigns and contacts are separate views without inner tabs or page-level refresh', () => {
   const campaigns = page({}), contacts = page({ view: 'contacts' });

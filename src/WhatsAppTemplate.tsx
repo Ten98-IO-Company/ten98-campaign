@@ -1,6 +1,6 @@
 import { Alert, ContentPreview, Field, Input, Stack, Text } from '@ten98/ui';
 
-// Counts the required values the form below asks for that are still empty: text placeholders, a media header link and URL suffixes.
+// Counts the required values the WhatsAppTemplate form asks for that are still empty: text placeholders, a media header link and URL suffixes.
 export function templateMissing(template: any, components: any[]) {
   let missing = 0;
   for (const component of template?.components || []) {

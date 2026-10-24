@@ -295,7 +295,9 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   const integrationsAction = onOpenIntegrations ? <Button variant="secondary" size="sm" onClick={onOpenIntegrations}>Open integrations</Button> : undefined;
   const estimate = localAudience(contacts, draft, audienceMode);
   const checks = campaignChecks({ draft, audienceMode, status, selectedTemplate, estimate, validPreview, current, sendMode, scheduledAt, readOnly, isOperator });
-  const row = (key: string): Check => editable ? checks.rows[key] : { summary: checks.rows[key].summary };
+  // A campaign past its draft shows what was sent, without readiness reasons; its recipients are the reported deliveries.
+  const sentProgress = editable || !current ? null : campaignProgress(current), toSummary = sentProgress ? plural(sentProgress.total, 'recipient') : checks.rows.to.summary;
+  const row = (key: string): Check => editable ? checks.rows[key] : { summary: key === 'to' ? toSummary : checks.rows[key].summary };
   const toggle = (key: string) => (open: boolean) => setOpenRow(open ? key : '');
   const pageOpen = composing || !!editingId, sendBlocked = !ready || checks.sendBlockers.length > 0, sendSummary = [checks.rows.to.summary, labels[draft.channel], checks.rows.time.summary].join(' · ');
   const sendReasons = checks.sendBlockers.length ? checks.sendBlockers : ['Check the audience again'];
@@ -306,7 +308,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
     <Stack gap={3}>
       <Inline><Button variant="ghost" size="sm" disabled={!!busy} onClick={closeCampaign}>All campaigns</Button></Inline>
       <Inline justify="between" align="center" gap={3}>
-        <Stack gap={2}><Heading level={2}>{current ? current.name : `New ${labels[draft.channel]} campaign`}</Heading><Inline gap={3} align="center"><CampaignStatus campaign={current || { id: '', status: 'draft' }}/><Text tone="muted" size="sm">{checks.rows.to.summary} · {labels[draft.channel]}</Text></Inline></Stack>
+        <Stack gap={2}><Heading level={2}>{current ? current.name : `New ${labels[draft.channel]} campaign`}</Heading><Inline gap={3} align="center"><CampaignStatus campaign={current || { id: '', status: 'draft' }}/><Text tone="muted" size="sm">{toSummary} · {labels[draft.channel]}</Text></Inline></Stack>
         {current && !readOnly && <Button variant="secondary" disabled={!!busy} onClick={() => { openDraft({ ...current, id: '', name: current.name + ' copy' }); setDetail(null); setComposing(true); }}>Duplicate as draft</Button>}
       </Inline>
     </Stack>
@@ -345,7 +347,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
           </> : draft.channel === 'sms' ? <>
             <Field label="SMS message" required description="The audience check reports encoding and billable SMS segments." count={{ value: draft.text, max: 1500 }}><Textarea required rows={5} maxLength={1500} value={draft.text} onChange={event => setDraft({ ...draft, text: event.target.value })}/></Field>
             <ContentPreview label="SMS preview" destination="Recipient" provider="SMS" chrome="message" text={draft.text || undefined} emptyMessage="Your message will appear here."/>
-            {testable && current && current.channel === 'sms' && (testRecipients.length ? <Field label="Test recipient" required><Select required value={testRecipient ? testContactId : ''} onChange={event => setTestContactId(event.target.value)}><Option value="">Choose a contact</Option>{testRecipients.map(person => <Option key={person.id} value={person.id}>{contactName(person)} · {person.phone}</Option>)}</Select></Field> : <Text tone="muted" size="sm">Record SMS permission for a contact in Contacts to send a test.</Text>)}
+            {testable && current && current.channel === 'sms' && (testRecipients.length ? <Field label="Test recipient" description="Who receives Send test SMS."><Select value={testRecipient ? testContactId : ''} onChange={event => setTestContactId(event.target.value)}><Option value="">Choose a contact</Option>{testRecipients.map(person => <Option key={person.id} value={person.id}>{contactName(person)} · {person.phone}</Option>)}</Select></Field> : <Text tone="muted" size="sm">Record SMS permission for a contact in Contacts to send a test.</Text>)}
           </> : <>
             {selectedTemplate ? <WhatsAppTemplate template={selectedTemplate} components={draft.templateComponents} onChange={templateComponents => setDraft({ ...draft, templateComponents })}/> : <Text tone="muted">Choose an approved template above to fill its values.</Text>}
             <Text tone="muted" size="sm">Template values are shared by every recipient. Approved text values, image/video/document headers and website-button suffixes are supported. Header files must use direct public HTTPS links: JPEG/PNG images up to 5 MB; MP4/3GPP video up to 16 MB with H.264/AAC; documents up to 100 MB. Drive preview links cannot be sent. Flows, carousels and named variables require a separate provider workflow. WhatsApp permission and an international phone number are required.</Text>
@@ -353,7 +355,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
           {onShortenText && draft.channel !== 'whatsapp' && <Stack gap={1}><Inline><Button variant="secondary" disabled={!!busy || readOnly || !editable || !editingId || !draft.text.trim()} onClick={shortenText}>Use short links in message</Button></Inline>{!editingId && <Text tone="muted" size="sm">Save this draft first to associate short links with its campaign report.</Text>}</Stack>}{draft.channel !== 'whatsapp' && <Text tone="muted" size="sm">Personalisation fields: {'{{name}}, {{email}}, {{phone}}, {{company}}'}. URLs containing these fields stay unchanged when shortening. The audience preview uses the first eligible contact. SMS includes an opt-out footer.</Text>}
         </ChecklistRow>
         {editable && <ChecklistRow label="Send time" check={row('time')} open={openRow === 'time'} onOpenChange={toggle('time')}>
-          <RadioGroup legend="When to send" name="direct-send-time" value={sendMode} onValueChange={value => setSendMode(value === 'schedule' ? 'schedule' : 'now')} options={[{ value: 'now', label: 'Send now', description: 'Sending starts when you confirm.' }, { value: 'schedule', label: 'Schedule', description: 'Choose a time up to 366 days ahead.' }]}/>
+          <RadioGroup legend="When to send" name="direct-send-time" value={sendMode} onValueChange={value => { setSendMode(value === 'schedule' ? 'schedule' : 'now'); setConfirmationMode(''); }} options={[{ value: 'now', label: 'Send now', description: 'Sending starts when you confirm.' }, { value: 'schedule', label: 'Schedule', description: 'Choose a time up to 366 days ahead.' }]}/>
           {sendMode === 'schedule' && <DateTimeField label="Send at (your local timezone)" value={scheduledAt} onValueChange={setScheduledAt} disabled={!!busy} timeZoneLabel={timeZone()}/>}
         </ChecklistRow>}
       </Stack>
