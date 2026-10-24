@@ -266,3 +266,41 @@ test('without a social publishing connection the post check, file check and queu
   assert.match(online.html(), /<button(?![^>]*disabled)[^>]*>Check file<\/button>/);
   assert.doesNotMatch(online.html(), /Open integrations/);
 });
+
+test('the Schedule confirm and its reason lead the panel, before the time, queue and post check, so they are visible without scrolling', async () => {
+  // The @ten98/ui Popover caps its panel at 24rem and scrolls; it has no size or pinned-footer option, so the action goes first.
+  const view = mount({ ...base, accounts, onValidate: async () => ({ valid: true }), onLoadQueues: async () => ({ queues: [] }) });
+  view.pick(['fb-a']); view.type('Caption', 'Launch day');
+  await view.openSchedule();
+  const panel = nodes(view.find(node => node.type === ui.Popover)), at = (predicate: (node: Node) => boolean) => panel.findIndex(predicate);
+  const confirm = at(node => node.type === ui.Button && node.props.variant === 'primary'), reason = at(node => node.type === ui.Text && text(node) === 'Choose a time or the next free slot.');
+  assert.ok(confirm >= 0 && reason >= 0);
+  for (const [name, predicate] of [['Next free slot', (node: Node) => node.type === ui.Button && text(node) === 'Next free slot'], ['time', (node: Node) => node.type === ui.DateTimeField], ['queue', (node: Node) => node.type === ui.Field && node.props.label === 'Queue'], ['post check', (node: Node) => node.type === ui.ValidationSummary && node.props.title === 'Post check']] as const) {
+    const position = at(predicate); assert.ok(position > confirm && position > reason, `The confirm and its reason come before the ${name}.`);
+  }
+});
+
+test('the "Choose at least one social platform." error clears as soon as a destination is chosen', async () => {
+  const message = 'Choose at least one social platform.';
+  const submitEmpty = async (view: ReturnType<typeof mount>) => { await view.find(node => node.type === ui.Form)!.props.onSubmit(null, { preventDefault() {} }); await view.settle(); assert.match(view.html(), new RegExp(message)); };
+  const platformsOnly = mount({ ...base, accounts: [] });
+  await submitEmpty(platformsOnly);
+  platformsOnly.find(node => node.type === ui.MultiCombobox)!.props.onValuesChange([{ value: 'instagram', label: 'Instagram' }]); platformsOnly.paint();
+  assert.doesNotMatch(platformsOnly.html(), new RegExp(message), 'Picking a platform clears the form-level error.');
+  const withAccounts = mount({ ...base, accounts });
+  await submitEmpty(withAccounts); await withAccounts.openSchedule();
+  assert.ok(nodes(withAccounts.find(node => node.type === ui.Popover)).some(node => node.type === ui.Alert && text(node) === message), 'The scheduling panel shows the same error.');
+  withAccounts.pick(['ig-a', 'fb-a']);
+  assert.doesNotMatch(withAccounts.html(), new RegExp(message), 'Choosing accounts clears it everywhere, including the scheduling panel.');
+});
+
+test('Enter in the platform picker never submits the composer; it only picks the highlighted option', async () => {
+  const view = mount({ ...base, accounts: [] }), form = () => view.find(node => node.type === ui.Form)!;
+  let prevented = 0;
+  const press = (role: string | null, extra: Record<string, unknown> = {}) => { form().props.onKeyDown({ key: 'Enter', target: { getAttribute: (name: string) => name === 'role' ? role : null }, preventDefault() { prevented++; }, ...extra }); view.paint(); };
+  press('combobox');
+  assert.equal(prevented, 1, 'Enter in "Choose platforms" with nothing highlighted does not submit the form.');
+  press(null);
+  assert.equal(prevented, 1, 'Enter elsewhere, such as a new line in the caption, is left alone.');
+  assert.deepEqual(view.snapshot().platforms, [], 'Enter picked nothing by itself.');
+});

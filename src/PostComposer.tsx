@@ -66,6 +66,7 @@ function nextQueueSlot(slots: { dayOfWeek: number; time: string }[], timeZone: s
   }
   return best;
 }
+const noDestination = 'Choose at least one social platform.';
 const issueMessages = (errors: { message: string }[], warnings: { message: string }[]): ValidationMessage[] => [...errors.map((item, index) => ({ id: 'error' + index, text: item.message })), ...warnings.map((item, index) => ({ id: 'warning' + index, text: 'To verify: ' + item.message }))];
 function AccountGroupPicker({ load, onChoose, disabled }: { load: NonNullable<Props['onLoadGroups']>; onChoose: (members: Row[], directory: Row[]) => void; disabled: boolean }) {
   const [data, setData] = useState<any>(null), [selectedId, setSelectedId] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
@@ -278,14 +279,16 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   }
   const selectedCheck = editingAccountId ? validatePostForPlatforms(values, [selected], { assets, accountId: editingAccountId, providerOwnedMediaUrls }) : validatePostForPlatforms(values, [selected], { assets, providerOwnedMediaUrls }), errors = selectedCheck.errors, warnings = selectedCheck.warnings;
   const socialAccounts = accounts.filter(account => PLATFORM_RULES[account.platform] && account.isActive !== false), activeAccounts = socialAccounts.filter(account => platforms.includes(account.platform));
+  // Changing destinations clears the submit error that asked for one, here and in the Schedule panel.
+  function choosePlatforms(next: string[]) { setPlatforms(next); setError(previous => previous === noDestination ? '' : previous); }
   function changeOverride(patch: Override, remove: string[] = []) {
     if (own(patch, 'options') || remove.includes('options')) { const keep = (previous: Record<string, string>) => Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith(editKey + ':'))); setOptionInputs(keep); setOptionErrors(keep); }
     if (editingAccountId) { setAccountOverrides(previous => { const next: AccountOverride = { ...previous[editingAccountId], platform: selected, ...patch }; for (const key of remove) delete (next as any)[key]; return { ...previous, [editingAccountId]: next }; }); return; }
     setOverrides(previous => { const next: Record<string, any> = { ...previous[selected], ...patch }; for (const key of remove) delete next[key]; return { ...previous, [selected]: next }; });
   }
   function togglePlatform(platform: string) {
-    if (platforms.includes(platform)) { setPlatforms(platforms.filter(value => value !== platform)); setAccounts(selectedAccounts.filter(id => socialAccounts.find(account => accountId(account) === id)?.platform !== platform)); }
-    else { setPlatforms([...platforms, platform]); setActivePlatform(platform); }
+    if (platforms.includes(platform)) { choosePlatforms(platforms.filter(value => value !== platform)); setAccounts(selectedAccounts.filter(id => socialAccounts.find(account => accountId(account) === id)?.platform !== platform)); }
+    else { choosePlatforms([...platforms, platform]); setActivePlatform(platform); }
   }
   function updateOption(key: string, value: any) {
     const options = { ...variant?.options }; value === undefined ? delete options[key] : options[key] = value;
@@ -294,7 +297,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   async function submit(event: React.FormEvent<HTMLFormElement>, publish = false) {
     event.preventDefault(); if (disabled) return; setError('');
     try {
-      if (!platforms.length) throw new Error('Choose at least one social platform.');
+      if (!platforms.length) throw new Error(noDestination);
       const invalid = Object.entries(optionErrors).find(([key, value]) => value && platforms.includes(key.split(':')[0]));
       if (invalid) throw new Error(invalid[1]);
       normalizePostTags(values.tags); normalizePostVariants(values); normalizeAccountVariants(values);
@@ -340,7 +343,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     const platformOf = (id: string) => socialAccounts.find(account => accountId(account) === id)?.platform, added = ids.filter(id => !selectedAccounts.includes(id)), removed = selectedAccounts.filter(id => !ids.includes(id));
     const next = platforms.filter(platform => !removed.some(id => platformOf(id) === platform) || ids.some(id => platformOf(id) === platform));
     for (const id of added) { const platform = platformOf(id); if (platform && !next.includes(platform)) next.push(platform); }
-    setAccountsTouched(true); setAccounts(ids); setPlatforms(next);
+    setAccountsTouched(true); setAccounts(ids); choosePlatforms(next);
     const last = added.length ? platformOf(added[added.length - 1]) : undefined; if (last) setActivePlatform(last);
   }
   const save = (publish = false) => submit({ preventDefault() {} } as React.FormEvent<HTMLFormElement>, publish);
@@ -413,15 +416,18 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     {postCheck}
   </Stack>;
   const reasonId = formId + '-schedule-reason';
+  // The confirm and its reasons lead the panel: the @ten98/ui Popover caps its height and scrolls, with no size or pinned-footer
+  // option, and the time, queue and post check below would otherwise push the action out of view.
   const scheduleStep = <Stack gap={4}>
+    <Stack gap={2}>
+      <Inline justify="between" gap={2}><Text size="sm"><Text as="strong" weight="semibold">Posts to</Text> {destinationNames.join(', ') || 'no destinations yet'}</Text><Button variant="primary" disabled={!!scheduleBlocked || saving || busy} aria-describedby={scheduleBlocked ? reasonId : undefined} onClick={() => save(!publishReason)}>{saving || busy ? 'Saving…' : primaryLabel}</Button></Inline>
+      {scheduleBlocked && <Text id={reasonId} size="sm" tone="muted">{scheduleBlocked}</Text>}
+      {publishReason && <Inline gap={2} align="center"><Text size="sm" tone="muted">{publishReason}</Text>{!connected && integrationsAction}</Inline>}
+      {error && <Alert tone="danger" variant="inline">{error}</Alert>}
+    </Stack>
     {onLoadQueues && <Inline><Button variant="secondary" size="sm" pressed={!!queueId} disabled={loadingQueues || !connected} onClick={() => void chooseNextSlot()}>Next free slot</Button></Inline>}
     {timing}
-    <Text size="sm"><Text as="strong" weight="semibold">Posts to</Text> {destinationNames.join(', ') || 'no destinations yet'}</Text>
     {postCheck}
-    {error && <Alert tone="danger" variant="inline">{error}</Alert>}
-    {publishReason && <Inline gap={2} align="center"><Text size="sm" tone="muted">{publishReason}</Text>{!connected && integrationsAction}</Inline>}
-    {scheduleBlocked && <Text id={reasonId} size="sm" tone="muted">{scheduleBlocked}</Text>}
-    <Inline justify="end"><Button variant="primary" disabled={!!scheduleBlocked || saving || busy} aria-describedby={scheduleBlocked ? reasonId : undefined} onClick={() => save(!publishReason)}>{saving || busy ? 'Saving…' : primaryLabel}</Button></Inline>
   </Stack>;
   // Without connected accounts the platforms are one combobox, so the To row stays short on a phone.
   const platformOptions = Object.entries(PLATFORM_RULES).filter(([platform, config]) => config.supported || platforms.includes(platform)).map(([platform, config]: [string, any]) => ({ value: platform, label: config.label + (config.supported ? '' : ' (posting unavailable)') }));
@@ -431,7 +437,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     {socialAccounts.length > 0 && !providerPost && <Inline gap={2}><Button variant="ghost" size="sm" disabled={socialAccounts.length > 50 || socialAccounts.every(account => selectedAccounts.includes(accountId(account)))} onClick={() => chooseAccounts(socialAccounts.map(accountId))}>Select all</Button></Inline>}
     {(!socialAccounts.length || unmatched.length > 0) && <MultiCombobox label={socialAccounts.length ? 'Platforms without a connected account' : 'Post to'} placeholder="Choose platforms" disabled={providerPost} options={platformOptions} values={platforms.flatMap(platform => platformOptions.filter(option => option.value === platform))} onValuesChange={next => { const ids = next.map(option => option.value), changed = ids.find(platform => !platforms.includes(platform)) || platforms.find(platform => !ids.includes(platform)); if (changed) togglePlatform(changed); }}/>}
     {!socialAccounts.length && <Inline gap={2} align="center"><Text tone="muted" size="sm">No social accounts connected. Connect them in Integrations, or save a draft for a platform.</Text>{integrationsAction}{onLoadAccounts && <Button variant="ghost" size="sm" disabled={disabled || loadingAccounts || providerPost} onClick={loadAccounts}>{loadingAccounts ? 'Loading accounts…' : 'Refresh accounts'}</Button>}</Inline>}
-    {onLoadGroups && !providerPost && <Disclosure variant="plain" summary="Use a saved group"><AccountGroupPicker load={onLoadGroups} disabled={disabled || loadingAccounts} onChoose={(members, directory) => { setGroupAccounts(directory); setAccountsTouched(true); setAccounts(members.map(accountId)); setPlatforms([...new Set(members.map(row => row.platform))]); setActivePlatform(members[0]?.platform || ''); setActiveAccount(''); setProviderCheck(null); }}/></Disclosure>}
+    {onLoadGroups && !providerPost && <Disclosure variant="plain" summary="Use a saved group"><AccountGroupPicker load={onLoadGroups} disabled={disabled || loadingAccounts} onChoose={(members, directory) => { setGroupAccounts(directory); setAccountsTouched(true); setAccounts(members.map(accountId)); choosePlatforms([...new Set(members.map(row => row.platform))]); setActivePlatform(members[0]?.platform || ''); setActiveAccount(''); setProviderCheck(null); }}/></Disclosure>}
     {providerPost && <Text tone="muted" size="sm">Destinations are fixed for this post.</Text>}
     {missingAccounts.length > 0 && <Alert tone="warning" variant="inline">Choose an account for {missingAccounts.map(platform => PLATFORM_RULES[platform]?.label || platform).join(', ')} before publishing.</Alert>}
   </Stack>;
@@ -467,7 +473,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   </Stack>;
   const canSave = !disabled || busy || saving;
   const actions = <>{onDelete && canWrite && !readOnly && !post?.externalId && post?.status !== 'published' && <Button variant="danger" disabled={busy || saving} onClick={onDelete}>Delete</Button>}{/* In the editor dialog its close button cancels, which keeps the footer to one row on a phone. */}{!actionsHost && <Button variant="secondary" disabled={saving} onClick={onCancel}>{readOnly || !canWrite ? 'Close' : 'Cancel'}</Button>}{canSave ? <Button variant={providerPost ? 'primary' : 'secondary'} type="submit" form={formId} disabled={disabled}>{saving || busy ? 'Saving…' : post ? 'Save changes' : 'Save draft'}</Button> : null}{canSave && !providerPost && <Popover label="Schedule options" triggerLabel={primaryLabel} triggerVariant="primary" placement="top-end" open={scheduleMenu} onOpenChange={setScheduleMenu} disabled={disabled}>{scheduleStep}</Popover>}</>;
-  return <Form id={formId} gap={6} onSubmit={(_, event) => submit(event)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !disabled) { event.preventDefault(); primaryAction(); } }}>
+  return <Form id={formId} gap={6} onSubmit={(_, event) => submit(event)} onKeyDown={event => { if (event.key !== 'Enter') return; if ((event.metaKey || event.ctrlKey) && !disabled) { event.preventDefault(); primaryAction(); } else if ((event.target as HTMLElement | null)?.getAttribute?.('role') === 'combobox') event.preventDefault(); }}>
     <Input type="hidden" name="draftSnapshot" readOnly value={JSON.stringify(values)}/>
     <VisuallyHidden as="h3" tabIndex={-1} ref={headingRef}>Post composer</VisuallyHidden>
     {error && !scheduleMenu && <Alert tone="danger">{error}</Alert>}

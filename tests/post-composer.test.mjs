@@ -205,7 +205,7 @@ test('legacy unsupported destinations remain removable while new drafts offer on
   assert.equal(choices(['facebook', 'whatsapp']).includes('whatsapp'), true);
   const handler = source.slice(source.indexOf('function togglePlatform('), source.indexOf('  function updateOption(')).replace('platform: string', 'platform');
   let platforms = ['facebook', 'whatsapp'], selected = ['fb-account', 'wa-account'];
-  const toggle = new Function('platforms', 'selectedAccounts', 'socialAccounts', 'accountId', 'setPlatforms', 'setAccounts', 'setActivePlatform', `return (${handler});`)(platforms, selected, [{ id: 'fb-account', platform: 'facebook' }, { id: 'wa-account', platform: 'whatsapp' }], account => account.id, value => { platforms = value; }, value => { selected = value; }, () => {});
+  const toggle = new Function('platforms', 'selectedAccounts', 'socialAccounts', 'accountId', 'choosePlatforms', 'setAccounts', 'setActivePlatform', `return (${handler});`)(platforms, selected, [{ id: 'fb-account', platform: 'facebook' }, { id: 'wa-account', platform: 'whatsapp' }], account => account.id, value => { platforms = value; }, value => { selected = value; }, () => {});
   toggle('whatsapp');
   assert.deepEqual(platforms, ['facebook']); assert.deepEqual(selected, ['fb-account']);
   assert.equal(choices(platforms).includes('whatsapp'), false);
