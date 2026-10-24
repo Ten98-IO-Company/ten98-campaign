@@ -101,6 +101,15 @@ test('an archived tracking link is shown as inactive, without a QR code that no 
   assert.doesNotMatch(markup, /<img|Download QR/);
 });
 
+test('the promo code pattern compiles as browsers compile it and accepts what the server accepts', () => {
+  // Browsers compile `pattern` as ^(?:pattern)$ with the v (unicode sets) flag; an invalid one logs an error and is ignored.
+  const pattern = source.match(/<Field label="Promo code"[^>]*><Input [^>]*pattern="([^"]+)"/)?.[1];
+  assert.ok(pattern, 'The Promo code input has a pattern.');
+  const browser = new RegExp(`^(?:${pattern})$`, 'v'), server = /^[A-Za-z0-9_-]+$/; // The server check in server/index.ts.
+  for (const code of ['MALL10', 'moe_20-off', '-', '_', 'MOE 20%!', 'has spaces in it', 'café', 'a/b', 'x\\y']) assert.equal(browser.test(code), server.test(code), code);
+  assert.ok(browser.test(''), 'The promo code is optional.');
+});
+
 test('the page is built from @ten98/ui only', () => {
   assert.doesNotMatch(source, /className=|style=/, 'No app CSS or inline style.');
   assert.doesNotMatch(code, /createElement\("/, 'No raw HTML elements.');
