@@ -57,7 +57,9 @@ test('protected SMS media downloads use project access and server-held credentia
       }
     }
     for (mode of ['bad-redirect', 'provider-error', 'wrong-type', 'too-large', 'oversized-stream']) {
-      const before = calls.length, result = await request(mediaPath); assert.equal(result.status, 502, mode); assert.doesNotMatch(await result.text(), /PRIVATE_/); assert.equal(calls.length, before + 1, 'Rejected media must not fetch an arbitrary redirect target.');
+      const before = calls.length, result = await request(mediaPath), text = await result.text(); assert.equal(result.status, 502, mode); assert.doesNotMatch(text, /PRIVATE_/); assert.equal(calls.length, before + 1, 'Rejected media must not fetch an arbitrary redirect target.');
+      // readResponseBytes (@ten98/runtime) refuses a declared and a streamed size over 20 MB the same way.
+      if (mode === 'too-large' || mode === 'oversized-stream') assert.match(text, /exceeds the 20 MB download limit/, mode);
     }
     const stored = structuredClone(message.data); stored.attachments[0].url = 'https://localhost/private'; await app.sql.run('UPDATE sms_messages SET data=? WHERE id=?', JSON.stringify(stored), message.id);
     const before = calls.length; assert.equal((await request(mediaPath)).status, 502); assert.equal(calls.length, before);
