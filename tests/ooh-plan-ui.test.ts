@@ -27,7 +27,8 @@ function hooks(states: unknown[]) {
 const elements = (node: any): any[] => Array.isArray(node) ? node.flatMap(elements)
   : React.isValidElement(node) ? [node, ...elements((node.props as Row).children), ...elements((node.props as Row).actions), ...((node.props as Row).items || []).flatMap((item: Row) => elements(item.content)),
     ...(node.type === DataTable ? elements((node.props as Row).rows.flatMap((row: Row) => [...(node.props as Row).columns.map((column: Row) => column.render?.(row)), (node.props as Row).rowActions?.(row)])) : [])] : [];
-const text = (node: any): string => renderToStaticMarkup(React.createElement(React.Fragment, null, node)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+// Visible text read by splitting on tags in one pass (not a sanitiser).
+const text = (node: any): string => renderToStaticMarkup(React.createElement(React.Fragment, null, node)).split(/<[^>]*>/).join(' ').replace(/\s+/g, ' ');
 
 function oohMap(states: unknown[]) {
   const mock = hooks(states);
@@ -87,7 +88,8 @@ test('the booking form is grouped, shows at most 8 fields before More, and submi
   const { BookingFields } = oohMap([]);
   const fields = (item?: Row) => React.createElement(BookingFields, { item, partners: [{ id: 'v1', name: 'Gulf Outdoor' }], campaigns: [{ id: 'c1', name: 'Launch' }] });
   const html = renderToStaticMarkup(fields());
-  const legends = [...html.matchAll(/<legend[^>]*>(.*?)<\/legend>/g)].map(match => match[1].replace(/<[^>]+>/g, ''));
+  const legends = [...html.matchAll(/<legend[^>]*>(.*?)<\/legend>/g)].map(match => match[1].split(/<[^>]*>/).join(''));
+  assert.ok(legends.every(legend => !legend.includes('<')), 'Legend text still contains markup.');
   assert.deepEqual(legends.filter(legend => legend !== 'Booking dates'), ['Placement', 'Where', 'When &amp; cost', 'Campaign &amp; status']);
   const names = [...html.matchAll(/name="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual([...new Set(names)].sort(), ['campaignId', 'cost', 'currency', 'endDate', 'latitude', 'location', 'longitude', 'name', 'notes', 'proofUrl', 'providerId', 'startDate', 'status', 'type']);
@@ -99,6 +101,9 @@ test('the booking form is grouped, shows at most 8 fields before More, and submi
   assert.ok(html.indexOf('name="proofUrl"') > html.indexOf('>More<') && html.indexOf('name="notes"') > html.indexOf('>More<'));
   const status = html.match(/<input[^>]*name="status"[^>]*>/)?.[0] || '';
   assert.match(status, /type="hidden"/); assert.match(status, /value="draft"/, 'New bookings start as Draft, as before.');
+  // From a campaign page: the campaign is preselected and the booking is still new (Draft).
+  const preset = renderToStaticMarkup(React.createElement(BookingFields, { partners: [], campaigns: [{ id: 'c1', name: 'Launch' }], defaultCampaignId: 'c1' }));
+  assert.match(preset, /<option value="c1" selected="">Launch<\/option>/); assert.match(preset, /name="status"[^>]*value="draft"|value="draft"[^>]*name="status"/);
   const saved = { id: 'p1', name: 'Marina screen', type: 'digital', status: 'live', location: 'Dubai Marina', latitude: 25.08, longitude: 55.14, providerId: 'v1', campaignId: 'c1', startDate: '2026-11-01T00:00:00.000Z', endDate: '2026-11-30', cost: 4200, currency: 'USD', proofUrl: 'https://proof.example.test/p1', notes: 'Night slot' };
   const edit = renderToStaticMarkup(fields(saved));
   for (const value of ['value="Marina screen"', 'value="Dubai Marina"', 'value="25.08"', 'value="55.14"', 'value="4200"', 'value="2026-11-01"', 'value="2026-11-30"', 'value="https://proof.example.test/p1"', 'Night slot']) assert.ok(edit.includes(value), value);
@@ -140,7 +145,8 @@ test('the OOH page shows Bookings and Inventory tabs only when Broadsign is conn
 
 test('main wires the OOH page through the plan view and the grouped booking form', () => {
   assert.match(mainSource, /<OohProviders onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\}[^\r\n]*?bookings=\{<OohMap /);
-  assert.match(mainSource, /\{modal\.type === 'placement' && <BookingFields item=\{modal\.item\} partners=\{state\.providers\} campaigns=\{state\.campaigns\}\/>\}/);
+  // A booking started from a campaign page preselects that campaign; editing keeps the booking's own.
+  assert.match(mainSource, /\{modal\.type === 'placement' && <BookingFields item=\{modal\.item\} partners=\{state\.providers\} campaigns=\{state\.campaigns\} defaultCampaignId=\{modal\.campaignId\}\/>\}/);
   assert.doesNotMatch(mainSource, /label="Latitude"|<Stat label="Live placements"/, 'The page and form no longer live in main.');
 });
 
