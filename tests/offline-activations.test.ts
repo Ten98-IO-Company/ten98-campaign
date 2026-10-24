@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { postgresSkip, testApp } from './postgres.mjs';
+import { consentWording } from '../shared/offline-activations.ts';
 
 async function start(t: TestContext) {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-offline-')), origin = 'http://127.0.0.1:3000';
@@ -73,7 +74,12 @@ test('staff capture leads at an activation with explicit per-channel consent, an
   let contact = (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.email === 'pat@example.test');
   // The field wording asks for news and offers, so an email opt-in is also marketing permission (#165).
   assert.deepEqual(contact.consents, { email: true, sms: true, whatsapp: false, emailMarketing: true }); assert.deepEqual(contact.tags, [tag]);
-  for (const channel of ['email', 'sms', 'emailMarketing']) assert.match(contact.consentEvidence[channel].source, /In person at Roadshow stop “Mall roadshow — Saturday” .* recorded by Erin\. Wording shown: “.*Brand launch.*”/);
+  // The evidence names when the lead was captured (not the activation's planned start, 2026-11-07) and the sentence the form showed.
+  for (const channel of ['email', 'sms', 'emailMarketing']) {
+    const { source, at } = contact.consentEvidence[channel], shown = String(source.match(/ on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) UTC,/)?.[1]);
+    assert.ok(Math.abs(Date.parse(shown.replace(' ', 'T') + ':00Z') - Date.parse(at)) < 60000, `${source} is dated at capture (${at}).`);
+    assert.equal(source, `In person at Roadshow stop “Mall roadshow — Saturday” on ${shown} UTC, recorded by Erin. Wording shown: “${consentWording('Brand launch', ['email', 'sms'])}”`);
+  }
 
   const before = await count();
   assert.equal((await request(leads, 'POST', { name: 'No thanks', email: 'nothanks@example.test', consents: { email: false } }, editor.cookie)).status, 400, 'Without an opt-in nothing is stored.');
@@ -93,6 +99,7 @@ test('staff capture leads at an activation with explicit per-channel consent, an
   response = await request(`${project}/activations/${second.id}/leads`, 'POST', { name: 'Someone else', phone: '+447700900123', consents: { whatsapp: true } }, editor.cookie);
   assert.equal(response.status, 201, JSON.stringify(response.body)); contact = (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.id === contact.id);
   assert.deepEqual(contact.tags, [tag, 'offline:' + second.id.slice(0, 8)], 'Repeat meetings add the activation tag.'); assert.equal(contact.name, 'Pat Doe', 'A field entry does not rename a known contact.');
+  assert.ok(contact.consentEvidence.whatsapp.source.endsWith(`Wording shown: “${consentWording('Brand launch', ['whatsapp'])}”`), contact.consentEvidence.whatsapp.source);
 
   await request(project + '/activations/' + second.id, 'PATCH', { status: 'cancelled' }, owner);
   assert.equal((await request(`${project}/activations/${second.id}/leads`, 'POST', { email: 'late@example.test', consents: { email: true } }, editor.cookie)).status, 409, 'Cancelled activations take no leads.');

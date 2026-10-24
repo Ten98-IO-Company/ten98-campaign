@@ -36,7 +36,9 @@ export async function handleActivations({ req, url, project, role, user, body, s
   if (!requested.length) fail(400, 'Tick at least one channel the person agreed to. Without an opt-in nothing is saved.');
   // Only the fields given, because the contacts module treats a present key as a destination to validate.
   const person = Object.fromEntries(Object.entries({ name: optional(body.name, 'Name', 120), email: optional(body.email, 'Email', 254), phone: optional(body.phone, 'Phone', 16) }).filter(([, value]) => value !== undefined));
-  const source = `In person at ${ACTIVATION_TYPE_LABELS[activation.type as ActivationType]} “${activation.name}” on ${String(activation.startAt).slice(0, 10)}, recorded by ${user.name}. Wording shown: “${consentWording(project.name, requested)}”`;
+  // Dated when the lead is captured, not when the activation was planned to start.
+  const capturedAt = new Date().toISOString();
+  const source = `In person at ${ACTIVATION_TYPE_LABELS[activation.type as ActivationType]} “${activation.name}” on ${capturedAt.slice(0, 10)} ${capturedAt.slice(11, 16)} UTC, recorded by ${user.name}. Wording shown: “${consentWording(project.name, requested)}”`;
   send(201, await contacts.capture(project.id, person, requested, source, activationTag(activation.id)));
   return true;
 }
