@@ -19,7 +19,7 @@ RUN npm run build && npm prune --omit=dev
 FROM node:24-alpine@sha256:6a1c190e17215d844926b0677f4bf87273ff7d5e54db06d3b5b5863ab0b09a3d
 # Openship passes no build args, so the defaults are what ships there: APP_VERSION must equal package.json's version
 # (tests/image-labels.test.mjs fails CI otherwise) and APP_REVISION is overridden by `--build-arg` where one is available.
-ARG APP_VERSION=0.31.0
+ARG APP_VERSION=0.31.1
 ARG APP_REVISION=unknown
 LABEL org.opencontainers.image.title="Ten98 Campaign" \
       org.opencontainers.image.description="Open-source campaign management for per-platform social publishing, advertising, OOH media and digital assets" \
