@@ -173,19 +173,20 @@ test('seven work areas plus Settings give every page and section exactly one tab
   assert.deepEqual(areas.map(area => area.label), ['Home', 'Planner', 'Messages', 'Ads', 'Offline', 'Library', 'Reports', 'Settings']);
   for (const area of areas) assert.ok(area.tabs.length <= 5, area.label + ' has at most five tabs');
   for (const [page, view] of Object.entries(pageRoutes)) for (const section of pageSections[page] || ['']) {
-    const homes = areas.flatMap(area => area.tabs.filter(tab => tab.page === page && (!tab.section || tab.section === section)).map(tab => [area, tab]));
+    const homes = areas.flatMap(area => area.tabs.filter(tab => tab.page === page && (!tab.sections || tab.sections.includes(section))).map(tab => [area, tab]));
     assert.equal(homes.length, 1, `${page} › ${section} has one home`);
     const [area, tab] = homes[0], old = readNavigation(`?view=${view}${section ? '&section=' + section : ''}`);
-    assert.equal(areaOf(old.page), area); assert.equal(areaTab(old.page, old.section), tab);
+    assert.equal(areaOf(old.page, old.section), area); assert.equal(areaTab(old.page, old.section), tab);
   }
   // Each area opens on its first tab, and each tab link reads back as that tab.
   for (const area of areas) for (const tab of area.tabs) {
-    const url = new URL(navigationUrl({ page: tab.page, section: tab.section || pageSections[tab.page]?.[0] || '', projectId: 'a' }, 'https://campaign.example/'), 'https://campaign.example');
+    const url = new URL(navigationUrl({ page: tab.page, section: tab.sections?.[0] || pageSections[tab.page]?.[0] || '', projectId: 'a' }, 'https://campaign.example/'), 'https://campaign.example');
     const route = readNavigation(url.search); assert.equal(areaTab(route.page, route.section), tab);
   }
-  assert.equal(areaTab('Publishing', 'queues').label, 'Posts'); assert.equal(areaTab('Ads manager', 'shopping').label, 'Ads');
+  assert.equal(areaTab('Publishing', 'recycling').label, 'Posts'); assert.equal(areaOf('Publishing', 'queues').label, 'Settings'); assert.equal(areaOf('Publishing', 'destinations').label, 'Settings');
+  assert.equal(areaOf('Publishing', 'library').label, 'Library'); assert.equal(areaTab('Publishing', 'library').label, 'From your accounts'); assert.equal(areaTab('Ads manager', 'shopping').label, 'Ads');
   assert.equal(areaTab('Direct campaigns', 'templates').label, 'WhatsApp templates'); assert.equal(areaTab('Analytics', 'accounts').label, 'Social accounts');
-  assert.equal(areaOf(readNavigation('?view=assistant').page).label, 'Planner');
+  assert.equal(areaOf(readNavigation('?view=assistant').page, '').label, 'Planner');
   assert.deepEqual(areas.find(area => area.id === 'offline').tabs.map(tab => tab.label), ['Billboards', 'Field activity', 'Partners']);
   assert.equal(areaTab(readNavigation('?view=activations').page, '').label, 'Field activity');
 });
