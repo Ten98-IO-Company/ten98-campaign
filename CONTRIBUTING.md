@@ -10,6 +10,7 @@ Branch from `dev` and open your pull request into `dev`; `main` receives tested 
 
 ## Campaign rules
 
+- The same features across both apps should look the same and work the same. Before approving a UI change, open the same feature in Discover and compare; fix differences in the same change or track them in an issue.
 - Keep changes focused. Reuse the existing provider helpers and native platform features before adding dependencies.
 - Every nontrivial behavior change needs a small runnable regression check. Provider tests must use mocks, never real spending or credentials.
 - Trace every caller when fixing shared behavior. Review asynchronous results for project changes, unmounted editors, concurrent updates and uncertain provider writes. Remove unused code only after checking its callers; keep validation, consent and access controls intact.
