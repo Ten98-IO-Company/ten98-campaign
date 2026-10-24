@@ -19,7 +19,7 @@ const { code: homeCode } = await transformWithOxc(homeSource, 'HomeSetup.tsx', {
 const HomeSetup = new Function('React', 'useState', 'globalThis', 'Badge', 'Button', 'Card', 'Inline', 'List', 'ListItem', 'Progress', 'Stack', 'Text', homeCode + '; return HomeSetup;')(React, React.useState, { localStorage: undefined }, ui.Badge, ui.Button, ui.Card, ui.Inline, ui.List, ui.ListItem, ui.Progress, ui.Stack, ui.Text);
 
 // FirstProject with its one useState replaced, so each test chooses the skipped state and sees the requested change.
-const { code: firstProjectCode } = await transformWithOxc(slice('function FirstProject(', '\n// The story panel beside'), 'FirstProject.tsx', { jsx: { runtime: 'classic' } });
+const { code: firstProjectCode } = await transformWithOxc(slice('function FirstProject(', '\n// Campaign adapter'), 'FirstProject.tsx', { jsx: { runtime: 'classic' } });
 const story = React.createElement(ui.AuthStory, { eyebrow: 'STORY', title: 'Story panel', lead: 'Lead line.', footnote: 'Footnote' });
 function firstProject(skipped: boolean) {
   const changes: boolean[] = [], created: unknown[] = []; let signedOut = 0;

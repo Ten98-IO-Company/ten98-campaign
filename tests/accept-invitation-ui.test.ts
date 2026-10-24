@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
-import { InvitationAcceptFlow } from '@ten98/ui';
+import { AuthStory, InvitationAcceptFlow } from '@ten98/ui';
 import { AppBrand } from '@ten98/ui/app';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { roleLabel } from '../src/workspace-roles.ts';
@@ -15,11 +15,12 @@ type Props = { token: string; request: (path: string, method?: string, body?: un
 const source = await readFile(new URL('../src/AcceptInvitation.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .*?;\r?\n/gm, '').replace('export default function', 'function'), 'AcceptInvitation.tsx', { jsx: { runtime: 'classic' } });
 
+const story = React.createElement(AuthStory, { eyebrow: 'Campaign management', title: 'Plan. Publish.', lead: 'Lead line.', footnote: 'ten98 Campaign' });
 function view(props: Props) {
   const state: unknown[] = [], refs: { current: unknown }[] = [], effects: (() => void)[] = []; let index = 0, refIndex = 0;
   const useState = (value: unknown) => { const slot = index++; if (!(slot in state)) state[slot] = value; return [state[slot], (next: unknown) => { state[slot] = typeof next === 'function' ? next(state[slot]) : next; }]; };
   const useRef = (value: unknown) => { const slot = refIndex++; if (!(slot in refs)) refs[slot] = { current: value }; return refs[slot]; };
-  const AcceptInvitation = new Function('React', 'useState', 'useRef', 'useEffect', 'InvitationAcceptFlow', 'Brand', 'roleLabel', code + '; return AcceptInvitation;')(React, useState, useRef, (effect: () => void) => { effects.push(effect); }, InvitationAcceptFlow, AppBrand, roleLabel);
+  const AcceptInvitation = new Function('React', 'useState', 'useRef', 'useEffect', 'InvitationAcceptFlow', 'Brand', 'roleLabel', 'authStory', code + '; return AcceptInvitation;')(React, useState, useRef, (effect: () => void) => { effects.push(effect); }, InvitationAcceptFlow, AppBrand, roleLabel, story);
   const render = (): React.ReactElement<any> => { index = 0; refIndex = 0; return AcceptInvitation(props); };
   return { render, effects };
 }
@@ -48,8 +49,9 @@ test('the invitation shows Campaign\'s role label and the shared flow date, and 
   const ui = view({ token: 'T'.repeat(43), request, onAccepted() {}, onSignIn: (email?: string) => { signIns.push(email); } });
   ui.render(); ui.effects.forEach(effect => effect()); await new Promise(resolve => setImmediate(resolve));
   const tree = ui.render(), html = renderToStaticMarkup(tree);
-  // InvitationAcceptFlow renders invitation.role verbatim, so the adapter passes the label Team settings uses.
-  assert.equal(tree.props.invitation.role, 'Editor'); assert.match(html, />Editor</); assert.doesNotMatch(html, />editor</);
+  // The flow's roleLabel prop shows the label Team settings uses; the invitation keeps its role value. Like every
+  // signed-out screen it sits beside the shared story panel, in the default split layout (#272).
+  assert.equal(tree.props.invitation.role, 'editor'); assert.equal(tree.props.roleLabel, roleLabel); assert.equal(tree.props.aside, story); assert.equal(tree.props.surface, undefined); assert.match(html, />Editor</); assert.doesNotMatch(html, />editor</);
   assert.equal(tree.props.formatDate, undefined, 'The flow keeps its own Intl date format, the same one Team settings shows.');
   assert.match(html, />Oct 30, 2026</); assert.doesNotMatch(html, /10\/30\/2026/);
   tree.props.onSignIn(); assert.deepEqual(signIns, ['new@example.test']);
