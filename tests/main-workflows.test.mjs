@@ -319,13 +319,13 @@ test('the first setup step follows where setup stands and gives the action only 
   const appSource = source(), start = appSource.indexOf('  const zernioLinked = '), end = appSource.indexOf('  const setupSteps: SetupStep[] = [', start);
   assert.ok(start > 0 && end > start);
   const step = ({ key = true, linked = true, accounts = 0, operator = false, admin = false, map = false }) => {
-    const calls = [], context = { state: { connections: { zernio: key }, user: { isOperator: operator } }, remote: { status: { zernio: { configured: key, mapped: linked } }, accounts: { accounts: Array(accounts).fill({}) } }, canAdmin: admin, canMap: map, setPage: page => calls.push(['page', page]), setModal: value => calls.push(['modal', value]) };
+    const calls = [], context = { state: { connections: { zernio: key }, user: { isOperator: operator } }, remote: { status: { zernio: { configured: key, mapped: linked } }, accounts: { accounts: Array(accounts).fill({}) } }, canAdmin: admin, canMap: map, setPage: (page, section) => calls.push(['page', page, section]), setModal: value => calls.push(['modal', value]) };
     const result = new Function(...Object.keys(context), stripTypeScriptTypes(appSource.slice(start, end)) + '; return accountsStep;')(...Object.values(context));
     result.onAction?.(); return { ...result, calls };
   };
   const member = step({ key: false });
   assert.equal(member.title, 'Turn on social publishing'); assert.equal(member.onAction, undefined, 'A member is told to ask, not sent to credentials.');
-  assert.deepEqual(step({ key: false, operator: true }).calls, [['page', 'Integrations']]); assert.equal(step({ key: false, operator: true }).action, 'Add your Zernio key');
+  assert.deepEqual(step({ key: false, operator: true }).calls, [['page', 'Integrations', 'keys']], 'The operator lands on Settings › Advanced › Service keys.'); assert.equal(step({ key: false, operator: true }).action, 'Add your Zernio key');
   assert.equal(step({ linked: false, admin: true }).onAction, undefined, 'Linking a brand profile needs an operator who manages the workspace.');
   assert.equal(step({ linked: false, map: true }).action, 'Link brand profile');
   const admin = step({ admin: true });

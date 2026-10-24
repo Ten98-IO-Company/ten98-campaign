@@ -133,14 +133,16 @@ test('SMS inbox keeps consent and STOP guidance, history and setup navigation wi
 
 test('Integrations has one Google credential form, preserves unrelated drafts and tests each Google service independently', async () => {
   const h = mount('IntegrationSettings'), calls = [];
-  const options = props(settingsRequest(calls, async () => ({ callbackUrl: 'https://campaign.example.test/inbound/a', publicCallbacks: true })));
+  const options = { ...props(settingsRequest(calls, async () => ({ callbackUrl: 'https://campaign.example.test/inbound/a', publicCallbacks: true }))), mode: 'keys' };
   h.render(options); h.flush(); await settle();
   let tree = h.render(options);
   const inputs = elements(tree).filter(node => [ui.Input, ui.Textarea].includes(node.type));
   assert.deepEqual(inputs.filter(node => node.props.name?.endsWith('-serviceAccountEmail')).map(node => node.props.name), ['googleDrive-serviceAccountEmail']);
   assert.deepEqual(inputs.filter(node => node.props.name?.endsWith('-privateKey')).map(node => node.props.name), ['googleDrive-privateKey']);
   assert.equal(elements(card(tree, 'googleCalendar')).filter(node => String(node.props?.name || '').startsWith('googleCalendar-')).length, 0, 'Calendar has no credential form of its own; its card holds only the project calendar mapping.');
-  assert.equal(elements(card(tree, 'googleCalendar')).filter(node => node.props?.as === 'form').length, 1);
+  // The project calendar mapping is project setup, so it sits under Manage in Connections, not in Service keys.
+  assert.equal(elements(card(tree, 'googleCalendar')).filter(node => node.props?.as === 'form').length, 0);
+  assert.equal(elements(card(h.render({ ...options, mode: 'connections' }), 'googleCalendar')).filter(node => node.props?.as === 'form').length, 1);
   const change = (name, value) => elements(tree).find(node => node.props.name === name).props.onChange({ target: { value } });
   change('openrouter-model', 'keep/unsaved');
   change('googleDrive-serviceAccountEmail', 'replacement@example.test');
@@ -238,7 +240,7 @@ test('Amazon SES settings take regions only from the server, never prefill the s
   const ses = { id: 'amazonSes', label: 'Amazon SES email', configured: true, source: 'saved', fields: { emailProvider: '', region: 'eu-west-1', accessKeyId: 'AKIAEXAMPLEEXAMPLE00', fromAddress: 'receipts@example.test', fromName: '', replyToAddress: '', configurationSet: 'feedback', snsTopicArn: '' }, secretFields: { secretAccessKey: { configured: true, source: 'saved' } }, options: { region: ['eu-west-1', 'ap-south-1'] } };
   async function open(provider) {
     const h = mount('IntegrationSettings'), calls = [];
-    const options = props(async (...args) => {
+    const options = { ...props(async (...args) => {
       calls.push(args); const [path, method] = args;
       if (path === '/settings/integrations') return { providers: [structuredClone(provider)] };
       if (path.endsWith('/calendar/status')) return { calendarId: '' };
@@ -247,7 +249,7 @@ test('Amazon SES settings take regions only from the server, never prefill the s
       if (path === '/settings/integrations/amazonSes/test' && method === 'POST') return { ok: true, status: 'connected', message: 'Synthetic SES check.' };
       if (path === '/settings/integrations/amazonSes' && method === 'PUT') return {};
       throw new Error('Unexpected synthetic request: ' + args.join(' '));
-    });
+    }), mode: 'keys' };
     h.render(options); h.flush(); await settle();
     return { h, calls, tree: () => h.render(options) };
   }
@@ -286,4 +288,19 @@ test('Amazon SES settings take regions only from the server, never prefill the s
   assert.deepEqual(named(tree, 'region').props.options.map(option => option.value), [''], 'Without the server list there is no region to choose.');
   assert.match(fieldOf(tree, 'region').props.description, /does not list Amazon SES regions/);
   unlisted.h.unmount();
+});
+
+test('Connections shows each tool on one line with Manage for this project; credentials live only in Service keys', async () => {
+  const h = mount('IntegrationSettings'), opened = [], options = { ...props(settingsRequest([], async () => ({ callbackUrl: 'https://campaign.example.test/inbound/a', publicCallbacks: true }))), onOpenKeys: () => opened.push('keys') };
+  h.render(options); h.flush(); await settle();
+  const connections = h.render(options), keys = h.render({ ...options, mode: 'keys' });
+  const credentialInputs = tree => elements(tree).filter(node => [ui.Input, ui.Textarea].includes(node.type) && /-(apiKey|privateKey|serviceAccountEmail|authToken|accessKeyId)$/.test(String(node.props.name || '')));
+  assert.equal(credentialInputs(connections).length, 0, 'No key or secret field in Connections.');
+  assert.ok(credentialInputs(keys).length > 0, 'Service keys holds the credential forms.');
+  assert.ok(elements(card(connections, 'googleCalendar')).some(node => node.type === ui.Disclosure && node.props.summary === 'Manage'), 'Project setup opens under Manage.');
+  const add = elements(connections).find(node => node.type === ui.Button && node.props.children === 'Add keys in Service keys');
+  if (add) { add.props.onClick(); assert.deepEqual(opened, ['keys']); }
+  const member = mount('IntegrationSettings'), memberOptions = { ...options, isOperator: false, mode: 'keys' };
+  member.render(memberOptions); member.flush(); await settle();
+  assert.match(renderToStaticMarkup(member.render(memberOptions)), /Only your Campaign administrator manages service keys/);
 });
