@@ -48,8 +48,8 @@ test('each activation gets a tagged landing page, and its link shows the short a
   assert.deepEqual(Object.fromEntries(url.searchParams), { ref: '1', utm_source: 'roadshow', utm_medium: 'offline', utm_campaign: 'Winter field push', utm_content: 'Mall stop' });
   for (const bad of ['shop.example.com', 'http://shop.example.com', 'https://user:secret@shop.example.com']) assert.throws(() => module.trackingDestination(bad, stopRow, ''), /landing page|HTTPS/);
   const markup = renderToStaticMarkup(React.createElement(module.TrackingLink, { link: { name: 'Mall stop', shortUrl: 'https://go.example.com/s/abc', qrSvgUrl: '/api/projects/p1/links/l1/qr.svg', clicks: 1200, qrScans: 85 } }));
-  assert.match(markup, /src="\/api\/projects\/p1\/links\/l1\/qr.svg"/); assert.match(markup, /alt="QR code for Mall stop"/);
-  assert.match(markup, /https:\/\/go.example.com\/s\/abc/); assert.match(markup, /1,200 link visits · 85 QR scans/); assert.match(markup, /download="Mall stop QR.svg"/);
+  assert.match(markup, /src="\/api\/projects\/p1\/links\/l1\/qr\.svg"/); assert.match(markup, /alt="QR code for Mall stop"/);
+  assert.match(markup, /https:\/\/go\.example\.com\/s\/abc/); assert.match(markup, /1,200 link visits · 85 QR scans/); assert.match(markup, /download="Mall stop QR\.svg"/);
 });
 
 test('lead capture shows the consent wording first, starts unticked, and sends only what was given', () => {
