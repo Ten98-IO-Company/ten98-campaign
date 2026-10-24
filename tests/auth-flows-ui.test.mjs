@@ -80,9 +80,31 @@ test('the startup reader takes the invitation from #invite= or an older ?invite=
   assert.deepEqual(openLink('?project=p1&invite=' + invite), { token: invite, calls: [[{ campaignIndex: 2 }, '', '/?project=p1']] });
   assert.deepEqual(openLink('?invite=' + 'B'.repeat(43), '#invite=' + invite), { token: invite, calls: [[{ campaignIndex: 2 }, '', '/']] }, 'The fragment wins, and both copies are removed.');
   assert.deepEqual(openLink('?project=p1', '#top'), { token: '', calls: [] }, 'Without an invitation the address is left alone.');
-  assert.equal((source.match(/takeInvite\(window\.location, window\.history\)/g) || []).length, 1, 'The invitation is read once, at startup.');
+  assert.equal((source.match(/takeInvite\(window\.location, window\.history\)/g) || []).length, 1, 'The invitation reader runs once at startup; a pasted link is read by watchInvite.');
   assert.doesNotMatch(source, /get\('invite'\) \|\| ''/, 'The app does not read the invitation from the address again.');
   assert.ok(source.indexOf('let startupAuthError = takeAuthError(') < source.indexOf('const startupInvite = takeInvite('), 'An identity error is read first, so a returned #invite= survives until the invitation reader takes it.');
+});
+
+// The real hash-change reader from main.tsx, run against a fake window.
+const watchStart = source.indexOf('function watchInvite('), watchEnd = source.indexOf('\n}\n', watchStart) + 2;
+const watchInvite = watchStart < 0 ? undefined : new Function('takeInvite', (await transformWithOxc(source.slice(watchStart, watchEnd), 'WatchInvite.ts')).code + '; return watchInvite;')(takeInvite);
+
+test('an invitation link pasted into an open tab is read on hashchange, once, and removed from the address', () => {
+  assert.equal(typeof watchInvite, 'function');
+  const invite = 'Ab_-'.repeat(10) + 'xyz', listeners = new Map(), calls = [], tokens = [];
+  const target = {
+    location: { pathname: '/', search: '?project=p1', hash: '' },
+    history: { state: { campaignIndex: 4 }, replaceState: (...args) => { calls.push(args); target.location.hash = ''; } },
+    addEventListener: (type, listener) => listeners.set(type, listener),
+    removeEventListener: (type, listener) => { if (listeners.get(type) === listener) listeners.delete(type); },
+  };
+  const stop = watchInvite(target, token => tokens.push(token));
+  target.location.hash = '#top'; listeners.get('hashchange')();
+  assert.deepEqual([tokens, calls], [[], []], 'Other fragments are left alone.');
+  target.location.hash = '#invite=' + invite; listeners.get('hashchange')();
+  assert.deepEqual(tokens, [invite]); assert.deepEqual(calls, [[{ campaignIndex: 4 }, '', '/?project=p1']]);
+  stop(); assert.equal(listeners.has('hashchange'), false, 'The listener is removed on unmount.');
+  assert.match(source, /useEffect\(\(\) => watchInvite\(window, token => \{ setInviteSignIn\(null\); setInviteToken\(token\); \}\), \[\]\);/, 'The App shows the new invitation instead of Sign in.');
 });
 
 // The real startup reader and code map from main.tsx.

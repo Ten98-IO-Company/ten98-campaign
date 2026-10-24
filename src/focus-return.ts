@@ -2,19 +2,20 @@ import { useEffect, useRef } from 'react';
 
 // A @ten98/ui Button is disabled while its action is busy, and a disabled button loses focus to <body>.
 // Call the returned function when a busy action starts: once `busy` clears, focus goes back to the control
-// that was focused, unless that control is gone or the person has moved focus somewhere else meanwhile.
+// that was focused, unless the person has moved focus somewhere else meanwhile. When that control is gone (a reviewed
+// card drops its review buttons), focus goes to the optional `fallback` instead, if it is still on the page.
 export function useFocusReturn(busy: unknown) {
-  const target = useRef<HTMLElement | null>(null);
+  const target = useRef<{ element: HTMLElement; fallback?: HTMLElement | null } | null>(null);
   useEffect(() => {
-    const element = target.current;
-    if (busy || !element) return;
+    const remembered = target.current;
+    if (busy || !remembered) return;
     target.current = null;
-    const active = document.activeElement;
-    if (element.isConnected && (!active || active === document.body)) element.focus();
+    const active = document.activeElement, element = [remembered.element, remembered.fallback].find(node => node?.isConnected);
+    if (element && (!active || active === document.body)) element.focus();
   }, [busy]);
-  return () => {
+  return (fallback?: HTMLElement | null) => {
     const active = document.activeElement;
-    target.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    target.current = active instanceof HTMLElement && active !== document.body ? { element: active, fallback } : null;
   };
 }
 

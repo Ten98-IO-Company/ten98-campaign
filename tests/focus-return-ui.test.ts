@@ -40,6 +40,38 @@ test('focus is left alone when the person moved it, the control is gone, or noth
   assert.equal(document.body.focused, 0, 'Focus on <body> at the start is not a target.');
 });
 
+test('when the control that started an action is gone, focus goes to the fallback given when it was remembered (#151)', () => {
+  const render = mount(), button = new FakeElement(), card = new FakeElement();
+  document.activeElement = button; (render('') as (fallback?: FakeElement) => void)(card);
+  render('Saving review'); button.isConnected = false; document.activeElement = document.body; // The reviewed card drops its buttons.
+  render(''); assert.equal(card.focused, 1); assert.equal(document.activeElement, card);
+  const kept = mount(), stays = new FakeElement(), unused = new FakeElement();
+  document.activeElement = stays; (kept('') as (fallback?: FakeElement) => void)(unused); kept('Saving'); document.activeElement = document.body; kept('');
+  assert.deepEqual([stays.focused, unused.focused], [1, 0], 'A control that is still there keeps priority over the fallback.');
+});
+
+// ten98-campaign#151: Approvals and first-run sign-in return focus after their busy actions.
+test('Approvals remembers the focused control once per accepted action, with its review card as the fallback', async () => {
+  const source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');
+  const owner = source.indexOf('export default function ContentApprovals('), from = source.indexOf('async function action(', owner), body = source.slice(from, source.indexOf('  async function review(', from));
+  assert.match(source.slice(owner, from), /const rememberFocus = useFocusReturn\(busy\);/);
+  const remembered: unknown[] = [], card = { id: 'review-post-1' };
+  const context = { busy: '', active: { current: true }, readVersion: { current: 0 }, setBusy() {}, setError() {}, setNotice() {}, noteRestrictions() {}, advance: { current: null }, document: { getElementById: (id: string) => id === card.id ? card : null }, rememberFocus: (fallback: unknown) => { remembered.push(fallback); } };
+  const action = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(body)});`)(...Object.values(context));
+  await action('post-1', async () => {}); await action('refresh', async () => {});
+  assert.deepEqual(remembered, [card, null]);
+  const refused = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(body)});`)(...Object.values({ ...context, busy: 'post-1' }));
+  await refused('post-2', async () => {}); assert.equal(remembered.length, 2, 'A refused repeat does not replace the remembered control.');
+});
+
+test('a failed owner setup or sign-in returns focus to the control that submitted it', async () => {
+  const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), app = source.indexOf('function App() {');
+  assert.match(source, /^import \{ useFocusReturn \} from '\.\/focus-return';$/m);
+  const hook = source.indexOf('  const rememberFocus = useFocusReturn(busy);', app);
+  assert.ok(hook > app && hook < source.indexOf('  if (!session) return', app), 'The hook runs before the App returns early.');
+  assert.match(source, / onSubmit=\{async values => \{ rememberFocus\(\); await run\(async \(\) => \{ await api\('\/auth\/' \+ \(session\.setupRequired \? 'setup' : 'login'\), 'POST', values\);/);
+});
+
 // The three reported surfaces remember focus inside their single-flight lock, after a repeat is refused.
 for (const [file, component, start, end] of [['DirectCampaigns', 'export default function DirectCampaigns(', 'async function action(', '  function acceptCampaign('], ['UnifiedInbox', 'function ZernioInbox(', 'async function action(', '  async function write('], ['TeamSettings', 'export default function TeamSettings(', 'async function act(', '  const invite =']] as const) {
   test(`${file} remembers the focused control once per accepted action`, async () => {

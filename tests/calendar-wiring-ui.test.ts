@@ -26,7 +26,7 @@ const agendaElement = calendarPage.match(/<CampaignPublishingAgenda [\s\S]*?\/><
 const elementCode = (await transformWithOxc(`const element = ${agendaElement};`, 'calendar-wiring.tsx', { jsx: { runtime: 'classic' } })).code;
 
 // Renders the agenda with exactly the props main.tsx passes, from main.tsx's initial calendar state.
-function wiredAgenda(state: { projectId: string; posts: Row[]; campaigns: Row[] }) {
+function wiredAgenda(state: { projectId: string; posts: Row[]; campaigns: Row[]; activations?: Row[] }) {
   const updates: Record<string, unknown[]> = {};
   const useState = (initial: unknown) => [typeof initial === 'function' ? (initial as () => unknown)() : initial, () => {}];
   const names = declarations.flatMap(line => [...line.matchAll(/\[(\w+), (\w+)\]/g)].flatMap(match => [match[1], match[2]]));
@@ -66,4 +66,10 @@ test('Week is the default calendar view, and week and filter changes go back to 
   assert.deepEqual(control?.props?.options.map((option: { value: string }) => option.value), ['week', 'month', 'list']);
   element!.props!.onWeekChange('2099-10-26'); element!.props!.onFiltersChange({ campaign: 'c1' }); control!.props!.onValueChange('month');
   assert.deepEqual(Object.values(updates).flat(), ['2099-10-26', { campaign: 'c1' }, 'month']);
+});
+
+test('field activity reaches the calendar through main.tsx with no Google events loaded (#185)', () => {
+  const activation = { id: 'road', name: 'Mall of the Emirates roadshow', type: 'roadshow', status: 'planned', location: 'Mall of the Emirates', startAt: today(10), endAt: today(16) };
+  const { element } = wiredAgenda({ projectId: 'p1', posts: [], campaigns: [], activations: [activation] });
+  assert.match(renderToStaticMarkup(element as React.ReactElement), /Field activity · Mall of the Emirates roadshow/);
 });

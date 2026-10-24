@@ -5,13 +5,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
-import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentPrompt } from '../shared/offline-activations.ts';
+import * as shared from '../shared/offline-activations.ts';
 
 type Row = Record<string, any>;
 const source = await readFile(new URL('../src/OfflineActivations.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, ''), 'OfflineActivations.tsx', { jsx: { runtime: 'classic' } });
-const library = ui as unknown as Record<string, unknown>;
-const module = new Function('React', 'useEffect', 'useRef', 'useState', 'ACTIVATION_TYPES', 'ACTIVATION_TYPE_LABELS', 'CONSENT_CHANNELS', 'CONSENT_LABELS', 'consentPrompt', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink, leadBody, LeadCapture, rollUp, ResultsSummary, peopleChoices, patchBody };')(React, useEffect, useRef, useState, ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentPrompt, ...Object.values(library));
+const library = { ...shared, ...ui } as unknown as Record<string, unknown>;
+const module = new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink, leadBody, LeadCapture, rollUp, ResultsSummary, peopleChoices, patchBody };')(React, useEffect, useRef, useState, ...Object.values(library));
 const html = (props: Row) => renderToStaticMarkup(React.createElement(module.OfflineActivations, { projectId: 'p1', brand: 'Brand launch', campaigns: [], activations: [], request: async () => ({}), onChanged() {}, ...props }));
 const campaigns = [{ id: 'c1', name: 'Winter field push', currency: 'GBP' }, { id: 'c2', name: 'Spring sampling', currency: 'AED' }];
 const activation = (id: string, startAt: string, extra: Row = {}) => ({ id, name: id, type: 'roadshow', campaignId: 'c1', status: 'planned', startAt, endAt: new Date(Date.parse(startAt) + 8 * 3600000).toISOString(), location: 'City Centre Mall', budget: 1200, spent: 300, reached: 0, materials: [], teamIds: [], ...extra });
@@ -56,11 +56,18 @@ test('lead capture shows the consent wording first, starts unticked, and sends o
   assert.throws(() => module.leadBody({ name: 'Pat', email: 'pat@example.test', phone: '', channels: [] }), /Without an opt-in nothing is saved/);
   assert.deepEqual(module.leadBody({ name: ' Pat ', email: 'pat@example.test', phone: '', channels: ['email'] }), { name: 'Pat', email: 'pat@example.test', consents: { email: true, sms: false, whatsapp: false } });
   const markup = renderToStaticMarkup(React.createElement(module.LeadCapture, { brand: 'Brand launch', activation: { id: 'a1', name: 'Mall stop' }, request: async () => ({}), path: '/projects/p1/activations', onClose() {} }));
-  assert.match(markup, /Ask first: “Yes, Brand launch may send me news and offers by…”/);
+  assert.ok(markup.includes(`Ask first: “${shared.consentWording('Brand launch', [])}”`), 'The form shows the whole sentence that is recorded as evidence.');
   assert.equal((markup.match(/type="checkbox"/g) || []).length, 3); assert.doesNotMatch(markup, /checked=""/, 'Every channel starts unticked.');
   assert.ok(markup.indexOf('Ask first') < markup.indexOf('Mobile number'), 'Consent comes before personal details.');
   assert.match(html({ campaigns, activations: [activation('First stop', '2026-11-07T10:00:00Z'), activation('Called off', '2026-11-08T10:00:00Z', { status: 'cancelled' })] }), /aria-label="Capture leads at First stop"/);
   assert.doesNotMatch(html({ campaigns, activations: [activation('Called off', '2026-11-08T10:00:00Z', { status: 'cancelled' })] }), /Capture leads/, 'Cancelled activations take no leads.');
+});
+
+test('the consent sentence names the ticked channels in a fixed order, so the screen and the stored evidence agree', () => {
+  assert.equal(shared.consentWording('Brand launch', []), 'Yes, Brand launch may send me news and offers by email, text message or WhatsApp. I can unsubscribe at any time.');
+  assert.equal(shared.consentWording('Brand launch', ['email']), 'Yes, Brand launch may send me news and offers by email. I can unsubscribe at any time.');
+  assert.equal(shared.consentWording('Brand launch', ['whatsapp', 'sms']), 'Yes, Brand launch may send me news and offers by text message and WhatsApp. I can unsubscribe at any time.', 'Ticking order does not change the sentence.');
+  assert.equal(shared.consentChannelList(['whatsapp', 'email', 'sms'], 'or'), 'email, text message or WhatsApp');
 });
 
 test('results roll up reached, leads, visits, spend and cost per lead, and never add up mixed currencies', () => {
@@ -92,6 +99,15 @@ test('an archived tracking link is shown as inactive, without a QR code that no 
   const markup = renderToStaticMarkup(React.createElement(module.TrackingLink, { link: { name: 'Mall stop', shortUrl: 'https://go.example.com/s/abc', qrSvgUrl: '/api/projects/p1/links/l1/qr.svg', clicks: 3, qrScans: 1, archived: true } }));
   assert.match(markup, /Inactive/); assert.match(markup, /no longer redirect/);
   assert.doesNotMatch(markup, /<img|Download QR/);
+});
+
+test('the promo code pattern compiles as browsers compile it and accepts what the server accepts', () => {
+  // Browsers compile `pattern` as ^(?:pattern)$ with the v (unicode sets) flag; an invalid one logs an error and is ignored.
+  const pattern = source.match(/<Field label="Promo code"[^>]*><Input [^>]*pattern="([^"]+)"/)?.[1];
+  assert.ok(pattern, 'The Promo code input has a pattern.');
+  const browser = new RegExp(`^(?:${pattern})$`, 'v'), server = /^[A-Za-z0-9_-]+$/; // The server check in server/index.ts.
+  for (const code of ['MALL10', 'moe_20-off', '-', '_', 'MOE 20%!', 'has spaces in it', 'café', 'a/b', 'x\\y']) assert.equal(browser.test(code), server.test(code), code);
+  assert.ok(browser.test(''), 'The promo code is optional.');
 });
 
 test('the page is built from @ten98/ui only', () => {
