@@ -155,7 +155,8 @@ test('post status filter is one labelled segmented control bound to the local fi
   const filter = new Function('state', 'tab', 'filtered', declaration + '; return visiblePosts;');
   const posts = statuses.slice(1).map(status => ({ id: status, status }));
   for (const status of statuses) assert.deepEqual(filter({ posts }, status, rows => rows).map(post => post.id), status === 'all' ? statuses.slice(1) : [status]);
-  assert.match(appSource, /sections\('Publishing sections', publishingView, /, 'Publishing route navigation stays separate.');
+  assert.doesNotMatch(appSource, /sections\('Publishing sections'/, 'Publishing sections are homed by the area map, not a second tab row.');
+  assert.match(appSource, />Repeating posts<\/Button>/); assert.match(appSource, /\{page === 'Publishing' && publishingView === 'queues' && settingsFrame\(/);
 });
 
 test('Overview campaign totals and channel counts use singular only for one campaign', async () => {
