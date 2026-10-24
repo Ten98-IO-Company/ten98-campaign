@@ -5,6 +5,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { assertNoMarkup, readText } from './read-text.ts';
 
 type Row = Record<string, any>;
 const library = ui as unknown as Record<string, any>;
@@ -28,7 +29,7 @@ const elements = (node: any): any[] => Array.isArray(node) ? node.flatMap(elemen
   : React.isValidElement(node) ? [node, ...elements((node.props as Row).children), ...elements((node.props as Row).actions), ...((node.props as Row).items || []).flatMap((item: Row) => elements(item.content)),
     ...(node.type === DataTable ? elements((node.props as Row).rows.flatMap((row: Row) => [...(node.props as Row).columns.map((column: Row) => column.render?.(row)), (node.props as Row).rowActions?.(row)])) : [])] : [];
 // Visible text read by splitting on tags in one pass (not a sanitiser).
-const text = (node: any): string => renderToStaticMarkup(React.createElement(React.Fragment, null, node)).split(/<[^>]*>/).join(' ').replace(/\s+/g, ' ');
+const text = (node: any): string => readText(renderToStaticMarkup(React.createElement(React.Fragment, null, node)));
 
 function oohMap(states: unknown[]) {
   const mock = hooks(states);
@@ -88,8 +89,8 @@ test('the booking form is grouped, shows at most 8 fields before More, and submi
   const { BookingFields } = oohMap([]);
   const fields = (item?: Row) => React.createElement(BookingFields, { item, partners: [{ id: 'v1', name: 'Gulf Outdoor' }], campaigns: [{ id: 'c1', name: 'Launch' }] });
   const html = renderToStaticMarkup(fields());
-  const legends = [...html.matchAll(/<legend[^>]*>(.*?)<\/legend>/g)].map(match => match[1].split(/<[^>]*>/).join(''));
-  assert.ok(legends.every(legend => !legend.includes('<')), 'Legend text still contains markup.');
+  const legends = [...html.matchAll(/<legend[^>]*>(.*?)<\/legend>/g)].map(match => readText(match[1], ''));
+  for (const legend of legends) assertNoMarkup(legend, 'Legend text still contains markup.');
   assert.deepEqual(legends.filter(legend => legend !== 'Booking dates'), ['Placement', 'Where', 'When &amp; cost', 'Campaign &amp; status']);
   const names = [...html.matchAll(/name="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual([...new Set(names)].sort(), ['campaignId', 'cost', 'currency', 'endDate', 'latitude', 'location', 'longitude', 'name', 'notes', 'proofUrl', 'providerId', 'startDate', 'status', 'type']);
