@@ -14,7 +14,7 @@ import { IntegrationError, mediaUrl, type ProviderRecord, type OperationContext 
 import { createIntegrationSettings } from './integration-settings.ts';
 import { handleInvitations, revokeMemberInvitations } from './invitations.ts';
 import { handleOperationRecovery } from './operation-recovery.ts';
-import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from './approvals.ts';
+import { handleApprovals, assertPublishingApproval, assertProviderPostEdit, recordApprovedReschedule } from './approvals.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.ts';
 import { handleCalendar } from './calendar.ts';
 import { handleAgent } from './agent.ts';
@@ -430,7 +430,7 @@ export async function createApp(options: AppOptions = {}) {
                 if (['url', 'deliveryUrl', 'kind'].some(key => data[key] !== previous[key])) data.approval = 'pending';
                 if (Object.hasOwn(body, 'deliveryUrl') && data.deliveryUrl !== previous.deliveryUrl) for (const key of MEDIA_DELIVERY_FIELDS) data[key] = null;
               }
-              const record = await store.update(project.id, collection, id, data); await store.activity(project.id, `${capitalise(recordKind(collection))} updated.`); return send(200, { record });
+              const record = await store.update(project.id, collection, id, data); await store.activity(project.id, `${capitalise(recordKind(collection))} updated.`); if (collection === 'posts' && record) await recordApprovedReschedule({ ...context, project }, previous, record); return send(200, { record });
             }
           }
         }

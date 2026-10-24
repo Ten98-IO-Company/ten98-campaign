@@ -32,7 +32,8 @@ async function postSnapshot(context: ApprovalContext, post: ProviderRecord, load
     return [platform, { content: variant.content, mediaItems: variant.mediaItems, options: variant.options }];
   }));
   const mediaItems = resolveVariant({ ...post, platformOverrides: {} }, 'facebook', records.filter(Boolean)).mediaItems;
-  const accountVariants = Object.fromEntries(Object.entries(accountOverrides).map(([id, copy]) => { const variant = resolveVariant(post, copy.platform, records.filter(Boolean), id); return [id, { platform: copy.platform, content: variant.content, mediaItems: variant.mediaItems, options: variant.options, ...(copy.scheduledAt ? { scheduledAt: copy.scheduledAt } : {}) }]; }));
+  // An account entry that only sets its own time changes no copy (#125), so it is left out like an absent one.
+  const accountVariants = Object.fromEntries(Object.entries(accountOverrides).filter(([, copy]) => Object.keys(copy).some(key => key !== 'platform' && key !== 'scheduledAt')).map(([id, copy]) => { const variant = resolveVariant(post, copy.platform, records.filter(Boolean), id); return [id, { platform: copy.platform, content: variant.content, mediaItems: variant.mediaItems, options: variant.options }]; }));
   const wireItems = (items: ProviderRecord[]) => items.map(({ width, height, duration, ...item }) => item);
   const configuration = (target: ProviderRecord) => {
     const current = targetConfiguration(target);
@@ -41,13 +42,38 @@ async function postSnapshot(context: ApprovalContext, post: ProviderRecord, load
   };
   const providerVariants = (post.providerResults || []).filter((target: ProviderRecord) => target.platform && target.accountId).flatMap((target: ProviderRecord) => {
     const id = String(target.accountId?._id || target.accountId), actual = configuration(target), expected = configuration(buildPlatformEntry(post, target.platform, id, records.filter(Boolean)));
-    const scheduledFor = typeof target.scheduledFor === 'string' && Date.parse(target.scheduledFor) !== Date.parse(accountOverrides[id]?.scheduledAt || post.scheduledAt || post.scheduledFor) ? target.scheduledFor : '';
-    return JSON.stringify(actual) === JSON.stringify(expected) && !scheduledFor ? [] : [{ platform: target.platform, accountId: String(target.accountId?._id || target.accountId), ...actual, ...(scheduledFor ? { scheduledFor } : {}) }];
+    return JSON.stringify(actual) === JSON.stringify(expected) ? [] : [{ platform: target.platform, accountId: id, ...actual }];
   });
   // `publishedEdit` (a proposed edit of a published copy) is added only when present, so other posts keep their fingerprints.
-  return { tags: normalizePostTags(post.tags, { preserve: true }), ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), ...(Object.keys(accountVariants).length ? { accountOverrides: accountVariants } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', scheduledAt: post.scheduledAt || post.scheduledFor || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null, ...(post.publishedEdit ? { publishedEdit: post.publishedEdit } : {}) };
+  // The schedule is not part of what is approved (postSchedule, #125).
+  return { tags: normalizePostTags(post.tags, { preserve: true }), ...(Object.keys(accountVariants).length ? { accountOverrides: accountVariants } : {}), content: post.content || '', platforms: post.platforms || [], accounts: post.accounts || [], mediaItems, platformOverrides: variants, providerVariants, assetId: post.assetId || '', campaignId: post.campaignId || '', assets, asset: assets.find(asset => asset.id === post.assetId) || null, ...(post.publishedEdit ? { publishedEdit: post.publishedEdit } : {}) };
 }
 const fingerprint = (snapshot: ProviderRecord) => createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
+// Manager decision on #125: approvers approve what is published, not the minute it goes out. The post time, each
+// account's own time, a provider copy's differing time and the publishing queue (which only picks the next weekly
+// slot) sit outside the fingerprint; a review stores them as
+// `schedule` beside its snapshot. A move to another future time keeps the approval. A move to now or the past, or
+// clearing the time, makes it stale. Ad spend fingerprints never held a schedule.
+function postSchedule(post: ProviderRecord) {
+  const at = post.scheduledAt || post.scheduledFor || '', overrides = normalizeAccountVariants(post);
+  const accounts = Object.fromEntries(Object.entries(overrides).filter(([, copy]) => copy.scheduledAt).map(([id, copy]) => [id, copy.scheduledAt]));
+  const providers = Object.fromEntries((post.providerResults || []).filter((target: ProviderRecord) => target.platform && target.accountId && typeof target.scheduledFor === 'string').flatMap((target: ProviderRecord) => {
+    const id = String(target.accountId?._id || target.accountId);
+    return Date.parse(target.scheduledFor) !== Date.parse(overrides[id]?.scheduledAt || at) ? [[id, target.scheduledFor]] : [];
+  }));
+  return { at, accounts, providers, queue: post.queueId ? { id: post.queueId, version: post.queueVersion || '' } : null };
+}
+const withSchedule = (snapshot: ProviderRecord, post: ProviderRecord) => ({ ...snapshot, ...(post.queueId ? { queueId: post.queueId, queueVersion: post.queueVersion } : {}), scheduledAt: post.scheduledAt || post.scheduledFor || '', schedule: postSchedule(post) });
+// Whether an approved review still covers the post's current times. Reviews stored before #125 have no schedule and
+// a fingerprint that included it, so they never reach here with a matching fingerprint.
+function scheduleKept(review: ProviderRecord, post: ProviderRecord, now = Date.now()) {
+  const approved = JSON.parse(review.snapshot).schedule, current = postSchedule(post);
+  if (JSON.stringify(approved) === JSON.stringify(current)) return true;
+  const times = [current.at, ...Object.values(current.accounts), ...Object.values(current.providers)] as string[];
+  // Only a move from one time to another keeps it: a post approved with no time (to publish now, or kept as a provider
+  // draft) that gains one is a different instruction. A queue always takes its next slot, so it counts as a future time.
+  return Boolean((approved?.at || approved?.queue) && (current.at || current.queue)) && times.filter(Boolean).every(time => Date.parse(time) > now);
+}
 const latest = (db: Executor, projectId: string, postId: string) => first(db.execute(sql`SELECT * FROM post_approval_reviews WHERE project_id=${projectId} AND post_id=${postId} ORDER BY seq DESC LIMIT 1`));
 // A review of a proposed provider update stores the proposal beside the snapshot it fingerprints (#30 Q2).
 const proposalOf = (review: ProviderRecord | undefined) => Boolean(review && JSON.parse(review.snapshot).proposal);
@@ -89,11 +115,11 @@ function fields(body: any, allowed: string[]) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_APPROVAL_FIELDS', 'Use only the fields shown in the approval form.');
 }
 // A post's review state as the queue shows it; only 'approved' passes assertPublishingApproval's review check.
-const approvalStatus = (post: ProviderRecord, review: ProviderRecord | undefined, snapshot: ProviderRecord) => submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint === fingerprint(snapshot) ? review.status : 'stale';
+const approvalStatus = (post: ProviderRecord, review: ProviderRecord | undefined, snapshot: ProviderRecord) => submitted(post) && !retryableFailure(post) ? 'submitted' : !review ? 'not_requested' : review.fingerprint !== fingerprint(snapshot) || review.status === 'approved' && !scheduleKept(review, post) ? 'stale' : review.status;
 async function queueItem(context: ApprovalContext, post: ProviderRecord, queue: ProviderRecord | null = null) {
-  const snapshot = await postSnapshot(context, post), review = await latest(context.db, context.project.id, post.id);
+  const snapshot = await postSnapshot(context, post), review = await latest(context.db, context.project.id, post.id), schedule = postSchedule(post), overrides = normalizeAccountVariants(post);
   const status = approvalStatus(post, review, snapshot);
-  return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: snapshot.queueId || '', queueVersion: snapshot.queueVersion || '', content: snapshot.content, tags: snapshot.tags, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, ...(snapshot.accountOverrides ? { accountOverrides: snapshot.accountOverrides } : {}), providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: snapshot.scheduledAt }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: await publicReview(context.db, review) };
+  return { post: { id: post.id, status: post.status, providerFailed: retryableFailure(post), sample: Boolean(post.sample), queueId: post.queueId || '', queueVersion: post.queueVersion || '', content: snapshot.content, tags: snapshot.tags, platforms: snapshot.platforms, accounts: snapshot.accounts, mediaItems: snapshot.mediaItems, platformOverrides: snapshot.platformOverrides, ...(Object.keys(overrides).length ? { accountOverrides: Object.fromEntries(Object.entries(overrides).map(([id, copy]) => [id, { ...(snapshot.accountOverrides?.[id] || { platform: copy.platform, ...snapshot.platformOverrides[copy.platform] }), ...(schedule.accounts[id] ? { scheduledAt: schedule.accounts[id] } : {}) }])) } : {}), providerVariants: snapshot.providerVariants, assetId: snapshot.assetId, campaignId: snapshot.campaignId, scheduledAt: post.scheduledAt || post.scheduledFor || '' }, queue, assets: snapshot.assets, asset: snapshot.asset, status, review: await publicReview(context.db, review) };
 }
 async function publishingQueues(context: ApprovalContext) {
   const env = { ...(context.config?.env === undefined ? process.env : context.config.env), ...(context.config || {}) }, profileId = String(context.project.zernioProfileId || '');
@@ -139,9 +165,9 @@ async function requestProposal(context: ApprovalContext, post: ProviderRecord) {
   await db.transaction(async (tx: Executor) => {
     await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
     const current = await latest(tx, project.id, post.id), now = new Date().toISOString();
-    if (current?.fingerprint === hash && (current.status === 'approved' || current.status === 'pending' && proposalOf(current))) return;
+    if (current?.fingerprint === hash && (current.status === 'approved' && scheduleKept(current, proposed) || current.status === 'pending' && proposalOf(current))) return;
     await tx.execute(sql`UPDATE post_approval_reviews SET status='rejected',reviewed_at=${now},note=${'Superseded by a newer proposed update.'} WHERE project_id=${project.id} AND post_id=${post.id} AND status='pending'`);
-    await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${randomUUID()}, ${project.id}, ${post.id}, ${hash}, ${JSON.stringify({ ...snapshot, proposal: body.proposal })}, 'pending', ${user.id}, ${now})`);
+    await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${randomUUID()}, ${project.id}, ${post.id}, ${hash}, ${JSON.stringify({ ...withSchedule(snapshot, proposed), proposal: body.proposal })}, 'pending', ${user.id}, ${now})`);
     await createStore(tx).activity(project.id, `Review of a proposed provider update requested by ${user.name || user.id}.`);
   });
   return queueItem(context, post);
@@ -152,15 +178,31 @@ async function assertApprovedReview(context: ApprovalContext, post: ProviderReco
   const review = await latest(context.db, context.project.id, post.id);
   if (!review || review.status !== 'approved') fail(403, 'PUBLISHING_APPROVAL_REQUIRED', 'An owner or administrator must approve this post before it can be sent to a provider.');
   if (review.fingerprint !== fingerprint(snapshot)) fail(409, 'PUBLISHING_APPROVAL_STALE', 'This post or its creative changed after approval. Request a new review before publishing.');
+  if (!scheduleKept(review, post)) fail(409, 'PUBLISHING_APPROVAL_STALE', 'This post was moved to a time that has already passed after approval. Request a new review before publishing.');
 }
 
 export async function assertPublishingApproval(context: ApprovalContext, post: ProviderRecord) {
   const current = await context.store.get(context.project.id, 'posts', post?.id);
   if (!current || post.sample || current.sample) fail(409, 'APPROVAL_POST_NOT_FOUND', 'Use a real post from this project before publishing.');
   const snapshot = await postSnapshot(context, current), currentFingerprint = fingerprint(snapshot);
-  if (fingerprint(await postSnapshot(context, post)) !== currentFingerprint) fail(409, 'APPROVAL_POST_CHANGED', 'The post or creative changed while publishing was being prepared. Refresh it before publishing.');
+  // The times sit outside the fingerprint (#125) but a dispatch must still send exactly the stored post.
+  if (fingerprint(await postSnapshot(context, post)) !== currentFingerprint || JSON.stringify(postSchedule(post)) !== JSON.stringify(postSchedule(current))) fail(409, 'APPROVAL_POST_CHANGED', 'The post or creative changed while publishing was being prepared. Refresh it before publishing.');
   if (!(await policy(context.db, context.project.id)).requireApproval) return;
   await assertApprovedReview(context, current, snapshot);
+}
+
+// #125: after a time-only move that keeps an approval, the review takes the new times and the activity log names who
+// moved the post. A move that makes the approval stale changes nothing here; the queue then shows it as stale.
+export async function recordApprovedReschedule(context: ApprovalContext, previous: ProviderRecord, post: ProviderRecord) {
+  if (JSON.stringify(postSchedule(previous)) === JSON.stringify(postSchedule(post))) return;
+  const { project, user, db } = context, hash = fingerprint(await postSnapshot(context, post));
+  await db.transaction(async (tx: Executor) => {
+    await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, post.id]));
+    const review = await latest(tx, project.id, post.id);
+    if (review?.status !== 'approved' || review.fingerprint !== hash || !scheduleKept(review, post)) return;
+    await tx.execute(sql`UPDATE post_approval_reviews SET snapshot=${JSON.stringify(withSchedule(JSON.parse(review.snapshot), post))} WHERE id=${review.id}`);
+    await createStore(tx).activity(project.id, `Post rescheduled after approval by ${user.name || user.id}.`);
+  });
 }
 
 // A provider update replaces a submitted post's content, so the approval must match the proposed post (the current
@@ -195,14 +237,14 @@ function reviewInput(body: any) {
 // approvals with their use); only a still-pending review takes a decision, so a parallel approve and reject cannot both
 // apply. `setting` names the policy flag under which the self-review rule applies. Returns whether the decision was a
 // self-approval, or null when a repeatable item finds a parallel decision the same way already recorded.
-async function recordDecision(context: ApprovalContext, subject: string, review: ProviderRecord, decision: string, note: string, setting: 'requireApproval' | 'requireAdApproval', repeatable = false) {
+async function recordDecision(context: ApprovalContext, subject: string, review: ProviderRecord, decision: string, note: string, setting: 'requireApproval' | 'requireAdApproval', repeatable = false, approvedSnapshot?: string) {
   const { project, user, db } = context;
   return db.transaction(async (tx: Executor) => {
     await lockReviewer(tx, project.id, user.id);
     await advisoryLock(tx, 'approval:' + JSON.stringify([project.id, subject]));
     const self = decision === 'approved' && review.requested_by === user.id && (await policy(tx, project.id))[setting];
     if (self) await assertSelfApprovalAllowed(tx, project.id, user.id);
-    const decided = await tx.execute(sql`UPDATE post_approval_reviews SET status=${decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()},self_approved=${self} WHERE id=${review.id} AND status='pending'`);
+    const decided = await tx.execute(sql`UPDATE post_approval_reviews SET status=${decision},reviewed_by=${user.id},reviewed_at=${new Date().toISOString()},note=${note.trim()},self_approved=${self},snapshot=COALESCE(${decision === 'approved' ? approvedSnapshot ?? null : null}, snapshot) WHERE id=${review.id} AND status='pending'`);
     if (!decided.rowCount) {
       // A parallel decision the same way already holds; a repeatable item reports it instead of failing.
       if (repeatable && (await first(tx.execute(sql`SELECT status FROM post_approval_reviews WHERE id=${review.id}`)))?.status === decision) return null;
@@ -219,7 +261,7 @@ async function decide(context: ApprovalContext, { post, review, snapshot, hash, 
   const note = reviewInput(body);
   if (repeatable && (await first(db.execute(sql`SELECT status FROM post_approval_reviews WHERE id=${body.reviewId} AND project_id=${project.id} AND post_id=${post.id}`)))?.status === body.decision) return { status: 'unchanged', item: await queueItem(context, post, queueSummary(post, [], true)) };
   if (!review || review.id !== body.reviewId || review.status !== 'pending' || review.fingerprint !== hash) fail(409, 'APPROVAL_REVIEW_CHANGED', 'This review request changed or its post was edited. Refresh the queue before reviewing it.');
-  let queue = null;
+  let queue = null, approvedSnapshot: string | undefined;
   if (body.decision === 'approved' && proposing) {
     if ((await policy(db, project.id)).requireApproval) approvalAccounts(snapshot);
     assetApproved(snapshot);
@@ -229,13 +271,16 @@ async function decide(context: ApprovalContext, { post, review, snapshot, hash, 
     if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
     if (post.queueId) queue = reviewedQueue(post, await publishingQueues(context));
     const currentReview = await latest(db, project.id, post.id);
-    if (fingerprint(await postSnapshot(context, await localPost(context, post.id))) !== hash || currentReview?.id !== review.id || currentReview?.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before approving it.');
+    const fresh = await localPost(context, post.id);
+    if (fingerprint(await postSnapshot(context, fresh)) !== hash || currentReview?.id !== review.id || currentReview?.status !== 'pending') fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before approving it.');
     if ((await policy(db, project.id)).requireApproval) approvalAccounts(post);
     assetApproved(snapshot);
+    // The approval covers the times the approver saw, so a later move is measured from them.
+    approvedSnapshot = JSON.stringify(withSchedule(JSON.parse(review.snapshot), fresh));
     const failed = retryableFailure(post) ? post.providerResults.filter((copy: ProviderRecord) => copy.status === 'failed' && copy.platform) : [];
     assertPlatformRules(post, (await assetRecords(context, post)).records.filter(Boolean), failed.length ? failed : undefined);
   }
-  const selfApproved = await recordDecision(context, post.id, review, body.decision, note, 'requireApproval', repeatable);
+  const selfApproved = await recordDecision(context, post.id, review, body.decision, note, 'requireApproval', repeatable, approvedSnapshot);
   if (selfApproved === null) return { status: 'unchanged', item: await queueItem(context, post, queueSummary(post, [], true)) };
   await store.activity(project.id, selfApproved ? `Content self-approved by ${user.name || user.id} (only administrator).` : `Content ${body.decision} by ${user.name || user.id}.`); return { status: 'decided', item: await queueItem(context, post, queue ? { ...queue, ready: true } : queueSummary(post, [], true)) };
 }
@@ -421,11 +466,11 @@ export async function handleApprovals(context: ApprovalContext) {
         const local = within(context, tx), currentReview = await latest(tx, project.id, post.id);
         // A review that changed for this same content (for example a parallel request just opened it) is the answer;
         // a review of other content, or a changed post, means the request is stale.
-        const sameContent = currentReview?.fingerprint === hash && currentReview?.status !== 'rejected';
+        const sameContent = currentReview?.fingerprint === hash && currentReview?.status !== 'rejected' && (currentReview?.status !== 'approved' || scheduleKept(currentReview, post));
         if (fingerprint(await postSnapshot(local, await localPost(local, post.id))) !== hash || ((currentReview?.id !== review?.id || currentReview?.status !== review?.status) && !sameContent)) fail(409, 'APPROVAL_REVIEW_CHANGED', 'The post or review changed while its queue was being verified. Refresh before requesting review.');
         if ((await policy(tx, project.id)).requireApproval) approvalAccounts(post);
-        if (!currentReview || currentReview.fingerprint !== hash || currentReview.status === 'rejected') {
-          await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${randomUUID()}, ${project.id}, ${post.id}, ${hash}, ${JSON.stringify(snapshot)}, 'pending', ${user.id}, ${new Date().toISOString()})`);
+        if (!sameContent) {
+          await tx.execute(sql`INSERT INTO post_approval_reviews (id,project_id,post_id,fingerprint,snapshot,status,requested_by,requested_at) VALUES (${randomUUID()}, ${project.id}, ${post.id}, ${hash}, ${JSON.stringify(withSchedule(snapshot, post))}, 'pending', ${user.id}, ${new Date().toISOString()})`);
           await local.store.activity(project.id, `Content review requested by ${user.name || user.id}.`);
         }
       });
