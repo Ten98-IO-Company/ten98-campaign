@@ -209,7 +209,7 @@ test('the editor wires Schedule to save then the post card publish path, with th
   const block = app.match(/const composerPublishBlock = (.+);/)![1];
   const approval = app.match(/const composerApproval = (.+);/)![1];
   const gate = (summary: any, connected: any, item: any) => { const modal = { type: 'post', item }, approvalGate = (_: any, id: string) => summary?.[id] ?? null; const composerApproval = new Function('modal', 'approvalGate', 'approvalSummary', `return (${approval});`)(modal, approvalGate, summary); return new Function('connected', 'modal', 'composerApproval', `return (${block});`)(connected, modal, composerApproval); };
-  assert.equal(gate(null, false, undefined), 'Connect Zernio in Integrations to publish.');
+  assert.equal(gate(null, false, undefined), 'Connect your social accounts in Settings › Connections to publish.');
   assert.equal(gate(null, true, { id: 'p', sample: true }), 'Sample posts cannot be published.');
   assert.equal(gate({ p: { publishable: false, reason: 'Waiting for approval.' } }, true, { id: 'p' }), 'Waiting for approval.');
   assert.equal(gate({ p: { publishable: true, reason: '' } }, true, { id: 'p' }), undefined);
