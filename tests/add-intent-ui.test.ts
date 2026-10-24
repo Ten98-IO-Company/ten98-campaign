@@ -7,30 +7,9 @@ import React from 'react';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import * as shared from '../shared/offline-activations.ts';
+import { hooks, nodes } from './hook-recorder.ts';
 
 type Row = Record<string, any>;
-type Effect = { deps?: unknown[]; run: () => unknown };
-
-// Keeps hook state across renders and queues effects whose dependencies changed, like React does after a commit.
-function hooks() {
-  const states: unknown[] = [], refs: { current: unknown }[] = [], effects: Effect[] = [];
-  let state = 0, ref = 0, effect = 0, pending: Effect['run'][] = [];
-  const useState = (initial: unknown) => {
-    const key = state++;
-    if (!(key in states)) states[key] = typeof initial === 'function' ? (initial as () => unknown)() : initial;
-    return [states[key], (next: unknown) => { states[key] = typeof next === 'function' ? (next as (value: unknown) => unknown)(states[key]) : next; }];
-  };
-  const useRef = (value: unknown) => refs[ref++] ||= { current: value };
-  const useEffect = (run: Effect['run'], deps?: unknown[]) => {
-    const key = effect++, previous = effects[key];
-    if (!previous || !deps || !previous.deps || deps.some((value, index) => !Object.is(value, previous.deps![index]))) { effects[key] = { deps, run }; pending.push(run); }
-  };
-  const render = (component: (props: Row) => unknown, props: Row) => { state = ref = effect = 0; pending = []; return component(props); };
-  const flush = () => { const queued = pending; pending = []; for (const run of queued) run(); };
-  return { useState, useRef, useEffect, render, flush };
-}
-// Every element in a tree, including elements passed through props; components stay unrendered.
-const nodes = (node: any): any[] => Array.isArray(node) ? node.flatMap(nodes) : !React.isValidElement(node) ? [] : [node, ...Object.values(node.props as Row).flatMap(value => Array.isArray(value) || React.isValidElement(value) ? nodes(value) : [])];
 const strip = (text: string) => text.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, '');
 const compile = async (file: string) => (await transformWithOxc(strip(await readFile(new URL('../src/' + file, import.meta.url), 'utf8')), file, { jsx: { runtime: 'classic' } })).code;
 const library = ui as unknown as Record<string, unknown>;
