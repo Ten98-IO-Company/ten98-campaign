@@ -57,9 +57,13 @@ export function FieldReport({ projectId, request, activations, campaigns, money 
   const read = useRead(() => request(`/projects/${encodeURIComponent(projectId)}/activations/results`).then(value => (value?.results || {}) as Record<string, Row>), [projectId, request]);
   if (!activations.length) return <EmptyState icon="billboard" title="No field activity yet" description="Plan a roadshow, door-to-door area, event, street team or sampling shift to see its leads and reach here."/>;
   const leads = read.state === 'ready' ? activations.reduce((total, activation) => total + count(read.value[activation.id]?.leads), 0) : null;
-  const currency = campaigns.find(campaign => campaign.id === activations[0]?.campaignId)?.currency || 'AED', campaignName = (id: string) => campaigns.find(campaign => campaign.id === id)?.name || 'No campaign';
+  const campaignName = (id: string) => campaigns.find(campaign => campaign.id === id)?.name || 'No campaign';
+  // Spend is totalled per currency (each activation spends in its campaign's currency); amounts in different currencies are never added together.
+  const spent = new Map<string, number>();
+  for (const activation of activations) { const currency = campaigns.find(campaign => campaign.id === activation.campaignId)?.currency || 'AED'; spent.set(currency, (spent.get(currency) || 0) + count(activation.spent)); }
+  const spentText = [...spent].map(([currency, amount]) => money(amount, currency)).join(' · ');
   return <Stack gap={4}>
-    <MetricGrid list label="Field activity results">{[metric('Activities', activations.length), metric('Leads captured', leads ?? (read.state === 'failed' ? 'Couldn’t load' : '…')), metric('People reached', activations.reduce((total, activation) => total + count(activation.reached), 0)), metric('Spent', money(activations.reduce((total, activation) => total + count(activation.spent), 0), currency))]}</MetricGrid>
+    <MetricGrid list label="Field activity results">{[metric('Activities', activations.length), metric('Leads captured', leads ?? (read.state === 'failed' ? 'Couldn’t load' : '…')), metric('People reached', activations.reduce((total, activation) => total + count(activation.reached), 0)), metric('Spent', spentText, spent.size > 1 ? 'Per currency, never added together' : undefined)]}</MetricGrid>
     <DataTable ariaLabel="Field activity results" searchable={false} sortable={false} pagination={false} rows={activations} rowKey={activation => activation.id} columns={[
       { key: 'name', header: 'Activity', rowHeader: true, wrap: true, render: activation => <Stack gap={0}><Text weight="semibold">{activation.name || 'Field activity'}</Text><Text as="small" size="sm" tone="muted">{campaignName(activation.campaignId)}</Text></Stack> },
       { key: 'leads', header: 'Leads', numeric: true, render: activation => read.state === 'ready' ? count(read.value[activation.id]?.leads).toLocaleString() : '—' },

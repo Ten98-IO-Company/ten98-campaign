@@ -65,3 +65,15 @@ test('Reports keeps five tabs: Overview, Social accounts, Links, Messages and Fi
   assert.match(main, /label: 'Social accounts' \}, \{ page: 'Analytics', sections: \['links'\], label: 'Links' \}, \{ page: 'Analytics', sections: \['messages'\], label: 'Messages' \}, \{ page: 'Analytics', sections: \['offline'\], label: 'Field activity' \}/);
   assert.match(main, /\{page === 'Analytics' && \['summary', 'accounts'\]\.includes\(insightsView\) && /, 'The account report no longer catches the new tabs.');
 });
+
+test('Field activity totals spend per currency and never adds amounts in different currencies', async () => {
+  const activations = [{ id: 'a1', campaignId: 'dubai', reached: 1, spent: 300 }, { id: 'a2', campaignId: 'dubai', reached: 1, spent: 200 }, { id: 'a3', campaignId: 'london', reached: 1, spent: 150 }];
+  const campaigns = [{ id: 'dubai', name: 'Dubai launch', currency: 'AED' }, { id: 'london', name: 'London launch', currency: 'GBP' }];
+  const view = await mount('FieldReport', { activations, campaigns, money: (value: unknown, currency = 'AED') => `${currency} ${value}` }, async () => ({ results: {} }));
+  const spent = nodes(view.render()).find(node => node.type === ui.MetricCard && node.props.label === 'Spent').props;
+  assert.equal(spent.value, 'AED 500 · GBP 150', 'Each currency keeps its own total.');
+  assert.equal(spent.hint, 'Per currency, never added together');
+  assert.doesNotMatch(spent.value, /650/, 'AED and GBP are never summed into one number.');
+  const single = await mount('FieldReport', { activations: activations.slice(0, 2), campaigns, money: (value: unknown, currency = 'AED') => `${currency} ${value}` }, async () => ({ results: {} }));
+  assert.equal(nodes(single.render()).find(node => node.type === ui.MetricCard && node.props.label === 'Spent').props.value, 'AED 500');
+});
