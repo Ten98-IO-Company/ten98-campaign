@@ -387,7 +387,7 @@ function App() {
   useEffect(() => { setError(''); }, [section, state?.projectId]); // An earlier action's error does not follow you to another section or project.
   useEffect(() => { if (state?.projectId) void loadApprovalSummary(state.projectId); }, [state]);
   useEffect(() => {
-    if (!state?.projectId || !['Overview', 'Calendar'].includes(page) || !state.posts.some(post => Object.keys(post.accountOverrides || {}).length) || remote.accounts || !remote.status?.zernio?.configured || !remote.status.zernio.mapped) return;
+    if (!state?.projectId || !['Overview', 'Calendar'].includes(page) || !(page === 'Overview' || state.posts.some(post => Object.keys(post.accountOverrides || {}).length)) || remote.accounts || !remote.status?.zernio?.configured || !remote.status.zernio.mapped) return;
     void loadRemote('accounts', 'accounts');
   }, [state?.projectId, state?.posts, page, remote.accounts, remote.status?.zernio?.configured, remote.status?.zernio?.mapped]);
   useEffect(() => {
@@ -569,11 +569,18 @@ function App() {
   const connected = remote.status?.zernio?.configured && remote.status?.zernio?.mapped;
   // Home: campaigns are the core object, so active ones come first; setup steps count only the team's own records.
   const activeRows = filtered(state.campaigns).filter(c => c.status === 'active');
+  // The first step follows where setup really stands, and offers an action only to someone who can take it.
+  const zernioLinked = !!(remote.status?.zernio?.configured && remote.status.zernio.mapped);
+  const accountsStep: SetupStep = !state.connections.zernio
+    ? { id: 'accounts', title: 'Turn on social publishing', detail: state.user.isOperator ? 'Add the Zernio key for this installation once; then connect your accounts.' : 'Your Campaign administrator turns this on once for everyone.', done: false, ...(state.user.isOperator ? { action: 'Add your Zernio key', onAction: () => setPage('Integrations') } : {}) }
+    : !zernioLinked
+      ? { id: 'accounts', title: 'Link this project to a brand profile', detail: canMap ? 'Choose the brand profile this project publishes from.' : 'Your Campaign administrator links this project once.', done: false, ...(canMap ? { action: 'Link brand profile', onAction: () => setPage('Integrations') } : {}) }
+      : { id: 'accounts', title: 'Connect your social and ad accounts', detail: canAdmin ? 'Publish posts and run ads from one place.' : 'An owner or administrator connects the accounts.', done: !!remote.accounts?.accounts?.length, ...(canAdmin ? { action: 'Connect accounts', onAction: () => setModal({ type: 'connect' }) } : {}) };
   const setupSteps: SetupStep[] = [
-    { id: 'accounts', title: 'Connect your social and ad accounts', detail: canAdmin ? 'Publish posts and run ads from one place.' : 'An owner or administrator connects accounts in Settings › Connections.', done: !!state.connections.zernio, action: 'Connect accounts', onAction: () => setPage('Integrations') },
+    accountsStep,
     { id: 'campaign', title: 'Create your first campaign', detail: 'A campaign keeps posts, ads, messages and billboards for one launch together.', done: state.campaigns.some(c => !c.sample), action: 'New campaign', onAction: () => setModal({ type: 'campaign' }) },
     { id: 'post', title: 'Plan your first post', detail: 'Write it once and choose where and when it goes out. It is sent once your accounts are connected.', done: state.posts.some(p => !p.sample && ['scheduled', 'submitted', 'published'].includes(p.status)), action: 'Create post', onAction: () => setModal({ type: 'post' }) },
-    { id: 'drive', title: 'Connect Google Drive for your media', detail: 'Use the photos and videos your team already keeps in Drive.', done: !!state.connections.drive, action: 'Connect Drive', onAction: () => setPage('Integrations') },
+    { id: 'drive', title: 'Connect Google Drive for your media', detail: canMap ? 'Use the photos and videos your team already keeps in Drive.' : 'Your Campaign administrator links the team’s Drive folder once.', done: !!remote.status?.drive?.mapped, ...(canMap ? { action: 'Connect Drive', onAction: () => setPage('Integrations') } : {}) },
   ];
   // The same gates as the post card's publish button; the server still decides.
   const composerApproval = modal?.type === 'post' ? approvalGate(approvalSummary, modal.item?.id || '') : null;
