@@ -27,7 +27,7 @@ const { code: approvalsCode } = await transformWithOxc(approvals.replace(/^impor
 function approvalsModule(states = {}) {
   let index = 0;
   const useState = initial => { const current = index++; return [Object.hasOwn(states, current) ? states[current] : initial, () => {}]; };
-  const helpers = { adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits, reviewKeyAction: () => null, PostVariantPreview: () => null, PLATFORM_RULES };
+  const helpers = { adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits, reviewKeyAction: () => null, useFocusReturn: () => () => {}, PostVariantPreview: () => null, PLATFORM_RULES };
   return new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(helpers), ...ui.map(([name]) => name), approvalsCode + '; return { ContentApprovals, AdSpendReviews };')(React, () => {}, value => ({ current: value }), useState, ...Object.values(helpers), ...ui.map(([, value]) => value));
 }
 const { code: policyCode } = await transformWithOxc((await read('ApprovalPolicy.tsx')).replace(/^import .*;\n/gm, '').replace('export default function', 'function'), 'ApprovalPolicy.tsx', { jsx: { runtime: 'classic' } });

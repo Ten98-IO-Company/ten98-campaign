@@ -18,7 +18,7 @@ async function view(file, names, request, initial = {}) {
     useRef(value) { const ref = { current: value }; refs.push(ref); return ref; }, useEffect(run) { effects.push(run); },
     FormData: FormValues, window: { confirm: () => true, location: { reload: () => reloads.push(file) } }, crypto, DOMException,
     // Imported app helpers (TeamSettings): the real role list, and a focus-return hook without a DOM.
-    workspaceRoles, useFocusReturn: () => () => {},
+    workspaceRoles, useFocusReturn: () => () => {}, document: { getElementById: () => null },
     lines: value => String(value || '').split('\n').map(line => line.trim()).filter(Boolean),
     // Pure module-level helpers the component body calls (ContentApprovals), taken from the real source.
     ...Object.fromEntries(['approveBlocked', 'postName', 'reviewItem'].flatMap(name => { const line = source.match(new RegExp(`^const ${name} = (.+);$`, 'm')); return line ? [[name, new Function('return ' + stripTypeScriptTypes(line[1]))()]] : []; })),
