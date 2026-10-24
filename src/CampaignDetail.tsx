@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { postDisplayStatus } from '../shared/post-schedule.ts';
 import { Button, Card, DataTable, EmptyState, Heading, Icon, Inline, MetricCard, MetricGrid, Popover, SegmentedControl, Stack, Tabs, Text } from '@ten98/ui';
 
@@ -11,7 +11,31 @@ type Props = {
   campaign: Row; posts: Row[]; placements: Row[]; activations: Row[]; canWrite: boolean;
   money: (value: unknown, currency?: string) => string; date: (value: string) => string; statusBadge: (status: string) => ReactNode; postTitle: (post: Row) => string;
   onBack: () => void; onEdit: () => void; onAdd: (kind: CampaignAddKind) => void; onOpen: (kind: CampaignItemKind, row: Row) => void;
+  // Reads this campaign's link and field results for the Results tab (reads only; nothing is sent to a network).
+  projectId?: string; request?: (path: string) => Promise<any>;
 };
+export type CampaignResult = { label: string; value: number | null; failed?: boolean; hint: string };
+// 'failed' marks a read that was refused or errored, so the tab can say so instead of looking like no data.
+type Loaded = { links?: { totals?: Row } | null | 'failed'; activations?: Record<string, Row> | null | 'failed' };
+
+// What this campaign has produced, from records that name it. null means "not reported", never 0.
+export function campaignResults(campaign: Row, posts: Row[], placements: Row[], activations: Row[], loaded: Loaded): CampaignResult[] {
+  const mine = (rows: Row[]) => rows.filter(row => row.campaignId === campaign.id), field = mine(activations);
+  const links = loaded.links === 'failed' ? undefined : loaded.links, results = loaded.activations === 'failed' ? undefined : loaded.activations;
+  const linksFailed = loaded.links === 'failed', resultsFailed = loaded.activations === 'failed';
+  const sum = (rows: Row[], key: string) => rows.reduce((total, row) => total + (Number.isFinite(Number(row[key])) ? Number(row[key]) : 0), 0);
+  const counted = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : null;
+  return [
+    { label: 'Link clicks', value: counted(links?.totals?.clicks), failed: linksFailed, hint: 'Short links in this campaign' },
+    { label: 'QR scans', value: counted(links?.totals?.qrScans), failed: linksFailed, hint: 'QR codes in this campaign' },
+    { label: 'Leads captured', value: results && field.length ? field.reduce((total, activation) => total + (Number(results[activation.id]?.leads) || 0), 0) : null, failed: resultsFailed && field.length > 0, hint: 'At field activity' },
+    { label: 'People reached', value: field.length ? sum(field, 'reached') : null, hint: 'Reported by field teams' },
+    { label: 'Posts published', value: mine(posts).filter(post => post.status === 'published').length, hint: 'Across social accounts' },
+    { label: 'Billboards booked', value: mine(placements).filter(placement => ['booked', 'live', 'completed'].includes(placement.status)).length, hint: 'Booked, live or finished' },
+    { label: 'Impressions', value: counted(campaign.impressions), hint: 'Entered for this campaign' },
+    { label: 'Conversions', value: counted(campaign.conversions), hint: 'Entered for this campaign' },
+  ];
+}
 
 const kindLabel: Record<CampaignItemKind, string> = { post: 'Post', placement: 'Billboard', activation: 'Field activity' };
 const filters = [['all', 'All'], ['post', 'Posts'], ['placement', 'Billboards'], ['activation', 'Field activity']];
@@ -26,8 +50,18 @@ export function campaignItems(campaignId: string, posts: Row[], placements: Row[
   ].sort((a, b) => (b.when || '').localeCompare(a.when || ''));
 }
 
-export default function CampaignDetail({ campaign, posts, placements, activations, canWrite, money, date, statusBadge, postTitle, onBack, onEdit, onAdd, onOpen }: Props) {
-  const [tab, setTab] = useState('overview'), [filter, setFilter] = useState('all'), [adding, setAdding] = useState(false);
+export default function CampaignDetail({ campaign, posts, placements, activations, canWrite, money, date, statusBadge, postTitle, onBack, onEdit, onAdd, onOpen, projectId, request }: Props) {
+  const [tab, setTab] = useState('overview'), [filter, setFilter] = useState('all'), [adding, setAdding] = useState(false), [loaded, setLoaded] = useState<Loaded | null>(null);
+  // Results load when the tab opens, over the campaign so far (up to a year).
+  useEffect(() => {
+    if (tab !== 'results' || loaded || !request || !projectId) return;
+    let active = true; const project = encodeURIComponent(projectId), started = Date.parse(campaign.startDate || '');
+    const days = Math.min(365, Math.max(1, Number.isFinite(started) ? Math.floor((Date.now() - started) / 86400000) + 1 : 30));
+    Promise.all([request(`/projects/${project}/links/analytics?days=${days}&campaignId=${encodeURIComponent(campaign.id)}`).catch(() => 'failed' as const), request(`/projects/${project}/activations/results`).then(value => value?.results || null, () => 'failed' as const)])
+      .then(([links, results]) => { if (active) setLoaded({ links, activations: results }); });
+    return () => { active = false; };
+  }, [tab, loaded, request, projectId, campaign.id, campaign.startDate]);
+  const results = campaignResults(campaign, posts, placements, activations, loaded || {});
   const items = campaignItems(campaign.id, posts, placements, activations, postTitle), now = Date.now();
   const upNext = items.filter(item => item.when && Date.parse(item.when) > now).sort((a, b) => a.when.localeCompare(b.when)).slice(0, 5);
   // The same dialog opens read-only for viewers and for campaigns an ad network manages, so it is labelled for what it does.
@@ -57,6 +91,7 @@ export default function CampaignDetail({ campaign, posts, placements, activation
     </MetricGrid>
     <Tabs label="Campaign sections" value={tab} onValueChange={setTab} items={[
       { value: 'overview', label: 'Overview', content: <Card as="section" headingLevel={3} title="Up next">{upNext.length ? table(upNext, 'Up next in ' + campaign.name) : <Text tone="muted">Nothing scheduled yet. {items.length ? 'Schedule an item to see it here.' : 'Add a post, booking or field activity to start.'}</Text>}</Card> },
+      { value: 'results', label: 'Results', content: <Stack gap={3}>{loaded ? null : <Text tone="muted">Loading results…</Text>}<MetricGrid list label={'Results for ' + campaign.name}>{results.map(result => <MetricCard key={result.label} label={result.label} hint={result.hint} {...(result.value === null ? { unavailable: result.failed ? 'Couldn’t load' : 'Not reported yet' } : { value: result.value.toLocaleString() })}/>)}</MetricGrid>{canWrite && <Inline><Button variant="ghost" onClick={onEdit}>Update entered totals</Button></Inline>}</Stack> },
       { value: 'items', label: `Items · ${items.length}`, content: <Stack gap={3}><SegmentedControl label="Item type" value={filter} onValueChange={setFilter} options={filters.map(([value, label]) => ({ value, label }))}/>{table(shown, 'Items in ' + campaign.name)}</Stack> },
     ]}/>
   </Stack>;

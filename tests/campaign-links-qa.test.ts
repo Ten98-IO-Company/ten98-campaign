@@ -7,6 +7,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import * as UI from '@ten98/ui';
 import { transformWithOxc } from 'vite';
+import { readText } from './read-text.ts';
 
 type Row = Record<string, unknown>;
 type Run = (generation: number) => Promise<void>;
@@ -20,9 +21,10 @@ const draft = { name: 'Duplicate test', destination: 'https://shop.example.com/b
 
 function createWith(links: Row[], response: Row) {
   const notices: string[] = [], selections: string[] = [], cleared: unknown[] = [], reused: string[] = [];
+  let reveals = 0;
   const DestinationError = compile(source.match(/class DestinationError extends Error \{\}/)![0]);
-  const create = compile(section('async function create(', '  async function saveName('), { readOnly: false, draft, links, destinationWithUtm: () => draft.destination, DestinationError, setDestinationError() {}, destinationRef: { current: null }, focusDestination: { current: false }, action: async (_label: string, run: Run) => run(1), requester: { current: async () => response }, path, version: { current: 1 }, acceptLink() {}, setSelected: (value: string) => selections.push(value), setDraft: (value: unknown) => cleared.push(value), blank: () => ({}), setNotice: (value: string) => notices.push(value), setReused: (value: string) => reused.push(value) });
-  return create(event).then(() => ({ notices, selections, cleared: cleared.length, reused }));
+  const create = compile(section('async function create(', '  async function saveName('), { readOnly: false, draft, links, destinationWithUtm: () => draft.destination, DestinationError, setDestinationError() {}, destinationRef: { current: null }, focusDestination: { current: false }, action: async (_label: string, run: Run) => run(1), requester: { current: async () => response }, path, version: { current: 1 }, acceptLink() {}, setSelected: (value: string) => selections.push(value), setDraft: (value: unknown) => cleared.push(value), blank: () => ({}), setNotice: (value: string) => notices.push(value), setReused: (value: string) => reused.push(value), setReusedReveal: (update: (count: number) => number) => { reveals = update(reveals); } });
+  return create(event).then(() => ({ notices, selections, cleared: cleared.length, reused, reveals }));
 }
 
 async function qrPanel(props: Row) {
@@ -51,6 +53,24 @@ test('#114 a destination that already has an active link says so inside the QR p
   assert.match(panel, /<div(?=[^>]*role="status")(?=[^>]*id="campaign-link-reused")[^>]*>[\s\S]*?already has an active link, “Billboard Downtown QR”\. No new link was created[\s\S]*?QR tracking address/);
   for (const reused of ['', 'other-link']) { const plain = await qrPanel({ chosen, reused }); assert.doesNotMatch(plain, /already has an active link|aria-describedby/); }
   assert.match(source, /useEffect\(\(\) => \{ if \(reused && reused !== selected\) setReused\(''\); \}, \[selected, reused\]\);\n  async function action\(/, 'Opening another link or closing the panel drops the explanation; it is the last hook.');
+});
+
+test('#114 a reused-link create moves focus to its explanation, which is the first content in the QR panel', async () => {
+  const existing = { id: 'old-link', name: 'Original link' };
+  // In the QA case the original link's panel is already open, so `selected` does not change and only this reveal moves focus.
+  for (const links of [[existing], []]) assert.equal((await createWith(links, { link: existing })).reveals, 1, 'Each reuse asks for its explanation, even when the same link is reused again.');
+  assert.equal((await createWith([existing], { link: { id: 'new-link', name: 'Duplicate test' } })).reveals, 0, 'A new link only opens its panel.');
+  const hooks = section("  useEffect(() => { if (selected) document.getElementById('campaign-link-qr')", '  async function action(');
+  const reveal = hooks.split('\n').find(line => line.includes('useEffect(') && line.includes('reusedReveal'));
+  assert.ok(reveal && hooks.indexOf(reveal) > 0, 'The reveal effect runs after the panel focus effect, so the explanation keeps focus when both run in one commit.');
+  const focused: string[] = [];
+  compile(`() => { ${reveal} }`, { useEffect: (run: () => void) => run(), reusedReveal: 1, document: { getElementById: (id: string) => ({ focus: () => focused.push(id) }) } })();
+  assert.deepEqual(focused, ['campaign-link-reused'], 'Focus, and with it the scroll, goes to the explanation.');
+  const chosen = { id: 'old-link', name: 'Original link', code: 'abc', qrUrl: 'https://go.example.com/q/abc', shortUrl: 'https://go.example.com/s/abc' };
+  const panel = await qrPanel({ chosen, reused: 'old-link' });
+  assert.match(panel, /t98-card-content"><div(?=[^>]*role="status")(?=[^>]*id="campaign-link-reused")(?=[^>]*tabindex="-1")[^>]*>/, 'The explanation is a focusable status, first in the panel body and across its width.');
+  const text = readText(panel).trim();
+  assert.ok(text.startsWith('QR code · Original link This destination and campaign already has an active link, “Original link”.'), text);
 });
 
 function saveWith(allowedWebsiteOrigins: string, response: () => Row, changes: Row = {}) {
