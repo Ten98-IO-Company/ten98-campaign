@@ -67,7 +67,7 @@ export default function AdsManager({ view, onView, connected, busy, data, query,
     const totals = levelTotals(rows), footer = shown.map(column => column.key === 'name' ? `Totals · ${plural(rows.length, noun)}${rows.length < total ? ' (filtered)' : ''}` : column.key === 'spend' && totals.mixedCurrency ? <Tooltip content="Spend in different currencies is not added."><Text as="span" tone="muted">—</Text></Tooltip> : column.numeric && column.render ? column.render(totals) : '');
     return <DataTable ariaLabel={name} searchable={false} pagination={false} density="compact" stickyHeader responsive="stack" columns={shown} rows={filterAndSortRows(rows, shown, '', sort)} rowKey={row => noun === 'campaign' ? campaignKey(row) : row.key} sort={sort} onSortChange={setSort}
       selectable={!!extra.selection} selectedKeys={extra.selection?.[0]} onSelectionChange={extra.selection?.[1]} onRowActivate={row => onOpen(noun === 'campaign' ? row : row.campaign)}
-      rowActionsLabel={extra.actions ? 'Status' : undefined} rowActions={extra.actions ? rowActions : undefined} footerCells={footer} emptyTitle={`No ${noun}s match these filters`} emptyDescription="Change or clear the filters above."/>;
+      rowActionsLabel={extra.actions ? 'Status' : undefined} rowActions={extra.actions ? rowActions : undefined} footerCells={footer} emptyTitle={total ? `No ${noun}s match these filters` : `No ${noun}s reported`} emptyDescription={total ? 'Change or clear the filters above.' : `${noun === 'ad set' ? 'Ad sets' : 'Ads'} appear here once your networks report them.`}/>;
   }
 
   return <Stack gap={4}>

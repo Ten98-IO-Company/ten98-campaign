@@ -171,3 +171,12 @@ test('the ads level asks for a selection before reading anything', () => {
   const empty = find(view, ui.EmptyState)[0]; assert.match(empty.title, /Select campaigns/);
   find(empty.action, ui.Button)[0].onClick(); assert.deepEqual(events.at(-1), ['view', 'campaigns']);
 });
+
+test('an empty level says nothing is reported, while filtered rows point to the filters', () => {
+  const { draw } = setup({ data: { campaigns: [campaigns[2]] } });
+  const sets = table(draw({ view: 'adsets' }));
+  assert.deepEqual([sets.emptyTitle, sets.emptyDescription], ['No ad sets reported', 'Ad sets appear here once your networks report them.']);
+  select(draw({ view: 'campaigns' }), 'Status').onChange({ currentTarget: { value: 'active' }, target: { value: 'active' } });
+  const list = table(draw());
+  assert.deepEqual([list.emptyTitle, list.emptyDescription], ['No campaigns match these filters', 'Change or clear the filters above.']);
+});
