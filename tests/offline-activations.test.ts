@@ -126,3 +126,31 @@ test('activation results count leads by tag and link visits and scans, and the c
   assert.deepEqual(field.map((event: any) => [event.summary, event.start, event.end]), [['Field · Mall roadshow — Saturday', { dateTime: mall.startAt }, { dateTime: mall.endAt }]], 'Cancelled activations stay off the calendar.');
   assert.match(field[0].description, /Roadshow stop · City Centre Mall, atrium/);
 });
+
+test('a member who leaves or loses editing access is dropped from an activation instead of blocking later edits', { skip: postgresSkip }, async t => {
+  const { app, request, owner, state, project, member } = await start(t);
+  const campaignId = (await request(project + '/campaigns', 'POST', { name: 'Winter field push', channel: 'offline' }, owner)).body.record.id;
+  const erin = await member('editor', 'Erin'), dan = await member('editor', 'Dan'), workspaceId = state.workspaces[0].id;
+  const activation = (await request(project + '/activations', 'POST', { ...stop(campaignId), ownerId: erin.id, teamIds: [erin.id, dan.id, state.user.id] }, owner)).body.record;
+  await app.sql.run("UPDATE memberships SET role='viewer' WHERE workspace_id=? AND user_id=?", workspaceId, erin.id);
+  await app.sql.run('DELETE FROM memberships WHERE workspace_id=? AND user_id=?', workspaceId, dan.id);
+
+  const edited = await request(project + '/activations/' + activation.id, 'PATCH', { reached: 25 }, owner);
+  assert.equal(edited.status, 200, 'An edit that does not touch people still saves: ' + JSON.stringify(edited.body));
+  assert.deepEqual([edited.body.record.reached, edited.body.record.ownerId, edited.body.record.teamIds], [25, '', [state.user.id]], 'Stale owner and team are dropped, current members kept.');
+  assert.equal((await request(project + '/activations/' + activation.id, 'PATCH', { teamIds: [state.user.id, erin.id] }, owner)).status, 400, 'People chosen in this edit must still be editing members.');
+  assert.equal((await request(project + '/activations/' + activation.id, 'PATCH', { ownerId: dan.id }, owner)).status, 400);
+});
+
+test('activations only reference campaigns and links of their own project, and viewers cannot create or delete them', { skip: postgresSkip }, async t => {
+  const { request, owner, state, project, member } = await start(t);
+  const campaignId = (await request(project + '/campaigns', 'POST', { name: 'Winter field push', channel: 'offline' }, owner)).body.record.id;
+  const other = `/projects/${(await request('/projects', 'POST', { workspaceId: state.workspaces[0].id, name: 'Other brand' }, owner)).body.project.id}`;
+  const foreignCampaign = (await request(other + '/campaigns', 'POST', { name: 'Other campaign', channel: 'offline' }, owner)).body.record.id;
+  const foreignLink = (await request(other + '/links', 'POST', { name: 'Other link', destination: 'https://shop.example.com/other', campaignId: foreignCampaign }, owner)).body.link.id;
+  assert.equal((await request(project + '/activations', 'POST', stop(foreignCampaign), owner)).status, 400, 'A campaign from another project is refused.');
+  assert.equal((await request(project + '/activations', 'POST', { ...stop(campaignId), linkId: foreignLink }, owner)).status, 400, 'A link from another project is refused.');
+  const activation = (await request(project + '/activations', 'POST', stop(campaignId), owner)).body.record, viewer = await member('viewer', 'Vic');
+  assert.equal((await request(project + '/activations', 'POST', stop(campaignId), viewer.cookie)).status, 403);
+  assert.equal((await request(project + '/activations/' + activation.id, 'DELETE', undefined, viewer.cookie)).status, 403);
+});

@@ -28,6 +28,10 @@ export function trackingDestination(landing: string, activation: Row, campaignNa
   return url.href;
 }
 export function TrackingLink({ link }: { link: Row }) {
+  if (link.archived) return <Stack gap={1}>
+    <Inline gap={2} align="center"><Text as="strong" weight="semibold">{link.shortUrl}</Text><Badge tone="neutral">Inactive</Badge></Inline>
+    <Text tone="muted" size="sm">This link was archived in Links &amp; tracking, so its short address and QR code no longer redirect. Restore it there to use it again.</Text>
+  </Stack>;
   return <Inline gap={3} align="start">
     <Image src={link.qrSvgUrl} alt={'QR code for ' + link.name} fit="contain" width={144} height={144}/>
     <Stack gap={1}>
@@ -88,11 +92,25 @@ export function activationBody(draft: Draft) {
   if (!draft.startAt || !draft.endAt) throw new Error('Enter when the activation starts and ends.');
   return { name: draft.name, type: draft.type, campaignId: draft.campaignId, status: draft.status, startAt: instant(draft.startAt), endAt: instant(draft.endAt), location: draft.location, notes: draft.notes, ownerId: draft.ownerId, teamIds: draft.teamIds, materials: draft.materials, budget: amount(draft.budget, 'Planned budget'), spent: amount(draft.spent, 'Actual spend'), reached: amount(draft.reached, 'People reached', true), promoCode: draft.promoCode.trim() };
 }
+// Members as choices, plus any chosen person who is no longer an editing member, so they can be removed.
+export function peopleChoices(members: Row[], chosen: string[]) {
+  const known = new Set(members.map(member => member.id));
+  return [...members.map(member => ({ value: member.id, label: member.name })), ...(members.length ? chosen.filter(id => id && !known.has(id)).map(id => ({ value: id, label: 'Former member' })) : [])];
+}
+// An edit sends the owner and team only when they changed, so stale stored people are dropped by the server, not re-checked.
+export function patchBody(draft: Draft, existing: Row | null) {
+  const body: Partial<ReturnType<typeof activationBody>> = activationBody(draft);
+  if (!existing) return body;
+  if (draft.ownerId === (existing.ownerId || '')) delete body.ownerId;
+  const before = existing.teamIds || [];
+  if (draft.teamIds.length === before.length && draft.teamIds.every((id: string) => before.includes(id))) delete body.teamIds;
+  return body;
+}
 
 export default function OfflineActivations({ projectId, brand, campaigns, activations, request, readOnly = false, onChanged }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/activations`, requester = useRef(request); requester.current = request;
   const [filter, setFilter] = useState(''), [members, setMembers] = useState<Row[]>([]), [editing, setEditing] = useState<Row | 'new' | null>(null), [draft, setDraft] = useState<Draft>(blankDraft()), [dirty, setDirty] = useState(false);
-  const [link, setLink] = useState<Row | null>(null), [landing, setLanding] = useState(''), [linkError, setLinkError] = useState(''), [linking, setLinking] = useState(false);
+  const [link, setLink] = useState<Row | null>(null), [linkLoading, setLinkLoading] = useState(false), opened = useRef(''), [landing, setLanding] = useState(''), [linkError, setLinkError] = useState(''), [linking, setLinking] = useState(false);
   const [material, setMaterial] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [removing, setRemoving] = useState<Row>(), [capturing, setCapturing] = useState<Row | null>(null), [results, setResults] = useState<Record<string, Result> | null>(null);
   useEffect(() => { if (readOnly) return; let current = true; requester.current(`/projects/${encodeURIComponent(projectId)}/assignees`).then(result => { if (current) setMembers(result.members || []); }, () => { if (current) setMembers([]); }); return () => { current = false; }; }, [projectId, readOnly]);
   useEffect(() => { let current = true; requester.current(`${path}/results`).then(result => { if (current) setResults(result.results || {}); }, () => { if (current) setResults({}); }); return () => { current = false; }; }, [path, activations]);
@@ -100,7 +118,12 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
   const rows = activations.filter(activation => !filter || activation.campaignId === filter).sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
   const change = (patch: Partial<Draft>) => { setDraft(current => ({ ...current, ...patch })); setDirty(true); };
   function open(activation: Row | 'new') { setDraft(activation === 'new' ? blankDraft(filter || campaigns[0]?.id || '') : draftFrom(activation)); setEditing(activation); setDirty(false); setMaterial(''); setError(''); setNotice(''); setLink(null); setLanding(''); setLinkError('');
-    if (activation !== 'new' && activation.linkId) request(`/projects/${encodeURIComponent(projectId)}/links`).then(result => setLink((result.links || []).find((row: Row) => row.id === activation.linkId) || null), () => setLinkError('The tracking link could not be loaded.'));
+    const id = activation === 'new' ? '' : activation.id; opened.current = id; setLinkLoading(Boolean(id && activation !== 'new' && activation.linkId));
+    if (activation !== 'new' && activation.linkId) request(`/projects/${encodeURIComponent(projectId)}/links`).then(result => {
+      if (opened.current !== id) return;
+      const found = (result.links || []).find((row: Row) => row.id === activation.linkId);
+      setLink(found || null); if (!found) setLinkError('The saved tracking link is no longer available. Create a new one below.');
+    }, () => { if (opened.current === id) setLinkError('The tracking link could not be loaded.'); }).finally(() => { if (opened.current === id) setLinkLoading(false); });
   }
   // Creates (or reuses) the campaign short link for this activation's tagged landing page and keeps it on the activation.
   async function createLink(activation: Row) {
@@ -117,7 +140,7 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
     setError('');
     try {
       const existing = editing !== 'new' && editing ? editing : null;
-      await request(existing ? `${path}/${encodeURIComponent(existing.id)}` : path, existing ? 'PATCH' : 'POST', activationBody(draft));
+      await request(existing ? `${path}/${encodeURIComponent(existing.id)}` : path, existing ? 'PATCH' : 'POST', patchBody(draft, existing));
       setEditing(null); setNotice(existing ? 'Activation saved.' : 'Activation planned.'); await onChanged();
     } catch (failure) { setError((failure as Error).message || 'The activation could not be saved.'); }
   }
@@ -127,7 +150,7 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
   }
   function addMaterial() { const label = material.trim(); if (!label || draft.materials.length >= 30) return; change({ materials: [...draft.materials, { label, done: false }] }); setMaterial(''); }
   const editable = !readOnly, current = editing && editing !== 'new' ? editing : null;
-  const peopleOptions = members.map(member => ({ value: member.id, label: member.name }));
+  const teamOptions = peopleChoices(members, draft.teamIds), ownerOptions = [{ value: '', label: 'No owner' }, ...peopleChoices(members, [draft.ownerId])];
   return <Card as="section">
     <Stack gap={3}>
       <Text tone="muted" size="sm">Roadshow stops, door-to-door areas, events, street teams and sampling, planned against a campaign.</Text>
@@ -165,10 +188,10 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
         <Field label="Where" required description="An address for a stop or booth, or the streets an area covers."><Input required maxLength={500} disabled={!editable} value={draft.location} onChange={event => change({ location: event.target.value })}/></Field>
         <Field label="Brief" description="What the team should know. For door-to-door, list no-knock streets and no-cold-calling zones here."><Textarea maxLength={2000} rows={3} disabled={!editable} value={draft.notes} onChange={event => change({ notes: event.target.value })}/></Field>
         <FormGrid>
-          <Field label="Owner"><Select disabled={!editable} value={draft.ownerId} onChange={event => change({ ownerId: event.target.value })} options={[{ value: '', label: 'No owner' }, ...peopleOptions]}/></Field>
+          <Field label="Owner"><Select disabled={!editable} value={draft.ownerId} onChange={event => change({ ownerId: event.target.value })} options={ownerOptions}/></Field>
           <Field label="Promo code" description="Optional, for in-store or checkout attribution."><Input maxLength={40} pattern="[A-Za-z0-9_-]*" disabled={!editable} value={draft.promoCode} onChange={event => change({ promoCode: event.target.value })}/></Field>
         </FormGrid>
-        {peopleOptions.length > 0 && <CheckboxGroup legend="Team" orientation="horizontal" disabled={!editable} value={draft.teamIds} onValueChange={teamIds => change({ teamIds })} options={peopleOptions}/>}
+        {teamOptions.length > 0 && <CheckboxGroup legend="Team" orientation="horizontal" disabled={!editable} value={draft.teamIds} onValueChange={teamIds => change({ teamIds })} options={teamOptions}/>}
         <FormGrid>
           <Field label={`Planned budget (${campaignOf(draft.campaignId)?.currency || 'AED'})`}><Input inputMode="decimal" disabled={!editable} value={draft.budget} onChange={event => change({ budget: event.target.value })}/></Field>
           <Field label={`Actual spend (${campaignOf(draft.campaignId)?.currency || 'AED'})`}><Input inputMode="decimal" disabled={!editable} value={draft.spent} onChange={event => change({ spent: event.target.value })}/></Field>
@@ -182,7 +205,7 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
         {current && <Stack gap={2}>
           <Text as="strong" weight="semibold">Tracking</Text>
           {linkError && <Alert tone="danger" variant="inline">{linkError}</Alert>}
-          {link ? <TrackingLink link={link}/> : current.linkId ? <Text tone="muted" size="sm">Loading the tracking link…</Text> : editable ? <Inline gap={2} align="end"><Field label="Landing page" description="Visits from this activation's short link and QR code are counted here and tagged utm_medium=offline."><Input type="url" placeholder="https://" value={landing} disabled={linking} onChange={event => setLanding(event.target.value)}/></Field><Button variant="secondary" disabled={!landing.trim() || linking} onClick={() => createLink(current)}>Create link and QR</Button></Inline> : <Text tone="muted" size="sm">No tracking link yet.</Text>}
+          {link ? <TrackingLink link={link}/> : linkLoading ? <Text tone="muted" size="sm">Loading the tracking link…</Text> : editable ? <Inline gap={2} align="end"><Field label="Landing page" description="Visits from this activation's short link and QR code are counted here and tagged utm_medium=offline."><Input type="url" placeholder="https://" value={landing} disabled={linking} onChange={event => setLanding(event.target.value)}/></Field><Button variant="secondary" disabled={!landing.trim() || linking} onClick={() => createLink(current)}>Create link and QR</Button></Inline> : <Text tone="muted" size="sm">No tracking link yet.</Text>}
         </Stack>}
       </Stack>
     </Dialog>
