@@ -106,7 +106,8 @@ export default function OohMap({ projectId, request, locations, placements, visi
   </Stack>;
 }
 /** Grouped booking editor fields. The host form submits them by name, so each name is the placement record field. */
-export function BookingFields({ item, partners, campaigns }: { item?: Placement | null; partners: Named[]; campaigns: Named[] }) {
+// defaultCampaignId preselects the campaign for a new booking started from a campaign page.
+export function BookingFields({ item, partners, campaigns, defaultCampaignId }: { item?: Placement | null; partners: Named[]; campaigns: Named[]; defaultCampaignId?: string }) {
   const [dates, setDates] = useState({ start: item?.startDate?.slice(0, 10) || '', end: item?.endDate?.slice(0, 10) || '' });
   return <Stack gap={4}>
     <Fieldset legend="Placement">
@@ -137,7 +138,7 @@ export function BookingFields({ item, partners, campaigns }: { item?: Placement 
     </Fieldset>
     <Fieldset legend="Campaign & status">
       <FormGrid>
-        <Field label="Campaign"><Select name="campaignId" defaultValue={item?.campaignId || ''}><Option value="">No campaign</Option>{campaigns.map(campaign => <Option key={campaign.id} value={campaign.id}>{campaign.name}</Option>)}</Select></Field>
+        <Field label="Campaign"><Select name="campaignId" defaultValue={item?.campaignId || defaultCampaignId || ''}><Option value="">No campaign</Option>{campaigns.map(campaign => <Option key={campaign.id} value={campaign.id}>{campaign.name}</Option>)}</Select></Field>
         {item && <Field label="Booking status"><Select name="status" defaultValue={item.status || 'draft'}>{statuses.map(([value, label]) => <Option key={value} value={value}>{label}</Option>)}</Select></Field>}
       </FormGrid>
       {!item && <><Input type="hidden" name="status" value="draft" readOnly/><Text tone="muted" size="sm">New bookings start as Draft. Change the status once the partner confirms.</Text></>}

@@ -167,6 +167,11 @@ test('all page URLs round-trip, preserve connection links, and reject sections f
   assert.equal(readNavigation('?view=assistant').page, 'Draft content');
   assert.deepEqual(readNavigation('?view=ads&section=contacts'), { page: 'Ads manager', section: 'campaigns', projectId: '' });
   assert.deepEqual(readNavigation('?view=unknown&section=shopping'), { page: 'Overview', section: '', projectId: '' });
+  // A campaign page is Campaigns with ?item=; other pages ignore the parameter.
+  const campaignPage = { page: 'Campaigns', section: '', projectId: 'a', item: 'c1' };
+  assert.deepEqual(readNavigation(new URL(navigationUrl(campaignPage, 'https://campaign.example/'), 'https://campaign.example').search), campaignPage);
+  assert.deepEqual(readNavigation('?view=calendar&item=c1'), { page: 'Calendar', section: '', projectId: '' });
+  assert.equal(new URL(navigationUrl({ page: 'Calendar', section: '', projectId: 'a' }, 'https://campaign.example/?view=campaigns&item=c1'), 'https://campaign.example').searchParams.get('item'), null, 'Leaving the campaign page drops its id.');
 });
 
 test('seven work areas plus Settings give every page and section exactly one tab, and old URLs open that tab', () => {
