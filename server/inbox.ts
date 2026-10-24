@@ -99,7 +99,7 @@ function metadata(value: any, accounts: ProviderRecord[]): ProviderRecord {
   for (const key of ['failedAccounts', 'accountsSkipped']) if (value[key] !== undefined) {
     if (!Array.isArray(value[key]) || value[key].some(row => !plain(row) || !accounts.some(account => account._id === row.accountId))) fail(502, 'INVALID_PROVIDER_SCOPE', 'Zernio returned inbox diagnostics outside this project.');
     for (const row of value[key]) { renderFields(row, ['accountId', 'platform', 'code'], ['retryAfter']); if (row.platform != null && row.platform !== accounts.find(account => account._id === row.accountId)?.platform) invalid(); }
-    result[key] = value[key].map(row => ({ ...pick(row, ['accountId', 'platform', 'code', 'retryAfter']), ...(key === 'failedAccounts' ? { error: 'The provider could not read this account. Check its connection and permissions.' } : {}) }));
+    result[key] = value[key].map(row => ({ ...pick(row, ['accountId', 'platform', 'code', 'retryAfter']), ...(key === 'failedAccounts' ? { error: 'This account could not be read. Check its connection and permissions.' } : {}) }));
   }
   return result;
 }
