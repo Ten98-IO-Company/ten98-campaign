@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore } from '../server/database.ts';
-import { handleApprovals, assertPublishingApproval, assertProviderPostEdit } from '../server/approvals.ts';
+import { handleApprovals, assertPublishingApproval, assertProviderPostEdit, recordApprovedReschedule } from '../server/approvals.ts';
 import { blockWrites, postgresSkip, singleConnection, testDatabase } from './postgres.mjs';
 
 test('content approval policy binds current posts and creative to audited review requests and enforces role and project boundaries', { skip: postgresSkip }, async t => {
@@ -50,7 +50,8 @@ test('content approval policy binds current posts and creative to audited review
     assert.equal((await review(firstReviewId)).status, 409, 'A completed review cannot silently change its decision.');
     const originalPost = (await current());
     await store.update(project.id, 'posts', post.id, { accountOverrides: {} }); await assert.doesNotReject(async () => assertPublishingApproval(context(), (await current())), 'Empty account customizations keep legacy approval fingerprints unchanged.');
-    for (const changed of [{ tags: ['changed keywords'] }, { content: 'Changed copy' }, { platforms: ['instagram'] }, { accounts: ['another-brand-account'] }, { mediaItems: [{ type: 'image', url: 'https://cdn.example.test/new.jpg' }] }, { campaignId: 'changed-campaign' }, { scheduledAt: '2027-01-21T10:00:00Z' }, { accountOverrides: { 'brand-account-a': { platform: 'facebook', content: 'Account caption', options: {}, mediaItems: [] } } }, { accountOverrides: { 'brand-account-a': { platform: 'facebook', scheduledAt: '2027-01-22T10:00:00Z' } } }]) {
+    for (const changed of [{ tags: ['changed keywords'] }, { content: 'Changed copy' }, { platforms: ['instagram'] }, { accounts: ['another-brand-account'] }, { mediaItems: [{ type: 'image', url: 'https://cdn.example.test/new.jpg' }] }, { campaignId: 'changed-campaign' }, { accountOverrides: { 'brand-account-a': { platform: 'facebook', content: 'Account caption', options: {}, mediaItems: [] } } }]) {
+      // A time-only move is covered by the #125 test below.
       await store.update(project.id, 'posts', post.id, changed); await assertRejected((await current()), 'PUBLISHING_APPROVAL_STALE'); assert.equal((await item()).status, 'stale'); await store.update(project.id, 'posts', post.id, originalPost);
     }
     await store.update(project.id, 'posts', post.id, { assetId: asset.id }); await assertRejected((await current()), 'PUBLISHING_APPROVAL_STALE');
@@ -454,4 +455,56 @@ test('approving a proposal validates the proposed post against the platform rest
   assert.equal((await f.stored(reviewId)).status, 'pending');
   await f.sql.run('UPDATE post_approval_reviews SET snapshot = ? WHERE id = ?', JSON.stringify(snapshot), reviewId);
   assert.equal((await f.review('blair', reviewId)).status, 200);
+});
+
+// Manager decision on #125: moving an approved post only in time, to a future time, keeps its approval and is logged.
+// A time of now or in the past, clearing the time, or any other change makes the approval stale.
+test('a time-only move to a future time keeps the approval; a move to now or the past makes it stale', { skip: postgresSkip }, async t => {
+  const { db, pool, sql } = await testDatabase(t);
+  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner','Workspace owner','owner@example.test'),('editor','Author','editor@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'); INSERT INTO memberships VALUES ('w','owner','owner'),('w','editor','editor')");
+  const store = createStore(db), project = { id: 'project-a' };
+  const context = role => ({ db, store, project, role, user: { id: role, name: { owner: 'Workspace owner', editor: 'Author' }[role] } });
+  const invoke = async (path, role, body = {}, method = 'POST') => { let result; await handleApprovals({ ...context(role), req: { method }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body, send(status, data) { result = { status, data }; } }); return result; };
+  assert.equal((await invoke('policy', 'owner', { requireApproval: true })).status, 200);
+  const post = await store.create(project.id, 'posts', { content: 'Autumn teaser', platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [], scheduledAt: '2099-10-28T09:00:00Z' });
+  const current = () => store.get(project.id, 'posts', post.id);
+  const status = async () => (await invoke('posts', 'editor', {}, 'GET')).data.posts.find(row => row.post.id === post.id).status;
+  const publishes = async () => { try { await assertPublishingApproval(context('editor'), await current()); return 'passed'; } catch (error) { return error.code; } };
+  const approve = async () => { const reviewId = (await invoke(`posts/${post.id}/request`, 'editor')).data.item.review.id; assert.equal((await invoke(`posts/${post.id}/review`, 'owner', { reviewId, decision: 'approved' })).status, 200); return reviewId; };
+  // Moves the post through the same path as the post update route, which records a kept approval.
+  const move = async changes => { const previous = await current(), record = await store.update(project.id, 'posts', post.id, changes); await recordApprovedReschedule(context('editor'), previous, record); };
+  const firstReview = await approve();
+  assert.deepEqual([await status(), await publishes()], ['approved', 'passed']);
+
+  await move({ scheduledAt: '2099-10-29T15:30:00Z' });
+  assert.deepEqual([await status(), await publishes()], ['approved', 'passed'], 'A move to another future time keeps the approval.');
+  assert.equal((await sql.get('SELECT message FROM activity WHERE project_id = ? ORDER BY seq DESC LIMIT 1', project.id)).message, 'Post rescheduled after approval by Author.');
+  assert.equal(JSON.parse((await sql.get('SELECT snapshot FROM post_approval_reviews WHERE id = ?', firstReview)).snapshot).schedule.at, '2099-10-29T15:30:00Z', 'The review keeps the new time.');
+  await move({ accountOverrides: { 'brand-account-a': { platform: 'facebook', scheduledAt: '2099-10-30T08:00:00Z' } } });
+  assert.deepEqual([await status(), await publishes()], ['approved', 'passed'], 'An account’s own future time keeps the approval too.');
+  // A queue only picks the next weekly slot, so choosing one (or another version of it) is a time-only move.
+  await move({ queueId: 'queue-a', queueVersion: 'a'.repeat(64) });
+  assert.equal(await status(), 'approved', 'Choosing a queue keeps the approval.');
+  await move({ queueId: 'queue-b', queueVersion: 'b'.repeat(64), scheduledAt: '' });
+  assert.equal(await status(), 'approved', 'A queued post with no fixed time keeps the approval.');
+  await move({ queueId: '', queueVersion: '', scheduledAt: '2099-10-29T15:30:00Z' });
+
+  for (const changes of [{ scheduledAt: '2020-01-01T09:00:00Z' }, { scheduledAt: new Date(Date.now() - 1000).toISOString() }, { scheduledAt: '' }, { accountOverrides: { 'brand-account-a': { platform: 'facebook', scheduledAt: '2020-01-01T09:00:00Z' } } }]) {
+    const before = await current(), logged = (await sql.get('SELECT count(*)::int AS n FROM activity WHERE project_id = ?', project.id)).n;
+    await move(changes);
+    assert.deepEqual([await status(), await publishes()], ['stale', 'PUBLISHING_APPROVAL_STALE'], 'A move to now, the past or no time needs a new review: ' + JSON.stringify(changes));
+    assert.equal((await sql.get('SELECT count(*)::int AS n FROM activity WHERE project_id = ?', project.id)).n, logged, 'A stale move is not logged as a kept approval.');
+    await store.update(project.id, 'posts', post.id, before);
+  }
+  assert.deepEqual([await status(), await publishes()], ['approved', 'passed']);
+
+  // After a move into the past, a request opens a new review instead of answering with the old approval.
+  await move({ scheduledAt: '2020-01-01T09:00:00Z' });
+  const reopened = (await invoke(`posts/${post.id}/request`, 'editor')).data.item;
+  assert.equal(reopened.status, 'pending'); assert.notEqual(reopened.review.id, firstReview);
+
+  // Content changes stay stale whatever the time.
+  await store.update(project.id, 'posts', post.id, { scheduledAt: '2099-11-01T09:00:00Z' }); await approve();
+  await move({ content: 'Edited caption', scheduledAt: '2099-11-02T09:00:00Z' });
+  assert.deepEqual([await status(), await publishes()], ['stale', 'PUBLISHING_APPROVAL_STALE']);
 });

@@ -157,7 +157,9 @@ test('queue edits stale approvals and a queue change during provider validation 
     assert.equal((await f.request(`${f.project}/approvals/posts/${post.id}/request`, 'POST', {})).status, 409);
     f.queues[0].slots[0].time = '09:00'; assert.equal((await f.request(`${f.project}/approvals/posts/${post.id}/review`, 'POST', { reviewId: review.data.item.review.id, decision: 'approved' })).status, 200); f.queues[0].slots[0].time = '11:00';
     const current = (await f.list()).queues[0]; await f.request(`${f.project}/posts/${post.id}`, 'PATCH', { queueVersion: current.version });
-    const status = (await f.request(`${f.project}/approvals/posts`)).data.posts.find(row => row.post.id === post.id); assert.equal(status.status, 'stale'); assert.equal((await f.request(`${f.project}/integrations/social/publish`, 'POST', { postId: post.id })).status, 409);
+    // A queue only picks the next slot, so taking its new version is a time-only move that keeps the approval (#125).
+    const status = (await f.request(`${f.project}/approvals/posts`)).data.posts.find(row => row.post.id === post.id); assert.equal(status.status, 'approved');
+    assert.equal((await f.app.sql.get('SELECT message FROM activity WHERE project_id = ? ORDER BY seq DESC LIMIT 1', f.project.split('/').pop())).message, 'Post rescheduled after approval by Queue owner.');
   } finally { await f.close(); }
 });
 

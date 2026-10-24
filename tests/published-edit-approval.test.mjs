@@ -210,8 +210,9 @@ test('an approved local post keeps its fingerprint and stays approved', { skip: 
   assert.equal((await invoke('policy', 'blair', { requireApproval: true })).status, 200);
   const post = await store.create(project.id, 'posts', { content: 'Stable fingerprint fixture', platforms: ['facebook', 'linkedin'], accounts: ['facebook-a', 'linkedin-a'], tags: ['launch'], status: 'draft', mediaItems: [], accountOverrides: { 'linkedin-a': { platform: 'linkedin', content: 'LinkedIn copy' } } });
   const requested = await invoke(`posts/${post.id}/request`, 'casey'); assert.equal(requested.status, 200, JSON.stringify(requested.data));
-  // Recorded with the approvals code before published edits were covered (cabc2f4).
-  assert.equal((await sql.get('SELECT fingerprint FROM post_approval_reviews WHERE id = ?', requested.data.item.review.id)).fingerprint, 'c1ac6df89d6e937743a36ee30f6e95fe8ce6d155cf07dd1841057045c62db5c9');
+  // Recorded after #125 took the schedule out of what is approved (cabc2f4 first pinned it). That change was deliberate:
+  // a review approved before it needs one new review. Any other change to this value is a fingerprint regression.
+  assert.equal((await sql.get('SELECT fingerprint FROM post_approval_reviews WHERE id = ?', requested.data.item.review.id)).fingerprint, 'c495e4c244b09276e91993e85df011246bb41ae5ec5f41a07bd3da2e921a50a9');
   assert.equal((await invoke(`posts/${post.id}/review`, 'blair', { decision: 'approved', reviewId: requested.data.item.review.id })).status, 200);
   await assertPublishingApproval({ db, store, project }, post);
 });
