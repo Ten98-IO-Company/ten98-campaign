@@ -15,3 +15,9 @@ export function postScheduleEntries<T extends ScheduledPost>(post: T, accounts: 
   }) : [{ id: post.id, post, platform: post.platforms?.[0] || '', content: post.content || '', scheduledAt: post.scheduledAt }];
   return copies.filter((copy): copy is PostScheduleEntry<T> => typeof copy.scheduledAt === 'string' && Number.isFinite(Date.parse(copy.scheduledAt)));
 }
+
+// A post is "scheduled" only once a network holds it (it has an externalId). A dated local post is "planned": nothing
+// goes out until it is submitted, so screens must not call it scheduled.
+export function postDisplayStatus(post: { [key: string]: unknown }) {
+  return post.status === 'scheduled' && !post.externalId ? 'planned' : typeof post.status === 'string' && post.status ? post.status : 'draft';
+}
