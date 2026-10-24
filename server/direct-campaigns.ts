@@ -35,10 +35,10 @@ function content(campaign: any, contact: any) {
 }
 function validate(raw: any) {
   if (!plain(raw)) fail(400, 'INVALID_CAMPAIGN', 'Use the campaign fields.');
-  const allowed = ['name', 'channel', 'subject', 'text', 'html', 'emailPurpose', 'accountId', 'templateName', 'templateLanguage', 'templateComponents', 'contactIds', 'tags'];
+  const allowed = ['name', 'campaignId', 'channel', 'subject', 'text', 'html', 'emailPurpose', 'accountId', 'templateName', 'templateLanguage', 'templateComponents', 'contactIds', 'tags'];
   if (Object.keys(raw).some(key => !allowed.includes(key))) fail(400, 'INVALID_CAMPAIGN', 'Use only the campaign editor fields.');
   if (!channels.includes(raw.channel)) fail(400, 'INVALID_CAMPAIGN', 'Choose email, SMS or WhatsApp.');
-  const data = { name: text(raw.name, 'a campaign name', 120), channel: raw.channel, subject: text(raw.subject, 'a subject', 200, true), text: text(raw.text, 'message text', 100000, true), html: text(raw.html, 'HTML content', 200000, true), emailPurpose: raw.emailPurpose === 'marketing' && raw.channel === 'email' ? 'marketing' : 'transactional', accountId: text(raw.accountId, 'a WhatsApp account', 200, true), templateName: text(raw.templateName, 'a template name', 200, true), templateLanguage: text(raw.templateLanguage, 'a template language', 30, true), contactIds: list(raw.contactIds, 'Recipients'), tags: list(raw.tags, 'Tags', 30), templateComponents: raw.templateComponents ?? [] };
+  const data = { name: text(raw.name, 'a campaign name', 120), campaignId: text(raw.campaignId, 'a campaign', 100, true), channel: raw.channel, subject: text(raw.subject, 'a subject', 200, true), text: text(raw.text, 'message text', 100000, true), html: text(raw.html, 'HTML content', 200000, true), emailPurpose: raw.emailPurpose === 'marketing' && raw.channel === 'email' ? 'marketing' : 'transactional', accountId: text(raw.accountId, 'a WhatsApp account', 200, true), templateName: text(raw.templateName, 'a template name', 200, true), templateLanguage: text(raw.templateLanguage, 'a template language', 30, true), contactIds: list(raw.contactIds, 'Recipients'), tags: list(raw.tags, 'Tags', 30), templateComponents: raw.templateComponents ?? [] };
   if (raw.emailPurpose !== undefined && !['transactional', 'marketing'].includes(raw.emailPurpose)) fail(400, 'INVALID_CAMPAIGN', 'Choose a transactional or marketing email purpose.');
   if (!Array.isArray(data.templateComponents) || JSON.stringify(data.templateComponents).length > 20000) fail(400, 'INVALID_CAMPAIGN', 'Use a template component array of at most 20 KB.');
   if (data.channel === 'email' && (!data.subject || !data.text)) fail(400, 'INVALID_CAMPAIGN', 'Email needs a subject and plain text content.');
@@ -105,6 +105,8 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     if (current?.status === 'cancelled') { campaign.status = 'cancelled'; if (current.providerStatus === 'cancelled') campaign.providerStatus = 'cancelled'; }
     campaign.updatedAt = nowISO(); await tx.execute(sql`UPDATE direct_campaigns SET data = ${JSON.stringify(campaign)} WHERE id = ${campaign.id} AND project_id = ${campaign.projectId}`); return campaign;
   });
+  // A message may name the planner campaign it belongs to; that campaign must be in the same project.
+  const requireCampaign = async (projectId: string, campaignId: string, ex: Executor = db) => { if (campaignId && !await createStore(ex).get(projectId, 'campaigns', campaignId)) fail(400, 'INVALID_CAMPAIGN', 'Choose a campaign from this project.'); };
   // Row lock: read-modify-write of the stored campaign, so a concurrent worker, refresh or cancellation write is not lost.
   const changeCampaign = (projectId: string, id: string, change: (campaign: any) => unknown) => db.transaction(async tx => {
     const campaign = await find(projectId, id, tx, true);
@@ -297,12 +299,12 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     }
     if (kind !== 'campaigns') return false;
     if (!id && method === 'GET') { const campaigns = []; for (const campaign of await campaignRows(project.id)) campaigns.push(await decorate(campaign)); send(200, { campaigns }); return true; }
-    if (!id && method === 'POST') { const timestamp = nowISO(), campaign = { ...validate(body), id: randomUUID(), projectId: project.id, status: 'draft', createdAt: timestamp, updatedAt: timestamp }; await db.execute(sql`INSERT INTO direct_campaigns (id, project_id, data) VALUES (${campaign.id}, ${project.id}, ${JSON.stringify(campaign)})`); send(201, { campaign: await decorate(campaign) }); return true; }
+    if (!id && method === 'POST') { const timestamp = nowISO(), campaign = { ...validate(body), id: randomUUID(), projectId: project.id, status: 'draft', createdAt: timestamp, updatedAt: timestamp }; await requireCampaign(project.id, campaign.campaignId); await db.execute(sql`INSERT INTO direct_campaigns (id, project_id, data) VALUES (${campaign.id}, ${project.id}, ${JSON.stringify(campaign)})`); send(201, { campaign: await decorate(campaign) }); return true; }
     const campaign = await find(project.id, id);
     if (!action && method === 'GET') { send(200, { campaign: await decorate(campaign), deliveries: await deliveries(id) }); return true; }
     if (!action && method === 'PATCH') {
       // Row lock: the draft check and the edit commit together, so a concurrent send cannot be reverted to an edited draft.
-      const saved = await db.transaction(async tx => { const current = await find(project.id, id, tx, true); if (current.status !== 'draft') fail(409, 'CAMPAIGN_LOCKED', 'Only drafts can be edited. Create a new draft for another send.'); const fields = Object.fromEntries(['name', 'channel', 'subject', 'text', 'html', 'emailPurpose', 'accountId', 'templateName', 'templateLanguage', 'templateComponents', 'contactIds', 'tags'].map(key => [key, current[key]])); Object.assign(current, validate({ ...fields, ...body })); return save(current, tx); });
+      const saved = await db.transaction(async tx => { const current = await find(project.id, id, tx, true); if (current.status !== 'draft') fail(409, 'CAMPAIGN_LOCKED', 'Only drafts can be edited. Create a new draft for another send.'); const fields = Object.fromEntries(['name', 'campaignId', 'channel', 'subject', 'text', 'html', 'emailPurpose', 'accountId', 'templateName', 'templateLanguage', 'templateComponents', 'contactIds', 'tags'].map(key => [key, current[key]])); const data = validate({ ...fields, ...body }); if (data.campaignId !== (current.campaignId || '')) await requireCampaign(project.id, data.campaignId, tx); Object.assign(current, data); return save(current, tx); });
       send(200, { campaign: await decorate(saved) }); return true;
     }
     if (method !== 'POST') return false;
