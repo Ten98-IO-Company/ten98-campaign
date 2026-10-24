@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
 import { postgresSkip, singleConnection, testApp } from './postgres.mjs';
+import { readText } from './read-text.ts';
 import { testNativeGoogleAds } from '../server/native-google-ads.ts';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -165,7 +166,7 @@ test('Shopping report budgets and spend retain the mapped currency precision', a
     const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
     for (const budgetPeriod of ['DAILY', 'CUSTOM_PERIOD']) {
       const row = { id: '123', name: 'Precision fixture', channel: 'SHOPPING', status: 'PAUSED', budgetPeriod, dailyBudgetMicros: micros, totalBudgetMicros: micros, metrics: { costMicros: micros } };
-      const text = renderToStaticMarkup(render({ campaigns: [row] }, currency, digits)).replace(/<[^>]*>/g, '');
+      const text = readText(renderToStaticMarkup(render({ campaigns: [row] }, currency, digits)), '');
       assert.equal(text.split(expected).length - 1, 2, 'Both the budget and spend must retain ' + expected);
     }
   }

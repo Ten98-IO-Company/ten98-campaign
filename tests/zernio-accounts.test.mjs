@@ -6,6 +6,7 @@ import React from 'react';
 import * as design from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import { readText } from './read-text.ts';
 import { handleZernioAccounts } from '../server/zernio-accounts.ts';
 import { handleIntegration } from '../server/integrations.ts';
 import { IntegrationError } from '../server/provider-core.ts';
@@ -532,7 +533,7 @@ test('rendered health controls show WhatsApp link and permission evidence, hide 
     assert.ok(manage); assert.equal(manage.props.children, 'Manage'); assert.equal(manage.props.pressed, true); assert.equal(manage.props.disabled, busy);
     if (!busy) { manage.props.onClick(); assert.equal(chosen, selected); }
     assert.ok(nodes(tree).some(node => node.type === design.DataTable && node.props.ariaLabel === 'Connected accounts'));
-    const html = renderToStaticMarkup(tree); return html.replace(/<[^>]*>/g, ' ');
+    return readText(renderToStaticMarkup(tree));
   }
   const viewer = render(false), admin = render(true); assert.match(viewer, /WhatsApp platform link:.*disconnected/); assert.match(viewer, /valid token alone does not confirm/); assert.match(viewer, /Inbound webhook subscribed:.*No/); assert.match(viewer, /Permission details/); assert.doesNotMatch(viewer, /Disconnect account|Save account settings|Reconnect account/); assert.match(admin, /Reconnect account/); assert.match(admin, /Save account settings/); assert.doesNotMatch(source, /window.confirm/);
   render(false, true); render(true, true);
