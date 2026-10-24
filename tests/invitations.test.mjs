@@ -11,7 +11,7 @@ async function fixture(t) {
     INSERT INTO memberships VALUES ('workspace-a','owner','owner'),('workspace-a','admin','admin'),('workspace-a','viewer','viewer'),('workspace-b','outside','owner');
     INSERT INTO instance_operators VALUES ('owner');`);
   const users = Object.fromEntries((await pool.query('SELECT id, name, email FROM users')).rows.map(user => [user.id, user]));
-  const auth = { async limit() {}, clientAddress: () => '127.0.0.1' }, workspaceAccess = async (workspaceId, userId) => {
+  const auth = { async limit() {}, clientKey: (req, scope) => scope + ':test-client' }, workspaceAccess = async (workspaceId, userId) => {
     const role = await memberRole(db, workspaceId, userId);
     if (!role) throw new HttpError(404, 'Workspace not available.'); return role;
   };
