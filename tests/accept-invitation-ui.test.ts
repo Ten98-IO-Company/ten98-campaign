@@ -9,7 +9,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { roleLabel } from '../src/workspace-roles.ts';
 
 type Call = [path: string, method?: string, body?: unknown];
-type Props = { token: string; request: (path: string, method?: string, body?: unknown) => Promise<unknown>; onAccepted: (result: unknown) => void; onSignIn: (email?: string) => void };
+type Props = { token: string; signedInEmail?: string; request: (path: string, method?: string, body?: unknown) => Promise<unknown>; onAccepted: (result: unknown) => void; onSignIn: (email?: string) => void; onCancel?: () => void };
 
 // Evaluate Campaign's real AcceptInvitation adapter with hooks mocked by call order.
 const source = await readFile(new URL('../src/AcceptInvitation.tsx', import.meta.url), 'utf8');
@@ -56,4 +56,22 @@ test('the invitation shows Campaign\'s role label and the shared flow date, and 
   assert.match(html, />Oct 30, 2026</); assert.doesNotMatch(html, /10\/30\/2026/);
   tree.props.onSignIn(); assert.deepEqual(signIns, ['new@example.test']);
   assert.equal(roleLabel('custom'), 'custom', 'An unknown role is shown as given.');
+});
+
+// QA #265 recheck: as in Discover, someone signed in as another account sees the mismatch notice with Switch account,
+// which signs them out and opens sign-in for the invited email; Cancel leaves the invitation. No accept goes out.
+test('an invitation opened as another account offers Switch account, and Cancel leaves the invitation', async () => {
+  const calls: Call[] = [], signIns: (string | undefined)[] = []; let cancelled = 0;
+  const request = async (path: string, method?: string, body?: unknown) => { calls.push([path, method, body]); return { invitation: { email: 'New@Example.test', role: 'viewer', workspaceName: 'Studio', expiresAt: '2026-11-01T00:00:00.000Z' }, accountExists: true, requiresSignIn: false }; };
+  const ui = view({ token: 'T'.repeat(43), signedInEmail: 'someone.else@example.test', request, onAccepted() {}, onSignIn: email => signIns.push(email), onCancel: () => { cancelled++; } });
+  ui.render(); ui.effects.forEach(effect => effect()); await new Promise(resolve => setImmediate(resolve));
+  const tree = ui.render();
+  assert.equal(tree.props.state, 'mismatch'); assert.equal(tree.props.signedInEmail, 'someone.else@example.test');
+  tree.props.onSwitchAccount(); assert.deepEqual(signIns, ['New@Example.test']);
+  await tree.props.onSubmit({}); assert.equal(calls.filter(([path]) => path === '/invitations/accept').length, 0, 'A mismatched session cannot accept.');
+  assert.equal(tree.props.cancel.label, 'Cancel'); tree.props.cancel.onClick(); assert.equal(cancelled, 1);
+  assert.deepEqual(tree.props.passwordPolicy, { minLength: 12, maxLength: 128 }, 'The library hint, as on owner setup.');
+  const same = view({ token: 'T'.repeat(43), signedInEmail: 'new@example.test', request, onAccepted() {}, onSignIn() {} });
+  same.render(); same.effects.forEach(effect => effect()); for (let tick = 0; tick < 3; tick++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(same.render().props.state, 'details', 'The invited email in another case is the same account.');
 });
