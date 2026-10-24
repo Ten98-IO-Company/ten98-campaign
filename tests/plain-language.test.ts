@@ -18,3 +18,16 @@ test('messages point people at Settings › Connections, not Integrations', asyn
   }
   assert.deepEqual(found, [], 'Say "in Settings › Connections" instead:\n' + found.join('\n'));
 });
+
+// QA round 5 (#267): phrases that named the integration or "the provider" where people read them.
+test('messages name the network or the place, not Zernio or "the provider"', async () => {
+  const banned = [/history stored by Zernio/, /sends it to the provider/, /The provider could not read/, /Create provider/];
+  const found: string[] = [];
+  for (const dir of dirs) {
+    for (const file of (await readdir(dir, { recursive: true })).map(name => name.replaceAll('\\', '/')).filter(name => /\.tsx?$/.test(name))) {
+      const source = await readFile(new URL(file, dir), 'utf8');
+      for (const pattern of banned) if (pattern.test(source)) found.push(`${file}: ${pattern}`);
+    }
+  }
+  assert.deepEqual(found, []);
+});
