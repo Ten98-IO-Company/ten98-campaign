@@ -91,10 +91,10 @@ export default function GoogleCalendar({ projectId, canWrite, request, fromDate,
   </Inline>; };
   return <>
     {agenda?.(eventActions)}
-    <Card as="section" headingLevel={2} title="Google Calendar" description="Share campaign dates with your team and manage project events." actions={onOpenIntegrations && <Button variant="secondary" onClick={onOpenIntegrations}>Open integrations</Button>}>
+    <Card as="section" headingLevel={2} title="Google Calendar" description="Share campaign dates with your team and manage project events." actions={onOpenIntegrations && <Button variant="secondary" onClick={onOpenIntegrations}>Open Connections</Button>}>
       <Stack>
         {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}
-        {status && <Text tone="muted">{connected ? `Shared calendar: ${status.calendarId}` : 'Connect this project’s Google Calendar in Integrations.'}</Text>}
+        {status && <Text tone="muted">{connected ? `Shared calendar: ${status.calendarId}` : 'Connect this project’s Google Calendar in Settings › Connections.'}</Text>}
         {connected && <>
           <FormActions><Button variant="secondary" disabled={busy || !from || !to || to < from} onClick={() => action(load)}>{busy ? 'Working…' : 'Load Google events'}</Button>{canWrite && <Button variant="secondary" disabled={busy} onClick={reviewPlan}>Review campaign plan for Google</Button>}</FormActions>
           <Text tone="muted">Google events load for the agenda month. The plan covers this whole project, across all dates. Account customizations create separate events at each account’s publishing time. Publishing also removes obsolete plan events shown in the review; manually created and unrelated events are excluded. Calendar events do not publish social posts.</Text>

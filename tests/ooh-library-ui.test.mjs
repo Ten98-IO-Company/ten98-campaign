@@ -40,7 +40,7 @@ test('OOH shared reviews render and submit only their exact booking while native
   assert.doesNotMatch(html, /Broadsign connection|Approve project inventory|Credentials configured/); assert.match(html, /Exact client · sandbox/);
   let opened = 0;
   const linked = elements(render({ onOpenIntegrations: () => opened++ }));
-  linked.find(node => node.type === Button && node.props.children === 'Open integrations').props.onClick();
+  linked.find(node => node.type === Button && node.props.children === 'Open Connections').props.onClick();
   assert.equal(opened, 1); assert.equal(calls.length, 0, 'Opening setup must not perform a provider action.');
   const setupTree = render({ mode: 'connection', role: 'admin', isOperator: true }), setup = elements(setupTree), setupHtml = renderToStaticMarkup(setupTree);
   assert.match(setupHtml, /Broadsign connection/); assert.match(setupHtml, /Domain 17 · Exact client · Client client-exact/);

@@ -48,10 +48,10 @@ test('the bookings view leads with its stats, then the list, and shows no map pl
   const off = oohMap([{ configured: false }, '', false]), tree = off.render(props()), nodes = elements(tree);
   const order = nodes.map(node => node.type);
   assert.ok(order.indexOf(MetricGrid) >= 0 && order.indexOf(MetricGrid) < order.indexOf(DataTable), 'Stats sit above the list.');
-  assert.match(text(nodes.find(node => node.type === MetricGrid)), /Live placements 1 .*Media partners 1 .*Locations 2/);
+  assert.match(text(nodes.find(node => node.type === MetricGrid)), /Live billboards 1 .*Media partners 1 .*Locations 2/);
   assert.equal(nodes.some(node => node.type === EmbedHost), false, 'No empty map card.');
   assert.doesNotMatch(text(tree), /Put your placements on the map|Google Maps/, 'Members who cannot enable Maps see no setup hint.');
-  assert.match(text(off.render(props({ canManageMaps: true }))), /Google Maps is off/, 'One hint for whoever can enable it.');
+  assert.match(text(off.render(props({ canManageMaps: true }))), /The map is off\. Turn on Google Maps/, 'One hint for whoever can enable it.');
   const loading = oohMap([null, '', false]);
   assert.equal(elements(loading.render(props())).some(node => node.type === EmbedHost), false, 'The map appears only once Maps is known to be configured.');
 });
@@ -81,8 +81,8 @@ test('each booking row shows status, dates and cost, and opens the booking it na
   assert.match(text(table.props.rowActions(placements[0])), /Proof/);
   assert.deepEqual(elements(view.render(props({ canWrite: false }))).filter(node => node.type === Button).map(node => node.props.children), ['View booking', 'View booking']);
   const empty = elements(view.render(props({ visible: [] }))).find(node => node.type === DataTable);
-  assert.match(text(empty.props.emptyState), /No placements match this search/);
-  assert.match(text(elements(view.render(props({ placements: [], visible: [], locations: [] }))).find(node => node.type === DataTable).props.emptyState), /No OOH placements/);
+  assert.match(text(empty.props.emptyState), /No bookings match this search/);
+  assert.match(text(elements(view.render(props({ placements: [], visible: [], locations: [] }))).find(node => node.type === DataTable).props.emptyState), /No billboard bookings/);
 });
 
 test('the booking form is grouped, shows at most 8 fields before More, and submits the same fields as before', () => {
@@ -149,7 +149,7 @@ test('main wires the OOH page through the plan view and the grouped booking form
   assert.match(mainSource, /<OohProviders onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\}[^\r\n]*?bookings=\{<OohMap /);
   // A booking started from a campaign page preselects that campaign; editing keeps the booking's own.
   assert.match(mainSource, /\{modal\.type === 'placement' && <BookingFields item=\{modal\.item\} partners=\{state\.providers\} campaigns=\{state\.campaigns\} defaultCampaignId=\{modal\.campaignId\} defaultDates=\{modal\.dates\}\/>\}/);
-  assert.doesNotMatch(mainSource, /label="Latitude"|<Stat label="Live placements"/, 'The page and form no longer live in main.');
+  assert.doesNotMatch(mainSource, /label="Latitude"|<Stat label="Live billboards"/, 'The page and form no longer live in main.');
 });
 
 test('the OOH views use @ten98/ui only', () => {

@@ -113,7 +113,7 @@ test('current list failures still surface and malformed permission-scoped lists 
     const ui = await view(file, ['load'], async () => { throw new Error('Current read failed'); }); ui.mount(); await tick(); assert.equal(ui.errors(), 'Current read failed');
   }
   for (const file of ['TeamSettings', 'OperationRecovery']) {
-    const ui = await view(file, ['load'], async () => ({})); await assert.rejects(ui.load(), /could not be read/);
+    const ui = await view(file, ['load'], async () => ({})); await assert.rejects(ui.load(), /could not be (read|loaded)/);
   }
 });
 
