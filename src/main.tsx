@@ -154,7 +154,7 @@ function Creative({ item, small = false }: { item: Row; small?: boolean }) { ret
 function App() {
   const [session, setSession] = useState<any>(null), [state, setState] = useState<State | null>(null), { toast } = useToast();
   // inviteSignIn is set while an invited person signs in instead; it carries the invited email for the sign-in form.
-  const inviteToken = startupInvite, [inviteSignIn, setInviteSignIn] = useState<{ email?: string } | null>(startupAuthError ? {} : null);
+  const [inviteToken, setInviteToken] = useState(startupInvite), [inviteSignIn, setInviteSignIn] = useState<{ email?: string } | null>(startupAuthError ? {} : null);
   const [navigation, setNavigation] = useState(() => readNavigation(window.location.search)), [query, setQuery] = useState(''), [tab, setTab] = useState('all');
   const { page, section } = navigation;
   const adsView = page === 'Ads manager' ? section : 'campaigns', publishingView = page === 'Publishing' ? section : 'posts', insightsView = page === 'Analytics' ? section : 'summary', directView = page === 'Direct campaigns' ? section : 'campaigns';
@@ -366,6 +366,7 @@ function App() {
   }
   useEffect(() => { if (!notice) return; toast(notice); setNotice(''); }, [notice]); // The shared toast region announces notices and times them out.
   useEffect(() => { window.history.replaceState({ ...window.history.state, campaignIndex: historyIndex.current }, ''); }, []);
+  useEffect(() => watchInvite(window, token => { setInviteSignIn(null); setInviteToken(token); }), []);
   useEffect(() => { api('/session').then(s => { setSession(s); if (s.user) reload(new URLSearchParams(window.location.search).get('project') || '').catch(e => { if (e.name !== 'AbortError') setError(e.message); }); }).catch(e => setError(e.message)); }, []);
   useEffect(() => { setQuery(''); setTab('all'); setMobile(false); setError(''); }, [page]);
   useEffect(() => { if (modal) setError(''); }, [modal]); // A dialog shows only its own errors, not one left by an earlier page action.
@@ -674,6 +675,12 @@ function takeInvite(location: Pick<Location, 'pathname' | 'search' | 'hash'>, hi
   return token;
 }
 const startupInvite = takeInvite(window.location, window.history);
+// A link pasted into an open tab changes only the fragment, so the running app reads it the same way.
+function watchInvite(target: Pick<Window, 'location' | 'history' | 'addEventListener' | 'removeEventListener'>, onInvite: (token: string) => void) {
+  const read = () => { const token = takeInvite(target.location, target.history); if (token) onInvite(token); };
+  target.addEventListener('hashchange', read);
+  return () => target.removeEventListener('hashchange', read);
+}
 // Campaign adapter: the host-held setup token, sample opt-in and invitation continuation stay app-owned.
 // With an invitation in memory the screen says so, prefills the invited email and offers a way back; signing in returns to the invitation.
 function Auth({ session, inviteToken = '', inviteEmail = '', onBackToInvitation, error, busy, onSubmit, onOidcStart }: { session: any; inviteToken?: string; inviteEmail?: string; onBackToInvitation?: () => void; error: string; busy: boolean; onSubmit: (data: any) => void; onOidcStart?: () => void }) {
