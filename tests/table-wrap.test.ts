@@ -16,5 +16,7 @@ test('wrapping table cells keep a word-width minimum instead of collapsing to on
     assert.match(css, /\.t98-table-scroll\s*\{[^}]*overflow-x:\s*auto/, `${file} lets a wide table scroll`);
   }
   const links = await readFile(new URL('../src/CampaignLinks.tsx', import.meta.url), 'utf8');
-  assert.match(links, /\{ key: 'link', header: 'Link', wrap: true,/, 'The Links table uses the library wrap that 0.24.0 fixed.');
+  // Word-boundary wrapping alone still left the Link column at 24 px at 320 px (QA round 5), so it also takes the large
+  // named minimum width and names its row.
+  assert.match(links, /\{ key: 'link', header: 'Link', rowHeader: true, wrap: true, minWidth: 'lg',/, 'The Links table keeps a readable Link column.');
 });
