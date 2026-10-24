@@ -19,7 +19,7 @@ type Props = {
   onLoadQueues?: () => Promise<any>;
   onLoadGroups?: () => Promise<any>;
   onShortenLinks?: (values: Record<string, any>) => Promise<{ content: string; platformOverrides: Record<string, any>; accountOverrides?: Record<string, any> }>;
-  busy?: boolean; readOnly?: boolean; initialScheduledAt?: string;
+  busy?: boolean; readOnly?: boolean; initialScheduledAt?: string; initialCampaignId?: string;
   /** Element (the editor Dialog's footer) the actions render into; without it they follow the form. */
   actionsHost?: HTMLElement | null;
   /** The project has a social publishing connection. Defaults to whether accounts can be loaded (the editor passes `onLoadAccounts` only when connected); provider posts are connected. */
@@ -234,9 +234,9 @@ export function PostVariantPreview({ platform, variant, accountName = 'Your bran
     firstComment={options.firstComment || undefined}/>;
 }
 
-export default function PostComposer({ post, assets = [], campaigns = [], accounts: connectedAccounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onLookupDestinations, onLoadQueues, onLoadGroups, onShortenLinks, providerPost = false, connected = providerPost || !!onLoadAccounts, onOpenIntegrations, onSchedule, publishBlock, busy = false, readOnly = false, initialScheduledAt, actionsHost }: Props) {
+export default function PostComposer({ post, assets = [], campaigns = [], accounts: connectedAccounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onLookupDestinations, onLoadQueues, onLoadGroups, onShortenLinks, providerPost = false, connected = providerPost || !!onLoadAccounts, onOpenIntegrations, onSchedule, publishBlock, busy = false, readOnly = false, initialScheduledAt, initialCampaignId, actionsHost }: Props) {
   const [content, setContent] = useState(post?.content || ''), [platforms, setPlatforms] = useState<string[]>(post?.platforms || []), [selectedAccounts, setAccounts] = useState<string[]>(post?.accounts || []);
-  const [assetId, setAssetId] = useState(post?.assetId || ''), [campaignId, setCampaignId] = useState(post?.campaignId || ''), [scheduledAt, setScheduledAt] = useState(localTime(post?.scheduledAt) || initialScheduledAt || '');
+  const [assetId, setAssetId] = useState(post?.assetId || ''), [campaignId, setCampaignId] = useState(post?.campaignId || initialCampaignId || ''), [scheduledAt, setScheduledAt] = useState(localTime(post?.scheduledAt) || initialScheduledAt || '');
   const [baseMode, setBaseMode] = useState(Array.isArray(post?.mediaItems) ? post.mediaItems.length ? 'custom' : 'none' : post?.assetId ? 'asset' : 'none'), [baseMedia, setBaseMedia] = useState<MediaItem[]>(post?.mediaItems || []);
   const [overrides, setOverrides] = useState<Record<string, Override>>(post?.platformOverrides || {}), [activePlatform, setActivePlatform] = useState(post?.platforms?.[0] || ''), [error, setError] = useState(''), [saving, setSaving] = useState(false);
   const [accountOverrides, setAccountOverrides] = useState<Record<string, AccountOverride>>(post?.accountOverrides || {}), [activeAccount, setActiveAccount] = useState('');

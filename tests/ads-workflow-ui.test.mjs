@@ -8,12 +8,17 @@ import * as ui from '@ten98/ui';
 import { AuthErrorBoundary, Option, Select } from '@ten98/ui';
 import { transformWithOxc } from 'vite';
 
-test('campaign rows open the matching native advertising view and manual records retain their editor', async () => {
+test('campaign rows open the matching native advertising view and manual records open their campaign page', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), start = source.indexOf('function openCampaign('), end = source.indexOf('  const campaignTable', start);
   assert.ok(start > 0 && end > start);
-  const calls = [], open = new Function('setPage', 'setAdsView', 'setModal', `return (${stripTypeScriptTypes(source.slice(start, end))});`)((...value) => calls.push(['page', ...value]), value => calls.push(['view', value]), value => calls.push(['modal', value]));
+  const calls = [], record = name => (...value) => calls.push([name, ...value]);
+  const { open, add, openItem } = new Function('setPage', 'setAdsView', 'setModal', 'navigate', 'state', `${stripTypeScriptTypes(source.slice(start, end))}; return { open: openCampaign, add: addToCampaign, openItem: openCampaignItem };`)(record('page'), record('view'), record('modal'), record('navigate'), { projectId: 'project-a' });
   for (const [provider, view] of [['googleAdsNative', 'shopping'], ['microsoft', 'microsoft']]) { calls.length = 0; open({ nativeProvider: provider, id: 'native' }); assert.deepEqual(calls, [['page', 'Ads manager', view]]); }
-  calls.length = 0; const manual = { id: 'manual' }; open(manual); assert.deepEqual(calls, [['modal', { type: 'campaign', item: manual }]]);
+  calls.length = 0; open({ id: 'manual' }); assert.deepEqual(calls, [['navigate', { page: 'Campaigns', section: '', projectId: 'project-a', item: 'manual' }]]);
+  // Add creates posts and bookings already linked to the campaign; other kinds open where that work happens.
+  calls.length = 0; for (const kind of ['post', 'placement', 'activation', 'message', 'ad', 'link']) add(kind, 'c1');
+  assert.deepEqual(calls, [['modal', { type: 'post', campaignId: 'c1' }], ['modal', { type: 'placement', campaignId: 'c1' }], ['page', 'Field activity'], ['page', 'Direct campaigns'], ['page', 'Ads manager'], ['page', 'Links & tracking']]);
+  calls.length = 0; const post = { id: 'p1' }; openItem('post', post); openItem('activation', { id: 'a1' }); assert.deepEqual(calls, [['modal', { type: 'post', item: post }], ['page', 'Field activity']]);
 });
 
 test('Shopping product-bid handlers send scoped confirmed changes and ignore readback after leaving the view', async () => {
