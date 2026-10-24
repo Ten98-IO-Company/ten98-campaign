@@ -4,6 +4,7 @@ import { advisoryLock } from './auth.ts';
 import type { Database } from './database.ts';
 import { googleToken, pathSegment, providerRequest, operation, IntegrationError, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
+import { ACTIVATION_TYPE_LABELS, type ActivationType } from '../shared/offline-activations.ts';
 
 function fail(status: number, message: string): never { throw new IntegrationError(status, 'CALENDAR_ERROR', message); }
 const scope = 'https://www.googleapis.com/auth/calendar.events';
@@ -15,7 +16,7 @@ const snapshotOf = (value: unknown) => JSON.stringify(canonical(value));
 function planIdentity(event: ProviderRecord, projectId: string) {
   const fields = event.extendedProperties?.private;
   const generation = fields?.ten98Generation === undefined ? 0 : Number(fields.ten98Generation);
-  if (!projectId || fields?.ten98ProjectId !== projectId || !['campaigns', 'placements', 'posts'].includes(fields.ten98Collection) || typeof fields.ten98RecordId !== 'string' || !fields.ten98RecordId || fields.ten98AccountId !== undefined && (fields.ten98Collection !== 'posts' || typeof fields.ten98AccountId !== 'string' || !fields.ten98AccountId) || fields.ten98Generation !== undefined && (typeof fields.ten98Generation !== 'string' || !/^[1-9]\d{0,8}$/.test(fields.ten98Generation)) || event.id !== eventId(projectId, fields.ten98Collection, fields.ten98RecordId, fields.ten98AccountId, generation)) return undefined;
+  if (!projectId || fields?.ten98ProjectId !== projectId || !['campaigns', 'placements', 'posts', 'activations'].includes(fields.ten98Collection) || typeof fields.ten98RecordId !== 'string' || !fields.ten98RecordId || fields.ten98AccountId !== undefined && (fields.ten98Collection !== 'posts' || typeof fields.ten98AccountId !== 'string' || !fields.ten98AccountId) || fields.ten98Generation !== undefined && (typeof fields.ten98Generation !== 'string' || !/^[1-9]\d{0,8}$/.test(fields.ten98Generation)) || event.id !== eventId(projectId, fields.ten98Collection, fields.ten98RecordId, fields.ten98AccountId, generation)) return undefined;
   return { collection: fields.ten98Collection, recordId: fields.ten98RecordId, ...(fields.ten98AccountId ? { accountId: fields.ten98AccountId } : {}), generation };
 }
 const text = (value: any, max = 500): string => { if (typeof value !== 'string' || !value.trim() || value.length > max) fail(400, 'Enter a valid calendar event title or description.'); return value.trim(); };
@@ -36,7 +37,7 @@ function range(body: ProviderRecord) {
 }
 export async function calendarPlan(store: ProviderRecord, projectId: string, generations: Map<string, number> = new Map()) {
   const plan: ProviderRecord[] = [];
-  for (const collection of ['campaigns', 'placements', 'posts']) for (const row of await store.list(projectId, collection)) {
+  for (const collection of ['campaigns', 'placements', 'posts', 'activations']) for (const row of await store.list(projectId, collection)) {
     if (row.sample) continue;
     const generation = generations.get(generationKey(collection, row.id)) || 0, id = eventId(projectId, collection, row.id, '', generation);
     const privateFields = { ten98ProjectId: projectId, ten98RecordId: row.id, ten98Collection: collection };
@@ -45,6 +46,8 @@ export async function calendarPlan(store: ProviderRecord, projectId: string, gen
         const generation = generations.get(generationKey(collection, row.id, copy.accountId)) || 0;
         plan.push({ id: eventId(projectId, collection, row.id, copy.accountId, generation), summary: `Social · ${copy.accountId && !copy.platform ? 'Selected account post' : copy.content.slice(0, 100)}`, description: `Planned publishing time in ten98 Campaign. Calendar events do not publish social posts.${copy.accountId ? `\nAccount: ${copy.accountId}\nPlatform: ${copy.platform || 'Not available in the saved draft'}${copy.platform ? '\nCaption: ' + copy.content : '\nThe account-specific caption is not available in the saved draft.'}` : ''}`, start: { dateTime: new Date(copy.scheduledAt).toISOString() }, end: { dateTime: new Date(Date.parse(copy.scheduledAt) + 1800000).toISOString() }, extendedProperties: { private: { ...privateFields, ...(copy.accountId ? { ten98AccountId: copy.accountId } : {}), ...(generation ? { ten98Generation: String(generation) } : {}) } }, visibility: 'private' });
       }
+    } else if (collection === 'activations') {
+      if (row.status !== 'cancelled') plan.push({ id, summary: `Field · ${row.name}`, description: `${ACTIVATION_TYPE_LABELS[row.type as ActivationType] || 'Field activity'} · ${row.location}`, start: { dateTime: row.startAt }, end: { dateTime: row.endAt }, extendedProperties: { private: { ...privateFields, ...(generation ? { ten98Generation: String(generation) } : {}) } }, visibility: 'private' });
     } else if (collection !== 'posts' && isoDate(row.startDate)) {
       const end = isoDate(row.endDate) && row.endDate >= row.startDate ? row.endDate : row.startDate;
       plan.push({ id, summary: `${collection === 'placements' ? 'OOH' : 'Campaign'} · ${row.name}`, description: row.location || row.description || '', start: { date: row.startDate }, end: { date: new Date(Date.parse(end) + DAY).toISOString().slice(0, 10) }, extendedProperties: { private: { ...privateFields, ...(generation ? { ten98Generation: String(generation) } : {}) } }, visibility: 'private' });

@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 
 const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
-const routes = source.slice(source.indexOf('const pageRoutes:'), source.indexOf('const pages:'));
-const { readNavigation, navigationUrl, editorValues, pageRoutes, pageSections } = new Function(stripTypeScriptTypes(routes) + '; return {readNavigation, navigationUrl, editorValues, pageRoutes, pageSections};')();
+const routes = source.slice(source.indexOf('const pageRoutes:'), source.indexOf('const channels:'));
+const { readNavigation, navigationUrl, editorValues, pageRoutes, pageSections, areas, areaOf, areaTab } = new Function(stripTypeScriptTypes(routes) + '; return {readNavigation, navigationUrl, editorValues, pageRoutes, pageSections, areas, areaOf, areaTab};')();
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test('outcome checks preserve the original key without creating a first send and editor wrappers forward the check', async () => {
@@ -167,6 +167,25 @@ test('all page URLs round-trip, preserve connection links, and reject sections f
   assert.equal(readNavigation('?view=assistant').page, 'Draft content');
   assert.deepEqual(readNavigation('?view=ads&section=contacts'), { page: 'Ads manager', section: 'campaigns', projectId: '' });
   assert.deepEqual(readNavigation('?view=unknown&section=shopping'), { page: 'Overview', section: '', projectId: '' });
+});
+
+test('seven work areas plus Settings give every page and section exactly one tab, and old URLs open that tab', () => {
+  assert.deepEqual(areas.map(area => area.label), ['Home', 'Planner', 'Messages', 'Ads', 'Offline', 'Library', 'Reports', 'Settings']);
+  for (const area of areas) assert.ok(area.tabs.length <= 5, area.label + ' has at most five tabs');
+  for (const [page, view] of Object.entries(pageRoutes)) for (const section of pageSections[page] || ['']) {
+    const homes = areas.flatMap(area => area.tabs.filter(tab => tab.page === page && (!tab.section || tab.section === section)).map(tab => [area, tab]));
+    assert.equal(homes.length, 1, `${page} › ${section} has one home`);
+    const [area, tab] = homes[0], old = readNavigation(`?view=${view}${section ? '&section=' + section : ''}`);
+    assert.equal(areaOf(old.page), area); assert.equal(areaTab(old.page, old.section), tab);
+  }
+  // Each area opens on its first tab, and each tab link reads back as that tab.
+  for (const area of areas) for (const tab of area.tabs) {
+    const url = new URL(navigationUrl({ page: tab.page, section: tab.section || pageSections[tab.page]?.[0] || '', projectId: 'a' }, 'https://campaign.example/'), 'https://campaign.example');
+    const route = readNavigation(url.search); assert.equal(areaTab(route.page, route.section), tab);
+  }
+  assert.equal(areaTab('Publishing', 'queues').label, 'Posts'); assert.equal(areaTab('Ads manager', 'shopping').label, 'Ads');
+  assert.equal(areaTab('Direct campaigns', 'templates').label, 'WhatsApp templates'); assert.equal(areaTab('Analytics', 'accounts').label, 'Social accounts');
+  assert.equal(areaOf(readNavigation('?view=assistant').page).label, 'Planner');
 });
 
 test('initial deep links verify membership before requesting a project and never retain a foreign project URL', async () => {

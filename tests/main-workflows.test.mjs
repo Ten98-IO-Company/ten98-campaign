@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
-import { Button, Card, FormActions, Grid, Inline, SegmentedControl, Stack, Text } from '@ten98/ui';
+import { Button, Card, FormActions, Grid, Inline, Link, SegmentedControl, Stack, Text } from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 
@@ -42,8 +42,12 @@ test('browser-pass copy: connection empty states, disabled-control reasons, resu
   const appSource = source(), declaration = appSource.match(/^function ConnectionEmpty\([^\r\n]+$/m)[0];
   const { code } = await transformWithOxc(declaration, 'ConnectionEmpty.tsx', { jsx: { runtime: 'classic' } });
   const ConnectionEmpty = new Function('React', 'Card', 'EmptyState', 'Button', code + '; return ConnectionEmpty;')(React, Card, (await import('@ten98/ui')).EmptyState, Button);
-  let opened = 0; const html = renderToStaticMarkup(React.createElement(ConnectionEmpty, { subject: 'provider updates', onSettings: () => opened++ }));
-  assert.match(html, /Connect Zernio to use provider updates/); assert.match(html, />Open integrations</); assert.doesNotMatch(html, /Connect your/);
+  let opened = 0; const html = renderToStaticMarkup(React.createElement(ConnectionEmpty, { subject: 'ad activity', onSettings: () => opened++ }));
+  // Plain language: the job and where to do it, never the middleware or "provider".
+  assert.match(html, /Connect your accounts to use ad activity/); assert.match(html, /Settings › Connections/); assert.match(html, />Open Connections</);
+  assert.doesNotMatch(html, /Zernio|provider|Integrations/);
+  for (const subject of (appSource.match(/subject="[^"]+"/g) || [])) assert.doesNotMatch(subject, /provider|Zernio|queue|destination|tracking tag/, subject);
+  assert.match(appSource, /label=\{connected \? 'Accounts connected' : 'Connect your accounts'\} action=\{\{ label: 'Connections',/);
   for (const subject of (appSource.match(/subject="[^"]+"/g) || [])) assert.match(subject, /^subject="(?:the |[a-z]|WhatsApp|Google)/, subject);
   assert.doesNotMatch(appSource, /Open Integrations/, 'Button and prose casing is consistent within the shell.');
   for (const name of ['GoogleCalendar', 'UnifiedInbox']) assert.doesNotMatch(readFileSync(new URL(`../src/${name}.tsx`, import.meta.url), 'utf8'), /Open Integrations/, name + ' uses the same "Open integrations" casing.');
@@ -253,7 +257,7 @@ test('asset previews select safe actual media and fall back after a thumbnail fa
 });
 
 
-test('Settings keeps its two existing columns and renders scoped receipt recovery afterward at full width', async () => {
+test('Settings shows one section at a time, keeps scoped receipt recovery, and hides sign-in setup from non-operators', async () => {
   const appSource = source(), start = appSource.indexOf("{page === 'Settings' && "), end = appSource.indexOf('\n', start);
   assert.ok(start > 0 && end > start);
   const expression = appSource.slice(start + 1, end - 1);
@@ -262,25 +266,34 @@ test('Settings keeps its two existing columns and renders scoped receipt recover
   const AccountSettings = () => React.createElement('section', { 'data-account-settings': true });
   const OperationRecovery = ({ projectId }) => React.createElement('section', { 'data-provider-recovery': projectId });
   const TeamSettings = () => React.createElement('section', { 'data-team-settings': true });
+  const Frame = ({ children }) => React.createElement('div', { 'data-settings-frame': true }, children);
   const api = () => assert.fail('Rendering Settings must not submit an operation');
   const activeProject = { current: 'project-a' }, pendingKeys = { current: new Map([['retained', 'key']]) };
-  const context = { React, page: 'Settings', project: { id: 'project-a', name: 'Campaign project' }, state: { projectId: 'project-a', user: { id: 'viewer-a', isOperator: true } }, workspace: { id: 'workspace-a', role: 'admin', name: 'Workspace' }, session: { oidcEnabled: false }, canAdmin: true, sample: false, busy: false, activeProject, pendingKeys, api,
-    Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, Grid, Stack, Card, Inline, Text, Button, FormActions, AccountSettings, OperationRecovery, TeamSettings, title: value => value,
-    run: () => assert.fail('Rendering must not run an action'), reload: () => assert.fail('Rendering must not reload'), setPage: () => {}, setModal: () => {}, clearSampleData: () => {} };
-  const tree = new Function(...Object.keys(context), code + '; return render();')(...Object.values(context));
-  assert.equal(tree.type, React.Fragment);
-  const children = React.Children.toArray(tree.props.children), [grid, recovery] = children;
-  assert.equal(children.length, 2); assert.equal(grid.type, Grid); assert.equal(grid.props.columns, 2); assert.equal(recovery.type, OperationRecovery);
-  assert.equal(React.Children.toArray(grid.props.children).length, 2, 'Project/account and workspace/access retain their columns.');
-  assert.equal(nodes(grid).filter(node => node.type === AccountSettings).length, 1);
-  assert.equal(nodes(grid).filter(node => node.type === TeamSettings).length, 1);
-  assert.equal(nodes(grid).filter(node => node.type === OperationRecovery).length, 0, 'The receipt table is outside either half-width column.');
-  assert.equal(tree.props.children[1].key, 'receipts:project-a', 'The existing recovery instance key is unchanged before React.Children escapes it.');
+  const render = (section, isOperator = true) => {
+    const context = { React, page: 'Settings', section, project: { id: 'project-a', name: 'Campaign project' }, state: { projectId: 'project-a', user: { id: 'viewer-a', isOperator } }, workspace: { id: 'workspace-a', role: 'admin', name: 'Workspace' }, session: { oidcEnabled: false }, canAdmin: true, sample: false, busy: false, activeProject, pendingKeys, api,
+      Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, Link, Grid, Stack, Card, Inline, Text, Button, FormActions, AccountSettings, OperationRecovery, TeamSettings, title: value => value, settingsFrame: content => React.createElement(Frame, null, content),
+      run: () => assert.fail('Rendering must not run an action'), reload: () => assert.fail('Rendering must not reload'), setPage: () => {}, setModal: () => {}, clearSampleData: () => {}, leaveWorkspace: () => {} };
+    return new Function(...Object.keys(context), code + '; return render();')(...Object.values(context));
+  };
+  const count = (tree, type) => nodes(tree).filter(node => node.type === type).length;
+  assert.equal(renderToStaticMarkup(render('general')).includes('Project'), true); assert.equal(count(render('general'), OperationRecovery), 0);
+  assert.deepEqual([count(render('members'), TeamSettings), count(render('members'), AccountSettings)], [1, 0]);
+  assert.deepEqual(nodes(render('profile')).filter(node => node.type === AccountSettings).map(node => node.props.part), ['profile']);
+  assert.deepEqual(nodes(render('security')).filter(node => node.type === AccountSettings).map(node => node.props.part), ['security']);
+  assert.match(renderToStaticMarkup(render('sign-in')), /Single sign-on is off/); assert.equal(renderToStaticMarkup(render('sign-in', false)).includes('Single sign-on'), false, 'Only operators see sign-in setup.');
+  assert.equal(renderToStaticMarkup(render('members')).includes('OIDC'), false, 'Members no longer see instance sign-in configuration.');
+  // Walk the raw children: React.Children.toArray would escape the key being checked.
+  const raw = node => !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat(Infinity).flatMap(raw)];
+  const recovery = raw(render('activity')).find(node => node.type === OperationRecovery);
+  assert.equal(recovery.key, 'receipts:project-a', 'The existing recovery instance key is unchanged.');
   assert.equal(recovery.props.projectId, 'project-a'); assert.equal(recovery.props.role, 'admin'); assert.equal(recovery.props.isOperator, true); assert.equal(recovery.props.request, api);
   recovery.props.onReviewed('applied'); assert.equal(pendingKeys.current.size, 1);
   activeProject.current = 'another-project'; recovery.props.onReviewed('not_applied'); assert.equal(pendingKeys.current.size, 1, 'An old recovery callback cannot clear another project action keys.');
   activeProject.current = 'project-a'; recovery.props.onReviewed('not_applied'); assert.equal(pendingKeys.current.size, 0);
-  const html = renderToStaticMarkup(tree); assert.match(html, /Project settings/); assert.match(html, /Workspace &amp; access/); assert.ok(html.indexOf('data-provider-recovery') > html.indexOf('data-workspace-invitations'));
+  // The section list lives in SettingsLayout: Advanced is operator-only and Connections opens the integrations page.
+  assert.match(appSource, /\{ id: 'sign-in', label: 'Sign-in', group: 'operator', icon: 'server', href: settingsUrl\('sign-in'\), allowed: !!state\.user\.isOperator \}/);
+  assert.match(appSource, /groupLabels=\{\{ operator: 'Advanced' \}\}/);
+  assert.match(appSource, /\{page === 'Integrations' && project && settingsFrame\(<IntegrationSettings /);
 });
 
 test('post card publishing asks once and names every destination before calling the unchanged publish action', () => {

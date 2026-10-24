@@ -9,6 +9,9 @@ import type { ProviderRecord } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const channels = ['email', 'sms', 'whatsapp'], own = (value: object, key: string) => Object.hasOwn(value, key);
+// Consent is recorded per channel, plus marketing email (#137): permission to send newsletters and promotions is separate
+// from permission for service email, but it uses the email address and is suppressed with it.
+const consentKeys = [...channels, 'emailMarketing'], channelOf = (key: string) => key === 'emailMarketing' ? 'email' : key;
 function fail(status: number, message: string): never { throw new HttpError(status, message); }
 const text = (value: unknown, label: string, max = 200): string => { if (typeof value !== 'string' || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) fail(400, `Enter a valid ${label}.`); return value.trim(); };
 const messengerId = (value: unknown, label: string) => { const id = text(value, label, 500); if (!id || /\s/.test(id)) fail(400, `Provide a valid Messenger ${label}.`); return id; };
@@ -92,23 +95,23 @@ export function createContacts({ db }: { db: Database }) {
     if (own(body, 'phone')) { result.phone = text(body.phone, 'phone number', 16); if (result.phone && !/^\+[1-9]\d{6,14}$/.test(result.phone)) fail(400, 'Use an international E.164 phone number, for example +971501234567.'); }
     if (!result.email && !result.phone && !result.identities?.length) fail(400, 'Provide an email address or international phone number.');
     if (own(body, 'tags')) { if (!Array.isArray(body.tags) || body.tags.length > 30) fail(400, 'Use at most 30 contact tags.'); result.tags = [...new Set(body.tags.map(tag => text(tag, 'contact tag', 50)).filter(Boolean))]; }
-    if (body.consents !== undefined && (!object(body.consents) || Object.entries(body.consents).some(([channel, granted]) => !channels.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use an explicit true or false consent for each supported channel.');
+    if (body.consents !== undefined && (!object(body.consents) || Object.entries(body.consents).some(([channel, granted]) => !consentKeys.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use an explicit true or false consent for each supported channel.');
     const source = own(body, 'consentSource') ? text(body.consentSource, 'consent source', 1000) : previous?.consentSource || '';
-    result.consents = { email: false, sms: false, whatsapp: false, ...previous?.consents, ...body.consents }; result.suppression = { ...previous?.suppression }; result.consentEvidence = { ...previous?.consentEvidence };
+    result.consents = { email: false, sms: false, whatsapp: false, emailMarketing: false, ...previous?.consents, ...body.consents }; result.suppression = { ...previous?.suppression }; result.consentEvidence = { ...previous?.consentEvidence };
     const now = new Date().toISOString();
-    for (const channel of channels) {
-      const destination = channel === 'email' ? result.email : result.phone, oldDestination = channel === 'email' ? previous?.email : previous?.phone;
+    for (const channel of consentKeys) {
+      const medium = channelOf(channel), destination = medium === 'email' ? result.email : result.phone, oldDestination = medium === 'email' ? previous?.email : previous?.phone;
       // A provider's temporary suppression belongs to the old address; it does not follow an edited destination.
-      if (previous && destination !== oldDestination && result.suppression[channel]?.expiresAt) delete result.suppression[channel];
-      if (destination) { const suppressed = await ledger(ex, projectId, channel, destination) || channel === 'sms' && await smsSuppression(destination, ex); if (suppressed) result.suppression[channel] = suppressed; }
-      if (!destination || previous && destination !== oldDestination || result.suppression[channel] && !result.suppression[channel].expiresAt) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
+      if (medium === channel && previous && destination !== oldDestination && result.suppression[channel]?.expiresAt) delete result.suppression[channel];
+      if (medium === channel && destination) { const suppressed = await ledger(ex, projectId, channel, destination) || channel === 'sms' && await smsSuppression(destination, ex); if (suppressed) result.suppression[channel] = suppressed; }
+      if (!destination || previous && destination !== oldDestination || result.suppression[medium] && !result.suppression[medium].expiresAt) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
       if (result.consents[channel]) {
         const newlyEnabled = previous?.consents?.[channel] !== true;
         if (!source || newlyEnabled && !own(body, 'consentSource')) fail(400, 'Record the source of explicit consent before enabling a channel.');
         if (body.consents?.[channel] === true && (newlyEnabled || !result.consentEvidence[channel])) result.consentEvidence[channel] = { source, at: now };
       } else delete result.consentEvidence[channel];
     }
-    const consentChanged = channels.some(channel => result.consents[channel] !== (previous?.consents?.[channel] === true)) || JSON.stringify(result.consentEvidence) !== JSON.stringify(previous?.consentEvidence || {});
+    const consentChanged = consentKeys.some(channel => result.consents[channel] === true !== (previous?.consents?.[channel] === true)) || JSON.stringify(result.consentEvidence) !== JSON.stringify(previous?.consentEvidence || {});
     result.consentSource = source; result.consentUpdatedAt = consentChanged ? now : previous?.consentUpdatedAt || null;
     result.hygiene = hygiene(result.email, result.email === previous?.email ? previous?.hygiene : undefined);
     return { ...result, id: previous?.id || randomUUID(), projectId, createdAt: previous?.createdAt || now, updatedAt: now };
@@ -134,10 +137,34 @@ export function createContacts({ db }: { db: Database }) {
       await lockContacts(tx, projectId);
       if (!object(body)) fail(400, 'Use the supported contact fields.');
       const previous = id ? await get(projectId, id, tx) ?? fail(404, 'Contact not found in this project.') : match(await byDestination(projectId, destination(body), tx), body);
-      const record = await prepare(tx, projectId, body, previous);
-      if ((await byDestination(projectId, record, tx)).some(row => row.id !== record.id && (record.email && row.email === record.email || record.phone && row.phone === record.phone))) fail(409, 'This destination belongs to another contact in this project.');
-      if (!previous && (await resultRows(tx.execute(sql`SELECT count(*)::int AS n FROM direct_contacts WHERE project_id = ${projectId}`)))[0].n >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
-      return persist(tx, record);
+      return write(tx, projectId, await prepare(tx, projectId, body, previous), previous);
+    });
+  }
+  async function write(tx: Executor, projectId: string, record: ProviderRecord, previous?: ProviderRecord) {
+    if ((await byDestination(projectId, record, tx)).some(row => row.id !== record.id && (record.email && row.email === record.email || record.phone && row.phone === record.phone))) fail(409, 'This destination belongs to another contact in this project.');
+    if (!previous && (await resultRows(tx.execute(sql`SELECT count(*)::int AS n FROM direct_contacts WHERE project_id = ${projectId}`)))[0].n >= 10000) fail(400, 'This project has reached its 10,000-contact limit.');
+    return persist(tx, record);
+  }
+  /**
+   * In-person lead capture (offline activations). Records only the channels the person ticked, never opts a suppressed
+   * destination back in, keeps existing opt-ins and name, and adds the activation tag. Stores nothing when no channel can
+   * be recorded: refused when every ticked channel is suppressed.
+   * The field wording asks for news and offers, so an email opt-in also records marketing permission (emailMarketing).
+   */
+  async function capture(projectId: string, person: { name?: string; email?: string; phone?: string }, requested: string[], source: string, tag: string) {
+    return db.transaction(async tx => {
+      await lockContacts(tx, projectId);
+      const target = destination(person), previous = match(await byDestination(projectId, target, tx), person), refused: string[] = [];
+      for (const channel of requested) {
+        const to = channel === 'email' ? target.email : target.phone;
+        if (!to) fail(400, channel === 'email' ? 'Enter an email address for email consent.' : 'Enter an international phone number for SMS or WhatsApp consent.');
+        if (await ledger(tx, projectId, channel, to) || channel === 'sms' && await smsSuppression(to, tx)) refused.push(channel);
+      }
+      const recorded = requested.filter(channel => !refused.includes(channel));
+      if (!recorded.length) fail(409, 'This person opted out of the ticked channels earlier, so nothing was saved.');
+      const body = { ...(person.name && !previous?.name ? { name: person.name } : {}), ...(target.email ? { email: target.email } : {}), ...(target.phone ? { phone: target.phone } : {}), tags: [...new Set([...(previous?.tags || []), tag])], consents: Object.fromEntries([...recorded, ...(recorded.includes('email') ? ['emailMarketing'] : [])].map(channel => [channel, true])), consentSource: source };
+      const contact = await write(tx, projectId, await prepare(tx, projectId, body, previous), previous);
+      return { contactId: contact.id, recorded, refused };
     });
   }
   /** Pass the webhook transaction as `executor`; the contact and identity writes then run in a savepoint inside it. */
@@ -171,7 +198,7 @@ export function createContacts({ db }: { db: Database }) {
   }
   async function importCsv(projectId: string, options: any) {
     if (!object(options) || Object.keys(options).some(key => !['csv', 'dryRun', 'consents', 'consentSource'].includes(key)) || options.dryRun !== undefined && typeof options.dryRun !== 'boolean') fail(400, 'Use CSV text, optional consent evidence and an optional dry-run flag.');
-    if (options.consents !== undefined && (!object(options.consents) || Object.entries(options.consents).some(([channel, granted]) => !channels.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use explicit channel consent flags.');
+    if (options.consents !== undefined && (!object(options.consents) || Object.entries(options.consents).some(([channel, granted]) => !consentKeys.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use explicit channel consent flags.');
     if (Object.values(options.consents || {}).some(Boolean) && (!options.consentSource || !text(options.consentSource, 'consent source', 1000))) fail(400, 'Record the source of explicit consent before importing opt-ins.');
     const entries = parseCsv(options.csv);
     return db.transaction(async tx => {
@@ -201,6 +228,8 @@ export function createContacts({ db }: { db: Database }) {
   function suppressRecord(ex: Executor, record: ProviderRecord, channel: string, reason: string, at: string) {
     if (!record.suppression[channel] || record.suppression[channel].expiresAt) record.suppression[channel] = { reason, at };
     record.consents[channel] = false; delete record.consentEvidence[channel]; record.updatedAt = at;
+    // Suppressing the address also ends marketing permission on it: an unsubscribe stops newsletters too.
+    if (channel === 'email') { record.consents.emailMarketing = false; delete record.consentEvidence.emailMarketing; }
     if (channel === 'email' && reason === 'hard-bounce') record.hardBounceAt ||= at;
     return persist(ex, record);
   }
@@ -312,5 +341,5 @@ export function createContacts({ db }: { db: Database }) {
       return { checked: outcomes.size, contacts, notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' };
     });
   }
-  return { list, get, byDestination, save, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string) { return Boolean((await db.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount); } };
+  return { list, get, byDestination, save, capture, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string) { return Boolean((await db.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount); } };
 }

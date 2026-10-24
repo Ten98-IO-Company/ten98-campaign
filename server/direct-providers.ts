@@ -96,8 +96,10 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
     return receipt;
   }
   if (channel !== 'email') fail(400, 'UNSUPPORTED_CHANNEL', 'Use the WhatsApp broadcast workflow for WhatsApp campaigns.');
-  if (campaign.emailPurpose !== 'transactional') fail(400, 'TRANSACTIONAL_EMAIL_ONLY', 'Campaign sends transactional email only.');
-  const provider = requireEmailProvider(env), api = provider === 'cloudflare' ? cloudflare(env) : null;
+  const provider = requireEmailProvider(env);
+  // Marketing email goes only through Amazon SES, and always with the unsubscribe link and one-click headers below.
+  if (campaign.emailPurpose === 'marketing' ? provider !== 'ses' || !unsubscribeUrl : campaign.emailPurpose !== 'transactional') fail(400, 'TRANSACTIONAL_EMAIL_ONLY', 'This email provider sends transactional email only.');
+  const api = provider === 'cloudflare' ? cloudflare(env) : null;
   if (!email(contact.email)) fail(400, 'INVALID_RECIPIENT', 'Enter a valid email recipient.');
   const subject = text(campaign.subject, 'email subject', 998); if (/[\r\n]/.test(subject)) fail(400, 'INVALID_DIRECT_CONTENT', 'Email subjects cannot contain line breaks.');
   const sender = provider === 'ses' ? { address: env.AWS_SES_FROM_ADDRESS, name: env.AWS_SES_FROM_NAME, replyTo: env.AWS_SES_REPLY_TO_ADDRESS } : { address: env.CLOUDFLARE_EMAIL_FROM_ADDRESS, name: env.CLOUDFLARE_EMAIL_FROM_NAME, replyTo: env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS };

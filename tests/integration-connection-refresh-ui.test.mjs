@@ -5,7 +5,7 @@ import React from 'react';
 import { transformWithOxc } from 'vite';
 
 const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
-const start = source.indexOf("{page === 'Integrations' && project && <IntegrationSettings"), composition = source.slice(source.indexOf('<IntegrationSettings', start), source.indexOf("}] : []}/>}", start) + "}] : []}/>".length);
+const start = source.indexOf("{page === 'Integrations' && project && settingsFrame(<IntegrationSettings"), composition = source.slice(source.indexOf('<IntegrationSettings', start), source.indexOf("}] : []}/>)}", start) + "}] : []}/>".length);
 assert.ok(start > 0 && composition.endsWith('/>'), 'The central connection composition must remain available.');
 const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children), ...elements(Object.values(node.props.sections || {}))] : [];
 const IntegrationSettings = () => null, NativeGoogleAds = () => null, MicrosoftAds = () => null, OohProviders = () => null, stub = () => null;

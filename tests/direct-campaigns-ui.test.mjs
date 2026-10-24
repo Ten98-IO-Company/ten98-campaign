@@ -27,7 +27,7 @@ test('audience readiness renders the real library summary with app counts and pr
   const { code } = await transformWithOxc(`const render = (validPreview, audienceMode, draft) => (${jsx});`, 'AudienceReadiness.tsx', { jsx: { runtime: 'classic' } });
   const summary = new Function('React', 'AudienceSummary', 'labels', `${code}; return render;`)(React, AudienceSummary, { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' });
   const counts = { total: 8, eligible: 5, excluded: 3, unverified: 2 };
-  for (const [mode, scope, channel, purpose] of [['all', 'All contacts in this project', 'email', 'Transactional email'], ['tags', 'Contacts matching tags', 'sms', 'Direct campaign'], ['contacts', 'Chosen contacts', 'whatsapp', 'Direct campaign']]) {
+  for (const [mode, scope, channel, purpose] of [['all', 'All contacts in this project', 'email', 'Transactional email only'], ['tags', 'Contacts matching tags', 'sms', 'Direct campaign'], ['contacts', 'Chosen contacts', 'whatsapp', 'Direct campaign']]) {
     const element = summary({ audience: counts }, mode, { channel }); assert.deepEqual(element.props.counts, counts);
     const html = renderToStaticMarkup(element);
     assert.match(html, /class="t98-card t98-audience-summary"/); assert.match(html, /Audience readiness/);
@@ -114,7 +114,7 @@ test('actual action lock prevents repeat sends and local progress polling never 
 
 test('actual contact import previews grant only explicit permissions and do not refresh records until imported', async () => {
   const handler = section('async function importContacts(', '  async function readCsv('), calls = [], results = [], people = [], notices = [];
-  const context = { readOnly: false, action: async (_, run) => run(1), requester: { current: async (path, method, body) => { calls.push({ path, method, body }); return method === 'POST' ? { imported: 3, created: 2, updated: 1, skipped: 0, errors: [] } : { contacts: [{ id: 'saved' }] }; } }, path: '/projects/a/direct', csv: 'name,email,tags\nAlex,alex@example.com,customer|launch', importConsent: { email: true, sms: false, whatsapp: false }, importSource: 'Signup form 2026-10-18', version: { current: 1 }, setImportResult: value => results.push(value), setNotice: value => notices.push(value), setContacts: value => people.push(value) };
+  const context = { importNotice: compile(helper('importNotice')), readOnly: false, action: async (_, run) => run(1), requester: { current: async (path, method, body) => { calls.push({ path, method, body }); return method === 'POST' ? { imported: 3, created: 2, updated: 1, skipped: 0, errors: [] } : { contacts: [{ id: 'saved' }] }; } }, path: '/projects/a/direct', csv: 'name,email,tags\nAlex,alex@example.com,customer|launch', importConsent: { email: true, sms: false, whatsapp: false }, importSource: 'Signup form 2026-10-18', version: { current: 1 }, setImportResult: value => results.push(value), setNotice: value => notices.push(value), setContacts: value => people.push(value) };
   const submit = compile(handler, context);
   await submit({ ...event, nativeEvent: { submitter: { getAttribute: () => 'preview' } } }); assert.equal(calls.length, 1); assert.equal(calls[0].body.dryRun, true); assert.deepEqual(calls[0].body.consents, context.importConsent); assert.equal(results[0].dryRun, true); assert.equal(people.length, 0);
   await submit({ ...event, nativeEvent: { submitter: { getAttribute: () => 'import' } } }); assert.equal(calls.length, 3); assert.equal(calls[1].body.dryRun, undefined); assert.deepEqual(people[0], [{ id: 'saved' }]); assert.match(notices.at(-1), /Processed 3 rows: 2 created, 1 merged/);
@@ -363,4 +363,36 @@ test('a WhatsApp draft can be saved before its account and template are chosen',
     assert.doesNotMatch(field.split('<Option')[0], /\brequired\b/, `${label} must not block saving a draft.`);
     assert.match(field, /description="Needed before preview and sending/);
   }
+});
+
+// ten98-campaign#137(a): the page says plainly that email campaigns are transactional only, and why.
+test('Direct campaigns says email campaigns are transactional only, with the reason', () => {
+  assert.match(source, /Email campaigns are transactional only\./);
+  assert.doesNotMatch(source, /Manage permission-based email, SMS and approved WhatsApp template campaigns/, 'The intro no longer implies newsletters.');
+  assert.match(source, /title="Transactional email only">[^<]*because the configured email provider is for transactional mail\./);
+});
+
+// ten98-campaign#137(b): the Marketing purpose is serialized, offered only while Amazon SES sends, and asks for marketing
+// permission on contacts instead of the transactional confirmation.
+test('the Marketing email purpose is offered only while Amazon SES sends, with a reason and Open integrations otherwise', () => {
+  assert.equal(campaignBody({ ...blankDraft, emailPurpose: 'marketing' }, 'all').emailPurpose, 'marketing');
+  assert.equal(campaignBody({ ...blankDraft, emailPurpose: 'other' }, 'all').emailPurpose, 'transactional', 'Anything else is sent as transactional.');
+  assert.equal(campaignBody({ ...blankDraft, channel: 'sms', emailPurpose: 'marketing' }, 'all').emailPurpose, undefined);
+  assert.match(source, /<Option value="marketing" disabled=\{!status\?\.marketingAvailable\}>Marketing<\/Option>/);
+  assert.match(source, /'Marketing email needs Amazon SES as the email sender\.'/);
+  assert.match(source, /\{!status\?\.marketingAvailable && editable && !readOnly && integrationsAction && <Inline>\{integrationsAction\}<\/Inline>\}/);
+  assert.match(source, /draft\.channel === 'email' && draft\.emailPurpose !== 'marketing' && <Checkbox label="This is an expected transactional message/, 'Marketing sends skip the transactional confirmation.');
+  assert.match(source, /draft\.emailPurpose === 'marketing' \? 'Marketing email' : 'Transactional email only'/);
+  assert.match(source, /<Checkbox label="Email marketing permission \(newsletters and promotions\) is recorded for this contact\." checked=\{contact\.consents\.emailMarketing\}/);
+  assert.match(source, /<Checkbox label="Email marketing permission is recorded for all applicable imported contacts\." checked=\{importConsent\.emailMarketing\}/);
+});
+
+// ten98-campaign#135 client points: the import notice counts every processed row, skipped ones included, with a correct
+// plural, and the preview says a merge updates details but keeps recorded permissions.
+test('the import notice counts every processed row and the preview explains what a merge keeps', () => {
+  const importNotice = compile(helper('importNotice'));
+  assert.equal(importNotice({ imported: 4, created: 3, updated: 1, skipped: 2 }), 'Processed 6 rows: 3 created, 1 merged, 2 skipped. Review contact hygiene before sending.');
+  assert.equal(importNotice({ created: 0, updated: 1, skipped: 0 }), 'Processed 1 row: 0 created, 1 merged, 0 skipped. Review contact hygiene before sending.');
+  assert.equal(importNotice({}), 'Processed 0 rows: 0 created, 0 merged, 0 skipped. Review contact hygiene before sending.');
+  assert.match(source, /\{importResult\.dryRun && importResult\.updated > 0 && <Text tone="muted" size="sm">Merging updates an existing contact's details from the file, such as name and company, and keeps the permissions and evidence already recorded\.<\/Text>\}/);
 });

@@ -68,7 +68,7 @@ export async function migrate(pool = getDatabase().pool): Promise<string[]> {
 
 export type ProjectRecord = { id: string; projectId: string; createdAt: string; updatedAt: string; [key: string]: any };
 export type Store = ReturnType<typeof createStore>;
-export const collections = ['campaigns', 'posts', 'placements', 'assets', 'providers'];
+export const collections = ['campaigns', 'posts', 'placements', 'assets', 'providers', 'activations'];
 
 /** Project documents; pass a transaction to keep store writes inside the caller's critical section. */
 export function createStore(db: Executor) {

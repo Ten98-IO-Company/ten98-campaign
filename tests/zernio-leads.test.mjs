@@ -103,7 +103,7 @@ test('lead import revalidates reviewed answers, preserves contact consent/suppre
     const fresh = await f.request(route, 'POST', body); assert.equal(fresh.data.alreadyImported, true); assert.equal(fresh.data.association.contactId, contact.id);
     assert.equal((await f.app.sql.get('SELECT count(*) AS n FROM zernio_lead_associations')).n, 1); assert.equal((await f.request(f.project + '/direct/contacts')).data.contacts.length, 1);
     const second = (await f.request(f.selected('metaads') + '/leads' + f.query + '&cursor=lead-next%2B%2F')).data.leads[0];
-    const secondImport = await f.request(f.selected('metaads') + `/leads/${second.id}/import`, 'POST', { ...body, expectedLeadVersion: second.version, mapping: { email: 'email' } }); assert.equal(secondImport.status, 200); assert.deepEqual(secondImport.data.contact.consents, { email: false, sms: false, whatsapp: false });
+    const secondImport = await f.request(f.selected('metaads') + `/leads/${second.id}/import`, 'POST', { ...body, expectedLeadVersion: second.version, mapping: { email: 'email' } }); assert.equal(secondImport.status, 200); assert.deepEqual(secondImport.data.contact.consents, { email: false, sms: false, whatsapp: false, emailMarketing: false });
     assert.equal(f.writes().length, 0, 'Contact import makes local changes only.');
   } finally { await f.close(); }
 });

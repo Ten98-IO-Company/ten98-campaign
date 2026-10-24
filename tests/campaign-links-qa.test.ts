@@ -19,24 +19,38 @@ const event = { preventDefault() {} }, path = '/projects/project-a/links';
 const draft = { name: 'Duplicate test', destination: 'https://shop.example.com/billboard', campaignId: '', utm_source: '', utm_medium: '', utm_campaign: '', utm_content: '', utm_term: '' };
 
 function createWith(links: Row[], response: Row) {
-  const notices: string[] = [], selections: string[] = [], cleared: unknown[] = [];
+  const notices: string[] = [], selections: string[] = [], cleared: unknown[] = [], reused: string[] = [];
   const DestinationError = compile(source.match(/class DestinationError extends Error \{\}/)![0]);
-  const create = compile(section('async function create(', '  async function saveName('), { readOnly: false, draft, links, destinationWithUtm: () => draft.destination, DestinationError, setDestinationError() {}, destinationRef: { current: null }, focusDestination: { current: false }, action: async (_label: string, run: Run) => run(1), requester: { current: async () => response }, path, version: { current: 1 }, acceptLink() {}, setSelected: (value: string) => selections.push(value), setDraft: (value: unknown) => cleared.push(value), blank: () => ({}), setNotice: (value: string) => notices.push(value) });
-  return create(event).then(() => ({ notices, selections, cleared: cleared.length }));
+  const create = compile(section('async function create(', '  async function saveName('), { readOnly: false, draft, links, destinationWithUtm: () => draft.destination, DestinationError, setDestinationError() {}, destinationRef: { current: null }, focusDestination: { current: false }, action: async (_label: string, run: Run) => run(1), requester: { current: async () => response }, path, version: { current: 1 }, acceptLink() {}, setSelected: (value: string) => selections.push(value), setDraft: (value: unknown) => cleared.push(value), blank: () => ({}), setNotice: (value: string) => notices.push(value), setReused: (value: string) => reused.push(value) });
+  return create(event).then(() => ({ notices, selections, cleared: cleared.length, reused }));
 }
 
-test('#114 a destination that already has an active link says so, shows that link and keeps the form', async () => {
+async function qrPanel(props: Row) {
+  const start = source.indexOf('{chosen && <Card id="campaign-link-qr"'), end = source.indexOf('\n', start);
+  assert.ok(start > 0 && end > start);
+  const { code } = await transformWithOxc(`function Panel({ chosen, reused, qrPath, setSelected, localShortAddress }) { return <>${source.slice(start, end)}</>; }`, 'LinkQr.tsx', { jsx: { runtime: 'classic' } });
+  const Panel = new Function('React', ...Object.keys(UI), code + '; return Panel;')(React, ...Object.values(UI));
+  return renderToStaticMarkup(React.createElement(Panel, { qrPath: '/qr.svg', setSelected() {}, localShortAddress: () => false, ...props }));
+}
+
+test('#114 a destination that already has an active link says so inside the QR panel it opens, and keeps the form', async () => {
   const existing = { id: 'old-link', name: 'Billboard Downtown QR' };
   for (const links of [[existing], []]) {
     // The server answers with the link it already has, under that link's name, whether or not this list has loaded it.
     const result = await createWith(links, { link: existing });
     assert.deepEqual(result.selections, ['old-link'], 'The existing link is shown.');
     assert.equal(result.cleared, 0, 'Nothing was created, so the form keeps what was typed.');
-    assert.equal(result.notices.length, 1); assert.doesNotMatch(result.notices[0], /Short link created/);
-    assert.match(result.notices[0], /already has an active link, “Billboard Downtown QR”\. No new link was created/);
+    assert.deepEqual([result.reused, result.notices], [['old-link'], []], 'The explanation belongs to the QR panel, not the page-top status far above it.');
   }
   const created = await createWith([existing], { link: { id: 'new-link', name: 'Duplicate test' } });
-  assert.deepEqual([created.selections, created.cleared], [['new-link'], 1]); assert.match(created.notices[0], /^Short link created\./);
+  assert.deepEqual([created.selections, created.cleared, created.reused], [['new-link'], 1, []]); assert.match(created.notices[0], /^Short link created\./);
+  // The panel takes focus on open, so its explanation is on screen and describes the focused panel.
+  const chosen = { id: 'old-link', name: 'Billboard Downtown QR', code: 'abc', qrUrl: 'https://go.example.com/q/abc', shortUrl: 'https://go.example.com/s/abc' };
+  const panel = await qrPanel({ chosen, reused: 'old-link' });
+  assert.match(panel, /^<section[^>]*id="campaign-link-qr"[^>]*aria-describedby="campaign-link-reused"/);
+  assert.match(panel, /<div(?=[^>]*role="status")(?=[^>]*id="campaign-link-reused")[^>]*>[\s\S]*?already has an active link, “Billboard Downtown QR”\. No new link was created[\s\S]*?QR tracking address/);
+  for (const reused of ['', 'other-link']) { const plain = await qrPanel({ chosen, reused }); assert.doesNotMatch(plain, /already has an active link|aria-describedby/); }
+  assert.match(source, /useEffect\(\(\) => \{ if \(reused && reused !== selected\) setReused\(''\); \}, \[selected, reused\]\);\n  async function action\(/, 'Opening another link or closing the panel drops the explanation; it is the last hook.');
 });
 
 function saveWith(allowedWebsiteOrigins: string, response: () => Row, changes: Row = {}) {
@@ -53,7 +67,9 @@ test('#113 a refused website origin shows at the origins field with focus, not a
   const many = Array.from({ length: 11 }, (_, index) => `https://site${index}.example.com`).join('\n');
   assert.deepEqual(await saveWith(many, () => assert.fail('Too many origins are never sent.')), { calls: 0, fieldErrors: ['Use at most 10 website origins.'], formErrors: [], focused: ['origins'], deferredFocus: false });
   const domain = await saveWith('https://www.example.com', reject(refused), { canChangeDomain: true, settingsForm: { shortBaseUrl: 'https://10.0.0.1', allowedWebsiteOrigins: 'https://www.example.com' } });
-  assert.deepEqual([domain.fieldErrors, domain.formErrors], [[], [refused]], 'With a changed short address the refused value is ambiguous, so it stays form-level.');
+  assert.deepEqual([domain.fieldErrors, domain.formErrors], [[], ['Short address or website origins: ' + refused]], 'With both changed the refused value is ambiguous, so it stays form-level and names both fields.');
+  const onlyDomain = await saveWith('https://www.example.com', reject(refused), { canChangeDomain: true, settings: { shortBaseUrl: 'https://go.example.com', allowedWebsiteOrigins: ['https://www.example.com'] }, settingsForm: { shortBaseUrl: 'https://10.0.0.1', allowedWebsiteOrigins: 'https://www.example.com' } });
+  assert.deepEqual([onlyDomain.fieldErrors, onlyDomain.formErrors], [[], ['Short address: ' + refused]], 'Saved origins were already accepted, so with only the short address changed the error names it.');
   const role = await saveWith('https://www.example.com', reject('Only workspace administrators can change tracking settings.', 403));
   assert.deepEqual([role.fieldErrors, role.formErrors], [[], ['Only workspace administrators can change tracking settings.']]);
   assert.match(source, /<Field label="Websites allowed to send analytics \(one origin per line\)" description="[^"]*public HTTPS[^"]*Local http:\/\/ and localhost sites cannot send analytics\.[^"]*" error=\{originsError \|\| undefined\}><Textarea ref=\{originsRef\}/);

@@ -922,19 +922,23 @@ test('triage state loads in batches of 100 unique IDs, keyed like the webhook dr
 
 test('the triage filter defaults to open and pending, keeps unloaded items and labels waiting time and assignee', () => {
   const { triageFilters, triageVisible, waitingFor, triageLabel, mergeTriage } = triageHelpers();
-  assert.deepEqual(triageFilters.map(([, label]) => label), ['Open and pending', 'Open', 'Pending', 'Snoozed', 'Resolved', 'All']);
+  assert.deepEqual(triageFilters.map(([, label]) => label), ['Open', 'Mine', 'Unassigned', 'Snoozed', 'Done']);
   assert.match(source, /\[triageFilter, setTriageFilter\] = useState\('active'\)/);
   const rows = ['open', 'pending', 'snoozed', 'resolved'].map(status => ({ status }));
   const shown = filter => rows.filter(state => triageVisible(state, filter)).map(state => state.status);
   assert.deepEqual(shown('active'), ['open', 'pending']); assert.deepEqual(shown('snoozed'), ['snoozed']); assert.deepEqual(shown('resolved'), ['resolved']); assert.deepEqual(shown('all'), ['open', 'pending', 'snoozed', 'resolved']);
-  assert.equal(triageVisible(undefined, 'resolved'), true, 'A conversation whose state has not loaded is never hidden.');
+  const assigned = [{ status: 'open', assigneeId: 'me' }, { status: 'pending', assigneeId: 'teammate' }, { status: 'open', assigneeId: null }, { status: 'resolved', assigneeId: 'me' }, { status: 'snoozed', assigneeId: null }];
+  assert.deepEqual(assigned.filter(state => triageVisible(state, 'mine', 'me')), [assigned[0]], 'Mine is open or pending work assigned to the signed-in user.');
+  assert.deepEqual(assigned.filter(state => triageVisible(state, 'unassigned', 'me')), [assigned[2]], 'Unassigned is open or pending work without an assignee.');
+  assert.deepEqual(assigned.filter(state => triageVisible(state, 'mine', '')), [], 'Without a signed-in user, Mine matches nothing loaded.');
+  assert.equal(triageVisible(undefined, 'resolved'), true, 'A conversation whose state has not loaded is never hidden.'); assert.equal(triageVisible(undefined, 'mine', 'me'), true);
   const now = Date.parse('2026-10-22T12:00:00Z');
   assert.equal(waitingFor('2026-10-22T09:00:00Z', now), 'waiting 3h'); assert.equal(waitingFor('2026-10-22T11:35:00Z', now), 'waiting 25m'); assert.equal(waitingFor('2026-10-22T11:59:40Z', now), 'waiting under 1m'); assert.equal(waitingFor('2026-10-19T12:00:00Z', now), 'waiting 3d'); assert.equal(waitingFor(null, now), ''); assert.equal(waitingFor('not a date', now), '');
   assert.equal(triageLabel({ status: 'pending', assigneeId: 'me' }, 'me'), 'Pending · Assigned to you'); assert.equal(triageLabel({ status: 'resolved', assigneeId: 'teammate' }, 'me'), 'Resolved · Assigned'); assert.equal(triageLabel({ status: 'snoozed', assigneeId: null }, 'me'), 'Snoozed'); assert.equal(triageLabel(undefined), '');
   const saved = { 'a': { status: 'resolved', updatedAt: '2026-10-22T09:00:00.000Z' }, 'b': { status: 'open', updatedAt: '2026-10-22T09:00:00.000Z' } };
   const merged = mergeTriage(saved, { a: { status: 'open', updatedAt: '2026-10-22T08:00:00.000Z' }, b: { status: 'open', updatedAt: '2026-10-22T09:00:00.000Z', waitingSince: '2026-10-22T10:00:00.000Z' }, c: { status: 'open', updatedAt: null } });
   assert.equal(merged.a.status, 'resolved', 'A read that started before a change cannot undo it.'); assert.equal(merged.b.waitingSince, '2026-10-22T10:00:00.000Z'); assert.equal(merged.c.status, 'open');
-  assert.match(source, /triageVisible\(states\[triageKey\(row, triageKind\)\], triageFilter\)/); assert.match(source, /meta: \[when\(item\.lastMessageAt \|\| item\.updatedTime\), waitingFor\(states\[triageKey\(item\)\]\?\.waitingSince\)\]/);
+  assert.match(source, /triageVisible\(states\[triageKey\(row, triageKind\)\], triageFilter, userId\)/); assert.match(source, /meta: \[when\(item\.lastMessageAt \|\| item\.updatedTime\), waitingFor\(states\[triageKey\(item\)\]\?\.waitingSince\)\]/);
 });
 
 test('snooze presets send local times with an offset, and invalid snoozes never reach the server', async () => {
@@ -1043,7 +1047,7 @@ test('switching tabs never shows another kind’s triage states', () => {
 
 test('the triage filter hides reviews and mentions by status, and filters comments inside the thread', () => {
   const { triageVisible, triageKey, triageComments } = triageHelpers(), conversationMatches = compile(section('function conversationMatches(', 'function SmsInbox('));
-  const line = source.match(/^  const visibleRows = .*;$/m)[0], visible = context => compile('function shown() {' + line + ' return visibleRows; }', { historyFilter: null, search: '', conversationMatches, triageVisible, triageKey, ...context })().map(row => row.id);
+  const line = source.match(/^  const visibleRows = .*;$/m)[0], visible = context => compile('function shown() {' + line + ' return visibleRows; }', { historyFilter: null, search: '', userId: 'me', conversationMatches, triageVisible, triageKey, ...context })().map(row => row.id);
   const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }], states = { a: { status: 'open' }, b: { status: 'resolved' } };
   for (const [tab, triageKind] of [['reviews', 'review'], ['mentions', 'mention']]) {
     assert.deepEqual(visible({ tab, triageKind, rows, states, triageFilter: 'active' }), ['a', 'c'], tab + ': resolved items leave the default view; unloaded ones stay.');
@@ -1055,9 +1059,9 @@ test('the triage filter hides reviews and mentions by status, and filters commen
   const ids = rows => rows.map(row => [row.id, ids(row.replies)]);
   assert.deepEqual(ids(triageComments(thread, row => triageVisible({ status: status[row.id] }, 'active'))), [['kept', []], ['parent', [['reply', []]]]], 'A resolved parent stays only to show its matching reply.');
   assert.deepEqual(ids(triageComments(thread, () => true)), ids(thread));
-  assert.ok(source.includes("const shownComments = triageComments(detail?.comments || [], row => triageVisible(states[row.id], triageFilter));"));
+  assert.ok(source.includes("const shownComments = triageComments(detail?.comments || [], row => triageVisible(states[row.id], triageFilter, userId));"));
   assert.ok(source.includes('replies: shownComments }] : shownComments).map((item: Row) => commentMessage(item, selected))'));
-  assert.match(source, /^      <Field label="Triage status" description=/m, 'The status filter is offered on every tab.');
+  assert.match(source, /^      <Inline><SegmentedControl label="View" value=\{triageFilter\} onValueChange=\{setTriageFilter\} options=\{triageFilters\.map/m, 'The views are offered on every tab.');
 });
 
 test('review, mention and comment rows show their triage label, with waiting time except on mentions', async () => {
@@ -1227,28 +1231,21 @@ test('switching item never shows another item’s notes or applies a stale read 
   assert.doesNotMatch(add.html(), /For thread A/, 'A late add does not appear on another item.'); assert.equal(add.notices.includes('Note added.'), false); assert.equal(add.find(ui.Textarea).props.value, '');
 });
 
-test('inbox setup warnings offer Open integrations, and Refresh connections reports setup through the status read only', async () => {
+// The not-set-up state is one empty state, covered with the running component in inbox-flow-ui.test.ts.
+test('the webhook warning offers Open integrations, and Refresh connections reports setup through the status read only', async () => {
   const zernio = section('function ZernioInbox(', '\nfunction ');
   assert.match(zernio, /^function ZernioInbox\(\{[^}]*onOpenIntegrations[^}]*\}/, 'ZernioInbox receives the navigation prop the shell passes.');
-  const actionJsx = zernio.match(/const integrationsAction = (onOpenIntegrations \? <Button[^\n]*?<\/Button> : undefined);/)?.[1], warnings = zernio.match(/\{status && !connected && <Alert[\s\S]*?<\/Alert>\}\n\s*\{tab !== 'mentions' && status\?\.webhookConfigured === false && <Alert[\s\S]*?<\/Alert>\}/)?.[0];
+  const actionJsx = zernio.match(/const integrationsAction = (onOpenIntegrations \? <Button[^\n]*?<\/Button> : undefined);/)?.[1], warnings = zernio.match(/\{connected && tab !== 'mentions' && status\?\.webhookConfigured === false && <Alert[\s\S]*?<\/Alert>\}/)?.[0];
   assert.ok(actionJsx); assert.ok(warnings);
   const { code } = await transformWithOxc(`const make = onOpenIntegrations => (${actionJsx}); const render = (status, connected, tab, integrationsAction) => (<>${warnings}</>);`, 'InboxSetup.tsx', { jsx: { runtime: 'classic' } });
   const [make, render] = new Function('React', 'Button', 'Alert', `${code}; return [make, render];`)(React, ui.Button, ui.Alert), opened = [], action = make(() => opened.push('Integrations'));
   assert.equal(make(undefined), undefined);
-  const html = renderToStaticMarkup(render({ configured: false, mapped: false, webhookConfigured: false }, false, 'messages', action));
-  assert.equal((html.match(/<button[^>]*>Open integrations<\/button>/g) || []).length, 2, 'Both setup warnings link to Integrations.');
+  const webhook = renderToStaticMarkup(render({ configured: true, mapped: true, webhookConfigured: false }, true, 'messages', action));
+  assert.equal((webhook.match(/<button[^>]*>Open integrations<\/button>/g) || []).length, 1, 'A set-up inbox without webhooks shows the webhook banner, which links to Integrations.'); assert.match(webhook, /inbox webhooks/);
   action.props.onClick(); assert.deepEqual(opened, ['Integrations']);
-  assert.doesNotMatch(renderToStaticMarkup(render({ configured: false, mapped: false, webhookConfigured: false }, false, 'messages', undefined)), /Open integrations/);
+  assert.doesNotMatch(renderToStaticMarkup(render({ configured: true, mapped: true, webhookConfigured: false }, true, 'messages', undefined)), /Open integrations/);
   const requests = [], statuses = [];
   const refresh = compile(section('async function loadAccounts(', '  async function changeTriage('), { switchSelection: change => change(), action: async (_, run) => run(1), version: { current: 1 }, path, accountId: '', tab: 'messages', requester: { current: async target => { requests.push(target); return { configured: false, mapped: false, webhookConfigured: false, accounts: [] }; } }, setStatus: value => statuses.push(value), setAccounts() {}, setRows() {}, resetSelection() {}, setAccountId() {} });
   await refresh();
   assert.deepEqual(requests, [path + '/status'], 'The status read reports missing setup as data, so no duplicate error alert is added.'); assert.equal(statuses[0].configured, false);
-});
-
-test('the Messages workspace and its conversation list have different headings', () => {
-  const [, label, listLabel] = source.match(/\{tab === 'messages' \? <DetailWorkspace label="([^"]+)" listLabel=\{historyFilter \? 'History results' : '([^']+)'\}/);
-  const html = renderToStaticMarkup(React.createElement(ui.DetailWorkspace, { label, listLabel, detailLabel: 'Conversation', list: null, detail: null, selected: false }));
-  const headings = [...html.matchAll(/<h[1-6][^>]*>([^<]+)<\/h[1-6]>/g)].map(match => match[1]);
-  assert.ok(headings.includes('Private messages') && headings.includes('Conversations'), headings.join(', '));
-  assert.equal(new Set(headings).size, headings.length, 'No heading text repeats: ' + headings.join(', '));
 });

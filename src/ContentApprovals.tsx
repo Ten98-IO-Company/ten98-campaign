@@ -1,11 +1,11 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Disclosure, EmptyState, FeatureControls, Field, FormActions, Grid, Heading, Inline, Link, List, ListItem, Option, Progress, ReviewSummary, SegmentedControl, Select, StatusLine, Stack, Switch, Text, Textarea, ValidationSummary, type ReviewChange, type ValidationTarget, useConfirmDialog } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Disclosure, EmptyState, FeatureControls, Field, FormActions, Grid, Heading, Inline, Link, List, ListItem, Option, Progress, ReviewSummary, SegmentedControl, Select, StatusLine, Stack, Text, Textarea, ValidationSummary, type ReviewChange, type ValidationTarget } from '@ten98/ui';
 import { PostVariantPreview } from './PostComposer';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { reviewKeyAction } from './review-keys';
 import { adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits } from './approval-status';
 
-type Props = { projectId: string; role: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void> };
+type Props = { projectId: string; role: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; onOpenSettings?: () => void };
 const label = (value: string) => ({ not_requested: 'Not requested', pending: 'Awaiting review', approved: 'Approved', rejected: 'Changes requested', stale: 'Changed since review', submitted: 'Submitted to provider' }[value] || value);
 const when = (value: string) => new Date(value).toLocaleString();
 const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -73,10 +73,6 @@ function ProposedUpdateComparison({ item }: { item: any }) {
 const spendSubject = (action: string) => action === 'ooh/booking' ? 'OOH booking' : action.includes('ad-status') ? 'Ad' : action.includes('adset') ? 'Ad set' : 'Campaign';
 // Changing the ad spend setting voids unused approvals and pending requests (council decision on #35 Q1), so the switch
 // confirms first; the page's handler runs only after confirmation.
-function AdSpendPolicySwitch({ label, checked, disabled, onCheckedChange }: { label: string; checked: boolean; disabled: boolean; onCheckedChange: (checked: boolean) => void }) {
-  const [confirm, dialog] = useConfirmDialog();
-  return <>{dialog}<Switch label={label} checked={checked} disabled={disabled} onCheckedChange={async next => { if (await confirm({ title: next ? 'Require ad spend approval?' : 'Stop requiring ad spend approval?', description: 'Changing this setting voids every unused ad spend approval and pending ad spend request in this project. They stay listed as rejected.', confirmLabel: next ? 'Require approval' : 'Stop requiring approval' })) onCheckedChange(next); }}/></>;
-}
 function AdSpendReviews({ path, required, canReview, request, onChanged }: { path: string; required: boolean; canReview: boolean; request: Props['request']; onChanged?: Props['onChanged'] }) {
   const [data, setData] = useState<any>(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [notes, setNotes] = useState<Record<string, string>>({});
   const active = useRef(true), readVersion = useRef(0);
@@ -120,7 +116,7 @@ function AdSpendReviews({ path, required, canReview, request, onChanged }: { pat
   </Stack>;
 }
 
-export default function ContentApprovals({ projectId, role, request, onChanged }: Props) {
+export default function ContentApprovals({ projectId, role, request, onChanged, onOpenSettings }: Props) {
   const [data, setData] = useState<any>(null), [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [filter, setFilter] = useState('all'), [notes, setNotes] = useState<Record<string, string>>({});
   const [focusId, setFocusId] = useState(''), advance = useRef<{ id: string; index: number } | null>(null);
   const [selected, setSelected] = useState<string[]>([]), [bulk, setBulk] = useState<{ done: number; total: number } | null>(null), [bulkResult, setBulkResult] = useState<{ decision: string; ok: number; skipped: number; failed: { id: string; name: string; message: string }[] } | null>(null);
@@ -191,9 +187,8 @@ export default function ContentApprovals({ projectId, role, request, onChanged }
   return <Stack gap={4}>
     <Card as="section" title="Review before publishing" headingLevel={2}><Stack gap={3}><Text>Owners and administrators review the exact text, recipients, schedule, and creative. Changes to a post or its referenced asset require a new review.</Text>
       {data && <Text tone="muted" size="sm">Publishing approval is <Text as="strong">{data.requireApproval ? 'required' : 'optional'}</Text> for this project. Approving a post never publishes it.</Text>}
-      {canReview && data && <Switch label="Require approval before publishing" disabled={Boolean(busy)} checked={data.requireApproval} onCheckedChange={requireApproval => { action('policy', async () => { const result = await request(path + '/policy', 'POST', { requireApproval }); if (!active.current) return; setData((previous: any) => ({ ...previous, ...result })); setNotice(requireApproval ? 'Every post now needs current approval before publishing or retrying.' : 'Publishing approval is now optional.'); await onChanged?.(); await load(); }); }}/>}
       {data && <Text tone="muted" size="sm">Ad spend approval is <Text as="strong">{data.requireAdApproval ? 'required' : 'optional'}</Text> for this project. Approving a spend change never sends it to the provider.</Text>}
-      {canReview && data && <AdSpendPolicySwitch label="Require approval before activating ads or raising budgets" disabled={Boolean(busy)} checked={Boolean(data.requireAdApproval)} onCheckedChange={requireAdApproval => { action('ad-policy', async () => { const result = await request(path + '/policy', 'POST', { requireAdApproval }); if (!active.current) return; setData((previous: any) => ({ ...previous, ...result })); setNotice(requireAdApproval ? 'Activating ads and raising budgets now need an approved review first.' : 'Ad spend approval is now optional.'); await onChanged?.(); }); }}/>}
+      {canReview && onOpenSettings && <Inline><Button variant="ghost" onClick={onOpenSettings}>Change approval settings</Button></Inline>}
       <Inline><Button variant="secondary" disabled={Boolean(busy)} onClick={() => action('refresh', load)}>{busy === 'refresh' ? 'Refreshing…' : 'Refresh review queue'}</Button></Inline>
       {canReview && <Text tone="muted" size="sm">Keyboard review: focus a post, move with ↑ and ↓, then press A to approve or R to request changes.</Text>}
       {data?.requireApproval && <Text tone="muted" size="sm">While approval is required, an owner or administrator must make changes to posts already submitted to a provider. Editors can still cancel or remove copies using the publishing controls.</Text>}

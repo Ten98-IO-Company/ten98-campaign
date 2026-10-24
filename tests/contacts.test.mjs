@@ -147,7 +147,7 @@ test('verified Messenger identities create scoped replay-safe contacts without i
   const [first, replay, poll] = await Promise.all([contacts, createContacts({ db }), contacts].map(service => Promise.resolve().then(() => service.fromMessenger('a', incoming))));
   assert.equal(first.id, replay.id); assert.equal(first.id, poll.id); assert.notEqual(first.id, manual.id, 'A matching display name cannot merge unrelated identities.');
   assert.equal((await contacts.list('a')).length, 2); assert.equal(first.source, 'messenger'); assert.equal(first.email, ''); assert.equal(first.phone, '');
-  assert.deepEqual(first.consents, { email: false, sms: false, whatsapp: false }); assert.deepEqual(first.consentEvidence, {}); assert.equal(first.consentSource, ''); assert.deepEqual(first.suppression, {});
+  assert.deepEqual(first.consents, { email: false, sms: false, whatsapp: false, emailMarketing: false }); assert.deepEqual(first.consentEvidence, {}); assert.equal(first.consentSource, ''); assert.deepEqual(first.suppression, {});
   assert.deepEqual(first.identities.map(({ platform, accountId, participantId, conversationId }) => ({ platform, accountId, participantId, conversationId })), [{ platform: 'facebook', accountId: incoming.accountId, participantId: incoming.participantId, conversationId: incoming.conversationId }]);
   assert.ok(first.identities[0].createdAt); assert.equal(first.identities[0].avatarUrl, incoming.avatarUrl);
   const otherAccount = await contacts.fromMessenger('a', { ...incoming, accountId: 'facebook-page-b' }); assert.notEqual(otherAccount.id, first.id);

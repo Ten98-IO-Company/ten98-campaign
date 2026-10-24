@@ -108,7 +108,8 @@ test('actual account composer rendering shows distinct caption, media, options a
   // In the editor Dialog the actions render into its always-visible footer, outside the form, so Save names the form it submits.
   stateIndex = 0; const host = {}, hosted = renderToStaticMarkup(Composer({ post, accounts, assets: [], campaigns: [], canWrite: true, onSubmit: async () => {}, actionsHost: host }));
   assert.doesNotMatch(hosted, />Save changes</); assert.equal(portals.length, 1); assert.equal(portals[0][1], host);
-  assert.match(renderToStaticMarkup(portals[0][0]), /^<button type="button"[^>]*>Cancel<\/button><button type="submit"[^>]*form="composer-form"[^>]*>Save changes<\/button>$/);
+  // The dialog's close button cancels there, so the footer holds Save and the schedule action only.
+  assert.match(renderToStaticMarkup(portals[0][0]), /^<button type="submit"[^>]*form="composer-form"[^>]*>Save changes<\/button>[\s\S]*>(Schedule|Save to calendar)</, 'The schedule action follows Save as the primary action.');
   assert.match(html, /Customise destination/); assert.match(html, /Brand Two · second/); assert.match(html, /Second brand caption/); assert.match(html, /second\.jpg/); assert.match(html, /Separate account publishing options/); assert.match(html, /Separate account time/); assert.match(html, /2070-01-02/); assert.equal(post.platformOverrides.facebook.content, 'Platform caption');
 });
 
@@ -204,7 +205,7 @@ test('legacy unsupported destinations remain removable while new drafts offer on
   assert.equal(choices(['facebook', 'whatsapp']).includes('whatsapp'), true);
   const handler = source.slice(source.indexOf('function togglePlatform('), source.indexOf('  function updateOption(')).replace('platform: string', 'platform');
   let platforms = ['facebook', 'whatsapp'], selected = ['fb-account', 'wa-account'];
-  const toggle = new Function('platforms', 'selectedAccounts', 'socialAccounts', 'accountId', 'setPlatforms', 'setAccounts', 'setActivePlatform', `return (${handler});`)(platforms, selected, [{ id: 'fb-account', platform: 'facebook' }, { id: 'wa-account', platform: 'whatsapp' }], account => account.id, value => { platforms = value; }, value => { selected = value; }, () => {});
+  const toggle = new Function('platforms', 'selectedAccounts', 'socialAccounts', 'accountId', 'choosePlatforms', 'setAccounts', 'setActivePlatform', `return (${handler});`)(platforms, selected, [{ id: 'fb-account', platform: 'facebook' }, { id: 'wa-account', platform: 'whatsapp' }], account => account.id, value => { platforms = value; }, value => { selected = value; }, () => {});
   toggle('whatsapp');
   assert.deepEqual(platforms, ['facebook']); assert.deepEqual(selected, ['fb-account']);
   assert.equal(choices(platforms).includes('whatsapp'), false);
@@ -253,11 +254,11 @@ test('YouTube keywords save and reopen as a shared field and reach unpublished u
   assert.deepEqual(calls[0][1].tags, values.tags);
 });
 
-test('composer step numbers run consecutively whether or not the platform step is shown', async () => {
+test('the composer has no numbered steps and offers per-network tabs only once a platform is chosen', async () => {
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview').replace('export const accountLabel', 'const accountLabel'), 'PostComposer.tsx', { jsx: { runtime: 'classic' } });
   const hooks = { useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}], useRef: initial => ({ current: initial }), useEffect() {}, useMemo: compute => compute(), useId: () => 'composer' };
   const context = { React, ...hooks, ...social, ...ui, MediaImage: ui.Image }, Composer = new Function(...Object.keys(context), code + ';return PostComposer;')(...Object.values(context));
-  const steps = platforms => [...renderToStaticMarkup(Composer({ post: { content: 'Launch', platforms, mediaItems: [] }, assets: [], accounts: [], campaigns: [], canWrite: true, onSubmit: async () => {} })).matchAll(/<h3[^>]*>(\d+)\. ([^<]+)<\/h3>/g)].map(match => `${match[1]}. ${match[2]}`);
-  assert.deepEqual(steps([]), ['1. Choose destinations', '2. Shared content', '3. Campaign and timing']);
-  assert.deepEqual(steps(['linkedin']), ['1. Choose destinations', '2. Shared content', '3. Customise each platform', '4. Campaign and timing']);
+  const html = platforms => renderToStaticMarkup(Composer({ post: { content: 'Launch', platforms, mediaItems: [] }, assets: [], accounts: [], campaigns: [], canWrite: true, onSubmit: async () => {} }));
+  for (const platforms of [[], ['linkedin']]) assert.doesNotMatch(html(platforms), /<h3[^>]*>\d+\. /);
+  assert.doesNotMatch(html([]), /Customize per network/); assert.match(html(['linkedin']), /Customize per network/);
 });
