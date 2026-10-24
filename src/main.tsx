@@ -2,7 +2,7 @@ import React, { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState 
 import { createRoot } from 'react-dom/client';
 import { AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppStat as Stat, AppSelect } from '@ten98/ui/app';
 import { ActivityFeed, Avatar, Badge as UiBadge, Icon as UiIcon, BarList, Image, DataTable, type DataColumn, Grid, Meter, ProportionBar, SegmentedControl, Select as UiSelect, SelectableList, Skeleton, Stack, Text } from '@ten98/ui';
-import { AccountMenu, SettingsLayout, type SettingsNavItem, type NavLinkComponent, Alert, Card, EmptyState, PageHeader, Progress, SectionNav, ToastProvider, useToast, ConfirmDialog, useConfirmDialog, Dialog, Disclosure, FormGrid, Link, AppShell, AppStateScreen, AppTopbar, AuthErrorBoundary, AuthStory, Button, DangerZoneFlow, FirstUserSetupFlow, FormActions, type IconName, Inline, OidcProviderButtons, ProjectCreateFlow, SearchField, SidebarNav, type SidebarNavItem, SidebarStatus, SignInFlow, StatusLine, WorkspaceCreateFlow, WorkspaceOnboarding, WorkspaceProjectSwitcher } from '@ten98/ui';
+import { AccountMenu, SettingsLayout, type SettingsNavItem, type NavLinkComponent, Alert, Card, EmptyState, PageHeader, Progress, SectionNav, ToastProvider, useToast, useFocusReturn, ConfirmDialog, useConfirmDialog, Dialog, Disclosure, FormGrid, Link, AppShell, AppStateScreen, AppTopbar, AuthErrorBoundary, AuthStory, Button, DangerZoneFlow, FirstUserSetupFlow, FormActions, type IconName, Inline, OidcProviderButtons, ProjectCreateFlow, SearchField, SidebarNav, type SidebarNavItem, SidebarStatus, SignInFlow, StatusLine, WorkspaceCreateFlow, WorkspaceOnboarding, WorkspaceProjectSwitcher } from '@ten98/ui';
 // Library sheets only: @ten98/ui owns the page base, tables, fields and the sign-in card.
 import '@ten98/ui/app-tokens.css';
 import '@ten98/ui/app.css';
@@ -10,7 +10,6 @@ import '@ten98/ui/product.css';
 import AdComposer from './AdComposer';
 import SocialAnalytics from './SocialAnalytics';
 import TeamSettings from './TeamSettings';
-import { useFocusReturn } from './focus-return';
 import CampaignAgent from './CampaignAgent';
 import GoogleCalendar from './GoogleCalendar';
 import OohMap, { BookingFields } from './OohMap';
@@ -720,12 +719,12 @@ function watchInvite(target: Pick<Window, 'location' | 'history' | 'addEventList
   target.addEventListener('hashchange', read);
   return () => target.removeEventListener('hashchange', read);
 }
-// The step after the first sign-up: one project name, the sample opt-in and Skip for now (a stand-in Button until the
-// library's onSkip arrives in 0.25.0). Skipping opens Home with no project; Home's setup checklist then starts with
-// Create your first project, which returns to this step. Skip state lives here, not in App's hooks.
+// The step after the first sign-up: one project name, the sample opt-in and Skip for now. Skipping opens Home with no
+// project; Home's setup checklist then starts with Create your first project, which returns to this step. Skip state
+// lives here, not in App's hooks.
 function FirstProject({ workspaceName, user, busy, error, onCreate, onSignOut }: { workspaceName: string; user: Row; busy: boolean; error?: string; onCreate: (values: { name: string; sample: boolean }) => void; onSignOut: () => void }) {
   const [skipped, setSkipped] = useState(false);
-  if (!skipped) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} label="Create your first project" title={workspaceName} email={user.email} subheading="Create your first project" nameLabel="Project name" submitLabel="Create project" busyLabel="Creating project…" sampleOptIn={{ label: 'Add sample data' }} error={error} busy={busy} onSubmit={({ name, sample }) => onCreate({ name, sample: sample === true })}><Button type="button" variant="secondary" onClick={() => setSkipped(true)}>Skip for now</Button></WorkspaceOnboarding>;
+  if (!skipped) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} label="Create your first project" title={workspaceName} email={user.email} subheading="Create your first project" nameLabel="Project name" submitLabel="Create project" busyLabel="Creating project…" sampleOptIn={{ label: 'Add sample data' }} error={error} busy={busy} onSkip={() => setSkipped(true)} skipLabel="Skip for now" onSubmit={({ name, sample }) => onCreate({ name, sample: sample === true })}/>;
   const createProject = () => setSkipped(false);
   return <AppShell sidebarLabel="Campaign navigation" mainLabel="Home" skipLinkLabel="Skip to content" sidebar={<Brand product="Campaign" href="/"/>}
     topbar={<AppTopbar breadcrumb={{ scope: workspaceName, current: 'Home' }} actions={<AccountMenu name={user.name} email={user.email} items={[{ id: 'sign-out', kind: 'button', label: 'Sign out', danger: true, onSelect: onSignOut }]}/>}/>}>
@@ -739,7 +738,7 @@ function Auth({ session, inviteToken = '', inviteEmail = '', onBackToInvitation,
   const frame = { surface: 'card' as const, brand: <Brand product="Campaign" href="/"/>, label: 'Campaign sign in', eyebrow: 'YOUR WORKSPACE', error: error || startupAuthError || undefined, busy, busyLabel: 'Signing in…',
     aside: <AuthStory label="Campaign overview" eyebrow="CAMPAIGN MANAGEMENT" title="Plan. Publish." emphasis="Measure." lead="Manage social posts, advertising and campaign assets." channels={[{ icon: 'send', label: 'Social' }, { icon: 'target', label: 'Advertising' }, { icon: 'billboard', label: 'Out of home' }]} footnote="ten98 Campaign"/> };
   // First boot is one screen: no token, story panel, single sign-on or sample opt-in. A blank workspace name becomes "My workspace" on the server.
-  if (session.setupRequired) return <FirstUserSetupFlow surface="card" brand={frame.brand} label="Create owner account" title="Create owner account" error={frame.error} busy={busy} busyLabel="Creating account…" submitLabel="Create owner account" setupToken={false} workspaceName defaultValues={{ workspaceName: 'My workspace' }} passwordPolicy={{ minLength: 12, maxLength: 128 }} onSubmit={({ name, email, password, workspaceName }) => onSubmit({ name, email, password, workspaceName })}/>;
+  if (session.setupRequired) return <FirstUserSetupFlow surface="card" brand={frame.brand} label="Create owner account" title="Create owner account" error={frame.error} busy={busy} busyLabel="Creating account…" submitLabel="Create owner account" setupToken={false} workspaceName workspaceNameRequired={false} defaultValues={{ workspaceName: 'My workspace' }} passwordPolicy={{ minLength: 12, maxLength: 128 }} onSubmit={({ name, email, password, workspaceName }) => onSubmit({ name, email, password, workspaceName })}/>;
   // Invitation sign-in starts with a POST that carries the token; plain sign-in stays a link.
   const sso = inviteToken ? { id: 'sso', name: 'Organization single sign-on' } : { id: 'sso', name: 'Organization single sign-on', href: '/api/auth/oidc/start' };
   const invitation = inviteToken ? { title: 'Sign in to join', description: inviteEmail ? `Sign in as ${inviteEmail} to accept your workspace invitation.` : 'Sign in with the invited email to accept your workspace invitation.', defaultValues: inviteEmail ? { email: inviteEmail } : undefined, cancel: onBackToInvitation ? { label: 'Back to invitation', onClick: onBackToInvitation } : undefined } : { title: 'Sign in', description: 'Use your account to access your workspaces.' };

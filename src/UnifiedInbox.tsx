@@ -1,8 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Alert, AppliedFilters, Avatar, Blockquote, Button, Card, Checkbox, Combobox, ConfirmDialog, ContentPreview, ConversationThread, DescriptionList, DetailWorkspace, Disclosure, EmptyState, FeatureControls, Field, FieldList, Form, FormActions, FormGrid, Heading, Image, Inline, Input, Link, LoadMore, MediaPlayer, Option, Popover, ReviewConfirm, SegmentedControl, Select, SelectableList, Stack, StatusLine, Tabs, Text, Textarea } from '@ten98/ui';
+import { Alert, AppliedFilters, Avatar, Blockquote, Button, Card, Checkbox, Combobox, ConfirmDialog, ContentPreview, ConversationThread, DescriptionList, DetailWorkspace, Disclosure, EmptyState, FeatureControls, Field, FieldList, Form, FormActions, FormGrid, Heading, Image, Inline, Input, Link, LoadMore, MediaPlayer, Option, Popover, ReviewConfirm, SegmentedControl, Select, SelectableList, Stack, StatusLine, Tabs, Text, Textarea, useFocusReturn } from '@ten98/ui';
 import type { ConversationMessage } from '@ten98/ui';
 import WhatsAppTemplate, { templateRestriction } from './WhatsAppTemplate';
-import { useFocusReturn } from './focus-return';
 import { validPostInstant } from '../shared/social-posts.ts';
 
 type Row = Record<string, any>;
