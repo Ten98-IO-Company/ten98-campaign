@@ -175,7 +175,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
     <Text as="span" size="sm" tone="muted" numeric>{item.time}</Text><Text as="span" size="sm" truncate>{item.snippet}</Text><Badge tone={item.tone} dot>{item.status}</Badge>
   </Inline> : item.event ? <Inline key={item.id} gap={2} align="center">
     <Text as="span" size="sm" tone="muted" numeric>{item.time}</Text><Text as="span" size="sm" truncate>{item.label}</Text><Badge tone="neutral" dot>Google Calendar</Badge>{googleEventActions?.(item.event)}
-  </Inline> : <Button key={item.id} variant="ghost" size="sm" onClick={item.onSelect}>
+  </Inline> : <Button key={item.id} variant="ghost" size="sm" className="week-entry" onClick={item.onSelect}>
     <Text as="span" size="sm" tone="muted" numeric>{item.time}</Text>
     {item.network && <Text as="span" size="sm" weight="semibold">{item.network}</Text>}
     <Text as="span" size="sm" truncate>{item.snippet}</Text>
