@@ -10,11 +10,11 @@ import { postDisplayStatus } from '../shared/post-schedule.ts';
 // The campaign page with controlled hook state; it only calls the callbacks the app passes in.
 type Row = { id: string; [key: string]: any };
 const raw = await readFile(new URL('../src/CampaignDetail.tsx', import.meta.url), 'utf8');
-const body = raw.replace(/^import .*;\r?\n/gm, '').replace(/^export type .*;\r?\n/gm, '').replace('export function campaignItems', 'function campaignItems').replace('export default function', 'function');
+const body = raw.replace(/^import .*;\r?\n/gm, '').replace(/^export type .*;\r?\n/gm, '').replace(/^export (default )?function/gm, 'function');
 const { code } = await transformWithOxc(body, 'CampaignDetail.tsx', { jsx: { runtime: 'classic' }, lang: 'tsx' });
 const names = ['Button', 'Card', 'DataTable', 'EmptyState', 'Heading', 'Icon', 'Inline', 'MetricCard', 'MetricGrid', 'Popover', 'SegmentedControl', 'Stack', 'Tabs', 'Text'] as const;
-const { CampaignDetail, campaignItems } = new Function('React', 'useState', 'postDisplayStatus', ...names, code + '; return { CampaignDetail, campaignItems };')(
-  React, (initial: unknown) => [initial, () => {}], postDisplayStatus, ...names.map(name => (ui as Record<string, unknown>)[name]));
+const { CampaignDetail, campaignItems, campaignResults } = new Function('React', 'useState', 'useEffect', 'postDisplayStatus', ...names, code + '; return { CampaignDetail, campaignItems, campaignResults };')(
+  React, (initial: unknown) => [initial, () => {}], () => {}, postDisplayStatus, ...names.map(name => (ui as Record<string, unknown>)[name]));
 
 const campaign = { id: 'c1', name: 'Autumn launch', status: 'active', startDate: '2030-10-01', endDate: '2030-10-31', budget: 1000, spent: 250, currency: 'AED' };
 const posts = [{ id: 'p1', campaignId: 'c1', status: 'scheduled', scheduledAt: '2999-01-02T09:00:00.000Z', content: 'Hello' }, { id: 'p2', campaignId: 'other', status: 'draft', content: 'Elsewhere' }];
@@ -64,4 +64,20 @@ test('a dated local post reads Planned; only a post a network holds reads Schedu
   assert.equal(postDisplayStatus({}), 'draft');
   const items = campaignItems('c1', [{ id: 'p1', campaignId: 'c1', status: 'scheduled', scheduledAt: '2999-01-02T09:00:00.000Z' }, { id: 'p2', campaignId: 'c1', status: 'scheduled', externalId: 'x', scheduledAt: '2999-01-03T09:00:00.000Z' }], [], [], () => 'Post');
   assert.deepEqual(items.map((item: { row: Row; status: string }) => item.row.id + ':' + item.status), ['p2:scheduled', 'p1:planned']);
+});
+
+test('Results add up what this campaign produced and say Not reported instead of 0 when a source has nothing yet', () => {
+  const results = (loaded: Record<string, unknown>) => Object.fromEntries(campaignResults({ ...campaign, impressions: 1200, conversions: undefined }, [{ id: 'p1', campaignId: 'c1', status: 'published' }, { id: 'p2', campaignId: 'c1', status: 'draft' }, { id: 'p3', campaignId: 'other', status: 'published' }],
+    [{ id: 'b1', campaignId: 'c1', status: 'live' }, { id: 'b2', campaignId: 'c1', status: 'draft' }], [{ id: 'a1', campaignId: 'c1', reached: 40 }, { id: 'a2', campaignId: 'c1', reached: 10 }, { id: 'a3', campaignId: 'other', reached: 99 }], loaded).map((result: { label: string; value: number | null }) => [result.label, result.value]));
+  const full = results({ links: { totals: { clicks: 5, qrScans: 2 } }, activations: { a1: { leads: 3 }, a2: { leads: 1 }, a3: { leads: 50 } } });
+  assert.deepEqual(full, { 'Link clicks': 5, 'QR scans': 2, 'Leads captured': 4, 'People reached': 50, 'Posts published': 1, 'Billboards booked': 1, Impressions: 1200, Conversions: null });
+  const empty = results({});
+  assert.deepEqual([empty['Link clicks'], empty['QR scans'], empty['Leads captured']], [null, null, null], 'Unloaded or failed sources are not reported, not zero.');
+  assert.equal(Object.fromEntries(campaignResults(campaign, [], [], [], { activations: {} }).map((result: { label: string; value: number | null }) => [result.label, result.value]))['Leads captured'], null, 'No field activity means no leads to report, not 0.');
+});
+
+test('the campaign page has a Results tab next to Overview and Items', () => {
+  const walk = (node: any): any[] => Array.isArray(node) ? node.flatMap(walk) : !React.isValidElement(node) ? [] : [node, ...Object.values(node.props as Row).flatMap(value => Array.isArray(value) || React.isValidElement(value) ? walk(value) : [])];
+  const tabs = walk(CampaignDetail(props())).find(node => node.type === ui.Tabs);
+  assert.deepEqual(tabs.props.items.map((item: Row) => item.value), ['overview', 'results', 'items']);
 });
