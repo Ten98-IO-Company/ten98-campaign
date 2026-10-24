@@ -35,6 +35,16 @@ test('the page shows budget, spent and remaining, and offers Add and Edit only t
   assert.doesNotMatch(readOnly, />Add</); assert.doesNotMatch(readOnly, />Edit</);
 });
 
+test('viewers and network-managed campaigns get View details, which opens the same read-only dialog', () => {
+  const walk = (node: any): any[] => Array.isArray(node) ? node.flatMap(walk) : !React.isValidElement(node) ? [] : [node, ...Object.values(node.props as Record<string, unknown>).flatMap(value => Array.isArray(value) || React.isValidElement(value) ? walk(value) : [])];
+  for (const [label, extra] of [['viewer', { canWrite: false }], ['synced from an ad network', { campaign: { ...campaign, externalId: 'meta-123' } }], ['native Google campaign', { campaign: { ...campaign, nativeProvider: 'googleAdsNative' } }]] as const) {
+    let opened = 0;
+    const button = walk(CampaignDetail(props({ ...extra, onEdit: () => { opened++; } }))).find(node => node.type === ui.Button && node.props.children === 'View details');
+    assert.ok(button, label + ' sees View details'); button.props.onClick(); assert.equal(opened, 1, label + ' opens the campaign dialog');
+  }
+  assert.ok(walk(CampaignDetail(props())).some(node => node.type === ui.Button && node.props.children === 'Edit'), 'An editor of a local campaign sees Edit.');
+});
+
 test('Add lists every kind of work, and choosing one hands that kind to the app', () => {
   const added: string[] = [];
   const tree = CampaignDetail(props({ onAdd: (kind: string) => added.push(kind) }));

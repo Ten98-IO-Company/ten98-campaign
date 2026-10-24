@@ -29,6 +29,8 @@ export default function CampaignDetail({ campaign, posts, placements, activation
   const [tab, setTab] = useState('overview'), [filter, setFilter] = useState('all'), [adding, setAdding] = useState(false);
   const items = campaignItems(campaign.id, posts, placements, activations, postTitle), now = Date.now();
   const upNext = items.filter(item => item.when && Date.parse(item.when) > now).sort((a, b) => a.when.localeCompare(b.when)).slice(0, 5);
+  // The same dialog opens read-only for viewers and for campaigns an ad network manages, so it is labelled for what it does.
+  const editable = canWrite && !campaign.externalId && !campaign.nativeProvider;
   const currency = campaign.currency || 'AED', budget = Number(campaign.budget), spent = Number(campaign.spent);
   const remaining = Number.isFinite(budget) && Number.isFinite(spent) ? budget - spent : NaN;
   const add = canWrite ? <Popover label="Add to this campaign" triggerLabel="Add" triggerIcon="plus" triggerVariant="primary" placement="bottom-end" open={adding} onOpenChange={setAdding}>
@@ -45,7 +47,7 @@ export default function CampaignDetail({ campaign, posts, placements, activation
     <Inline><Button variant="ghost" icon={<Icon name="chevron-left" size={15}/>} onClick={onBack}>All campaigns</Button></Inline>
     <Inline justify="between" align="start" gap={3}>
       <Stack gap={1}><Inline gap={2} align="center"><Heading level={2}>{campaign.name}</Heading>{statusBadge(campaign.status)}</Inline><Text tone="muted">{date(campaign.startDate)} – {date(campaign.endDate)}</Text></Stack>
-      <Inline gap={2}>{canWrite && <Button variant="secondary" onClick={onEdit}>Edit</Button>}{add}</Inline>
+      <Inline gap={2}><Button variant="secondary" onClick={onEdit}>{editable ? 'Edit' : 'View details'}</Button>{add}</Inline>
     </Inline>
     <MetricGrid list label="Budget">
       <MetricCard label="Budget" value={money(campaign.budget, currency)}/>
