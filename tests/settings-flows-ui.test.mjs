@@ -43,3 +43,12 @@ test('sample data removal is one confirmed danger action that calls the project 
   assert.deepEqual(calls, [['/projects/project-a/sample-data', 'DELETE'], 'cleared', ['reload', 'project-a'], 'Removed 3 sample records.']);
   assert.equal(new Function('React', 'DangerZoneFlow', 'canAdmin', 'sample', 'busy', 'clearSampleData', zone + '; return render();')(React, DangerZoneFlow, true, false, false, clearSampleData), false, 'Hidden once the project has no sample data.');
 });
+
+test('a dialog opens without an error left by an earlier page action, such as a blocked sample data removal (#149)', () => {
+  const effect = source.match(/useEffect\(\(\) => \{ if \(modal\) setError\(''\); \}, \[modal\]\);/)?.[0];
+  assert.ok(effect, 'Opening a dialog clears the page error, so it does not show inside the dialog.');
+  const open = modal => { const cleared = []; new Function('useEffect', 'setError', 'modal', effect)((fn, deps) => { assert.deepEqual(deps, [modal]); fn(); }, value => cleared.push(value), modal); return cleared; };
+  assert.deepEqual(open({ type: 'project' }), ['']); assert.deepEqual(open(null), [], 'Closing a dialog leaves a page error alone.');
+  // A save error raised while the dialog is open still shows inside it.
+  assert.match(source, /<ProjectCreateFlow mode="create" defaultValues=\{\{ name: '', origin: '' \}\} showOrigin=\{false\} busy=\{busy\} error=\{error \|\| undefined\} onSubmit=\{saveEditor\}/);
+});

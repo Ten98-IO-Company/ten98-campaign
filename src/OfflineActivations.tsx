@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, MetricCard, MetricGrid, Select, Stack, Text, Textarea } from '@ten98/ui';
-import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentPrompt, type ActivationType, type ConsentChannel } from '../shared/offline-activations.ts';
+import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentChannelList, consentWording, type ActivationType, type ConsentChannel } from '../shared/offline-activations.ts';
 
 type Row = { id: string; [key: string]: any };
 type Material = { label: string; done: boolean };
@@ -64,22 +64,22 @@ export function leadBody(lead: Lead) {
   if (!lead.channels.length) throw new Error('Tick at least one channel the person agreed to. Without an opt-in nothing is saved.');
   return { ...Object.fromEntries((['name', 'email', 'phone'] as const).filter(key => lead[key].trim()).map(key => [key, lead[key].trim()])), consents: Object.fromEntries(CONSENT_CHANNELS.map(channel => [channel, lead.channels.includes(channel)])) };
 }
-const channelList = (channels: ConsentChannel[]) => channels.map(channel => CONSENT_LABELS[channel].toLowerCase());
 // Phone-sized form staff use at the stop or door: consent wording first, every channel unticked, then only contact details.
+// The wording follows the ticked channels, so what is on screen at Save is the sentence the server records.
 export function LeadCapture({ brand, activation, request, path, onClose }: { brand: string; activation: Row; request: Props['request']; path: string; onClose: () => void }) {
   const [lead, setLead] = useState<Lead>(blankLead), [saved, setSaved] = useState(0), [message, setMessage] = useState<{ tone: 'success' | 'danger'; text: string } | null>(null);
   async function save() {
     try {
-      const result = await request(`${path}/${encodeURIComponent(activation.id)}/leads`, 'POST', leadBody(lead)), refused = channelList(result.refused || []);
+      const result = await request(`${path}/${encodeURIComponent(activation.id)}/leads`, 'POST', leadBody(lead)), refused: ConsentChannel[] = result.refused || [];
       setSaved(count => count + 1); setLead(blankLead());
-      setMessage({ tone: 'success', text: `Lead saved with ${channelList(result.recorded).join(' and ')} consent.${refused.length ? ` Not ${refused.join(' or ')}: this person opted out earlier.` : ''}` });
+      setMessage({ tone: 'success', text: `Lead saved with ${consentChannelList(result.recorded)} consent.${refused.length ? ` Not ${consentChannelList(refused, 'or')}: this person opted out earlier.` : ''}` });
     } catch (failure) { setMessage({ tone: 'danger', text: (failure as Error).message || 'The lead could not be saved.' }); }
   }
   return <Dialog open onOpenChange={next => { if (!next) onClose(); }} eyebrow={activation.name} title="Capture a lead" description={saved ? `${saved} saved this session.` : undefined} onSubmit={save}
     footer={<Inline gap={2} justify="end"><Button variant="secondary" onClick={onClose}>Done</Button><Button type="submit">Save lead</Button></Inline>}>
     <Stack gap={3}>
       {message && <Alert tone={message.tone} variant="inline">{message.text}</Alert>}
-      <CheckboxGroup legend={`Ask first: “${consentPrompt(brand)}…”`} description="Tick only what the person says yes to. Nothing is saved without at least one." value={lead.channels} onValueChange={channels => setLead(current => ({ ...current, channels: channels as ConsentChannel[] }))} options={CONSENT_CHANNELS.map(channel => ({ value: channel, label: CONSENT_LABELS[channel] }))}/>
+      <CheckboxGroup legend={`Ask first: “${consentWording(brand, lead.channels)}”`} description="Tick only what the person says yes to. Nothing is saved without at least one." value={lead.channels} onValueChange={channels => setLead(current => ({ ...current, channels: channels as ConsentChannel[] }))} options={CONSENT_CHANNELS.map(channel => ({ value: channel, label: CONSENT_LABELS[channel] }))}/>
       <Field label="Name"><Input autoComplete="off" maxLength={120} value={lead.name} onChange={event => setLead(current => ({ ...current, name: event.target.value }))}/></Field>
       <Field label="Email" description="Needed for email consent."><Input type="email" inputMode="email" autoComplete="off" maxLength={254} value={lead.email} onChange={event => setLead(current => ({ ...current, email: event.target.value }))}/></Field>
       <Field label="Mobile number" description="International format, for example +447700900123. Needed for text message or WhatsApp."><Input type="tel" inputMode="tel" autoComplete="off" maxLength={16} value={lead.phone} onChange={event => setLead(current => ({ ...current, phone: event.target.value }))}/></Field>
@@ -189,7 +189,7 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
         <Field label="Brief" description="What the team should know. For door-to-door, list no-knock streets and no-cold-calling zones here."><Textarea maxLength={2000} rows={3} disabled={!editable} value={draft.notes} onChange={event => change({ notes: event.target.value })}/></Field>
         <FormGrid>
           <Field label="Owner"><Select disabled={!editable} value={draft.ownerId} onChange={event => change({ ownerId: event.target.value })} options={ownerOptions}/></Field>
-          <Field label="Promo code" description="Optional, for in-store or checkout attribution."><Input maxLength={40} pattern="[A-Za-z0-9_-]*" disabled={!editable} value={draft.promoCode} onChange={event => change({ promoCode: event.target.value })}/></Field>
+          <Field label="Promo code" description="Optional, for in-store or checkout attribution."><Input maxLength={40} pattern="[A-Za-z0-9_\-]*" disabled={!editable} value={draft.promoCode} onChange={event => change({ promoCode: event.target.value })}/></Field>
         </FormGrid>
         {teamOptions.length > 0 && <CheckboxGroup legend="Team" orientation="horizontal" disabled={!editable} value={draft.teamIds} onValueChange={teamIds => change({ teamIds })} options={teamOptions}/>}
         <FormGrid>

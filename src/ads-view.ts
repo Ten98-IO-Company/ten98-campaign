@@ -4,11 +4,55 @@ const present = (value: unknown): value is number => typeof value === 'number' &
 
 // Ported from zernio-dev/ads-dashboard@4386edd lib/date-range.ts (MIT); 'default' keeps the provider's own window.
 export const adsRangeOptions = [{ value: 'default', label: 'Provider default' }, { value: '7', label: 'Last 7 days' }, { value: '30', label: 'Last 30 days' }, { value: '90', label: 'Last 90 days' }];
-export function adsPath(range: string, now = new Date()) {
+export function adsRangeQuery(range: string, now = new Date()): Record<string, string> {
   const days = ({ '7': 7, '30': 30, '90': 90 } as Record<string, number>)[range];
-  if (!days) return 'ads';
+  if (!days) return {};
   const day = (back: number) => { const date = new Date(now); date.setUTCDate(date.getUTCDate() - back); return date.toISOString().slice(0, 10); };
-  return `ads?${new URLSearchParams({ fromDate: day(days - 1), toDate: day(0) })}`;
+  return { fromDate: day(days - 1), toDate: day(0) };
+}
+export function adsPath(range: string, now = new Date()) {
+  const dates = adsRangeQuery(range, now);
+  return dates.fromDate ? `ads?${new URLSearchParams(dates)}` : 'ads';
+}
+
+// Issue #126: tabs name objects or tasks, never providers. Direct connections are networks in the filter instead of tabs;
+// their section ids stay valid so existing links and campaign rows still open them.
+export const adsTabs = [['campaigns', 'Campaigns'], ['adsets', 'Ad sets'], ['ads', 'Ads'], ['leads', 'Leads'], ['measurement', 'Conversions'], ['events', 'Activity']];
+export const adsLevelViews = ['campaigns', 'adsets', 'ads'];
+export const adsDirectViews = [{ value: 'shopping', label: 'Google Shopping' }, { value: 'microsoft', label: 'Microsoft Advertising' }, { value: 'search', label: 'Google search tools' }];
+export const adsManagerViews = [...adsLevelViews, ...adsDirectViews.map(view => view.value)];
+export const anyNetwork = 'all', anyStatus = 'any';
+export const campaignKey = (c: Row) => String(c.id || c._id || [c.platform, c.platformCampaignId || c.campaignId, c.campaignName || c.name].join(':'));
+export function networkOptions(rows: Row[], network: (platform: string) => string): { value: string; label: string; group?: string }[] {
+  const platforms = [...new Set(rows.map(row => String(row.platform || '')).filter(Boolean))];
+  return [{ value: anyNetwork, label: 'All networks' }, ...platforms.map(value => ({ value, label: network(value) })), ...adsDirectViews.map(view => ({ ...view, group: 'Direct connections' }))];
+}
+export const statusOptions = [{ value: anyStatus, label: 'Any status' }, { value: 'active', label: 'Active' }, { value: 'paused', label: 'Paused' }, { value: 'review', label: 'In review' }, { value: 'ended', label: 'Ended' }];
+const endedStatuses = ['rejected', 'completed', 'cancelled', 'archived', 'deleted'];
+export function deliveryGroup(row: Row) {
+  const status = String(row.status || '').toLowerCase();
+  return endedStatuses.includes(status) ? 'ended' : row.reviewStatus === 'in_review' ? 'review' : status === 'active' || status === 'paused' ? status : 'other';
+}
+export const matchesFilters = (row: Row, { network, status }: { network: string; status: string }) => (network === anyNetwork || row.platform === network) && (status === anyStatus || deliveryGroup(row) === status);
+
+// Ad sets arrive inside the loaded campaign tree; each row carries its campaign so details open on the parent.
+export function adSetRows(campaigns: Row[]) {
+  return campaigns.flatMap(campaign => (Array.isArray(campaign.adSets) ? campaign.adSets : []).filter((set: Row) => set && set.platformAdSetId).map((set: Row): Row => ({ ...set, key: campaignKey(campaign) + '/' + set.platformAdSetId, name: set.adSetName || set.name || set.platformAdSetId, platform: campaign.platform, currency: campaign.currency || campaign.metrics?.currency, campaign })));
+}
+// Same path as the details drawer, narrowed to the page period like the campaign list.
+export function adItemsPath(campaign: Row, range: string, now = new Date()) {
+  return `ads/items?campaignId=${encodeURIComponent(campaign.platformCampaignId || campaign.campaignId || campaign.id)}&platform=${encodeURIComponent(campaign.platform)}${range === 'default' ? '' : '&' + new URLSearchParams(adsRangeQuery(range, now))}`;
+}
+export function adRows(campaign: Row, result: any): Row[] {
+  if (!result || !Array.isArray(result.ads) || result.ads.some((ad: Row) => !ad || typeof ad._id !== 'string' || !ad._id)) throw new Error(`Ads for ${campaign.name || campaign.campaignName || 'this campaign'} could not be read.`);
+  return result.ads.map((ad: Row) => ({ ...ad, key: ad._id, name: ad.name || 'Untitled ad', platform: campaign.platform, currency: result.campaign?.currency || campaign.currency || campaign.metrics?.currency, campaign }));
+}
+// A totals row shaped like a campaign, so each column formats it as it formats its cells. Money is never added across currencies.
+export function levelTotals(rows: Row[]) {
+  const sum = (key: string) => { const values = rows.map(row => campaignFigure(row, key)).filter(present); return values.length ? values.reduce((total, value) => total + value, 0) : undefined; };
+  const currencies = new Set(rows.filter(row => campaignFigure(row, 'spend') !== undefined).map(row => row.currency || row.metrics?.currency || 'USD'));
+  const impressions = sum('impressions'), clicks = sum('clicks'), mixedCurrency = currencies.size > 1;
+  return { id: 'totals', currency: [...currencies][0], adCount: sum('adCount'), mixedCurrency, metrics: { spend: mixedCurrency ? undefined : sum('spend'), impressions, clicks, ctr: impressions && clicks !== undefined ? clicks / impressions * 100 : undefined, conversions: sum('conversions') } };
 }
 
 // Ported from zernio-dev/ads-dashboard@4386edd components/dashboard/account-picker.tsx (MIT), applied to already-loaded rows.

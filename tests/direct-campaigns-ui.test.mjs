@@ -396,3 +396,12 @@ test('the import notice counts every processed row and the preview explains what
   assert.equal(importNotice({}), 'Processed 0 rows: 0 created, 0 merged, 0 skipped. Review contact hygiene before sending.');
   assert.match(source, /\{importResult\.dryRun && importResult\.updated > 0 && <Text tone="muted" size="sm">Merging updates an existing contact's details from the file, such as name and company, and keeps the permissions and evidence already recorded\.<\/Text>\}/);
 });
+
+test('Messages shows campaigns and contacts as its own tabs, so a view hides the inner tab strip', async () => {
+  const source = (await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
+  assert.match(source, /\{\(sections => view \? sections\.find\(section => section\.value === view\)!\.content : <Tabs label="Direct campaign sections"[^\n]*items=\{sections\}\/>\)\(\[\{ value: 'campaigns',/);
+  const app = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  assert.match(app, /\['campaigns', 'people'\]\.includes\(directView\) && <Suspense[^\n]*<DirectCampaigns key=\{state\.projectId\} projectId=\{state\.projectId\} view=\{directView === 'people' \? 'contacts' : 'campaigns'\}/);
+  assert.match(app, /<SegmentedControl label="Contacts to show" value=\{directView\}[^\n]*'Your contacts'[^\n]*'From social accounts'/);
+});
+

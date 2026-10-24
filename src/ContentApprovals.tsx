@@ -3,6 +3,7 @@ import { Alert, Badge, Button, Card, Checkbox, CodeBlock, DescriptionList, Discl
 import { PostVariantPreview } from './PostComposer';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { reviewKeyAction } from './review-keys';
+import { useFocusReturn } from './focus-return';
 import { adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits } from './approval-status';
 
 type Props = { projectId: string; role: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; onOpenSettings?: () => void };
@@ -136,9 +137,11 @@ export default function ContentApprovals({ projectId, role, request, onChanged, 
     const rows = problem?.code === 'APPROVAL_POST_RESTRICTIONS' && Array.isArray(problem.details) ? problem.details.filter((row: any) => row && typeof row.message === 'string' && row.message && ['platform', 'field', 'accountId'].every(key => row[key] === undefined || typeof row[key] === 'string')).slice(0, 100) : [];
     setRestrictions(previous => { const { [postId]: _previous, ...rest } = previous; return rows.length ? { ...rest, [postId]: rows } : rest; });
   }
+  const rememberFocus = useFocusReturn(busy);
   // A failed action also drops a pending keyboard move, so a later refresh cannot jump focus to another card.
+  // Focus returns to the clicked control, or to its review card once a review removes that card's buttons.
   async function action(name: string, run: () => Promise<void>) {
-    if (busy || !active.current) return; readVersion.current++; setBusy(name); setError(''); setNotice(''); noteRestrictions(name, null);
+    if (busy || !active.current) return; rememberFocus(document.getElementById('review-' + name)); readVersion.current++; setBusy(name); setError(''); setNotice(''); noteRestrictions(name, null);
     try { await run(); } catch (err) { if (active.current) { setError((err as Error).message || 'This review could not be saved.'); noteRestrictions(name, err); } advance.current = null; }
     finally { if (active.current) setBusy(''); }
   }

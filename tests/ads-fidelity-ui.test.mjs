@@ -61,7 +61,10 @@ test('campaign columns show reported figures only and sort locally', async () =>
   assert.equal(cell(columns, 'spend', rows[0]), '€120');
   assert.equal(cell(columns, 'clicks', rows[1]), '—');
   assert.equal(cell(columns, 'ctr', rows[0]), '3.33%');
-  assert.match(cell(columns, 'name', rows[1]), /Search[\s\S]*in platform review/);
+  // Delivery reads as the status plus a muted reason (issue #126); the name cell keeps only the ad account.
+  assert.match(cell(columns, 'status', rows[1]), /paused[\s\S]*In platform review/);
+  assert.doesNotMatch(cell(columns, 'name', rows[1]), /review/);
+  assert.equal(columns.find(column => column.key === 'status').header, 'Delivery');
   const sorted = key => designSystem.filterAndSortRows(rows, columns, '', { key, direction: 'desc' }).map(row => row.id);
   assert.deepEqual(sorted('spend'), ['b', 'a', 'c']);
   assert.deepEqual(designSystem.filterAndSortRows(rows, columns, '', { key: 'spend', direction: 'asc' }).map(row => row.id), ['c', 'a', 'b']);

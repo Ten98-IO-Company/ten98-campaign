@@ -17,7 +17,7 @@ const deliverabilityAlerts = (status: any): DeliverabilityAlert[] => (Array.isAr
 
 type Row = { id: string; [key: string]: any };
 type Channel = 'email' | 'sms' | 'whatsapp';
-type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string>; onOpenIntegrations?: () => void };
+type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string>; onOpenIntegrations?: () => void; view?: 'campaigns' | 'contacts' };
 type EmailPurpose = 'transactional' | 'marketing';
 type Draft = { name: string; channel: Channel; emailPurpose: EmailPurpose; subject: string; text: string; html: string; accountId: string; templateName: string; templateLanguage: string; templateComponents: any[]; contactIds: string[]; tags: string[] };
 const labels = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
@@ -53,7 +53,7 @@ const testSendErrors: Record<string, string> = {
 };
 const testSendError = (failure: any) => (typeof failure?.code === 'string' && Object.hasOwn(testSendErrors, failure.code) ? testSendErrors[failure.code] : failure?.message) || 'The test could not be sent. Try again.';
 
-export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations }: Props) {
+export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations, view }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/direct`, requester = useRef(request), version = useRef(0), csvRead = useRef(0), pending = useRef(false), actionVersion = useRef(0), formRef = useRef<HTMLFormElement>(null);
   requester.current = request;
   const [tab, setTab] = useState('campaigns'), [status, setStatus] = useState<any>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [contacts, setContacts] = useState<Row[]>([]);
@@ -231,13 +231,13 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   const testProviderReady = !status || !!status.providers?.[current?.channel], testProviderReason = current?.channel === 'email' && status?.emailProvider === null ? emailProviderChoice : `Set up ${labels[current?.channel as Channel] || 'this'} sending in Integrations to send a test.`;
   const integrationsAction = onOpenIntegrations ? <Button variant="secondary" size="sm" onClick={onOpenIntegrations}>Open integrations</Button> : undefined;
   return <Stack gap={6}>
-    <Inline justify="between" align="center"><Stack gap={1}><Heading level={2}>Direct campaigns</Heading><Text tone="muted">Send permission-based transactional email, SMS and approved WhatsApp template messages to one contact list. {status?.marketingAvailable ? 'Email campaigns can be transactional or marketing.' : 'Email campaigns are transactional only.'}</Text></Stack><Button variant="secondary" disabled={!!busy} onClick={() => action('Refreshing campaigns', async generation => { await load(generation); })}>Refresh lists</Button></Inline>
+    <Inline justify="between" align="center"><Stack gap={1}>{view === 'contacts' ? <><Heading level={2}>Contacts</Heading><Text tone="muted">The people you can email, text or message on WhatsApp, with the permission each one gave.</Text></> : <><Heading level={2}>Direct campaigns</Heading><Text tone="muted">Send permission-based transactional email, SMS and approved WhatsApp template messages to one contact list. {status?.marketingAvailable ? 'Email campaigns can be transactional or marketing.' : 'Email campaigns are transactional only.'}</Text></>}</Stack><Button variant="secondary" disabled={!!busy} onClick={() => action('Refreshing campaigns', async generation => { await load(generation); })}>Refresh lists</Button></Inline>
     {error && <Alert tone="danger" actions={error === emailProviderChoice ? integrationsAction : undefined}>{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
     {deliverabilityAlerts(status).map(alert => { const copy = deliverabilityCopy(alert); return <Alert key={alert.provider + ':' + alert.kind} tone="warning" title={copy.title}>{copy.body}{alert.expiresAt ? ` The provider lists it until ${new Date(alert.expiresAt).toLocaleString()}.` : ''}</Alert>; })}
     {status?.emailProvider === 'ses' && typeof status.sesWebhookUrl === 'string' && status.sesWebhookUrl && <Disclosure summary="Amazon SES feedback webhook"><Stack gap={2}><Field label="SNS subscription URL" description="Subscribe the SNS topic of your SES configuration set to this URL over HTTPS so bounces and complaints update your contacts."><Input readOnly value={status.sesWebhookUrl}/></Field><Inline><CopyButton value={status.sesWebhookUrl} label="Copy webhook URL" messages={{ copied: 'Webhook URL copied.' }}/></Inline></Stack></Disclosure>}
     {status?.accountError && <Alert tone="warning" variant="inline">WhatsApp accounts could not be loaded: {status.accountError}. Email and SMS remain available when configured.</Alert>}
     {status?.publicCallbacks === false && <Alert tone="warning" title="Sending needs a public address">Before sending, the instance operator must set APP_URL to this app’s public HTTPS address and restart the service. Unsubscribe links and delivery updates need that address. Drafts and contacts can be saved now.</Alert>}
-    <Tabs label="Direct campaign sections" value={tab} onValueChange={setTab} keepMounted={false} items={[{ value: 'campaigns', label: <>Campaigns <Badge>{campaigns.length}</Badge></>, content: <Stack gap={6}>
+    {(sections => view ? sections.find(section => section.value === view)!.content : <Tabs label="Direct campaign sections" value={tab} onValueChange={setTab} keepMounted={false} items={sections}/>)([{ value: 'campaigns', label: <>Campaigns <Badge>{campaigns.length}</Badge></>, content: <Stack gap={6}>
       <Card as="section" title="Your campaigns" description="Drafts stay local until you explicitly send or schedule them." actions={!readOnly && <Button variant="primary" disabled={!!busy} onClick={() => openDraft()}>New campaign</Button>}>
         <DataTable searchable={false} sortable={false} pagination={false} ariaLabel="Direct campaigns" rows={campaigns} rowKey={campaign => campaign.id} emptyState={<EmptyState title="No direct campaigns yet" description="Create a draft, choose eligible contacts, and check the audience before sending."/>} columns={[{ key: 'name', header: 'Campaign', rowHeader: true, render: campaign => <Text as="strong" weight="semibold">{campaign.name}</Text> }, { key: 'channel', header: 'Channel', render: campaign => labels[campaign.channel as Channel] || campaign.channel }, { key: 'status', header: 'Status', render: campaign => statusLabel(campaign.status) }, { key: 'scheduledAt', header: 'Planned time', render: campaign => when(campaign.scheduledAt) }]} rowActionsLabel="Actions" rowActions={campaign => <Inline gap={2}><Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openCampaign(campaign)}>{campaign.status === 'draft' && !readOnly ? 'Edit draft' : 'View campaign'}</Button>{onOpenReplies && ['sms', 'whatsapp'].includes(campaign.channel) && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openReplies(campaign)}>Open replies</Button>}</Inline>}/>
       </Card>
@@ -346,6 +346,6 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
         <Field label="Reason" required><Input required maxLength={1000} value={suppression.reason} onChange={event => setSuppression({ ...suppression, reason: event.target.value })} placeholder="Unsubscribed, delivery failure, or manual exclusion"/></Field>
         <FormActions><Button variant="danger" type="submit">Confirm suppression</Button><Button variant="secondary" onClick={() => setSuppression(null)}>Cancel</Button></FormActions>
       </Stack></Form></Card>}
-    </Stack> }]}/>
+    </Stack> }])}
   </Stack>;
 }

@@ -9,7 +9,7 @@ function view(posts, state = {}) {
   const start = source.indexOf('export default function '), end = source.indexOf('  return <', start), values = [], initial = { 0: { requireApproval: true, posts }, ...state };
   const context = {
     useState(value) { const index = values.length; values.push(Object.hasOwn(initial, index) ? initial[index] : value); return [values[index], () => {}]; },
-    useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null },
+    useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {},
     ...Object.fromEntries(['approveBlocked', 'postName', 'reviewItem'].map(name => [name, new Function('return ' + stripTypeScriptTypes(source.match(new RegExp(`^const ${name} = (.+);$`, 'm'))[1]))()])),
   };
   return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(start, end).replace('export default ', '') + 'return { posts, counts, actionable, chosen };\n}')});`)(...Object.values(context))({ projectId: 'project', role: 'owner', request: async () => ({}) });
