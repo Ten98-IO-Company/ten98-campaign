@@ -162,3 +162,23 @@ test('#140: a dated post not yet submitted to a provider is Planned, not Schedul
   const filtered = (filters: Record<string, string>) => [...find(Agenda({ ...props, filters }), ofType(ui.CalendarMonth))!.props!.days.keys()];
   assert.deepEqual(filtered({ status: 'planned' }), ['2099-10-27']); assert.deepEqual(filtered({ channel: 'linkedin' }), ['2099-10-27']); assert.deepEqual(filtered({ status: 'scheduled' }), ['2099-10-28']);
 });
+
+test('#185: field activity is on the calendar without Google Calendar, labelled as field activity, and its Google copy is not shown twice', () => {
+  const roadshow = { id: 'road', name: 'Mall of the Emirates roadshow', type: 'roadshow', status: 'planned', location: 'Mall of the Emirates', campaignId: 'c1', startAt: at(26, 10), endAt: at(26, 16) };
+  const doors = { id: 'doors', name: 'Marina door-to-door', type: 'door_to_door', status: 'completed', location: 'Dubai Marina', startAt: at(22, 9), endAt: at(22, 12) };
+  const cancelled = { id: 'gone', name: 'Cancelled sampling', type: 'sampling', status: 'cancelled', location: 'JBR', startAt: at(23, 9), endAt: at(23, 12) };
+  const props = { ...base, posts: [], activations: [roadshow, doors, cancelled], campaigns: [{ id: 'c1', name: 'Autumn launch' }], weekStart: '2099-10-26', onMonthChange() {} };
+  const week = Agenda({ ...props, view: 'week' }), weekMarkup = html({ ...props, view: 'week' });
+  assert.match(String(days(week)[0].props!['aria-label']), /^Monday, October 26, 2099, 1 entry$/);
+  assert.match(weekMarkup, /Field activity · Mall of the Emirates roadshow/); assert.doesNotMatch(weekMarkup, /Marina|Cancelled sampling/, 'The week shows only its own days.');
+  assert.deepEqual(findAll(week, node => node.type === ui.Badge && Boolean(node.props?.dot)).map(badge => [text(badge), badge.props!.tone]), [['Planned', 'info']]);
+  const grid = find(Agenda({ ...props, view: 'month' }), ofType(ui.CalendarMonth))!;
+  assert.deepEqual([...grid.props!.days.keys()].sort(), ['2099-10-22', '2099-10-26'], 'A cancelled activation is left off, as in the Google plan.');
+  assert.equal(grid.props!.days.get('2099-10-22')[0].label, 'Field activity · Marina door-to-door · Completed');
+  const list = find(Agenda({ ...props, view: 'list' }), ofType(ui.PublishingAgenda))!;
+  assert.deepEqual(list.props!.entries.map((item: { id: string; title: string; details: string }) => [item.id, item.title, item.details]), [['activation:doors', 'Field activity · Marina door-to-door', 'Dubai Marina'], ['activation:road', 'Field activity · Mall of the Emirates roadshow', 'Mall of the Emirates · Autumn launch']]);
+  assert.equal(text(list.props!.entries[0].status), 'Completed');
+  const copy = { id: 'g-road', summary: 'Field · Mall of the Emirates roadshow', managed: true, plan: { collection: 'activations', recordId: 'road' }, start: { dateTime: roadshow.startAt }, end: { dateTime: roadshow.endAt } };
+  const synced = find(Agenda({ ...props, googleEvents: [copy], view: 'list' }), ofType(ui.PublishingAgenda))!;
+  assert.deepEqual(synced.props!.entries.map((item: { id: string }) => item.id), ['activation:doors', 'activation:road'], 'With Google Calendar connected the published copy is not listed again.');
+});
