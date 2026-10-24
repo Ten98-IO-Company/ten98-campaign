@@ -378,6 +378,7 @@ function App() {
     catch { if (activeProject.current === projectId) setApprovalSummary(null); }
   }
   useEffect(() => { setApprovalSummary(null); }, [state?.projectId]);
+  useEffect(() => { setError(''); }, [section, state?.projectId]); // An earlier action's error does not follow you to another section or project.
   useEffect(() => { if (state?.projectId) void loadApprovalSummary(state.projectId); }, [state]);
   useEffect(() => {
     if (!state?.projectId || !['Overview', 'Calendar'].includes(page) || !state.posts.some(post => Object.keys(post.accountOverrides || {}).length) || remote.accounts || !remote.status?.zernio?.configured || !remote.status.zernio.mapped) return;
