@@ -88,3 +88,9 @@ test('link setup discloses configured administration while keeping unconfigured 
   for (const change of [{ readOnly: true }, { canManageSettings: false }]) { const viewer = render(change); assert.doesNotMatch(viewer, /<form|Save link settings/); assert.match(viewer, /Ask your admin to change them/); assert.match(viewer, /Copy tracking code/); }
   assert.match(render({ canChangeDomain: false }), /type="url"[^>]*disabled=""/);
 });
+
+// #148: at 320 px the Link column was squeezed to 24 px and wrapped one character per line. It names its row and keeps
+// the large named minimum width; the table scrolls instead.
+test('the Link column keeps a readable minimum width and names its row', () => {
+  assert.match(source, /\{ key: 'link', header: 'Link', rowHeader: true, wrap: true, minWidth: 'lg', render:/);
+});
