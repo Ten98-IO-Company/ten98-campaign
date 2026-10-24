@@ -82,7 +82,7 @@ export default function OohMap({ projectId, request, locations, placements, visi
   const partnerName = (id?: string) => partners.find(partner => partner.id === id)?.name;
   const list = <DataTable ariaLabel="OOH bookings" rows={visible} rowKey={placement => placement.id} searchable={false} sortable={false} pagination={false} responsive="stack"
     activeKey={activeId || undefined} onRowActivate={placement => onOpen(placement)} columns={[
-      { key: 'placement', header: 'Placement', rowHeader: true, wrap: true, render: placement => <Stack gap={1}><Text weight="semibold">{placement.name}</Text><Text size="sm" tone="muted">{[formats.find(([value]) => value === placement.type)?.[1] || 'Billboard', partnerName(placement.providerId), placement.location || 'Location not set'].filter(Boolean).join(' · ')}</Text></Stack> },
+      { key: 'placement', header: 'Billboard', rowHeader: true, wrap: true, render: placement => <Stack gap={1}><Text weight="semibold">{placement.name}</Text><Text size="sm" tone="muted">{[formats.find(([value]) => value === placement.type)?.[1] || 'Billboard', partnerName(placement.providerId), placement.location || 'Location not set'].filter(Boolean).join(' · ')}</Text></Stack> },
       { key: 'dates', header: 'Dates', render: placement => `${formatDate(placement.startDate || '')} – ${formatDate(placement.endDate || '')}` },
       { key: 'status', header: 'Status', render: placement => <StatusBadge status={placement.status}/> },
       { key: 'cost', header: 'Cost', numeric: true, render: placement => placement.cost == null ? 'Not reported' : formatCost(placement.cost, placement.currency || 'AED') }]}
@@ -110,8 +110,8 @@ export default function OohMap({ projectId, request, locations, placements, visi
 export function BookingFields({ item, partners, campaigns, defaultCampaignId, defaultDates }: { item?: Placement | null; partners: Named[]; campaigns: Named[]; defaultCampaignId?: string; defaultDates?: { start?: string; end?: string } }) {
   const [dates, setDates] = useState({ start: item?.startDate?.slice(0, 10) || defaultDates?.start || '', end: item?.endDate?.slice(0, 10) || defaultDates?.end || '' });
   return <Stack gap={4}>
-    <Fieldset legend="Placement">
-      <Field label="Placement name" required><Input name="name" defaultValue={item?.name} placeholder="Sheikh Zayed Road · Digital screen" required/></Field>
+    <Fieldset legend="Billboard">
+      <Field label="Billboard name" required><Input name="name" defaultValue={item?.name} placeholder="Sheikh Zayed Road · Digital screen" required/></Field>
       <FormGrid>
         <Field label="Format"><Select name="type" defaultValue={item?.type || 'billboard'}>{formats.map(([value, label]) => <Option key={value} value={value}>{label}</Option>)}</Select></Field>
         <Field label="Media partner"><Select name="providerId" defaultValue={item?.providerId || ''}><Option value="">No partner</Option>{partners.map(partner => <Option key={partner.id} value={partner.id}>{partner.name}</Option>)}</Select></Field>

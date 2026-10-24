@@ -184,8 +184,8 @@ test('Schedule submits to the scheduler when publishing is open; otherwise the a
   const offline = mount({ ...props, onLoadAccounts: undefined }); offline.pick(['fb-a']); offline.type('Caption', 'Plan');
   assert.equal(menu(offline).props.triggerLabel, 'Save to calendar');
   await offline.openSchedule(); assert.equal(text(offline.confirm()), 'Save to calendar');
-  assert.match(offline.html(), /Connect Zernio in Integrations to publish\./);
-  nodes(menu(offline)).find(node => node.type === ui.Button && text(node) === 'Open integrations')!.props.onClick(); assert.deepEqual(opened, [true]);
+  assert.match(offline.html(), /Connect your social accounts in Settings › Connections to publish\./);
+  nodes(menu(offline)).find(node => node.type === ui.Button && text(node) === 'Open Connections')!.props.onClick(); assert.deepEqual(opened, [true]);
   await offline.confirm()!.props.onClick(); await offline.settle();
   assert.equal(saved.length, 1, 'Save to calendar saves the plan.'); assert.equal(published.length, 1);
   const reason = 'This project requires approval before publishing. Request a review first.';
@@ -258,13 +258,13 @@ test('without a social publishing connection the post check, file check and queu
   await view.openSchedule();
   for (const label of ['Check post', 'Load queues']) assert.equal(view.button(label)!.props.disabled, true, label);
   assert.deepEqual(calls, [], 'Opening Schedule does not ask the provider.');
-  assert.match(view.html(), /Connect social accounts in Integrations to check posts and use queues\./);
-  const action = view.all(node => node.type === ui.Button && text(node) === 'Open integrations');
+  assert.match(view.html(), /Connect social accounts in Settings › Connections to check posts and use queues\./);
+  const action = view.all(node => node.type === ui.Button && text(node) === 'Open Connections');
   assert.ok(action.length > 0); action[0].props.onClick(); assert.deepEqual(opened, [true]);
   const online = mount({ ...offline, onLoadAccounts: async () => ({}) });
   assert.notEqual(online.button('Next free slot')!.props.disabled, true);
   assert.match(online.html(), /<button(?![^>]*disabled)[^>]*>Check file<\/button>/);
-  assert.doesNotMatch(online.html(), /Open integrations/);
+  assert.doesNotMatch(online.html(), /Open Connections/);
 });
 
 test('the Schedule confirm and its reason lead the panel, before the time, queue and post check, so they are visible without scrolling', async () => {
