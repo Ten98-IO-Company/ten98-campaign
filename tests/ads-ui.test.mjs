@@ -625,7 +625,7 @@ test('actual Meta discovery controls use explicit connection/advertiser reads an
   for (const name of ['accountId', 'adAccountId']) assert.match(ui.html(), new RegExp('<select[^>]*name="' + name + '"[^>]*autocomplete="off"', 'i'));
   assert.match(ui.html(), /<p[^>]*role="status"[^>]*><span>Connection meta\/a.*1 campaign returned<\/span><\/p>/); assert.doesNotMatch(ui.html(), /<table[^>]*(?:role="status"|aria-live=)/);
   assert.equal(ui.calls.at(-1), 'ads/campaign-discovery?accountId=meta%2Fa&adAccountId=act_123'); assert.match(ui.html(), /&lt;b&gt;Empty campaign&lt;\/b&gt;/); assert.match(ui.html(), /empty-campaign/); assert.match(ui.html(), /<td>0<\/td>/); assert.match(ui.html(), /read-only/); assert.match(ui.html(), /last stored.*not a live/); assert.doesNotMatch(ui.html(), /Manage ads|Pause|Activate|Enable|budget|<b>/);
-  const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'); assert.match(main, /connected && <AdCampaignDiscovery key=\{state.projectId\} request=\{integrate\}/); assert.match(main, /Synced provider data/);
+  const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'); assert.match(main, /connected && <AdCampaignDiscovery key=\{state.projectId\} request=\{integrate\}/); assert.match(main, /<AdsManager [^\n]*>\{connected && <AdCampaignDiscovery /, 'Discovery sits inside the ads manager.');
 });
 
 test('discovery distinguishes verified empty from unavailable or malformed results and refresh withdraws earlier rows', async () => {
