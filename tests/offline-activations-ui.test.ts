@@ -11,7 +11,7 @@ type Row = Record<string, any>;
 const source = await readFile(new URL('../src/OfflineActivations.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, ''), 'OfflineActivations.tsx', { jsx: { runtime: 'classic' } });
 const library = ui as unknown as Record<string, unknown>;
-const module = new Function('React', 'useEffect', 'useRef', 'useState', 'ACTIVATION_TYPES', 'ACTIVATION_TYPE_LABELS', 'CONSENT_CHANNELS', 'CONSENT_LABELS', 'consentPrompt', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink, leadBody, LeadCapture, rollUp, ResultsSummary };')(React, useEffect, useRef, useState, ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentPrompt, ...Object.values(library));
+const module = new Function('React', 'useEffect', 'useRef', 'useState', 'ACTIVATION_TYPES', 'ACTIVATION_TYPE_LABELS', 'CONSENT_CHANNELS', 'CONSENT_LABELS', 'consentPrompt', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink, leadBody, LeadCapture, rollUp, ResultsSummary, peopleChoices, patchBody };')(React, useEffect, useRef, useState, ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentPrompt, ...Object.values(library));
 const html = (props: Row) => renderToStaticMarkup(React.createElement(module.OfflineActivations, { projectId: 'p1', brand: 'Brand launch', campaigns: [], activations: [], request: async () => ({}), onChanged() {}, ...props }));
 const campaigns = [{ id: 'c1', name: 'Winter field push', currency: 'GBP' }, { id: 'c2', name: 'Spring sampling', currency: 'AED' }];
 const activation = (id: string, startAt: string, extra: Row = {}) => ({ id, name: id, type: 'roadshow', campaignId: 'c1', status: 'planned', startAt, endAt: new Date(Date.parse(startAt) + 8 * 3600000).toISOString(), location: 'City Centre Mall', budget: 1200, spent: 300, reached: 0, materials: [], teamIds: [], ...extra });
@@ -48,8 +48,8 @@ test('each activation gets a tagged landing page, and its link shows the short a
   assert.deepEqual(Object.fromEntries(url.searchParams), { ref: '1', utm_source: 'roadshow', utm_medium: 'offline', utm_campaign: 'Winter field push', utm_content: 'Mall stop' });
   for (const bad of ['shop.example.com', 'http://shop.example.com', 'https://user:secret@shop.example.com']) assert.throws(() => module.trackingDestination(bad, stopRow, ''), /landing page|HTTPS/);
   const markup = renderToStaticMarkup(React.createElement(module.TrackingLink, { link: { name: 'Mall stop', shortUrl: 'https://go.example.com/s/abc', qrSvgUrl: '/api/projects/p1/links/l1/qr.svg', clicks: 1200, qrScans: 85 } }));
-  assert.match(markup, /src="\/api\/projects\/p1\/links\/l1\/qr.svg"/); assert.match(markup, /alt="QR code for Mall stop"/);
-  assert.match(markup, /https:\/\/go.example.com\/s\/abc/); assert.match(markup, /1,200 link visits · 85 QR scans/); assert.match(markup, /download="Mall stop QR.svg"/);
+  assert.match(markup, /src="\/api\/projects\/p1\/links\/l1\/qr\.svg"/); assert.match(markup, /alt="QR code for Mall stop"/);
+  assert.match(markup, /https:\/\/go\.example\.com\/s\/abc/); assert.match(markup, /1,200 link visits · 85 QR scans/); assert.match(markup, /download="Mall stop QR\.svg"/);
 });
 
 test('lead capture shows the consent wording first, starts unticked, and sends only what was given', () => {
@@ -74,6 +74,24 @@ test('results roll up reached, leads, visits, spend and cost per lead, and never
   const mixed = renderToStaticMarkup(React.createElement(module.ResultsSummary, { rows, results, currency: null }));
   assert.match(mixed, /Choose one campaign/); assert.doesNotMatch(mixed, /£|AED/);
   assert.match(renderToStaticMarkup(React.createElement(module.ResultsSummary, { rows, results: null, currency: 'GBP' })), /Loading/, 'Leads are never shown as 0 while loading.');
+});
+
+test('people who left stay visible as removable, and an edit that keeps them does not resend them', () => {
+  const members = [{ id: 'ann', name: 'Ann' }];
+  assert.deepEqual(module.peopleChoices(members, ['ann', 'gone']), [{ value: 'ann', label: 'Ann' }, { value: 'gone', label: 'Former member' }]);
+  assert.deepEqual(module.peopleChoices([], ['gone']), [], 'Before members load, nothing is labelled as former.');
+  const stored = { id: 'a1', ownerId: 'gone', teamIds: ['ann', 'gone'] }, draft = { ...module.draftFrom({ ...activation('a1', '2026-11-07T10:00:00Z'), ...stored }), reached: '12' };
+  const kept = module.patchBody(draft, stored);
+  assert.equal(Object.hasOwn(kept, 'ownerId') || Object.hasOwn(kept, 'teamIds'), false, 'Unchanged people are left to the server, which drops the stale ones.');
+  assert.deepEqual(module.patchBody({ ...draft, teamIds: ['ann'] }, stored).teamIds, ['ann'], 'Removing the former member sends the new team.');
+  assert.equal(module.patchBody({ ...draft, ownerId: 'ann' }, stored).ownerId, 'ann');
+  assert.deepEqual(module.patchBody(draft, null).teamIds, ['ann', 'gone'], 'A new activation sends everything.');
+});
+
+test('an archived tracking link is shown as inactive, without a QR code that no longer works', () => {
+  const markup = renderToStaticMarkup(React.createElement(module.TrackingLink, { link: { name: 'Mall stop', shortUrl: 'https://go.example.com/s/abc', qrSvgUrl: '/api/projects/p1/links/l1/qr.svg', clicks: 3, qrScans: 1, archived: true } }));
+  assert.match(markup, /Inactive/); assert.match(markup, /no longer redirect/);
+  assert.doesNotMatch(markup, /<img|Download QR/);
 });
 
 test('the page is built from @ten98/ui only', () => {
