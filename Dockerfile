@@ -1,5 +1,5 @@
 # The base image is pinned by digest; update the digest deliberately when moving to a newer Node 24 image.
-FROM node:24-alpine@sha256:6a1c190e17215d844926b0677f4bf87273ff7d5e54db06d3b5b5863ab0b09a3d AS build
+FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY vendor ./vendor
@@ -16,7 +16,7 @@ COPY tests ./tests
 COPY scripts ./scripts
 RUN npm run build && npm prune --omit=dev
 
-FROM node:24-alpine@sha256:6a1c190e17215d844926b0677f4bf87273ff7d5e54db06d3b5b5863ab0b09a3d
+FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53
 # Openship passes no build args, so the defaults are what ships there: APP_VERSION must equal package.json's version
 # (tests/image-labels.test.mjs fails CI otherwise) and APP_REVISION is overridden by `--build-arg` where one is available.
 ARG APP_VERSION=0.31.1
