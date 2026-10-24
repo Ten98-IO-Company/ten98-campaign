@@ -214,7 +214,7 @@ export async function createApp(options: AppOptions = {}) {
           return send(200, { user: publicUser(current), setupRequired: !await claimed(db), oidcEnabled: config.oidcEnabled, ...(sessionEnded ? { sessionEnded: true } : {}) });
         }
         if (path === '/api/auth/setup' && req.method === 'POST') {
-          await auth.limit('setup:' + auth.clientAddress(req), 10);
+          await auth.limit(auth.clientKey(req, 'setup'), 10);
           if (await claimed(db)) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
           // The first sign-up claims the installation as its owner (as in Discover); afterwards accounts join only by invitation.
           // Any legacy setup token in the body is ignored. The first project, and its optional sample, is the next step.

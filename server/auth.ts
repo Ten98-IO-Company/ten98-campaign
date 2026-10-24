@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sql } from 'drizzle-orm';
-import { parseTrustedProxies, resolveClientAddress } from '@ten98/runtime';
+import { clientLimitKey, parseTrustedProxies, resolveClientAddress } from '@ten98/runtime';
 import type { Database, Executor } from './database.ts';
 import { joinInvitation, lockInvitation } from './invitations.ts';
 
@@ -58,9 +58,10 @@ type OpenIdClient = typeof import('openid-client');
 export function createAuth(db: Database, config: AuthConfig, { openidClient = () => import('openid-client') }: { openidClient?: () => Promise<OpenIdClient> } = {}) {
   const digest = (value: string) => createHmac('sha256', config.sessionSecret).update(value).digest('hex');
   const proxies = (() => { try { return parseTrustedProxies([config.trustedProxies ?? ''].flat().join(',')); } catch { throw new Error('TRUSTED_PROXIES must be a comma-separated list of IP addresses or CIDR ranges.'); } })();
-  // The shared resolver ignores X-Forwarded-For unless the peer is a trusted proxy. It returns null when the address is
-  // unknown (an invalid peer, or a missing, malformed or all-trusted chain behind a trusted proxy); those share one bucket.
-  const clientAddress = (req: IncomingMessage): string => resolveClientAddress(req.socket?.remoteAddress, req.headers?.['x-forwarded-for'] as string | undefined, proxies) ?? 'unknown';
+  // A rate-limit key per client and scope (ten98-code-system#76). The shared resolver ignores X-Forwarded-For unless the
+  // peer is a trusted proxy; clientLimitKey derives the key with HMAC, groups IPv6 per /56, and gives an unresolved client
+  // (an invalid peer, or a missing, malformed or all-trusted chain behind a trusted proxy) its own `<scope>:unresolved` key.
+  const clientKey = (req: IncomingMessage, scope: string): string => clientLimitKey(scope, resolveClientAddress(req.socket?.remoteAddress, req.headers?.['x-forwarded-for'] as string | undefined, proxies), config.sessionSecret);
   // Cookies are shared across ports; include the configured origin so local instances can coexist.
   const scope = createHash('sha256').update(new URL(config.appUrl).origin).digest('hex').slice(0, 16), sessionName = 'ten98_session_' + scope, oidcName = 'ten98_oidc_' + scope, inviteName = 'ten98_oidc_invite_' + scope;
   function cookie(name: string, value: string, age = maxAge, path = '/') {
@@ -114,7 +115,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     return timingSafeEqual(Buffer.from(digest(value)), Buffer.from(stored)) ? token : '';
   }
   return {
-    user, establish, limit, clientAddress,
+    user, establish, limit, clientKey,
     /** The stored key of this request's session cookie, or '' when it carries none, for guards that join on sessions. */
     sessionKey(req: IncomingMessage): string { const token = sessionToken(req); return token && /^[\w-]{43}$/.test(token) ? digest(token) : ''; },
     async account(userId: string) {
@@ -139,8 +140,8 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       });
     },
     async login(req: IncomingMessage, res: ServerResponse, body: { email: string; password: string }): Promise<PublicUser | null> {
-      const client = clientAddress(req), account = body.email.toLowerCase(), clientAccount = 'client-email:' + digest(JSON.stringify([client, account]));
-      await limit('ip:' + client, signInLimits.client); await limit(clientAccount, signInLimits.clientAccount); await limit('email:' + digest(account), signInLimits.account);
+      const client = clientKey(req, 'ip'), account = body.email.toLowerCase(), clientAccount = 'client-email:' + digest(JSON.stringify([client, account]));
+      await limit(client, signInLimits.client); await limit(clientAccount, signInLimits.clientAccount); await limit('email:' + digest(account), signInLimits.account);
       const found = await first<UserRow>(db.execute(sql`SELECT u.*, EXISTS (SELECT 1 FROM instance_operators o WHERE o.user_id = u.id) AS "isOperator" FROM users u WHERE email = ${body.email}`));
       if (!await verify(body.password, found?.password)) throw new HttpError(401, 'Email or password is incorrect.');
       return db.transaction(async tx => {
@@ -177,7 +178,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   }
   async function startFlow(req: IncomingMessage, res: ServerResponse, invite: string | null): Promise<string> {
       if (!config.oidcEnabled || !(await db.execute(sql`SELECT id FROM users LIMIT 1`)).rowCount) throw new HttpError(400, 'Identity sign-in is unavailable.');
-      await limit('oidc:' + clientAddress(req), 30);
+      await limit(clientKey(req, 'oidc'), 30);
       const { client, provider } = await oidc();
       if (invite && !/^[A-Za-z0-9_-]{43}$/.test(invite)) throw new HttpError(400, 'Use a valid invitation link before signing in.');
       const state = client.randomState(), nonce = client.randomNonce(), verifier = client.randomPKCECodeVerifier(), browser = randomBytes(32).toString('base64url'), expires = Date.now() + oidcWindow * 1000;

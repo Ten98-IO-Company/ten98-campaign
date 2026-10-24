@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAuth, hashPassword, signInLimits } from '../server/auth.ts';
+import { clientLimitKey } from '@ten98/runtime';
 import { postgresSkip, testDatabase } from './postgres.mjs';
 
 const pg = { skip: postgresSkip }, secret = 'sign-in-limit-fixture-secret-32-characters';
@@ -12,17 +13,23 @@ const request = (peer, forwarded) => ({ headers: forwarded === undefined ? {} : 
 // Address parsing belongs to @ten98/runtime; these cases check which per-client bucket a failed sign-in charges.
 test('sign-in limits charge the client a trusted proxy reports and otherwise the socket peer', pg, async t => {
   const { db } = await testDatabase(t), auth = createAuth(db, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies: '10.0.0.0/8, 2001:db8:ffff::/48' });
+  // Keys come from clientLimitKey (ten98-code-system#76): HMAC of the resolved address, IPv6 per /56, and one dedicated
+  // key for unresolved clients.
+  const key = address => clientLimitKey('ip', address, secret);
   const cases = [
-    ['198.51.100.50', '203.0.113.7', 'ip:198.51.100.50'], // untrusted peer: the header is ignored
-    ['::ffff:198.51.100.51', '203.0.113.7', 'ip:198.51.100.51'], // IPv4-mapped peer keyed as IPv4
-    ['10.0.0.2', '192.0.2.1, 203.0.113.7', 'ip:203.0.113.7'], // trusted peer: right-most untrusted hop
-    ['10.1.2.3', '192.0.2.200, 203.0.113.8, 2001:db8:ffff::5, 10.9.9.9', 'ip:203.0.113.8'], // chain of trusted proxies
-    ['::ffff:10.0.0.2', '2001:DB8::9', 'ip:2001:db8::9'],
-    ['10.0.0.2', undefined, 'ip:unknown'], ['10.0.0.2', '203.0.113.9, not-an-address', 'ip:unknown'], // unknown clients share one conservative bucket
+    ['198.51.100.50', '203.0.113.7', key('198.51.100.50')], // untrusted peer: the header is ignored
+    ['::ffff:198.51.100.51', '203.0.113.7', key('198.51.100.51')], // IPv4-mapped peer keyed as IPv4
+    ['10.0.0.2', '192.0.2.1, 203.0.113.7', key('203.0.113.7')], // trusted peer: right-most untrusted hop
+    ['10.1.2.3', '192.0.2.200, 203.0.113.8, 2001:db8:ffff::5, 10.9.9.9', key('203.0.113.8')], // chain of trusted proxies
+    ['::ffff:10.0.0.2', '2001:DB8::9', key('2001:db8::9')],
+    ['2001:db8:1:ab::1', undefined, key('2001:db8:1:ab::1')], ['2001:db8:1:cd::2', undefined, key('2001:db8:1:ab::1')], // one IPv6 /56 is one client
+    ['10.0.0.2', undefined, 'ip:unresolved'], ['10.0.0.2', '203.0.113.9, not-an-address', 'ip:unresolved'], // unresolved clients get their own key
   ];
   for (const [peer, forwarded] of cases) await assert.rejects(auth.login(request(peer, forwarded), response(), { email: 'nobody@example.test', password: 'wrong password guess' }), error => error.status === 401);
   const { rows } = await db.$client.query("SELECT key FROM login_limits WHERE key LIKE 'ip:%' ORDER BY key");
-  assert.deepEqual(rows.map(row => row.key), [...new Set(cases.map(([, , key]) => key))].sort());
+  assert.deepEqual(rows.map(row => row.key).sort(), [...new Set(cases.map(([, , expected]) => expected))].sort());
+  assert.equal(new Set(rows.map(row => row.key)).size, 7, 'Two IPv6 hosts in one /56 share a key.');
+  assert.doesNotMatch(rows.map(row => row.key).join(' '), /198.51|203.0|2001:/, 'Stored keys never reveal an address.');
 });
 
 test('an invalid TRUSTED_PROXIES setting stops startup', () => {
@@ -63,4 +70,15 @@ test('the per-account sign-in limit trips across client addresses, and one clien
   await failed('192.0.2.250', 429);
   await assert.rejects(auth.login(viaProxy('198.51.100.10'), response(), { email: 'member@example.test', password }), error => error.status === 429);
   await assert.rejects(auth.login(viaProxy('198.51.100.10'), response(), { email: 'someone-else@example.test', password }), error => error.status === 401, 'other accounts are unaffected');
+});
+
+// clientLimitKey throws on an invalid scope, which would turn a rate-limited request into a 500. Every scope the
+// server passes must be one it accepts.
+test('every rate-limit scope the server uses is a valid clientLimitKey scope', async () => {
+  const { readdir, readFile } = await import('node:fs/promises'), dir = new URL('../server/', import.meta.url), scopes = new Set();
+  for (const file of (await readdir(dir)).filter(name => name.endsWith('.ts'))) {
+    for (const match of (await readFile(new URL(file, dir), 'utf8')).matchAll(/clientKey\(req, ([^)]+)\)/g)) for (const literal of match[1].matchAll(/'([^']*)'/g)) scopes.add(literal[1]);
+  }
+  assert.deepEqual([...scopes].sort(), ['invitation-get', 'invitation-post', 'ip', 'oidc', 'setup']);
+  for (const scope of scopes) assert.doesNotThrow(() => clientLimitKey(scope, '203.0.113.7', secret), scope);
 });

@@ -70,7 +70,7 @@ export async function handleInvitations(context: ProviderRecord) {
   if (bodyAction || publicRoute) {
     if (!bodyAction && !['GET', 'POST'].includes(req.method)) fail(405, 'This invitation action is unavailable.');
     const inspect = bodyAction ? bodyAction === 'inspect' : req.method === 'GET';
-    await auth.limit('invitation:' + (inspect ? 'GET' : 'POST') + ':' + (auth.clientAddress(req) || 'local'), inspect ? 120 : 30);
+    await auth.limit(auth.clientKey(req, inspect ? 'invitation-get' : 'invitation-post'), inspect ? 120 : 30);
     let token = publicRoute ? publicRoute[1] : '', details: ProviderRecord = body;
     if (bodyAction) {
       object(body, inspect ? ['token'] : ['token', 'name', 'password']);
