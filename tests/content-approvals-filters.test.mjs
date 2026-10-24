@@ -4,9 +4,9 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 
 const source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');
-// Evaluate the component body up to its markup with chosen state: 0 queue, 4 status filter, 7 selection, 10 sort, 11 platform.
+// Evaluate the component body up to its markup with chosen state: 0 queue, 4 view (default "All" here), 7 selection, 10 sort, 11 platform.
 function view(posts, state = {}) {
-  const start = source.indexOf('export default function '), end = source.indexOf('  return <', start), values = [], initial = { 0: { requireApproval: true, posts }, ...state };
+  const start = source.indexOf('export default function '), end = source.indexOf('  return <', start), values = [], initial = { 0: { requireApproval: true, posts }, 4: 'all', ...state };
   const context = {
     useState(value) { const index = values.length; values.push(Object.hasOwn(initial, index) ? initial[index] : value); return [values[index], () => {}]; },
     useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {},
@@ -26,10 +26,10 @@ const queue = [
 test('status counts match the platform-filtered list, which sorts newest request first by default', () => {
   const all = view(queue);
   assert.deepEqual(all.posts.map(row => row.post.id), ['new-ig', 'mid-both', 'old-fb', 'draft-fb'], 'Newest review request first; posts never requested sort last.');
-  assert.deepEqual(all.counts, { all: 4, pending: 2, stale: 0, approved: 1, rejected: 0, not_requested: 1 }, 'Sample posts are never counted.');
+  assert.deepEqual(all.counts, { waiting: 2, pending: 2, rejected: 0, approved: 1, all: 4 }, 'Sample posts are never counted.');
   const facebook = view(queue, { 11: 'facebook' });
   assert.deepEqual(facebook.posts.map(row => row.post.id), ['mid-both', 'old-fb', 'draft-fb']);
-  assert.deepEqual(facebook.counts, { all: 3, pending: 1, stale: 0, approved: 1, rejected: 0, not_requested: 1 });
+  assert.deepEqual(facebook.counts, { waiting: 1, pending: 1, rejected: 0, approved: 1, all: 3 });
   const pending = view(queue, { 4: 'pending', 11: 'facebook' });
   assert.deepEqual(pending.posts.map(row => row.post.id), ['old-fb']);
 });
@@ -38,4 +38,9 @@ test('planned-time sort puts the soonest planned post first and bulk selection s
   assert.deepEqual(view(queue, { 10: 'planned' }).posts.map(row => row.post.id), ['new-ig', 'old-fb', 'mid-both', 'draft-fb'], 'Posts without a planned time sort last.');
   const narrowed = view(queue, { 7: ['old-fb', 'new-ig'], 11: 'instagram' });
   assert.deepEqual(narrowed.actionable.map(row => row.post.id), ['new-ig']); assert.deepEqual(narrowed.chosen.map(row => row.post.id), ['new-ig'], 'A selected post hidden by the platform filter is not acted on.');
+});
+
+test('"Waiting on me" ignores the sort choice: soonest planned time first, then the oldest request', () => {
+  const waiting = view([...queue, item('unplanned-old', ['facebook'], 'pending', '2029-12-01T09:00:00Z'), item('unplanned-new', ['facebook'], 'pending', '2029-12-02T09:00:00Z')], { 4: 'waiting', 10: 'requested' });
+  assert.deepEqual(waiting.posts.map(row => row.post.id), ['new-ig', 'old-fb', 'unplanned-old', 'unplanned-new']);
 });

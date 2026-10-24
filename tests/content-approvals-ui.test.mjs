@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 
+// The page opens on "Waiting on me"; these renders choose the "All" view (state 4) so decided items stay listed.
 test('approval cards expose every saved recipient when account copies inherit the shared version', async () => {
   const source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function', 'function'), 'ContentApprovals.tsx', { jsx: { runtime: 'classic' } });
@@ -13,7 +14,7 @@ test('approval cards expose every saved recipient when account copies inherit th
   const data = { requireApproval: true, posts: [item] }, calls = [];
   let stateIndex = 0;
   const ui = Object.entries(await import('@ten98/ui')).filter(([name]) => /^[A-Z]|^useConfirmDialog$/.test(name));
-  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'PostVariantPreview', 'PLATFORM_RULES', 'useFocusReturn', ...ui.map(([name]) => name), code + '; return ContentApprovals;')(React, () => {}, value => ({ current: value }), initial => [stateIndex++ === 0 ? data : initial, () => {}], () => null, PLATFORM_RULES, () => () => {}, ...ui.map(([, value]) => value));
+  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'PostVariantPreview', 'PLATFORM_RULES', 'useFocusReturn', ...ui.map(([name]) => name), code + '; return ContentApprovals;')(React, () => {}, value => ({ current: value }), initial => { const index = stateIndex++; return [index === 0 ? data : index === 4 ? 'all' : initial, () => {}]; }, () => null, PLATFORM_RULES, () => () => {}, ...ui.map(([, value]) => value));
   const html = renderToStaticMarkup(Component({ projectId: 'project-one', role: 'owner', request: async (...args) => { calls.push(args); } }));
   assert.match(html, /Selected account IDs:<\/strong> inherited-account-one, inherited-account-two/);
   assert.match(html, /2 selected accounts/);
@@ -27,7 +28,7 @@ test('a pending change to a published post shows the account and the proposed va
   const ui = Object.entries(await import('@ten98/ui')).filter(([name]) => /^[A-Z]|^useConfirmDialog$/.test(name));
   const render = (posts, role = 'owner') => {
     let stateIndex = 0; const calls = [];
-    const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'PostVariantPreview', 'PLATFORM_RULES', 'useFocusReturn', ...ui.map(([name]) => name), code + '; return ContentApprovals;')(React, () => {}, value => ({ current: value }), initial => [stateIndex++ === 0 ? { requireApproval: true, posts } : initial, () => {}], () => null, PLATFORM_RULES, () => () => {}, ...ui.map(([, value]) => value));
+    const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'PostVariantPreview', 'PLATFORM_RULES', 'useFocusReturn', ...ui.map(([name]) => name), code + '; return ContentApprovals;')(React, () => {}, value => ({ current: value }), initial => { const index = stateIndex++; return [index === 0 ? { requireApproval: true, posts } : index === 4 ? 'all' : initial, () => {}]; }, () => null, PLATFORM_RULES, () => () => {}, ...ui.map(([, value]) => value));
     const html = renderToStaticMarkup(Component({ projectId: 'project-one', role, request: async (...args) => { calls.push(args); } }));
     assert.deepEqual(calls, []); return html;
   };
@@ -57,7 +58,7 @@ test('a pending update to a submitted post shows each proposed field beside the 
   const ui = Object.entries(await import('@ten98/ui')).filter(([name]) => /^[A-Z]|^useConfirmDialog$/.test(name));
   const render = (posts, role = 'owner') => {
     let stateIndex = 0; const calls = [];
-    const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'PostVariantPreview', 'PLATFORM_RULES', 'useFocusReturn', ...ui.map(([name]) => name), code + '; return ContentApprovals;')(React, () => {}, value => ({ current: value }), initial => [stateIndex++ === 0 ? { requireApproval: true, posts } : initial, () => {}], ({ platform, variant }) => React.createElement('output', null, `Preview ${platform}: ${variant.content}`), PLATFORM_RULES, () => () => {}, ...ui.map(([, value]) => value));
+    const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'PostVariantPreview', 'PLATFORM_RULES', 'useFocusReturn', ...ui.map(([name]) => name), code + '; return ContentApprovals;')(React, () => {}, value => ({ current: value }), initial => { const index = stateIndex++; return [index === 0 ? { requireApproval: true, posts } : index === 4 ? 'all' : initial, () => {}]; }, ({ platform, variant }) => React.createElement('output', null, `Preview ${platform}: ${variant.content}`), PLATFORM_RULES, () => () => {}, ...ui.map(([, value]) => value));
     const html = renderToStaticMarkup(Component({ projectId: 'project-one', role, request: async (...args) => { calls.push(args); } }));
     assert.deepEqual(calls, [], 'Rendering a proposed update starts no request.'); return html;
   };

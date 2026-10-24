@@ -27,8 +27,8 @@ const { code: approvalsCode } = await transformWithOxc(approvals.replace(/^impor
 function approvalsModule(states = {}) {
   let index = 0;
   const useState = initial => { const current = index++; return [Object.hasOwn(states, current) ? states[current] : initial, () => {}]; };
-  const helpers = { adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits, reviewKeyAction: () => null, useFocusReturn: () => () => {}, PostVariantPreview: () => null, PLATFORM_RULES };
-  return new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(helpers), ...ui.map(([name]) => name), approvalsCode + '; return { ContentApprovals, AdSpendReviews };')(React, () => {}, value => ({ current: value }), useState, ...Object.values(helpers), ...ui.map(([, value]) => value));
+  const helpers = { adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits, reviewKeyAction: () => null, useFocusReturn: () => () => {}, PostVariantPreview: () => null, PLATFORM_RULES, document: { getElementById: () => null } };
+  return new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(helpers), ...ui.map(([name]) => name), approvalsCode + '; return { ContentApprovals, SpendReview };')(React, () => {}, value => ({ current: value }), useState, ...Object.values(helpers), ...ui.map(([, value]) => value));
 }
 const { code: policyCode } = await transformWithOxc((await read('ApprovalPolicy.tsx')).replace(/^import .*;\n/gm, '').replace('export default function', 'function'), 'ApprovalPolicy.tsx', { jsx: { runtime: 'classic' } });
 function policyModule(states = {}) {
@@ -67,34 +67,32 @@ test('the review queue shows the policy read-only and links owners and administr
 
 const review = (extra = {}) => ({ id: 'spend-review', status: 'pending', kind: 'ad_spend', consumed: false, requestedBy: { id: 'editor', name: 'Casey Editor' }, requestedAt: '2030-01-01T09:00:00.000Z', reviewedBy: null, reviewedAt: null, note: null, selfApproved: false, snapshot: { subjectId: 'spend-set', platform: 'facebook', action: 'ads/adset-budget', amount: 2500, currency: 'AED', currentAmount: 2000, activates: false }, ...extra });
 
-test('an ad spend card shows the current and requested amounts and decides through the review endpoint', async () => {
+test('an ad spend review shows the current and requested amounts and decides through the review endpoint', async () => {
   const path = '/projects/project-one/approvals', calls = [], changed = [];
   const request = async (...args) => { calls.push(args); return args[1] ? { review: { ...review(), status: 'approved' } } : { requireAdApproval: true, reviews: [] }; };
-  const render = (reviews, canReview = true, states = {}) => approvalsModule({ 0: { requireAdApproval: true, reviews }, 4: { 'spend-review': 'Within plan' }, ...states }).AdSpendReviews({ path, required: true, canReview, request, onChanged: async () => { changed.push(true); } });
-  const tree = render([review()]), markup = html(tree);
+  // The review card itself is presentational; the page owns the comment and the decision request.
+  const card = (row, canReview = true) => approvalsModule().SpendReview({ review: row, canReview, busy: false, note: 'Within plan', noteError: false, onNote() {}, onDecide() {}, onKeyDown() {} });
+  const page = () => nodes(approvalsModule({ 0: { requireApproval: true, requireAdApproval: true, posts: [] }, 4: 'all', 5: { 'spend:spend-review': 'Within plan' }, 13: { reviews: [review()] } }).ContentApprovals({ projectId: 'project-one', role: 'owner', request, onChanged: async () => { changed.push(true); } })).find(node => node.type.name === 'SpendReview');
+  const markup = html(card(review()));
   assert.match(markup, /Raise ad set budget · Facebook/); assert.match(markup, /Ad set spend-set/);
   assert.equal(formatMinorUnits(2000, 'AED'), new Intl.NumberFormat(undefined, { style: 'currency', currency: 'AED' }).format(20));
   assert.match(markup, new RegExp(`scope="row">Budget</th><td>[^]*?${formatMinorUnits(2000, 'AED').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^]*?</td><td>[^]*?${formatMinorUnits(2500, 'AED').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'Current spend sits beside the requested amount.');
   assert.match(markup, /does not start delivery on its own/); assert.doesNotMatch(markup, /scope="row">Delivery</);
   assert.match(markup, /Requested by Casey Editor/); assert.match(markup, /Awaiting review/);
-  const approve = nodes(tree).find(node => node.type === designSystem.Button && text(node) === 'Approve spend change');
-  approve.props.onClick(); await tick(); await tick();
+  page().props.onDecide('approved'); await tick(); await tick();
   assert.deepEqual(calls, [[`${path}/ad-spend/review`, 'POST', { reviewId: 'spend-review', decision: 'approved', note: 'Within plan' }], [`${path}/ad-spend`]], 'The decision uses the ad spend review route, then the list refreshes.');
   assert.equal(changed.length, 1, 'The Approvals badge refreshes after a decision.');
-  calls.length = 0; nodes(render([review()])).find(node => node.type === designSystem.Button && text(node) === 'Request changes').props.onClick(); await tick();
+  calls.length = 0; page().props.onDecide('rejected'); await tick();
   assert.deepEqual(calls[0], [`${path}/ad-spend/review`, 'POST', { reviewId: 'spend-review', decision: 'rejected', note: 'Within plan' }]);
 
   // An activation names the delivery change; an unreadable current budget is shown as unavailable.
-  const activation = html(render([review({ snapshot: { subjectId: '4242', platform: 'microsoft', action: 'microsoft/campaign-status', amount: 3000, currency: 'USD', currentAmount: null, activates: true } })]));
+  const activation = html(card(review({ snapshot: { subjectId: '4242', platform: 'microsoft', action: 'microsoft/campaign-status', amount: 3000, currency: 'USD', currentAmount: null, activates: true } })));
   assert.match(activation, /Activate Microsoft search campaign · Microsoft Advertising/); assert.match(activation, /Budget that starts spending<\/th><td>[^]*?Not available/); assert.match(activation, /scope="row">Delivery<\/th>[^]*?Starts when the change is sent/);
   // Editors see the card without decision controls; decided cards say whether the approval was used.
-  assert.doesNotMatch(html(render([review()], false)), /Approve spend change|Request changes/);
-  assert.match(html(render([review({ status: 'approved', reviewedBy: { name: 'Olive Owner' }, reviewedAt: '2030-01-01T10:00:00.000Z' })])), /Approved by Olive Owner[^]*?Approved and not yet used/);
-  assert.match(html(render([review({ status: 'approved', consumed: true, reviewedAt: '2030-01-01T10:00:00.000Z', reviewedBy: { name: 'Olive Owner' } })])), /used by a provider change/);
-  assert.match(html(render([review({ status: 'rejected', reviewedAt: '2030-01-01T10:00:00.000Z', note: 'Superseded by a newer ad spend request.' })])), /· Changes requested · [^]*?Superseded by a newer ad spend request/);
-  // Without the setting and without reviews the section stays out of the page.
-  assert.equal(approvalsModule({ 0: { reviews: [] } }).AdSpendReviews({ path, required: false, canReview: true, request }), null);
-  assert.match(approvals, /<AdSpendReviews path=\{path\} required=\{Boolean\(data\?\.requireAdApproval\)\} canReview=\{canReview\} request=\{request\} onChanged=\{onChanged\}\/>/);
+  assert.doesNotMatch(html(card(review(), false)), /Approve spend change|Request changes/);
+  assert.match(html(card(review({ status: 'approved', reviewedBy: { name: 'Olive Owner' }, reviewedAt: '2030-01-01T10:00:00.000Z' }))), /Approved by Olive Owner[^]*?Approved and not yet used/);
+  assert.match(html(card(review({ status: 'approved', consumed: true, reviewedAt: '2030-01-01T10:00:00.000Z', reviewedBy: { name: 'Olive Owner' } }))), /used by a provider change/);
+  assert.match(html(card(review({ status: 'rejected', reviewedAt: '2030-01-01T10:00:00.000Z', note: 'Superseded by a newer ad spend request.' }))), /· Changes requested · [^]*?Superseded by a newer ad spend request/);
 });
 
 test('a held-back spend change explains the review the server opened and links to Approvals', async () => {
@@ -174,7 +172,7 @@ test('changing the ad spend setting is confirmed first, and an expired approval 
 });
 
 test('an unused approval past the server expiry reads as expired and needing re-approval', () => {
-  const card = extra => html(approvalsModule({ 0: { requireAdApproval: true, reviews: [review({ status: 'approved', reviewedAt: '2030-01-01T10:00:00.000Z', reviewedBy: { id: 'owner', name: 'Olive Owner' }, ...extra })] } }).AdSpendReviews({ path: '/projects/p/approvals', required: true, canReview: true, request: async () => ({}) }));
+  const card = extra => html(approvalsModule().SpendReview({ review: review({ status: 'approved', reviewedAt: '2030-01-01T10:00:00.000Z', reviewedBy: { id: 'owner', name: 'Olive Owner' }, ...extra }), canReview: true, busy: false, note: '', noteError: false, onNote() {}, onDecide() {}, onKeyDown() {} }));
   const expired = card({ consumed: false, expiresAt: '2000-01-01T00:00:00.000Z' });
   assert.match(expired, />Expired</); assert.match(expired, /expired before it was used[^<]*re-approval/); assert.doesNotMatch(expired, /not yet used/);
   const current = card({ consumed: false, expiresAt: '2999-01-01T00:00:00.000Z' });
