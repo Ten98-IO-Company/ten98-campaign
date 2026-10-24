@@ -182,3 +182,18 @@ test('#185: field activity is on the calendar without Google Calendar, labelled 
   const synced = find(Agenda({ ...props, googleEvents: [copy], view: 'list' }), ofType(ui.PublishingAgenda))!;
   assert.deepEqual(synced.props!.entries.map((item: { id: string }) => item.id), ['activation:doors', 'activation:road'], 'With Google Calendar connected the published copy is not listed again.');
 });
+
+test('#200: the week entry button carries the week-entry class and the stylesheet stacks it at phone width', async () => {
+  // A multi-platform entry like the one the issue describes: one post to Instagram, LinkedIn and X.
+  const entry200 = entry('sunday', at(25, 9), { platforms: ['instagram', 'linkedin', 'x'] });
+  const props = { ...base, posts: [entry200], view: 'week', weekStart: '2099-10-19' };
+  const button = find(Agenda(props), node => node.type === ui.Button && text(node).includes('sunday caption'))!;
+  assert.ok(button, 'The week entry is a button.');
+  assert.equal(button.props!.className, 'week-entry', 'The post entry button carries the week-entry class the mobile layout hooks onto.');
+  // The stylesheet stacks the parts at the kit's mobile width and ellipsizes the caption; desktop keeps the row.
+  const css = await readFile(new URL('../src/PublishingAgenda.css', import.meta.url), 'utf8');
+  const mobile = css.match(/@media \(max-width: 760px\)\s*{([\s\S]*)/)!;
+  assert.match(mobile[1], /\.week-entry\s*{[^}]*flex-direction:\s*column/, 'At phone width the entry stacks its parts.');
+  assert.match(mobile[1], /\.week-entry > \.t98-truncate\s*{[^}]*inline-size:\s*100%/, 'The caption takes the full width and ellipsizes instead of wrapping per character.');
+  assert.doesNotMatch(css.slice(0, mobile.index), /week-entry/, 'Outside the mobile breakpoint the entry is untouched, so desktop keeps its single row.');
+});

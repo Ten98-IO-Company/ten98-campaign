@@ -7,6 +7,8 @@ import { AccountMenu, SettingsLayout, type SettingsNavItem, type NavLinkComponen
 import '@ten98/ui/app-tokens.css';
 import '@ten98/ui/app.css';
 import '@ten98/ui/product.css';
+// The week-view calendar entry's own mobile stacking (the kit owns the rest of the calendar).
+import './PublishingAgenda.css';
 import AdComposer from './AdComposer';
 import SocialAnalytics from './SocialAnalytics';
 import TeamSettings from './TeamSettings';
