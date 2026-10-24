@@ -179,7 +179,7 @@ function App() {
   const discardSwitch = useRef(false);
   const discardAction = useRef<(() => void) | null>(null), dirtyScopes = useRef(new Map<Element, number>());
   const [inboxTarget, setInboxTarget] = useState<{ channel: 'sms' | 'whatsapp'; accountId?: string; search?: string; projectId: string } | null>(null);
-  const [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [notice, setNotice] = useState(''), [error, setError] = useState(''), [signInInstead, setSignInInstead] = useState<{ offered: boolean; email: string }>({ offered: false, email: '' });
+  const [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [notice, setNotice] = useState(''), [error, setError] = useState(''), [signInInstead, setSignInInstead] = useState<{ offered: boolean; email: string }>({ offered: false, email: '' }), [accountOpen, setAccountOpen] = useState(false);
   const rememberFocus = useFocusReturn(busy); // A failed owner setup or sign-in returns focus to the control that submitted it.
   const [mobile, setMobile] = useState(false), [currency, setCurrency] = useState('AED');
   const [remote, setRemote] = useState<any>({}), [connectionRevision, setConnectionRevision] = useState(0);
@@ -547,7 +547,9 @@ function App() {
   // After the first sign-up, the owner's workspace has no project yet: the next step creates it.
   const firstProjectWorkspace = !state.projects.length && state.workspaces.find(w => w.role === 'owner' || w.role === 'admin');
   if (firstProjectWorkspace) return <FirstProject workspaceName={firstProjectWorkspace.name} user={state.user} busy={busy} error={error || undefined} onCreate={values => createFirstProject(firstProjectWorkspace.id, values)} onSignOut={signOut}/>;
-  if (!state.projectId || !project) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} aside={authStory} label="Workspace access" email={state.user.email} subheading="No project access yet." help="Ask a workspace owner for an invitation, refresh after access is granted, or create your own workspace." error={error || undefined} busy={busy} onSubmit={({ name }) => createWorkspace(name)} onRefresh={() => run(() => reload(''))} signOut={{ onClick: signOut }}><AccountSettings request={api} onChanged={() => { run(() => reload('')); }}/></WorkspaceOnboarding>;
+  if (!state.projectId || !project) return <><WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} aside={authStory} label="Workspace access" email={state.user.email} subheading="No project access yet." help="Ask a workspace owner for an invitation, refresh after access is granted, or create your own workspace." error={error || undefined} busy={busy} onSubmit={({ name }) => createWorkspace(name)} onRefresh={() => run(() => reload(''))} signOut={{ onClick: signOut }} account={{ label: 'Account settings', onClick: () => setAccountOpen(true) }}/>
+    {/* Like Discover, the screen links to account settings instead of embedding them; without a project there is no shell, so they open in a dialog. */}
+    <Dialog open={accountOpen} onOpenChange={setAccountOpen} title="Account settings"><AccountSettings request={api} onChanged={() => { run(() => reload('')); }}/></Dialog></>;
   const campaigns = filtered(state.campaigns).filter(c => tab === 'all' || c.status === tab);
   const currencyCampaigns = state.campaigns.filter(c => (c.currency || 'AED') === currency);
   const currentCurrency = currencyCampaigns.filter(c => c.budgetType !== 'daily');

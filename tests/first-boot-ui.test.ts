@@ -38,7 +38,7 @@ test('after the first sign-up an owner or administrator without projects lands o
   assert.equal(pick({ projects: [], workspaces: [{ id: 'w2', name: 'Shared', role: 'editor' }, { ...owner, role: 'admin' }] }).id, 'w1');
   assert.ok(!pick({ projects: [], workspaces: [{ id: 'w2', name: 'Shared', role: 'editor' }] }), 'Members who cannot add the sample keep workspace onboarding.');
   assert.ok(!pick({ projects: [{ id: 'p1' }], workspaces: [owner] }));
-  assert.ok(source.indexOf('if (firstProjectWorkspace)') < source.indexOf('if (!state.projectId || !project) return <WorkspaceOnboarding'));
+  assert.ok(source.indexOf('if (firstProjectWorkspace)') < source.indexOf('if (!state.projectId || !project) return <><WorkspaceOnboarding'));
 });
 
 test('the first-project step is one project name, the sample opt-in and Skip for now', () => {
@@ -83,4 +83,13 @@ test('creating the first project posts the opt-in to the workspace and opens the
   assert.deepEqual(opened, ['project-1']);
   pendingWork.current = 1; await create('workspace-1', { name: 'Spring launch', sample: true });
   assert.equal(calls.length, 1, 'An in-flight action must not create a second project.');
+});
+
+// #272 / QA #265: like Discover, the no-access screen links to account settings instead of embedding them. Without a
+// project there is no shell, so they open in a dialog.
+test('the no-access workspace screen links to account settings, which open in a dialog', () => {
+  const screen = slice('if (!state.projectId || !project) return <>', '</>;');
+  assert.match(screen, /account=\{\{ label: 'Account settings', onClick: \(\) => setAccountOpen\(true\) \}\}\/>/);
+  assert.match(screen, /<Dialog open=\{accountOpen\} onOpenChange=\{setAccountOpen\} title="Account settings"><AccountSettings /);
+  assert.doesNotMatch(screen, /signOut=\{\{ onClick: signOut \}\}><AccountSettings/, 'Account settings are no longer embedded in the onboarding form.');
 });
