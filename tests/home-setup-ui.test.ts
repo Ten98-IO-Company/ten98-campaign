@@ -44,8 +44,8 @@ test('the checklist disappears when every step is done, and Hide is remembered p
 });
 
 test('a step that belongs to an administrator says Ask your admin instead of offering a button', () => {
-  const view = load(store()), tree = view.render({ projectId: 'p', steps: [{ id: 'accounts', title: 'Turn on social publishing', detail: 'Your Campaign administrator turns this on once for everyone.', done: false }, ...steps()] });
+  const view = load(store()), tree = view.render({ projectId: 'p', steps: [{ id: 'accounts', title: 'Connect your social accounts', detail: 'Your Campaign administrator turns this on once for everyone.', done: false }, ...steps()] });
   const html = renderToStaticMarkup(tree);
-  assert.match(html, /Turn on social publishing[\s\S]*Ask your admin/);
+  assert.match(html, /Connect your social accounts[\s\S]*Ask your admin/);
   assert.equal(nodes(tree).filter(node => node.type === ui.Button && node.props.children !== 'Hide').length, 2, 'Only the two steps with an action have a button.');
 });
