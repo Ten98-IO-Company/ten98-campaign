@@ -479,7 +479,20 @@ async function checkReferences(store: Store, projectId: string, data: ProviderRe
 async function checkDependants(store: Store, projectId: string, collection: string, id: string, realOnly = false): Promise<void> {
   const field = ({ campaigns: 'campaignId', assets: 'assetId', providers: 'providerId' } as Record<string, string | undefined>)[collection];
   // ponytail: scan local project records for references; use indexed relationships if project size makes deletion checks slow.
-  if (field && (await Promise.all(collections.map(name => store.list(projectId, name)))).some(list => list.some(record => (record[field] === id || (collection === 'assets' && [...Object.values((record.platformOverrides || {}) as ProviderRecord), ...Object.values((record.accountOverrides || {}) as ProviderRecord)].some(variant => variant?.assetId === id))) && (!realOnly || !record.sample)))) throw new HttpError(409, `This ${collection.slice(0, -1)} is assigned to ${realOnly ? 'a real record' : 'another record'}. Remove its assignments before deleting it${realOnly ? ' or removing sample data' : ''}.`);
+  if (!field) return;
+  const lists = await Promise.all(collections.map(async name => ({ name, records: await store.list(projectId, name) })));
+  const uses = (record: ProviderRecord) => (record[field] === id || (collection === 'assets' && [...Object.values((record.platformOverrides || {}) as ProviderRecord), ...Object.values((record.accountOverrides || {}) as ProviderRecord)].some(variant => variant?.assetId === id))) && (!realOnly || !record.sample);
+  const blocking = lists.flatMap(({ name, records }) => records.filter(uses).map(record => ({ name, record })))[0];
+  if (!blocking) return;
+  // The refusal names the record that still uses this one, so the person can find and unassign it.
+  const dependant = `${dependantKinds[blocking.name] || blocking.name.slice(0, -1)} "${recordLabel(blocking.record)}"`, kind = collection.slice(0, -1);
+  if (!realOnly) throw new HttpError(409, `This ${kind} is assigned to ${dependant}. Remove its assignments before deleting it.`);
+  throw new HttpError(409, `${dependant[0].toUpperCase() + dependant.slice(1)} uses sample ${kind} "${recordLabel(await store.get(projectId, collection, id))}". Remove that assignment before removing sample data.`);
+}
+const dependantKinds: Record<string, string> = { campaigns: 'campaign', posts: 'post', placements: 'booking', assets: 'asset', providers: 'provider', activations: 'activation' };
+function recordLabel(record: ProviderRecord | null | undefined): string {
+  const text = String(record?.name || record?.content || 'Untitled').replace(/\s+/g, ' ').trim();
+  return text.length > 40 ? text.slice(0, 39) + '…' : text;
 }
 function rejectProviderFields(body: ProviderRecord, collection = ''): void {
   if (collection === 'assets' && MEDIA_DELIVERY_FIELDS.some(key => Object.hasOwn(body, key))) bad('Hosted delivery metadata is managed by the upload workflow.');

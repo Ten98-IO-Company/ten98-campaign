@@ -365,6 +365,7 @@ function App() {
   useEffect(() => { window.history.replaceState({ ...window.history.state, campaignIndex: historyIndex.current }, ''); }, []);
   useEffect(() => { api('/session').then(s => { setSession(s); if (s.user) reload(new URLSearchParams(window.location.search).get('project') || '').catch(e => { if (e.name !== 'AbortError') setError(e.message); }); }).catch(e => setError(e.message)); }, []);
   useEffect(() => { setQuery(''); setTab('all'); setMobile(false); setError(''); }, [page]);
+  useEffect(() => { if (modal) setError(''); }, [modal]); // A dialog shows only its own errors, not one left by an earlier page action.
   useEffect(() => { document.querySelector<HTMLElement>('nav[aria-label="Main navigation"] [aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }, [page, project?.id, mobile]);
   useEffect(() => { if (!state?.projectId) return; setRemote({}); setOohInventory([]); setCalendarEvents([]); setModal(null); const id = state.projectId; api(endpoint('integrations/status')).then(status => { if (activeProject.current === id) setRemote((r: any) => ({ ...r, status })); }).catch(() => {}); }, [state?.projectId]);
   // The approvals summary labels the Approvals badge and gates Publish; when it cannot be read, Publish stays and the server decides.
