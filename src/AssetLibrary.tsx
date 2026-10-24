@@ -22,6 +22,8 @@ type Props = {
   /** Project records that can use an asset, for the detail view's "Used in" list. */
   related: Related;
   onSync: () => void;
+  /** Records an asset that already lives elsewhere (a Drive or web link); shown next to Upload when set. */
+  onAddLink?: () => void;
   /** The app's Drive upload: one file per call, with its own size check, request and success notice. */
   onUpload: (files: File[]) => void | Promise<void>;
   request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>;
@@ -56,7 +58,7 @@ const when = (value: unknown) => typeof value === 'string' && Number.isFinite(Da
 const bytes = (size: unknown) => typeof size === 'number' && size > 0 ? size < 1024 * 1024 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / 1024 / 1024).toFixed(1)} MB` : '';
 const approval = (asset: Row) => <AppBadge value={asset.approval || 'pending'} label={label(asset.approval || 'pending')}/>;
 
-export default function AssetLibrary({ projectId, assets, visibleAssets, busy, canWrite, drive, driveSyncReason, connected, tab, onTabChange, related, onSync, onUpload, request, onDeliverySaved, onOpen, onSetUpDrive, preview }: Props) {
+export default function AssetLibrary({ projectId, assets, visibleAssets, busy, canWrite, drive, driveSyncReason, connected, tab, onTabChange, related, onSync, onAddLink, onUpload, request, onDeliverySaved, onOpen, onSetUpDrive, preview }: Props) {
   const [view, setView] = useState('grid'), [selectedId, setSelectedId] = useState(''), [uploadOpen, setUploadOpen] = useState(false);
   const [uploads, setUploads] = useState<Upload[]>([]), [dragging, setDragging] = useState(false), [detailTab, setDetailTab] = useState('details');
   const mounted = useRef(true);
@@ -93,7 +95,7 @@ export default function AssetLibrary({ projectId, assets, visibleAssets, busy, c
     <Inline gap={2} align="center">
       <Text tone="muted" size="sm">{plural(assets.length, 'asset')}</Text>
       <Button variant="secondary" icon={<Icon name="refresh" size={15}/>} disabled={busy || !canWrite || !drive?.configured || !drive?.mapped} onClick={onSync}>Sync Drive</Button>
-      {canUpload && <Button variant="primary" icon={<Icon name="arrow-up" size={15}/>} onClick={() => setUploadOpen(true)}>Upload</Button>}
+      {onAddLink && <Button variant="secondary" onClick={onAddLink}>Add by link</Button>}{canUpload && <Button variant="primary" icon={<Icon name="arrow-up" size={15}/>} onClick={() => setUploadOpen(true)}>Upload</Button>}
     </Inline>
   </Inline>;
   const uploadField = (labelText: string) => <FileField label={labelText} description="JPG, PNG, WebP, GIF, MP4, PDF or text · up to 5 MB each. You can also drop files anywhere on this page." accept={DRIVE_TYPES.join(',')} multiple disabled={busy} busy={busy} onFiles={chosen => { setUploadOpen(false); void addUploads(chosen); }}/>;

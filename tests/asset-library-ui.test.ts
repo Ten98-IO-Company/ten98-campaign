@@ -180,3 +180,13 @@ test('the page makes no requests of its own, and main mounts it per project with
   assert.match(mount, /^ +\{page === 'Asset library' && <AssetLibrary key=\{state\.projectId\} [^\r\n]*related=\{state\}[^\r\n]*onSetUpDrive=\{\(\) => setPage\('Integrations'\)\}/);
   assert.match(mount, /onUpload=\{uploadAsset\}/);
 });
+
+test('Add by link sits beside Upload for editors, and the page header no longer repeats an add button', () => {
+  let added = 0; const view = page();
+  const toolbar = buttons(view.render({ onAddLink: () => added++ }), /^Add by link$/);
+  assert.equal(toolbar.length, 1); toolbar[0].props.onClick(); assert.equal(added, 1);
+  assert.equal((toolbar[0].props as Row).variant, 'secondary', 'Upload stays the one primary action.');
+  assert.equal(buttons(page().render(), /^Add by link$/).length, 0, 'Without an add-by-link handler (viewers) there is no button.');
+  assert.doesNotMatch(mainSource, /'Asset library': 'asset'|'Asset library': 'Add asset'/, 'The shell header has no second add button for assets.');
+  assert.match(mainSource, /<AssetLibrary [^\n]*onAddLink=\{canWrite \? \(\) => setModal\(\{ type: 'asset' \}\) : undefined\}/);
+});
