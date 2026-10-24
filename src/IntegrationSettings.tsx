@@ -56,7 +56,7 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
   function dirty(provider: Provider) { return Object.entries(drafts[provider.id] || {}).some(([name, value]) => value === null || (provider.secretFields?.[name] ? Boolean(value.trim()) : value !== String(provider.fields?.[name] ?? ''))); }
   async function action(name: string, run: () => Promise<void>) {
     if (busy) return; setBusy(name); setError(''); setNotice('');
-    try { await run(); } catch (err) { if (active.current) setError((err as Error).message || 'This integration action could not be completed.'); }
+    try { await run(); } catch (err) { if (active.current) setError((err as Error).message || 'That didn’t work. Try again, or check the connection details.'); }
     finally { if (active.current) setBusy(''); }
   }
   async function save(provider: Provider, event: React.FormEvent) {
@@ -114,7 +114,7 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
   async function saveCalendar(event: React.FormEvent) {
     event.preventDefault(); await action('calendar-mapping', async () => {
       await request(`/projects/${project.id}/calendar/connection`, 'POST', { calendarId: mapping.calendarId.trim() });
-      setNotice('Project calendar mapping saved.'); setResults(items => { const next = { ...items }; delete next.googleCalendar; return next; }); await onChanged?.();
+      setNotice('Calendar linked to this project.'); setResults(items => { const next = { ...items }; delete next.googleCalendar; return next; }); await onChanged?.();
     });
   }
   function reloadMaps() { const url = new URL(window.location.href); url.searchParams.set('view', 'integrations'); url.searchParams.set('project', project.id); window.location.assign(url.href); }
@@ -125,9 +125,9 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
   // Provider adapters: each provider's own project sections. The card shell below never branches on the provider.
   const adapters: Partial<Record<string, ReactNode>> = {
     zernio: <>{isOperator && <Field label="Webhook URL" description="Register this URL in Zernio with the signing secret from the connection settings."><Input readOnly value={`${window.location.origin}/api/webhooks/zernio`}/></Field>}
-      {mappingForm('Zernio profile ID', 'zernioProfileId', 200, 'Brand profile in Zernio', 'Each Zernio profile can belong to one project. Leaving it empty disconnects the profile.', 'Save profile', event => saveProject('zernio-mapping', 'zernioProfileId', 'zernio', 'Zernio profile mapping saved.', event))}
+      {mappingForm('Zernio profile ID', 'zernioProfileId', 200, 'Brand profile in Zernio', 'Each Zernio profile can belong to one project. Leaving it empty disconnects the profile.', 'Save profile', event => saveProject('zernio-mapping', 'zernioProfileId', 'zernio', 'Brand profile linked to this project.', event))}
       {canMap && <ZernioWebhooks key={project.id} projectId={project.id} request={request}/>}</>,
-    googleDrive: mappingForm('Google Drive folder ID', 'driveFolderId', 200, 'Shared creative folder ID', 'Use the folder ID from its Google Drive URL. Leaving it empty disconnects the folder.', 'Save folder', event => saveProject('drive-mapping', 'driveFolderId', 'googleDrive', 'Drive folder mapping saved.', event)),
+    googleDrive: mappingForm('Google Drive folder ID', 'driveFolderId', 200, 'Shared creative folder ID', 'Use the folder ID from its Google Drive URL. Leaving it empty disconnects the folder.', 'Save folder', event => saveProject('drive-mapping', 'driveFolderId', 'googleDrive', 'Drive folder linked to this project.', event)),
     googleCalendar: mappingForm('Google Calendar ID', 'calendarId', 500, 'calendar-id@group.calendar.google.com', 'Use a dedicated shared calendar with event editing access for the service account. Each calendar can belong to one project; leaving this empty disconnects it.', 'Save calendar', saveCalendar, !calendarLoaded),
     twilio: canMap && <Stack gap={2} aria-label="SMS incoming webhook"><Heading level={3} size="sm">Incoming SMS webhook</Heading><Text tone="muted">Set this project’s incoming-message webhook in Twilio to HTTP POST.</Text>
       {projectSmsWebhook?.error ? <Alert tone="danger" title={projectSmsWebhook.error}/> : projectSmsWebhook?.url ? <><Field label="Incoming-message webhook URL (HTTP POST)"><Input readOnly value={projectSmsWebhook.url}/></Field>{!projectSmsWebhook.publicCallbacks && <Alert tone="warning" title="Use a public HTTPS app address before configuring incoming SMS delivery."/>}</> : <StatusLine busy>Loading SMS webhook settings…</StatusLine>}</Stack>,
@@ -156,18 +156,18 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
       </Stack></Stack>}
     </Stack></Disclosure>;
   }
-  const resultTitle = (status: string) => ({ connected: 'Connection verified', needs_mapping: 'Project mapping needed', browser_verification_required: 'Browser check required', browser_loaded: 'Map connection verified' } as Record<string, string>)[status] || 'Connection check';
+  const resultTitle = (status: string) => ({ connected: 'Connection verified', needs_mapping: 'Link this project', browser_verification_required: 'Browser check required', browser_loaded: 'Map connection verified' } as Record<string, string>)[status] || 'Connection check';
   const card = (id: string, title: string, description: string, status: ReactNode, body: ReactNode) => <Card as="section" key={id} id={`integration-${id}`} title={title} description={description} actions={status}><Stack gap={3}>{body}</Stack></Card>;
   return <Stack gap={4}>
-    <Inline gap={2}><Text tone="muted">Credentials apply to every workspace. Each provider’s card also holds this project’s connection to it.</Text><Badge>{isOperator ? 'App administrator' : 'Project access'}</Badge></Inline>
+    <Inline gap={2}><Text tone="muted">Connect the tools this project uses. Each card shows whether it’s ready.</Text><Badge>{isOperator ? 'Administrator' : 'Project access'}</Badge></Inline>
     {error && <Alert tone="danger" title={error}/>}{notice && <StatusLine tone="success">{notice}</StatusLine>}
-    {!isOperator && <Alert tone="info" title="An app administrator can configure credentials and test provider connections. This project’s connections are shown in each card."/>}
-    {!canMap && <Text size="sm" tone="muted">An app administrator who also manages this workspace can change project connections.</Text>}
-    {isOperator && !loaded && !error && <StatusLine busy>Loading integration settings…</StatusLine>}
+    {!isOperator && <Alert tone="info" title="Your Campaign administrator adds the accounts and keys. Each card shows what’s connected for this project."/>}
+    {!canMap && <Text size="sm" tone="muted">Only a Campaign administrator who also manages this workspace can change these connections.</Text>}
+    {isOperator && !loaded && !error && <StatusLine busy>Loading connections…</StatusLine>}
     <Grid gap={4} minItemWidth="lg">
       {Object.entries(definitions).map(([id, definition]) => {
         const provider = providers.find(item => item.id === id), result = results[id];
-        return card(id, provider?.label || definition.label, definition.description, provider && <Badge tone={provider.configured ? 'success' : 'neutral'}>{provider.configured ? 'Configured' : 'Not configured'}</Badge>, <>
+        return card(id, provider?.label || definition.label, definition.description, provider && <Badge tone={provider.configured ? 'success' : 'neutral'}>{provider.configured ? 'Set up' : 'Not set up'}</Badge>, <>
           {provider && credentials(provider, definition)}
           {result && <Alert tone={result.ok ? 'success' : 'warning'} title={resultTitle(result.status)}>{result.message}{result.checkedAt && <Text size="xs" tone="muted">Checked {new Date(result.checkedAt).toLocaleString()}</Text>}</Alert>}
           {adapters[id]}{sections?.[id]}

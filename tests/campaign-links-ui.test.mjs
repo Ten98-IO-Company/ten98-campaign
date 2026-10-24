@@ -38,9 +38,9 @@ test('destination problems from the client check or the server show on the desti
   const other = await run('https://example.com/offer', () => { throw Object.assign(new Error('Choose a campaign in this project.'), { status: 400 }); });
   assert.deepEqual([other.fieldErrors, other.formErrors], [[], ['Choose a campaign in this project.']], 'Other failures stay form-level.');
   // The field carries the message and aria-invalid through Field's error, and takes focus once the fieldset is enabled again.
-  assert.match(source, /<Field label="Public HTTPS destination \*" error=\{destinationError \|\| undefined\}><Input ref=\{destinationRef\}/);
+  assert.match(source, /<Field label="Web page it opens \*" error=\{destinationError \|\| undefined\}><Input ref=\{destinationRef\}/);
   assert.match(source, /useEffect\(\(\) => \{ if \(focusDestination\.current && !busy\) \{ focusDestination\.current = false; destinationRef\.current\?\.focus\(\); \} \}, \[busy, destinationError\]\);/);
-  const html = renderToStaticMarkup(React.createElement(UI.Field, { label: 'Public HTTPS destination *', error: 'Choose a public HTTPS destination without embedded credentials.' }, React.createElement(UI.Input, { type: 'url' })));
+  const html = renderToStaticMarkup(React.createElement(UI.Field, { label: 'Web page it opens *', error: 'Choose a public HTTPS destination without embedded credentials.' }, React.createElement(UI.Input, { type: 'url' })));
   assert.match(html, /aria-invalid="true"/); assert.match(html, /role="alert"[^>]*>Choose a public HTTPS destination/);
 });
 
@@ -80,11 +80,11 @@ test('link setup discloses configured administration while keeping unconfigured 
   const html = render(), disclosure = html.match(/<details[\s\S]*?<\/details>/)?.[0];
   assert.ok(disclosure, 'Setup must remain mounted inside a native disclosure.');
   assert.match(disclosure, /<summary[^>]*>[\s\S]*?Link and website setup[\s\S]*?<\/summary>/); assert.doesNotMatch(disclosure.match(/^<details[^>]*>/)[0], /\bopen=/);
-  assert.match(disclosure, /Save link settings/); assert.match(disclosure, /Copy snippet/); assert.match(disclosure, /value="https:\/\/go\.example\.com"/);
-  const outside = html.replace(disclosure, ''); assert.match(outside, /does not verify DNS or the certificate/); assert.doesNotMatch(disclosure, /does not verify DNS or the certificate/);
-  for (const domainStatus of ['app_origin', 'unknown', undefined]) assert.match(render({ settings: { ...settings, domainStatus } }).replace(/<details[\s\S]*?<\/details>/, ''), /does not verify DNS or the certificate/);
+  assert.match(disclosure, /Save link settings/); assert.match(disclosure, /Copy tracking code/); assert.match(disclosure, /value="https:\/\/go\.example\.com"/);
+  const outside = html.replace(disclosure, ''); assert.match(outside, /Saving only stores the address/); assert.doesNotMatch(disclosure, /Saving only stores the address/);
+  for (const domainStatus of ['app_origin', 'unknown', undefined]) assert.match(render({ settings: { ...settings, domainStatus } }).replace(/<details[\s\S]*?<\/details>/, ''), /Saving only stores the address/);
   for (const value of [null, { ...settings, shortBaseUrl: 'http://localhost:3018' }, { ...settings, allowedWebsiteOrigins: [] }, { scriptUrl: settings.scriptUrl }]) assert.match(render({ settings: value }), /<details[^>]*\bopen=""/, JSON.stringify(value));
   const local = render({ settings: { ...settings, shortBaseUrl: 'http://localhost:3018' } }); assert.match(local.replace(/<details[\s\S]*?<\/details>/, ''), /will work only on this computer/);
-  for (const change of [{ readOnly: true }, { canManageSettings: false }]) { const viewer = render(change); assert.doesNotMatch(viewer, /<form|Save link settings/); assert.match(viewer, /Project administrators manage this setup/); assert.match(viewer, /Copy snippet/); }
+  for (const change of [{ readOnly: true }, { canManageSettings: false }]) { const viewer = render(change); assert.doesNotMatch(viewer, /<form|Save link settings/); assert.match(viewer, /Project administrators manage this setup/); assert.match(viewer, /Copy tracking code/); }
   assert.match(render({ canChangeDomain: false }), /type="url"[^>]*disabled=""/);
 });

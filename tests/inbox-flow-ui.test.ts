@@ -140,7 +140,7 @@ test('an inbox without a connected account shows only Connect social accounts, w
     assert.deepEqual(empty.map(state => state.props.title), ['Connect social accounts'], JSON.stringify(status));
     assert.equal(typeof empty[0].props.description, 'string', 'One muted line.');
     const buttons = find(tree, ui.Button);
-    assert.deepEqual(buttons.map(button => text(button.props.children)), ['Open integrations'], 'The only control opens Integrations.');
+    assert.deepEqual(buttons.map(button => text(button.props.children)), ['Open Connections'], 'The only control opens Settings › Connections.');
     buttons[0].props.onClick(); assert.deepEqual(opened, ['Integrations']);
     for (const control of [ui.SegmentedControl, ui.Select, ui.Input, ui.Popover, ui.Disclosure, ui.DetailWorkspace, ui.Alert]) assert.equal(find(tree, control).length, 0, control.name + ' waits for an account.');
     assert.equal(listReads(calls).length, 0);

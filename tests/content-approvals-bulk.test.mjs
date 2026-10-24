@@ -7,10 +7,10 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');
 
 // Run the component's own handlers up to its markup, with controlled state and a recording request boundary.
-function view(request, { selected = [], notes = {}, posts }) {
+function view(request, { selected = [], notes = {}, comment = '', posts }) {
   const start = source.indexOf('export default function '), end = source.indexOf('  return <', start), state = [];
-  // State 0 is the review queue, 5 the per-post notes and 7 the bulk selection.
-  const initial = { 0: { requireApproval: true, posts }, 5: notes, 7: selected };
+  // State 0 is the review queue, 5 the per-post notes, 7 the bulk selection and 15 the shared comment for the authors.
+  const initial = { 0: { requireApproval: true, posts }, 5: notes, 7: selected, 15: comment };
   const context = {
     useState(value) { const index = state.length; state.push(Object.hasOwn(initial, index) ? initial[index] : value); return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next; }]; },
     useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {},
@@ -49,16 +49,22 @@ test('bulk approve sends the single-card review once per visible selected post, 
   assert.equal(ui.state[8], null, 'Progress clears after the loop.');
 });
 
-test('bulk request changes sends each post its own note and includes posts whose approval is blocked', async () => {
+test('bulk request changes sends each post its own note, or the shared comment, and includes posts whose approval is blocked', async () => {
   const calls = [], request = async (path, method, body) => { calls.push({ path, method, body }); return method ? { item: card(path.split('/')[5]) } : { requireApproval: true, posts: [] }; };
-  const ui = view(request, { posts: posts(), selected, notes: { blocked: 'Replace the creative', approved: 'Ignored' } });
+  const ui = view(request, { posts: posts(), selected, notes: { blocked: 'Replace the creative', approved: 'Ignored' }, comment: ' Tighten the copy. ' });
   await ui.bulkReview('rejected');
   assert.deepEqual(calls.filter(call => call.method).map(call => [call.path.split('/')[5], call.body]), [
-    ['ready', { decision: 'rejected', note: '', reviewId: 'review-ready' }],
+    ['ready', { decision: 'rejected', note: 'Tighten the copy.', reviewId: 'review-ready' }],
     ['blocked', { decision: 'rejected', note: 'Replace the creative', reviewId: 'review-blocked' }],
-    ['failing', { decision: 'rejected', note: '', reviewId: 'review-failing' }],
+    ['failing', { decision: 'rejected', note: 'Tighten the copy.', reviewId: 'review-failing' }],
   ]);
   assert.deepEqual(ui.state[7], ['approved', 'sample', 'removed-from-view']); assert.equal(ui.state[5].blocked, '', 'A sent note is cleared like a single review.');
+  assert.equal(ui.state[15], '', 'The shared comment clears once every post was sent.');
+});
+
+test('bulk request changes without a comment for every post sends nothing', async () => {
+  const calls = [], ui = view(async (...args) => { calls.push(args); return {}; }, { posts: posts(), selected, notes: { blocked: 'Replace the creative' } });
+  await ui.bulkReview('rejected'); assert.deepEqual(calls, []); assert.match(ui.state[2], /Add a comment/);
 });
 
 test('a bulk action with nothing actionable sends no request', async () => {

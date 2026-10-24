@@ -100,7 +100,7 @@ test('Reddit edit receipts retain the same action key until exact account, targe
   const good = { operation: { status: 'complete' }, edited: true, accountId: 'rd', postId: 'post', commentId: 'comment', platform: 'reddit', content: body.content, comment: { id: 'comment', message: body.content, platform: 'reddit', from: { isOwner: true }, editVersion: 'a'.repeat(64) } }; let result = good;
   const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, account: { platform: 'reddit' }, requester: { current: async (...args) => { calls.push(args); return result; } } });
   for (const patch of [{ operation: { status: 'uncertain' } }, { edited: false }, { accountId: 'other' }, { postId: 'other' }, { commentId: 'other' }, { platform: 'facebook' }, { content: 'Wrong text' }, { comment: { ...good.comment, id: 'other' } }, { comment: { ...good.comment, message: 'Old text' } }, { comment: { ...good.comment, editVersion: '' } }, { comment: { ...good.comment, from: { isOwner: false } } }]) {
-    result = { ...good, ...patch }; await assert.rejects(write('comments/edit', body), /draft and action key have been retained/); assert.equal(keys.current.size, 1);
+    result = { ...good, ...patch }; await assert.rejects(write('comments/edit', body), /Your draft is kept/); assert.equal(keys.current.size, 1);
   }
   result = good; await write('comments/edit', body); assert.equal(keys.current.size, 0); assert.equal(new Set(calls.map(call => call[3])).size, 1);
 });
@@ -173,7 +173,7 @@ test('comment reactions validate exact scoped receipts and retain one action key
   const context = { readOnly: false, path, keys, crypto, account: { platform: 'linkedin' }, linkedInReactions, requester: { current: async (...args) => { calls.push(args); if (lost) throw new TypeError('Lost acknowledgment'); return result; } } };
   const write = compile(section('async function write(', '  async function loadAccounts('), context), good = { ...result };
   for (const mutation of [{ accountId: 'other' }, { postId: 'other' }, { commentId: 'other' }, { platform: 'facebook' }, { liked: false }, { reactionType: 'LIKE' }, { reactionType: undefined }, { alreadyReacted: 'yes' }, { operation: { status: 'pending' } }]) {
-    result = { ...good, ...mutation }; await assert.rejects(write('comments/like', body), /action key has been retained/); assert.equal(keys.current.size, 1);
+    result = { ...good, ...mutation }; await assert.rejects(write('comments/like', body), /won’t be done twice/); assert.equal(keys.current.size, 1);
   }
   lost = true; await assert.rejects(write('comments/like', body), /Lost acknowledgment/); lost = false;
   assert.equal(new Set(calls.map(call => call[3])).size, 1);
@@ -239,7 +239,7 @@ test('private comment replies keep the exact operation key until the scoped plat
   const good = { operation: { status: 'complete' }, sent: true, accountId: 'fb', postId: 'post', commentId: 'comment', platform: 'facebook', messageId: 'message-1' }; let result = good;
   const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, privateReplyTarget: { platform: 'facebook' }, requester: { current: async (...args) => { calls.push(args); return result; } } });
   for (const invalid of [{ ...good, operation: { status: 'uncertain' } }, { ...good, sent: false }, { ...good, accountId: 'other' }, { ...good, postId: 'other' }, { ...good, commentId: 'other' }, { ...good, platform: 'instagram' }, { ...good, messageId: '' }]) {
-    result = invalid; await assert.rejects(write('comments/private-reply', body), /retained/); assert.equal(keys.current.size, 1);
+    result = invalid; await assert.rejects(write('comments/private-reply', body), /could not confirm/); assert.equal(keys.current.size, 1);
   }
   result = good; await write('comments/private-reply', body); assert.equal(keys.current.size, 0); assert.ok(calls.every(row => row[3] === calls[0][3]));
 });
@@ -344,9 +344,9 @@ test('WhatsApp selected-button history renders escaped selection facts without g
 test('typing and conversation deletion receipts retain keys until their exact result is verified', async () => {
   const keys = { current: new Map() }, calls = []; let result = { operation: { status: 'complete' }, accepted: true, conversationId: 'other-thread', deleted: true, deletedMessages: 2, scope: 'zernio_copy' };
   const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, requester: { current: async (...args) => { calls.push(args); return result; } } });
-  await assert.rejects(write('conversations/thread/delete', { accountId: 'account' }), /retained/); assert.equal(keys.current.size, 1);
+  await assert.rejects(write('conversations/thread/delete', { accountId: 'account' }), /could not confirm/); assert.equal(keys.current.size, 1);
   result = { ...result, conversationId: 'thread' }; await write('conversations/thread/delete', { accountId: 'account' }); assert.equal(keys.current.size, 0); assert.equal(calls[0][3], calls[1][3]);
-  result = { operation: { status: 'complete' }, accepted: true, conversationId: 'thread' }; await assert.rejects(write('conversations/thread/typing', { accountId: 'account' }), /retained/);
+  result = { operation: { status: 'complete' }, accepted: true, conversationId: 'thread' }; await assert.rejects(write('conversations/thread/typing', { accountId: 'account' }), /could not confirm/);
   result.delivered = false; await write('conversations/thread/typing', { accountId: 'account' }); assert.equal(keys.current.size, 0);
 });
 
@@ -357,7 +357,7 @@ test('message action handlers submit the reviewed snapshot, retain failures and 
   for (const changes of [{ readOnly: true }, { selected: { id: 'other' } }, { accountId: 'other' }, { messageActionTarget: { ...target, kind: 'delete' }, confirmMessageAction: false }]) await submit(changes); assert.equal(calls.length, 0);
   await assert.rejects(submit({ write: async () => { throw new Error('Unknown outcome'); } }), /Unknown/); assert.deepEqual(cleared, []);
   await submit(); assert.deepEqual(calls[0], ['conversations/thread%2Fopaque/messages/message%2Fopaque/edit', { accountId: 'account-a', expectedMessageVersion: 'message-version', text: 'Edited message' }]); assert.deepEqual(cleared, [null]); assert.match(notices[0], /confirmed in message history/);
-  await submit({ messageActionTarget: { ...target, kind: 'react' }, write: async () => ({ observed: false }) }); assert.match(notices.at(-1), /not yet confirmed/);
+  await submit({ messageActionTarget: { ...target, kind: 'react' }, write: async () => ({ observed: false }) }); assert.match(notices.at(-1), /may take a moment to appear/);
   const count = cleared.length; version.current = 2; await submit(); assert.equal(cleared.length, count, 'A late action cannot close the next project or account’s draft.');
 });
 
@@ -419,7 +419,7 @@ test('conversation confirmations retain the reviewed version across refreshes an
 test('new action receipts are validated before their operation keys are released', async () => {
   const keys = { current: new Map() }, calls = [], suffix = 'conversations/thread/messages/message/react'; let response = { operation: { status: 'complete' }, accepted: true, action: 'react', messageId: 'wrong' };
   const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, requester: { current: async (...args) => { calls.push(args); return response; } } });
-  await assert.rejects(write(suffix, { accountId: 'account' }), /retained/); assert.equal(keys.current.size, 1);
+  await assert.rejects(write(suffix, { accountId: 'account' }), /could not confirm/); assert.equal(keys.current.size, 1);
   response = { ...response, messageId: 'message' }; await write(suffix, { accountId: 'account' }); assert.equal(keys.current.size, 0); assert.equal(calls[0][3], calls[1][3]);
 });
 
@@ -449,7 +449,7 @@ test('reply receipts retain their action key for malformed, foreign and contradi
   const keys = { current: new Map() }, calls = [], body = { accountId: 'ig', message: 'Unsent text', attachmentUrl: 'https://cdn.example.com/photo.png', attachmentType: 'image' }, valid = { operation: { status: 'complete' }, sent: true, accountId: 'ig', platform: 'instagram', messageId: 'attachment-sent', partialFailure: { part: 'text', error: 'Text rejected' }, messageIds: ['attachment-sent'] }; let result;
   const write = compile(section('async function write(', '  async function loadAccounts('), { readOnly: false, path, keys, crypto, account: { platform: 'instagram' }, requester: { current: async (...args) => { calls.push(args); return result; } } });
   for (const bad of [null, {}, { ...valid, accountId: 'other' }, { ...valid, platform: 'reddit' }, { ...valid, messageId: undefined }, { ...valid, partialFailure: undefined, messageIds: undefined }, { ...valid, partialFailure: true }, { ...valid, partialFailure: { part: 'attachment', error: 'Wrong part' } }, { ...valid, messageIds: ['attachment-sent', 'text-sent'] }, { ...valid, messageIds: ['wrong'] }]) {
-    result = bad; await assert.rejects(write('conversations/thread/reply', body), /draft and action key have been retained/); assert.equal(keys.current.size, 1);
+    result = bad; await assert.rejects(write('conversations/thread/reply', body), /Your draft is kept/); assert.equal(keys.current.size, 1);
   }
   assert.equal(new Set(calls.map(call => call[3])).size, 1); result = valid; await write('conversations/thread/reply', body); assert.equal(keys.current.size, 0);
 });
@@ -470,7 +470,7 @@ test('shared inbox writes release explicit failed receipts but retain unknown ou
 test('a missing second Meta message acknowledgement preserves the actual reply draft and action key', async () => {
   const keys = { current: new Map() }, cleared = [], calls = [], context = { replyButtons: [], readOnly: false, canReply: true, account: { platform: 'instagram' }, tab: 'messages', templateMode: false, message: 'Do not lose this text', messageLimit: 1000, accountId: 'ig', selected: { id: 'thread' }, replyTarget: null, confirmReplace: false, attachmentUrl: 'https://cdn.example.com/photo.png', attachmentType: 'image', attachmentName: '', messageTag: '', path, keys, crypto, action: async (_, run) => run(1), version: { current: 1 }, setMessage: value => cleared.push(value), setAttachmentUrl: value => cleared.push(value), setAttachmentName: value => cleared.push(value), setAttachmentPreview() {}, setAttachmentType() {}, setMessageTag() {}, setReplyTarget() {}, setConfirmReplace() {}, setNotice() {}, setError() {}, refreshAfterWrite: async () => {}, requester: { current: async (...args) => { calls.push(args); return { operation: { status: 'complete' }, sent: true, accountId: 'ig', platform: 'instagram', messageId: 'attachment-only' }; } } };
   context.write = compile(section('async function write(', '  async function loadAccounts('), context);
-  for (let attempt = 0; attempt < 2; attempt++) await assert.rejects(compile(section('async function reply(', '  async function conversationAction('), context)(event), /draft and action key have been retained/);
+  for (let attempt = 0; attempt < 2; attempt++) await assert.rejects(compile(section('async function reply(', '  async function conversationAction('), context)(event), /Your draft is kept/);
   assert.deepEqual(cleared, []); assert.equal(keys.current.size, 1); assert.equal(calls[0][3], calls[1][3]);
 });
 
@@ -512,7 +512,7 @@ test('optional history search keeps conversation actions, active results and pro
   const viewer = render({ readOnly: true }); assert.doesNotMatch(viewer, /New conversation/); assert.match(viewer, /Return to conversations/); assert.match(viewer, /Search history/);
   assert.doesNotMatch(render({ historyFilter: null, capabilities: {} }), /Return to conversations|New conversation|History results for/);
   assert.equal(render({ tab: 'comments' }).trim(), '');
-  assert.match(source.slice(0, start), /Provider reply windows and account permissions apply/); assert.match(source.slice(end), /Some connected accounts cannot be searched/);
+  assert.match(source.slice(0, start), /Each network limits when you can reply/); assert.match(source.slice(end), /Some connected accounts cannot be searched/);
 });
 
 test('full-history search uses the actual provider search loader, preserves page cursors and ignores previous-account results', async () => {
@@ -667,7 +667,7 @@ test('thread refresh preserves an unfinished reply and post-write read failures 
   const open = compile(section('async function openItem(', '  async function refreshAfterWrite('), context);
   await open(selected); assert.deepEqual(cleared, []); await open({ id: 'different-thread' }); assert.deepEqual(cleared, ['']);
   const refresh = compile(section('async function refreshAfterWrite(', '  function prepareReply('), { tab: 'messages', selected, focusedComment: '', version: { current: 1 }, fetchThread: async () => { throw new Error('Provider read failed'); }, setError: value => errors.push(value) });
-  await refresh(1); assert.match(errors[0], /change was confirmed/);
+  await refresh(1); assert.match(errors[0], /change was saved/);
 });
 
 test('webhook polling reads only the local update feed until new relevant activity arrives', async () => {
@@ -1232,7 +1232,7 @@ test('switching item never shows another item’s notes or applies a stale read 
 });
 
 // The not-set-up state is one empty state, covered with the running component in inbox-flow-ui.test.ts.
-test('the webhook warning offers Open integrations, and Refresh connections reports setup through the status read only', async () => {
+test('the webhook warning offers Open Connections, and Refresh connections reports setup through the status read only', async () => {
   const zernio = section('function ZernioInbox(', '\nfunction ');
   assert.match(zernio, /^function ZernioInbox\(\{[^}]*onOpenIntegrations[^}]*\}/, 'ZernioInbox receives the navigation prop the shell passes.');
   const actionJsx = zernio.match(/const integrationsAction = (onOpenIntegrations \? <Button[^\n]*?<\/Button> : undefined);/)?.[1], warnings = zernio.match(/\{connected && tab !== 'mentions' && status\?\.webhookConfigured === false && <Alert[\s\S]*?<\/Alert>\}/)?.[0];
@@ -1241,9 +1241,9 @@ test('the webhook warning offers Open integrations, and Refresh connections repo
   const [make, render] = new Function('React', 'Button', 'Alert', `${code}; return [make, render];`)(React, ui.Button, ui.Alert), opened = [], action = make(() => opened.push('Integrations'));
   assert.equal(make(undefined), undefined);
   const webhook = renderToStaticMarkup(render({ configured: true, mapped: true, webhookConfigured: false }, true, 'messages', action));
-  assert.equal((webhook.match(/<button[^>]*>Open integrations<\/button>/g) || []).length, 1, 'A set-up inbox without webhooks shows the webhook banner, which links to Integrations.'); assert.match(webhook, /inbox webhooks/);
+  assert.equal((webhook.match(/<button[^>]*>Open Connections<\/button>/g) || []).length, 1, 'A set-up inbox without webhooks shows the webhook banner, which links to Integrations.'); assert.match(webhook, /Settings › Connections/);
   action.props.onClick(); assert.deepEqual(opened, ['Integrations']);
-  assert.doesNotMatch(renderToStaticMarkup(render({ configured: true, mapped: true, webhookConfigured: false }, true, 'messages', undefined)), /Open integrations/);
+  assert.doesNotMatch(renderToStaticMarkup(render({ configured: true, mapped: true, webhookConfigured: false }, true, 'messages', undefined)), /Open Connections/);
   const requests = [], statuses = [];
   const refresh = compile(section('async function loadAccounts(', '  async function changeTriage('), { switchSelection: change => change(), action: async (_, run) => run(1), version: { current: 1 }, path, accountId: '', tab: 'messages', requester: { current: async target => { requests.push(target); return { configured: false, mapped: false, webhookConfigured: false, accounts: [] }; } }, setStatus: value => statuses.push(value), setAccounts() {}, setRows() {}, resetSelection() {}, setAccountId() {} });
   await refresh();
