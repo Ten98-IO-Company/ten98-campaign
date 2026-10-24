@@ -17,7 +17,7 @@ const deliverabilityAlerts = (status: any): DeliverabilityAlert[] => (Array.isAr
 
 type Row = { id: string; [key: string]: any };
 type Channel = 'email' | 'sms' | 'whatsapp';
-type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string>; onOpenIntegrations?: () => void; view?: 'campaigns' | 'contacts'; isOperator?: boolean };
+type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string>; onOpenIntegrations?: () => void; view?: 'campaigns' | 'contacts'; isOperator?: boolean; createNew?: boolean; onCreateHandled?: () => void };
 type EmailPurpose = 'transactional' | 'marketing';
 type Draft = { name: string; channel: Channel; emailPurpose: EmailPurpose; subject: string; text: string; html: string; accountId: string; templateName: string; templateLanguage: string; templateComponents: any[]; contactIds: string[]; tags: string[] };
 const labels = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
@@ -112,7 +112,7 @@ function CampaignResults({ campaign }: { campaign: Row }) {
   return <Text as="span" size="sm" tone="muted">{parts.join(' · ')}</Text>;
 }
 
-export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations, view = 'campaigns', isOperator = false }: Props) {
+export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations, view = 'campaigns', isOperator = false, createNew = false, onCreateHandled }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/direct`, requester = useRef(request), version = useRef(0), csvRead = useRef(0), pending = useRef(false), actionVersion = useRef(0), formRef = useRef<HTMLFormElement>(null);
   requester.current = request;
   const [status, setStatus] = useState<any>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [contacts, setContacts] = useState<Row[]>([]);
@@ -179,6 +179,8 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
     setEditingId(campaign?.id || ''); setDraft(campaignDraft(campaign)); setAudienceMode(campaign?.contactIds?.length ? 'contacts' : campaign?.tags?.length ? 'tags' : 'all'); setAudienceTags((campaign?.tags || []).join(', ')); setScheduledAt(''); setPreview(null); setDetail(campaign ? { campaign } : null); setTemplates([]); setTemplateAccount(''); setError(''); setSendMode('now'); setOpenRow('');
   }
   function startCampaign(channel: Channel) { openDraft(); setDraft({ ...blank(), channel }); setComposing(true); setOpenRow('to'); setChoosingChannel(false); }
+  // createNew: a campaign page's Add menu asked for a new message; open the channel choice once, then tell the app.
+  useEffect(() => { if (!createNew) return; if (!readOnly) setChoosingChannel(true); onCreateHandled?.(); }, [createNew]);
   function closeCampaign() { openDraft(); setComposing(false); }
   async function saveDraft(generation: number) {
     if (readOnly || !editable) throw new Error('Create or edit a draft before saving.');

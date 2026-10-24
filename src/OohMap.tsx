@@ -107,8 +107,8 @@ export default function OohMap({ projectId, request, locations, placements, visi
 }
 /** Grouped booking editor fields. The host form submits them by name, so each name is the placement record field. */
 // defaultCampaignId preselects the campaign for a new booking started from a campaign page.
-export function BookingFields({ item, partners, campaigns, defaultCampaignId }: { item?: Placement | null; partners: Named[]; campaigns: Named[]; defaultCampaignId?: string }) {
-  const [dates, setDates] = useState({ start: item?.startDate?.slice(0, 10) || '', end: item?.endDate?.slice(0, 10) || '' });
+export function BookingFields({ item, partners, campaigns, defaultCampaignId, defaultDates }: { item?: Placement | null; partners: Named[]; campaigns: Named[]; defaultCampaignId?: string; defaultDates?: { start?: string; end?: string } }) {
+  const [dates, setDates] = useState({ start: item?.startDate?.slice(0, 10) || defaultDates?.start || '', end: item?.endDate?.slice(0, 10) || defaultDates?.end || '' });
   return <Stack gap={4}>
     <Fieldset legend="Placement">
       <Field label="Placement name" required><Input name="name" defaultValue={item?.name} placeholder="Sheikh Zayed Road · Digital screen" required/></Field>
