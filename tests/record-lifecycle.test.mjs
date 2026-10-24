@@ -40,10 +40,12 @@ test('record deletion preserves assignments and administrators can remove sample
     const campaign = await create('campaigns', { name: 'Keep my real campaign' }), provider = await create('providers', { name: 'Keep my real provider' }), asset = await create('assets', { name: 'Keep my real asset', url: 'https://cdn.example.com/real.jpg' });
     const post = await create('posts', { content: 'A real linked draft', platforms: ['facebook'], campaignId: campaign.id, assetId: asset.id });
     const placement = await create('placements', { name: 'A real booking', location: 'Dubai', providerId: provider.id });
+    // Workspace activity names the record the way the app labels it (#241), not "placement created."
+    assert.equal((await app.sql.get('SELECT message FROM activity WHERE project_id=? ORDER BY seq DESC LIMIT 1', projectId)).message, 'Billboard booking created.');
     // The refusal names the record that still uses the one being deleted (#149).
-    for (const [collection, record, uses] of [['campaigns', campaign, 'post "A real linked draft"'], ['assets', asset, 'post "A real linked draft"'], ['providers', provider, 'booking "A real booking"']]) {
+    for (const [collection, record, kind, uses] of [['campaigns', campaign, 'campaign', 'post "A real linked draft"'], ['assets', asset, 'asset', 'post "A real linked draft"'], ['providers', provider, 'partner', 'billboard booking "A real booking"']]) {
       const result = await request(`${project}/${collection}/${record.id}`, { method: 'DELETE' });
-      assert.equal(result.status, 409); assert.equal(result.data.error, `This ${collection.slice(0, -1)} is assigned to ${uses}. Remove its assignments before deleting it.`); assert.ok(await app.store.get(projectId, collection, record.id));
+      assert.equal(result.status, 409); assert.equal(result.data.error, `This ${kind} is assigned to ${uses}. Remove its assignments before deleting it.`); assert.ok(await app.store.get(projectId, collection, record.id));
     }
     assert.equal((await request(`${project}/posts/${post.id}`, { method: 'PATCH', body: { content: 'Still editable after a rejected deletion' } })).status, 200);
     assert.equal((await request(`${project}/posts/${post.id}`, { method: 'PATCH', body: { campaignId: '', assetId: '' } })).status, 200);
