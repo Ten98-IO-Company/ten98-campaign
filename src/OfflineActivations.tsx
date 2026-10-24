@@ -189,7 +189,7 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
         <Field label="Brief" description="What the team should know. For door-to-door, list no-knock streets and no-cold-calling zones here."><Textarea maxLength={2000} rows={3} disabled={!editable} value={draft.notes} onChange={event => change({ notes: event.target.value })}/></Field>
         <FormGrid>
           <Field label="Owner"><Select disabled={!editable} value={draft.ownerId} onChange={event => change({ ownerId: event.target.value })} options={ownerOptions}/></Field>
-          <Field label="Promo code" description="Optional, for in-store or checkout attribution."><Input maxLength={40} pattern="[A-Za-z0-9_-]*" disabled={!editable} value={draft.promoCode} onChange={event => change({ promoCode: event.target.value })}/></Field>
+          <Field label="Promo code" description="Optional, for in-store or checkout attribution."><Input maxLength={40} pattern="[A-Za-z0-9_\-]*" disabled={!editable} value={draft.promoCode} onChange={event => change({ promoCode: event.target.value })}/></Field>
         </FormGrid>
         {teamOptions.length > 0 && <CheckboxGroup legend="Team" orientation="horizontal" disabled={!editable} value={draft.teamIds} onValueChange={teamIds => change({ teamIds })} options={teamOptions}/>}
         <FormGrid>
