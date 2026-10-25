@@ -733,17 +733,22 @@ function watchInvite(target: Pick<Window, 'location' | 'history' | 'addEventList
   target.addEventListener('hashchange', read);
   return () => target.removeEventListener('hashchange', read);
 }
-// The step after the first sign-up: one project name, the sample opt-in and Skip for now. Skipping opens Home with no
-// project; Home's setup checklist then starts with Create your first project, which returns to this step. Skip state
-// lives here, not in App's hooks.
+// The step after the first sign-up, inside the app shell as in Discover (DS #150): one project name, the sample opt-in and
+// Skip for now. Skipping opens Home with no project; Home's setup checklist then starts with Create your first project,
+// which returns to this step. Skip state lives here, not in App's hooks.
 function FirstProject({ workspaceName, user, busy, error, onCreate, onSignOut }: { workspaceName: string; user: Row; busy: boolean; error?: string; onCreate: (values: { name: string; sample: boolean }) => void; onSignOut: () => void }) {
-  const [skipped, setSkipped] = useState(false);
-  if (!skipped) return <WorkspaceOnboarding brand={<Brand product="Campaign" href="/"/>} aside={authStory} label="Create your first project" title={workspaceName} email={user.email} subheading="Create your first project" nameLabel="Project name" submitLabel="Create project" busyLabel="Creating project…" sampleOptIn={{ label: 'Add sample data' }} error={error} busy={busy} onSkip={() => setSkipped(true)} skipLabel="Skip for now" onSubmit={({ name, sample }) => onCreate({ name, sample: sample === true })}/>;
+  const [skipped, setSkipped] = useState(false), [menuOpen, setMenuOpen] = useState(false);
   const createProject = () => setSkipped(false);
-  return <AppShell sidebarLabel="Campaign navigation" mainLabel="Home" skipLinkLabel="Skip to content" sidebar={<Brand product="Campaign" href="/"/>}
+  // The same drawer navigation as the main shell, so the brand-only sidebar folds away at phone width.
+  return <AppShell sidebarLabel="Campaign navigation" mainLabel="Home" skipLinkLabel="Skip to content" navigation={{ open: menuOpen, onOpenChange: setMenuOpen }} sidebar={<Brand product="Campaign" href="/"/>}
     topbar={<AppTopbar breadcrumb={{ scope: workspaceName, current: 'Home' }} actions={<AccountMenu name={user.name} email={user.email} items={[{ id: 'sign-out', kind: 'button', label: 'Sign out', danger: true, onSelect: onSignOut }]}/>}/>}>
-    <PageHeader title="Home" actions={<Button variant="primary" onClick={createProject}>Create project</Button>}/>
-    <HomeSetup projectId={'no-project:' + workspaceName} steps={[{ id: 'project', title: 'Create your first project', detail: 'A project keeps the campaigns, posts, assets and connections for one brand together.', done: false, action: 'Create project', onAction: createProject }]}/>
+    {skipped ? <>
+      <PageHeader title="Home" actions={<Button variant="primary" onClick={createProject}>Create project</Button>}/>
+      <HomeSetup projectId={'no-project:' + workspaceName} steps={[{ id: 'project', title: 'Create your first project', detail: 'A project keeps the campaigns, posts, assets and connections for one brand together.', done: false, action: 'Create project', onAction: createProject }]}/>
+    </> : <>
+      <PageHeader title="Create your first project" description="A project keeps the campaigns, posts, assets and connections for one brand together."/>
+      <ProjectCreateFlow mode="create" title="Create your first project" hideTitle showOrigin={false} defaultValues={{ name: '' }} sampleOptIn={{ label: 'Add sample data' }} cancel={{ label: 'Skip for now', onClick: () => setSkipped(true) }} busy={busy} busyLabel="Creating project…" error={error} messages={{ create: 'Create project' }} onSubmit={({ name, sample }) => onCreate({ name, sample: Boolean(sample) })}/>
+    </>}
   </AppShell>;
 }
 // Campaign adapter: the first sign-up claims the installation as owner; invitation continuation stays app-owned.

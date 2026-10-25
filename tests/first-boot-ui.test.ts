@@ -6,7 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
-import { AccountMenu, AppShell, AppTopbar, Button, PageHeader, WorkspaceOnboarding } from '@ten98/ui';
+import { AccountMenu, AppShell, AppTopbar, Button, PageHeader, ProjectCreateFlow } from '@ten98/ui';
 import { AppBrand } from '@ten98/ui/app';
 import { readText } from './read-text.ts';
 
@@ -20,11 +20,12 @@ const HomeSetup = new Function('React', 'useState', 'globalThis', 'Badge', 'Butt
 
 // FirstProject with its one useState replaced, so each test chooses the skipped state and sees the requested change.
 const { code: firstProjectCode } = await transformWithOxc(slice('function FirstProject(', '\n// Campaign adapter'), 'FirstProject.tsx', { jsx: { runtime: 'classic' } });
-const story = React.createElement(ui.AuthStory, { eyebrow: 'STORY', title: 'Story panel', lead: 'Lead line.', footnote: 'Footnote' });
+// Elements of one type anywhere in a rendered tree, through fragments and children.
+const find = (node: any, type: unknown): any[] => !node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(child => find(child, type)) : [...(node.type === type ? [node] : []), ...find(node.props?.children, type)];
 function firstProject(skipped: boolean) {
   const changes: boolean[] = [], created: unknown[] = []; let signedOut = 0;
-  const FirstProject = new Function('React', 'useState', 'Brand', 'WorkspaceOnboarding', 'Button', 'AppShell', 'AppTopbar', 'AccountMenu', 'PageHeader', 'HomeSetup', 'authStory', firstProjectCode + '; return FirstProject;')(
-    React, () => [skipped, (next: boolean) => { changes.push(next); }], AppBrand, WorkspaceOnboarding, Button, AppShell, AppTopbar, AccountMenu, PageHeader, HomeSetup, story);
+  const FirstProject = new Function('React', 'useState', 'Brand', 'ProjectCreateFlow', 'Button', 'AppShell', 'AppTopbar', 'AccountMenu', 'PageHeader', 'HomeSetup', firstProjectCode + '; return FirstProject;')(
+    React, () => [skipped, (next: boolean) => { changes.push(next); }], AppBrand, ProjectCreateFlow, Button, AppShell, AppTopbar, AccountMenu, PageHeader, HomeSetup);
   const element = FirstProject({ workspaceName: 'My workspace', user: { id: 'u1', name: 'Owner', email: 'owner@example.test' }, busy: false, onCreate: (values: unknown) => { created.push(values); }, onSignOut: () => { signedOut++; } });
   return { element, changes, created, signedOut: () => signedOut };
 }
@@ -41,23 +42,22 @@ test('after the first sign-up an owner or administrator without projects lands o
   assert.ok(source.indexOf('if (firstProjectWorkspace)') < source.indexOf('if (!state.projectId || !project) return <><WorkspaceOnboarding'));
 });
 
-test('the first-project step is one project name, the sample opt-in and Skip for now', () => {
+test('the first-project step is one project name, the sample opt-in and Skip for now, inside the app shell', () => {
   const { element, changes, created } = firstProject(false);
-  assert.equal(element.type, WorkspaceOnboarding);
-  assert.equal(element.props.aside, story, 'The step keeps the story panel from the sign-up screen, as Discover does.');
-  assert.equal(element.props.subheading, 'Create your first project'); assert.equal(element.props.nameLabel, 'Project name'); assert.equal(element.props.submitLabel, 'Create project');
-  assert.deepEqual(element.props.sampleOptIn, { label: 'Add sample data' });
-  assert.equal(element.props.help, undefined, 'No extra explanation text.'); assert.equal(element.props.signOut, undefined);
-  const html = renderToStaticMarkup(element), text = readText(html);
+  // Like Discover's first website step (DS #150): the app shell with a page header and the library ProjectCreateFlow.
+  assert.equal(element.type, AppShell);
+  const flow = find(element, ProjectCreateFlow)[0], header = find(element, PageHeader)[0];
+  assert.ok(flow, 'ProjectCreateFlow renders the step.'); assert.equal(header.props.title, 'Create your first project');
+  assert.equal(flow.props.hideTitle, true, 'The page header is the one heading; the flow keeps it as its accessible name.'); assert.equal(flow.props.title, 'Create your first project');
+  assert.equal(flow.props.mode, 'create'); assert.equal(flow.props.showOrigin, false); assert.deepEqual(flow.props.sampleOptIn, { label: 'Add sample data' });
+  assert.equal(flow.props.cancel.label, 'Skip for now');
+  const html = renderToStaticMarkup(flow), text = readText(html);
   assert.match(html, /<form[^>]*>[\s\S]*name="sample"[\s\S]*<\/form>/, 'The sample opt-in is inside the form.');
   assert.equal((html.match(/<input[^>]*name="name"/g) || []).length, 1, 'One project name field.');
-  for (const label of ['Project name', 'Add sample data', 'Create project', 'Skip for now']) assert.ok(text.includes(label), label);
-  element.props.onSubmit({ name: 'Spring launch', sample: true }); element.props.onSubmit({ name: 'Own work' });
+  for (const label of ['Add sample data', 'Create project', 'Skip for now']) assert.ok(text.includes(label), label);
+  flow.props.onSubmit({ name: 'Spring launch', sample: true }); flow.props.onSubmit({ name: 'Own work' });
   assert.deepEqual(created, [{ name: 'Spring launch', sample: true }, { name: 'Own work', sample: false }]);
-  // The library's own Skip action (@ten98/ui 0.25.0), not a stand-in Button passed as children.
-  assert.equal(element.props.children, undefined); assert.equal(element.props.skipLabel, 'Skip for now');
-  assert.match(html, /<button[^>]*type="button"[^>]*>Skip for now<\/button>/);
-  element.props.onSkip(); assert.deepEqual(changes, [true]);
+  flow.props.cancel.onClick(); assert.deepEqual(changes, [true]);
 });
 
 test('skipping lands on Home with no project, where the setup checklist starts with Create your first project', () => {
@@ -66,8 +66,7 @@ test('skipping lands on Home with no project, where the setup checklist starts w
   const html = renderToStaticMarkup(element), text = readText(html);
   assert.match(html, /<h1[^>]*>Home<\/h1>/);
   for (const label of ['Set up Campaign', '0 of 1 done', 'Create your first project', 'Create project']) assert.ok(text.includes(label), label);
-  const children = React.Children.toArray(element.props.children) as any[];
-  const checklist = children.find(child => child.type === HomeSetup), header = children.find(child => child.type === PageHeader);
+  const checklist = find(element, HomeSetup)[0], header = find(element, PageHeader)[0];
   assert.deepEqual(checklist.props.steps.map((step: { id: string; done: boolean }) => [step.id, step.done]), [['project', false]]);
   checklist.props.steps[0].onAction(); header.props.actions.props.onClick();
   assert.deepEqual(changes, [false, false], 'Create project returns to the first-project step.');
