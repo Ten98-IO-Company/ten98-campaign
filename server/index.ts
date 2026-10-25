@@ -14,6 +14,7 @@ import { IntegrationError, mediaUrl, type ProviderRecord, type OperationContext 
 import { createIntegrationSettings } from './integration-settings.ts';
 import { handleInvitations, revokeMemberInvitations } from './invitations.ts';
 import { readRequestJson } from './json-body.ts';
+import { emailConfigured, sendDirect } from './direct-providers.ts';
 import { handleOperationRecovery } from './operation-recovery.ts';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit, recordApprovedReschedule } from './approvals.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.ts';
@@ -231,6 +232,26 @@ export async function createApp(options: AppOptions = {}) {
           return send(201, { user: { id, name, email: mail, isOperator: true }, workspaceId });
         }
         if (path === '/api/auth/login' && req.method === 'POST') return send(200, { user: await auth.login(req, res, { email: email(body.email), password: loginPassword(body.password) }) });
+        // Self-service password recovery (#284), as in Discover. The request answers the same whether or not the address has
+        // a local account, and the link goes out after the response through the installation's transactional email.
+        if (path === '/api/auth/password-reset-status' && req.method === 'GET') return send(200, { configured: emailConfigured(env) });
+        if (path === '/api/auth/request-password-reset' && req.method === 'POST') {
+          if (Object.keys(body).some(key => key !== 'email')) bad('Use the email field.');
+          const address = email(body.email);
+          if (!emailConfigured(env)) throw new HttpError(503, 'Email recovery is not configured. Ask your administrator to reset your password.');
+          const reset = await auth.requestPasswordReset(req, address);
+          if (reset) {
+            const link = new URL('/#password-reset=' + reset.token, appUrl).href, sendEnv = { ...env };
+            const text = ['A password reset was requested for your ten98 Campaign account.', '', 'Open this link within one hour to choose a new password:', link, '', 'If you did not ask for this, ignore this email; your password stays the same.'].join('\n');
+            setImmediate(() => { sendDirect({ channel: 'email', campaign: { emailPurpose: 'transactional', subject: 'Reset your ten98 Campaign password', text }, contact: { email: reset.email }, env: sendEnv }).catch(() => undefined); });
+          }
+          return send(200, { ok: true });
+        }
+        if (path === '/api/auth/reset-password' && req.method === 'POST') {
+          if (Object.keys(body).some(key => !['token', 'newPassword'].includes(key))) bad('Use the reset fields.');
+          await auth.resetPassword(req, typeof body.token === 'string' ? body.token : '', password(body.newPassword));
+          return send(200, { ok: true });
+        }
         if (path === '/api/auth/logout' && req.method === 'POST') { await auth.logout(req, res); return send(200, { ok: true }); }
         if (path === '/api/auth/oidc/start' && req.method === 'GET') return await auth.oidcStart(req, res);
         if (path === '/api/auth/oidc/start' && req.method === 'POST') {
