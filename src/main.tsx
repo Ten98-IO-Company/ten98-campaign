@@ -767,4 +767,4 @@ function Auth({ session, inviteToken = '', inviteEmail = '', onBackToInvitation,
 }
 
 // One auth frame for every signed-out, loading and error screen (@ten98/ui AuthFrameProvider, DS #157), outside the boundary.
-createRoot(document.getElementById('root')!).render(<AuthFrameProvider brand={<Brand product="Campaign" href="/"/>} aside={authStory} passwordPolicy={{ minLength: 12, maxLength: 128 }}><AuthErrorBoundary fallback={{ title: 'Page unavailable', message: 'This screen could not load. Reload the app to try again.', retryLabel: 'Reload app' }}><ToastProvider><App/></ToastProvider></AuthErrorBoundary></AuthFrameProvider>);
+createRoot(document.getElementById('root')!).render(<AuthFrameProvider brand={<Brand product="Campaign"/>} aside={authStory} passwordPolicy={{ minLength: 12, maxLength: 128 }}><AuthErrorBoundary fallback={{ title: 'Page unavailable', message: 'This screen could not load. Reload the app to try again.', retryLabel: 'Reload app' }}><ToastProvider><App/></ToastProvider></AuthErrorBoundary></AuthFrameProvider>);
