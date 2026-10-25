@@ -597,6 +597,10 @@ test('WhatsApp attachment downloads keep credentials server-side and reject unsa
     for (mode of ['html', 'oversized', 'stream-oversized', 'redirect', 'expired']) { result = await f.request(target + '&download=1'); assert.equal(result.status, mode === 'expired' ? 410 : 502, JSON.stringify(result.data)); }
     mediaUrl = 'https://evil.example.test/api/v1/whatsapp/media/media-id?accountId=wa'; assert.equal((await f.request(target + '&download=1')).status, 502);
     mediaUrl = 'https://zernio.com/api/v1/whatsapp/media/media-id?accountId=other'; assert.equal((await f.request(target + '&download=1')).status, 502);
+    // The media path passes the shared provider path guard before anything is fetched.
+    const mediaCalls = () => f.calls.filter(call => call.url.pathname.includes('/whatsapp/media/')).length, before = mediaCalls();
+    for (const unsafe of ['media-id%2F..%2Fother', '..%2Fother%FF', '..;x']) { mediaUrl = 'https://zernio.com/api/v1/whatsapp/media/' + unsafe + '?accountId=wa'; assert.equal((await f.request(target + '&download=1')).status, 502, unsafe); }
+    assert.equal(mediaCalls(), before, 'A refused media path fetches nothing.');
     mediaUrl = 'https://zernio.com/api/v1/whatsapp/media/media-id'; mode = 'valid'; assert.equal((await f.request(target + '&download=1')).status, 200, 'A verified attachment without the query receives the scoped account parameter.');
     mode = 'access'; assert.equal((await f.request(target + '&download=1')).status, 403);
   } finally { await f.close(); }
