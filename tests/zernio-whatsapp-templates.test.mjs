@@ -11,6 +11,7 @@ import { handleZernioWhatsAppTemplates, templateComponents } from '../server/zer
 import { IntegrationError } from '../server/provider-core.ts';
 import { postgresSkip, testApp, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addUsers, grantOperators } from './fixtures/accounts.ts';
 
 const profileId = 'profile-a', wabaId = '1234567890';
 const form = () => ({ headerFormat: 'text', headerText: 'Hello {{1}}', headerExamples: ['Ana'], headerMediaUrl: '', bodyText: 'Your order {{1}} is ready.', bodyExamples: ['ORDER-123'], footerText: 'Contact our team for help', buttons: [{ type: 'url', text: 'View order', url: 'https://example.com/orders/{{1}}', phoneNumber: '', example: 'ORDER-123' }] });
@@ -18,7 +19,7 @@ const createBody = () => ({ accountId: 'wa-a', expectedWabaId: wabaId, name: 'or
 const pg = { skip: postgresSkip };
 async function setup(t) {
   const { db, sql } = await testDatabase(t);
-  await sql.run("INSERT INTO users (id, name, email, password) VALUES ('operator-a', 'Operator', 'operator-a@example.test', NULL)"); await sql.run("INSERT INTO instance_operators (user_id) VALUES ('operator-a')");
+  await addUsers(sql, [{ id: 'operator-a', name: 'Operator', email: 'operator-a@example.test' }]); await grantOperators(sql, ['operator-a']);
   const calls = [], state = {
     accounts: [{ _id: 'wa-a', profileId, platform: 'whatsapp', displayName: 'Campaign support', isActive: true, metadata: { wabaId } }, { _id: 'wa-b', profileId: 'profile-b', platform: 'whatsapp', isActive: true, metadata: { wabaId } }, { _id: 'outside', profileId: 'elsewhere', platform: 'whatsapp', metadata: { wabaId: '99999' } }, { _id: 'social', profileId, platform: 'facebook' }],
     templates: [{ id: '1001', name: 'existing_order', language: 'en', category: 'UTILITY', status: 'APPROVED', components: templateComponents(form()), secret: 'never-return' }, { id: '1002', name: 'existing_order', language: 'es', category: 'UTILITY', status: 'REJECTED', rejected_reason: 'Add a clearer example', components: [{ type: 'body', text: 'Hola' }] }],

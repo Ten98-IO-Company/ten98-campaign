@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { postgresSkip, testApp } from './postgres.mjs';
+import { grantOperators } from './fixtures/accounts.ts';
 
 test('revoked sessions cannot complete provider reads or imports, while accepted writes retain uncertain receipts', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-session-revocation-')), origin = 'http://127.0.0.1:3018';
@@ -53,7 +54,7 @@ test('revoked sessions cannot complete provider reads or imports, while accepted
     assert.equal((await api(project + '/integrations/accounts')).data.accounts[0]._id, 'private-account');
     for (const change of [
       { pathname: '/api/v1/connect/facebook', action: () => api(project + '/integrations/connect?platform=facebook'), remove: () => app.sql.run("UPDATE memberships SET role='viewer' WHERE workspace_id=? AND user_id=?", state.workspaces[0].id, state.user.id), restore: () => app.sql.run("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?", state.workspaces[0].id, state.user.id), forbidden: 'authUrl' },
-      { pathname: '/api/v1/profiles', action: () => api('/settings/integrations/zernio/test', { method: 'POST', body: { projectId: state.projectId } }), remove: () => app.sql.run('DELETE FROM instance_operators WHERE user_id=?', state.user.id), restore: () => app.sql.run('INSERT INTO instance_operators VALUES(?)', state.user.id), forbidden: 'ok' },
+      { pathname: '/api/v1/profiles', action: () => api('/settings/integrations/zernio/test', { method: 'POST', body: { projectId: state.projectId } }), remove: () => app.sql.run('DELETE FROM instance_operators WHERE user_id=?', state.user.id), restore: () => grantOperators(app.sql, [state.user.id]), forbidden: 'ok' },
     ]) {
       let started, release; const entered = new Promise(resolve => { started = resolve; }), wait = new Promise(resolve => { release = resolve; });
       pause = { pathname: change.pathname, started, wait }; const pending = change.action();

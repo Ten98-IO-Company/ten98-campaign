@@ -16,6 +16,7 @@ import { IntegrationError } from '../server/provider-core.ts';
 import { createStore } from '../server/database.ts';
 import { postgresSkip, testApp, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addWorkspaces } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 
@@ -31,7 +32,7 @@ function upstreamFixture() {
 }
 async function fixture(t) {
   const { db, sql } = await testDatabase(t), { api, calls, state } = upstreamFixture();
-  await sql.run("INSERT INTO workspaces (id, name) VALUES ('workspace-a', 'Workspace A'), ('workspace-b', 'Workspace B')");
+  await addWorkspaces(sql, [{ id: 'workspace-a', name: 'Workspace A' }, { id: 'workspace-b', name: 'Workspace B' }]);
   await sql.run("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'workspace-a', 'A', 'profile-a'), ('project-b', 'workspace-b', 'B', 'profile-b')");
   // The service builds its own store on the processing transaction, so posts are real records; post(i) reads one back.
   const contacts = createContacts({ db }), store = createStore(db), posts = [await store.create('project-a', 'posts', { externalId: 'remote-post', zernioProfileId: profileId, status: 'submitted' }), await store.create('project-b', 'posts', { externalId: 'remote-post', zernioProfileId: profileId, status: 'draft' })];

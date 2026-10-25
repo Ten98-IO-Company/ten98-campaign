@@ -6,10 +6,11 @@ import { handleOoh } from '../server/ooh.ts';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 async function fixture(t, run) {
   const { pool, db, sql } = await testDatabase(t), originalFetch = globalThis.fetch, project = { id: 'ooh-audit' };
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('ooh-audit','w','OOH audit')");
+  await seedAccounts(pool, { workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('ooh-audit','w','OOH audit')");
   const store = createStore(db), calls = [], state = { providerStatus: 1, proposal: null, item: null, beforeBookResponse: null, beforeItemResponse: null, malformed: undefined, raw: undefined };
   globalThis.fetch = async (target, options) => {
     const path = new URL(target).pathname, payload = options.body && JSON.parse(options.body); calls.push({ path, payload }); let result;
@@ -193,7 +194,7 @@ test('OOH confirmation racing a cancellation, both reading before either writes,
 
 test('an OOH booking needs ad spend approval of its exact quote when the project requires it', { skip: postgresSkip }, async t => {
   await fixture(t, async ({ pool, db, store, project, calls, invoke, booking, bookingPath }) => {
-    await pool.query("INSERT INTO users VALUES ('o','Owner','o@example.test',NULL),('e','Editor','e@example.test',NULL); INSERT INTO memberships VALUES ('w','o','owner'),('w','e','editor'); INSERT INTO project_approval_policy (project_id,require_approval,require_ad_approval,updated_by,updated_at) VALUES ('ooh-audit',false,true,'o','2026-10-22T00:00:00Z')");
+    await seedAccounts(pool, { users: [{ id: 'o', name: 'Owner', email: 'o@example.test' }, { id: 'e', name: 'Editor', email: 'e@example.test' }], memberships: [['w', 'o', 'owner'], ['w', 'e', 'editor']] }); await pool.query("INSERT INTO project_approval_policy (project_id,require_approval,require_ad_approval,updated_by,updated_at) VALUES ('ooh-audit',false,true,'o','2026-10-22T00:00:00Z')");
     const editor = { role: 'editor', user: { id: 'e', name: 'Editor' }, config: { BROADSIGN_CURRENCY: 'USD' } }, books = () => calls.filter(call => call.path.includes('/book_proposal/')).length;
     const approvals = async (path, method = 'GET', body) => { let out; await handleApprovals({ db, store, project, role: 'owner', user: { id: 'o', name: 'Owner' }, req: { method }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body: body ?? {}, send(status, data) { out = { status, data }; } }); return out; };
     const approve = async reviewId => assert.equal((await approvals('ad-spend/review', 'POST', { reviewId, decision: 'approved' })).status, 200);

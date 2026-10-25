@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createContacts } from '../server/contacts.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 // Drizzle wraps driver errors; the PostgreSQL message is on the cause.
 const failure = pattern => error => pattern.test(error.cause?.message ?? error.message);
 async function fixture(t) {
   const { db, pool } = await testDatabase(t);
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('w', 'Fixture'); INSERT INTO projects (id, workspace_id, name) VALUES ('a', 'w', 'A'), ('b', 'w', 'B')");
+  await seedAccounts(pool, { workspaces: [{ id: 'w', name: 'Fixture' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('a', 'w', 'A'), ('b', 'w', 'B')");
   const project = id => pool.query('INSERT INTO projects (id, workspace_id, name) VALUES ($1, $2, $3)', [id, 'w', id]);
   return { db, pool, project, contacts: createContacts({ db }) };
 }

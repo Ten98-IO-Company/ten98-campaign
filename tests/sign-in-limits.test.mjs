@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createAuth, hashPassword, signInLimits } from '../server/auth.ts';
 import { clientLimitKey } from '@ten98/runtime';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { addUsers } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip }, secret = 'sign-in-limit-fixture-secret-32-characters';
 function response() {
@@ -42,7 +43,7 @@ test('an invalid TRUSTED_PROXIES setting stops startup', () => {
 
 test('failed sign-ins from one client behind a trusted proxy leave other clients able to sign in', pg, async t => {
   const { db } = await testDatabase(t), password = 'proxy fixture password 2026';
-  await db.$client.query('INSERT INTO users VALUES ($1, $2, $3, $4)', ['member', 'Member', 'member@example.test', await hashPassword(password)]);
+  await addUsers(db.$client, [{ id: 'member', name: 'Member', email: 'member@example.test', password: await hashPassword(password) }]);
   const auth = createAuth(db, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies: ['10.0.0.2'] }), viaProxy = client => request('10.0.0.2', client);
   for (let attempt = 0; attempt < signInLimits.client; attempt++) {
     await assert.rejects(auth.login(viaProxy('203.0.113.7'), response(), { email: `guess-${attempt}@example.test`, password: 'wrong password guess' }), error => error.status === 401);
@@ -60,7 +61,7 @@ test('failed sign-ins from one client behind a trusted proxy leave other clients
 
 test('the per-account sign-in limit trips across client addresses, and one client alone cannot reach it', pg, async t => {
   const { db } = await testDatabase(t), password = 'account fixture password 2026';
-  await db.$client.query('INSERT INTO users VALUES ($1, $2, $3, $4)', ['member', 'Member', 'member@example.test', await hashPassword(password)]);
+  await addUsers(db.$client, [{ id: 'member', name: 'Member', email: 'member@example.test', password: await hashPassword(password) }]);
   const auth = createAuth(db, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies: ['10.0.0.2'] }), viaProxy = client => request('10.0.0.2', client);
   const wrong = { email: 'Member@Example.test', password: 'wrong password guess' }, failed = async (client, status) => assert.rejects(auth.login(viaProxy(client), response(), wrong), error => error.status === status);
   // One client stops at its per-account limit; the account stays open to everyone else.

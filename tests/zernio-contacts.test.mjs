@@ -13,6 +13,7 @@ import { createContacts } from '../server/contacts.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { postgresSkip, testDatabase, testApp } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 const profileId = 'profile-a', id = value => String(value).padStart(24, '0');
@@ -64,7 +65,7 @@ function provider() {
 
 async function setup(t) {
   const { db, pool, sql } = await testDatabase(t);
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('w', 'Fixture'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a', 'w', 'Project A'), ('project-b', 'w', 'Project B'); INSERT INTO users (id, name, email, password) VALUES ('operator-a', 'Operator', 'operator-a@example.test', NULL); INSERT INTO instance_operators (user_id) VALUES ('operator-a')");
+  await seedAccounts(pool, { users: [{ id: 'operator-a', name: 'Operator', email: 'operator-a@example.test' }], workspaces: [{ id: 'w', name: 'Fixture' }], operators: ['operator-a'] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-a', 'w', 'Project A'), ('project-b', 'w', 'Project B')");
   const contacts = createContacts({ db }), local = await contacts.save('project-a', { name: 'Reviewed customer', email: 'customer@example.test', phone: '+12025550101', company: 'Own company', tags: ['vip'], consents: { whatsapp: true, sms: true }, consentSource: 'Explicit synthetic opt-in' }), second = await contacts.save('project-a', { name: 'Second customer', phone: '+12025550102', consents: { whatsapp: true }, consentSource: 'Explicit synthetic opt-in' });
   const { state, calls, api } = provider();
   let count = 0;

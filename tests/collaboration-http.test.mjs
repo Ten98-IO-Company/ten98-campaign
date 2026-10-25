@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addUsers } from './fixtures/accounts.ts';
 
 test('HTTP invitation links safely onboard new accounts, require the existing identity, preserve workspace scope and cannot reset passwords', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-collaboration-http-')), origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir, env: {}, appUrl: origin });
@@ -59,7 +60,7 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     assert.equal((await request(team + '/members')).status, 200);
 
     const existingId = randomUUID(), ownerHash = (await app.sql.get('SELECT password FROM users WHERE id=?', ownerState.user.id)).password;
-    await app.sql.run('INSERT INTO users VALUES(?,?,?,?)', existingId, 'Existing account', 'existing-colleague@example.test', ownerHash);
+    await addUsers(app.sql, [{ id: existingId, name: 'Existing account', email: 'existing-colleague@example.test', password: ownerHash }]);
     const existingCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: ownerPassword }, cookie: null })).cookie;
     const separate = await request('/api/workspaces', { method: 'POST', body: { name: 'Existing private workspace' }, cookie: existingCookie }); assert.equal(separate.status, 201);
     assert.equal((await request(`/api/state?projectId=${separate.data.projectId}`)).status, 404);

@@ -5,6 +5,7 @@ import { getTableConfig } from 'drizzle-orm/pg-core';
 import pg from 'pg';
 import * as schema from '../server/schema.ts';
 import { assertSchema, closeDatabase, getDatabase, migrate, migrationSources, parseInt8, pendingMigrations } from '../server/database.ts';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const tables = Object.values(schema).map(table => getTableConfig(table));
 const migrationSql = async () => (await migrationSources()).map(migration => migration.sql).join('\n');
@@ -87,7 +88,7 @@ test('migrations build exactly the Drizzle schema on PostgreSQL, once, and keep 
 
     // Fingerprints hash JSON.stringify of parsed documents, so key order must survive the database (jsonb would sort it).
     const document = JSON.stringify({ zeta: 1, id: 'r1', nested: { yy: [3, { b: 2, a: 1 }], x: 'é' }, a: null });
-    await pool.query("INSERT INTO workspaces (id, name) VALUES ('w', 'W'); INSERT INTO projects (id, workspace_id, name) VALUES ('p', 'w', 'P'); INSERT INTO users (id, name, email) VALUES ('u', 'U', 'u@example.com')");
+    await seedAccounts(pool, { users: [{ id: 'u', name: 'U', email: 'u@example.com' }], workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('p', 'w', 'P')");
     for (const id of ['r1', 'r2', 'r3']) await pool.query("INSERT INTO records (id, project_id, collection, data) VALUES ($1, 'p', 'posts', $2)", [id, document]);
     await pool.query("INSERT INTO post_recycling_reviews VALUES ('v', 'p', 'post', 'f', $1, $1, 'u', 'now')", [document]);
     const stored = (await pool.query("SELECT data, data->'nested'->>'x' AS x FROM records WHERE id = 'r1'")).rows[0];

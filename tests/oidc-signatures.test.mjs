@@ -5,6 +5,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import * as openid from 'openid-client';
 import { createAuth } from '../server/auth.ts';
 import { postgresSkip, signInRedirectError, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 function response() {
   return { headers: {}, status: null, setHeader(name, value) { this.headers[name] = value; }, getHeader(name) { return this.headers[name]; }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers); }, end() {} };
@@ -36,7 +37,7 @@ async function mockIssuer(t) {
 
 test('ID token signatures are verified against the issuer JWKS', { skip: postgresSkip }, async t => {
   const { db } = await testDatabase(t), issuer = await mockIssuer(t);
-  await db.$client.query("INSERT INTO users VALUES ('existing', 'Existing', 'existing@example.test', NULL)");
+  await seedAccounts(db.$client, { users: [{ id: 'existing', name: 'Existing', email: 'existing@example.test' }] });
   const config = { appUrl: 'https://campaign.example', sessionSecret: 'oidc-signature-fixture-secret-32-characters', oidcEnabled: true, oidcIssuer: issuer.url, oidcClientId: 'fixture-client', oidcClientSecret: 'fixture-client-secret', oidcAllowedEmails: ['allowed@example.test'] };
   // The real openid-client; the only change lets it reach this plain-HTTP local issuer.
   const openidClient = async () => ({ ...openid, discovery: (server, clientId, metadata, auth, options = {}) => openid.discovery(server, clientId, metadata, auth, { ...options, execute: [...(options.execute || []), openid.allowInsecureRequests] }) });

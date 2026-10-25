@@ -5,6 +5,7 @@ import pg from 'pg';
 import { connect, createStore } from '../server/database.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from '../server/webhooks.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const env = { ZERNIO_WEBHOOK_SECRET: 'webhook-test-secret-with-enough-entropy' };
 const signature = bytes => createHmac('sha256', env.ZERNIO_WEBHOOK_SECRET).update(bytes).digest('hex');
@@ -15,7 +16,7 @@ function signed(service, payload, extraHeaders = {}) {
 }
 async function fixture(t) {
   const { db, pool, url } = await testDatabase(t), store = createStore(db);
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('workspace-a', 'Workspace A'), ('workspace-b', 'Workspace B')");
+  await seedAccounts(pool, { workspaces: [{ id: 'workspace-a', name: 'Workspace A' }, { id: 'workspace-b', name: 'Workspace B' }] });
   await pool.query("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'workspace-a', 'A', 'profile-a'), ('project-b', 'workspace-b', 'B', 'profile-b')");
   const post = await store.create('project-a', 'posts', { content: 'Local copy', externalId: 'remote-post-a', zernioProfileId: 'profile-a', status: 'submitted' });
   const one = async (text, params) => (await pool.query(text, params)).rows[0];

@@ -7,6 +7,7 @@ import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { createApp } from '../server/index.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addMemberships, addUsers } from './fixtures/accounts.ts';
 
 test('native ad connection tests persist rotated tokens, survive restart and reject credentials changed in flight', { skip: postgresSkip }, async t => {
   const database = await testDatabase(t), { sql } = database;
@@ -108,11 +109,11 @@ test('integration settings HTTP routes enforce operators, retain encrypted secre
     assert.equal(JSON.stringify(settings.data).includes(env.ZERNIO_API_KEY), false);
 
     const passwordHash = (await sql.get('SELECT password FROM users WHERE id=?', state.user.id)).password, otherUserId = randomUUID();
-    await sql.run('INSERT INTO users VALUES(?,?,?,?)', otherUserId, 'Workspace owner', 'settings-owner@example.test', passwordHash);
+    await addUsers(sql, [{ id: otherUserId, name: 'Workspace owner', email: 'settings-owner@example.test', password: passwordHash }]);
     const otherCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'settings-owner@example.test', password: 'fixture settings password 2026' } })).cookie;
     const otherWorkspace = await request('/api/workspaces', { method: 'POST', body: { name: 'Separate workspace' }, cookie: otherCookie });
     assert.equal(otherWorkspace.status, 201);
-    await sql.run("INSERT INTO memberships VALUES(?,?,'owner')", workspaceId, otherUserId);
+    await addMemberships(sql, [[workspaceId, otherUserId, 'owner']]);
     for (const action of [request(route, { cookie: otherCookie }), save('zernio', { apiKey: 'unauthorized-fixture-key' }, { cookie: otherCookie }), request(`${route}/zernio`, { method: 'DELETE', cookie: otherCookie }), request(`${route}/zernio/test`, { method: 'POST', body: { projectId }, cookie: otherCookie })]) assert.equal((await action).status, 403, 'Workspace ownership does not grant installation credentials access.');
     assert.equal((await save('zernio', { apiKey: 'csrf-fixture-key' }, { originHeader: null })).status, 403);
     assert.equal((await save('zernio', { apiKey: 'csrf-fixture-key' }, { originHeader: 'https://other.example.test' })).status, 403);

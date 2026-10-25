@@ -9,6 +9,7 @@ import { createWebhookService } from '../server/webhooks.ts';
 import { handleInbox } from '../server/inbox.ts';
 import { blockWrites, lockWaiters, postgresSkip, testApp, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addMemberships, addUsers, seedAccounts } from './fixtures/accounts.ts';
 
 // Team triage overlay (ten98-campaign#41 change 1): waiting/first reply from the webhook drain and confirmed replies,
 // and the item-state read and update endpoints with their role, membership, lock and optimistic-concurrency gates.
@@ -31,7 +32,7 @@ test('the overlay table holds only key, triage and timing columns, never provide
 
 async function drainFixture(t) {
   const { db, pool, sql } = await testDatabase(t);
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('w', 'W'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'w', 'A', 'profile-a')");
+  await seedAccounts(pool, { workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'w', 'A', 'profile-a')");
   const service = createWebhookService({ db, contacts: createContacts({ db }), env: { ZERNIO_WEBHOOK_SECRET: secret } });
   const deliver = async payload => { const raw = Buffer.from(JSON.stringify(payload)); assert.equal((await service.receive(raw, { 'x-zernio-signature': sign(raw) })).status, 202); assert.equal((await service.processPending()).processed, 1); };
   const state = (kind, resourceId) => sql.get('SELECT * FROM inbox_item_state WHERE project_id=? AND profile_id=? AND account_id=? AND kind=? AND resource_id=?', 'project-a', 'profile-a', 'page-a', kind, resourceId);
@@ -114,8 +115,8 @@ async function appFixture(t) {
   const { workspace_id: workspaceId } = await app.sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId), ownerId = (await app.sql.get("SELECT id FROM users WHERE email='owner@example.test'")).id, hash = (await app.sql.get('SELECT password FROM users WHERE id=?', ownerId)).password;
   const people = {};
   for (const [name, role] of [['editor', 'editor'], ['second', 'editor'], ['viewer', 'viewer'], ['outsider', null]]) {
-    const userId = randomUUID(); await app.sql.run('INSERT INTO users VALUES(?,?,?,?)', userId, name, `${name}@example.test`, hash);
-    if (role) await app.sql.run('INSERT INTO memberships VALUES(?,?,?)', workspaceId, userId, role);
+    const userId = randomUUID(); await addUsers(app.sql, [{ id: userId, name: name, email: `${name}@example.test`, password: hash }]);
+    if (role) await addMemberships(app.sql, [[workspaceId, userId, role]]);
     people[name] = { id: userId, cookie: (await request('/api/auth/login', { method: 'POST', body: { email: `${name}@example.test`, password } })).cookie };
   }
   people.owner = { id: ownerId, cookie: owner };

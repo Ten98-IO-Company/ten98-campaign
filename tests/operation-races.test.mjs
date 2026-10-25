@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { IntegrationError, claimFence, operation, releaseFence } from '../server/provider-core.ts';
 import { handleOperationRecovery } from '../server/operation-recovery.ts';
 import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 async function fixture(t) {
   const database = await testDatabase(t);
-  await database.pool.query("INSERT INTO workspaces (id, name) VALUES ('w', 'W'); INSERT INTO projects (id, workspace_id, name) VALUES ('p', 'w', 'P'); INSERT INTO users VALUES ('operator', 'Operator', 'operator@example.test', NULL)");
+  await seedAccounts(database.pool, { users: [{ id: 'operator', name: 'Operator', email: 'operator@example.test' }], workspaces: [{ id: 'w', name: 'W' }] }); await database.pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('p', 'w', 'P')");
   const context = (key, body = { name: 'fixture' }) => ({ db: database.db, project: { id: 'p' }, req: { method: 'POST', headers: { 'idempotency-key': key } }, url: new URL('https://campaign.example/api/projects/p/integrations/social/update'), body });
   // A provider call that waits until the test lets it finish, counting how many requests actually reached the provider.
   const provider = { calls: 0, release: () => {} };

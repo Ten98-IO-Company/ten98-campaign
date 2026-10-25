@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { clientLimitKey } from '@ten98/runtime';
 import { createAuth, hashPassword, signInLimits } from '../server/auth.ts';
 import { blockWrites, postgresSkip, signInRedirectError, testApp, testDatabase } from './postgres.mjs';
+import { addUsers, seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 function response() {
@@ -22,7 +23,7 @@ function afterQuery(db, marker) {
   } });
   return { db: watched, reached };
 }
-async function seedUser(db, id, email, password) { await db.$client.query('INSERT INTO users VALUES ($1, $2, $3, $4)', [id, 'Fixture', email, password]); }
+async function seedUser(db, id, email, password) { await addUsers(db.$client, [{ id: id, name: 'Fixture', email: email, password: password }]); }
 
 test('an old-password login already verifying cannot create a session after a password change', pg, async t => {
   const { db } = await testDatabase(t), oldPassword = 'old fixture password 2026', nextPassword = 'new fixture password 2026';
@@ -120,7 +121,7 @@ const oidcConfig = (secret) => ({ appUrl: 'https://campaign.example', sessionSec
 test('OIDC invitation continuation is browser-bound, single-use and origin-fixed without bypassing provisioning or identity linking', pg, async t => {
   const { db } = await testDatabase(t), config = oidcConfig('oidc-continuation-fixture-secret-32-characters'), invite = 'A'.repeat(43), appUrl = config.appUrl;
   await seedUser(db, 'local-user', 'local@example.test', 'unchanged-local-hash');
-  await db.$client.query("INSERT INTO users VALUES ('identity-user', 'Identity', 'identity@example.test', NULL)");
+  await seedAccounts(db.$client, { users: [{ id: 'identity-user', name: 'Identity', email: 'identity@example.test' }] });
   await db.$client.query('INSERT INTO oidc_identities VALUES ($1, $2, $3)', [config.oidcIssuer, 'existing-subject', 'identity-user']);
   const oidc = oidcFixture(t, db, config), digest = value => createHmac('sha256', config.sessionSecret).update(value).digest('hex');
   for (const value of ['https://attacker.example/redirect', '../escape', 'short']) await assert.rejects(oidc.start('?invite=' + encodeURIComponent(value)), error => error.status === 400);
@@ -160,7 +161,7 @@ test('OIDC invitation continuation is browser-bound, single-use and origin-fixed
 
 test('a replayed OIDC callback is claimed once even when the replays arrive together', pg, async t => {
   const { db, pool } = await testDatabase(t), config = oidcConfig('oidc-replay-fixture-secret-32-characters-x');
-  await db.$client.query("INSERT INTO users VALUES ('identity-user', 'Identity', 'identity@example.test', NULL)");
+  await seedAccounts(db.$client, { users: [{ id: 'identity-user', name: 'Identity', email: 'identity@example.test' }] });
   await db.$client.query('INSERT INTO oidc_identities VALUES ($1, $2, $3)', [config.oidcIssuer, 'existing-subject', 'identity-user']);
   const oidc = oidcFixture(t, db, config), flow = await oidc.start();
   // Both replays find the flow before either claim commits unless the claim itself is the single DELETE ... RETURNING.
@@ -231,7 +232,7 @@ test('an expired, revoked or no-longer-authorized invitation falls back to the O
   const { db } = await testDatabase(t), config = oidcConfig('oidc-invite-fixture-secret-32-characters-c'), oidc = oidcFixture(t, db, config);
   const expired = await seedInvitation(db, { token: 'E'.repeat(43), expiresAt: Date.now() - 1000 }), revoked = await seedInvitation(db, { token: 'R'.repeat(43), revokedAt: Date.now() });
   const demoted = await seedInvitation(db, { token: 'D'.repeat(43), role: 'admin' });
-  await db.$client.query("INSERT INTO users VALUES ('admin-inviter', 'Admin', 'admin@example.test', NULL)"); await db.$client.query("INSERT INTO memberships VALUES ('team', 'admin-inviter', 'admin')");
+  await seedAccounts(db.$client, { users: [{ id: 'admin-inviter', name: 'Admin', email: 'admin@example.test' }] }); await seedAccounts(db.$client, { memberships: [['team', 'admin-inviter', 'admin']] });
   await db.$client.query("UPDATE workspace_invitations SET inviter_id = 'admin-inviter' WHERE token_hash = $1", [createHash('sha256').update(demoted).digest('hex')]);
   oidc.claims = invitedIdentity(config, 'invitee@example.test');
   for (const token of [expired, revoked, demoted]) await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_NOT_PROVISIONED', token[0]);
