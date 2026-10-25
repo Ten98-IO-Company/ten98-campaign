@@ -214,14 +214,14 @@ export async function createApp(options: AppOptions = {}) {
         }
         if (path === '/api/auth/setup' && req.method === 'POST') {
           await auth.limit(auth.clientKey(req, 'setup'), 10);
-          if (await claimed(db)) throw new HttpError(409, 'Setup is already complete. Sign in to continue.');
+          if (await claimed(db)) throw new HttpError(409, 'Setup is complete. Sign in with the owner account.');
           // The first sign-up claims the installation as its owner (as in Discover); afterwards accounts join only by invitation.
           // Any legacy setup token in the body is ignored. The first project, and its optional sample, is the next step.
           const name = text(body.name, 'Name'), mail = email(body.email), hash = await hashPassword(password(body.password)), workspace = workspaceName(body.workspaceName);
           const id = randomUUID(), workspaceId = randomUUID();
           // The installation row lock makes setup single use under parallel requests.
           await db.transaction(async tx => {
-            if ((await first<{ claimed: boolean }>(tx.execute(sql`SELECT claimed FROM installation WHERE id = 1 FOR UPDATE`)))?.claimed) throw new HttpError(409, 'Setup is already complete.');
+            if ((await first<{ claimed: boolean }>(tx.execute(sql`SELECT claimed FROM installation WHERE id = 1 FOR UPDATE`)))?.claimed) throw new HttpError(409, 'Setup is complete. Sign in with the owner account.');
             await tx.execute(sql`INSERT INTO users VALUES (${id}, ${name}, ${mail}, ${hash})`);
             await setInstanceOperator(tx, id, true, 'bootstrap');
             await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspaceId}, ${workspace})`); await tx.execute(sql`INSERT INTO memberships VALUES (${workspaceId}, ${id}, 'owner')`);
