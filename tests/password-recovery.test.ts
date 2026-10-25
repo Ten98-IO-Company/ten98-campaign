@@ -3,34 +3,36 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { TestContext } from 'node:test';
 import { postgresSkip, testApp } from './postgres.mjs';
 
 // Self-service password recovery (#284), as Discover offers it: one-hour single-use links sent by the installation's
 // transactional email, the same answer for every address, and a reset that ends the account's sessions.
 const pg = { skip: postgresSkip }, emailEnv = { CLOUDFLARE_ACCOUNT_ID: 'a'.repeat(32), CLOUDFLARE_EMAIL_API_TOKEN: 'test-cloudflare-token', CLOUDFLARE_EMAIL_FROM_ADDRESS: 'accounts@example.com' };
 
-async function fixture(t, env = emailEnv) {
+type Reply = { status: number; data: any; cookie?: string };
+async function fixture(t: TestContext, env: Record<string, string> = emailEnv) {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-recovery-')), origin = 'http://127.0.0.1:3000';
   const app = await testApp(t, { dataDir, env, appUrl: origin, directScheduler: false });
-  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
-  const base = `http://127.0.0.1:${app.server.address().port}`, originalFetch = globalThis.fetch, sent = [];
-  globalThis.fetch = async (target, options = {}) => {
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', () => resolve()));
+  const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`, originalFetch = globalThis.fetch, sent: any[] = [];
+  globalThis.fetch = async (target: any, options: any = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
     assert.equal(url.hostname, 'api.cloudflare.com'); assert.ok(url.pathname.endsWith('/email/sending/send'));
     const body = JSON.parse(options.body); sent.push(body);
     return Response.json({ success: true, result: { message_id: 'reset-' + sent.length, delivered: body.to, queued: [], permanent_bounces: [] } });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
-  async function request(path, { method = 'GET', body, cookie } = {}) {
+  async function request(path: string, { method = 'GET', body, cookie }: { method?: string; body?: unknown; cookie?: string } = {}): Promise<Reply> {
     const response = await originalFetch(base + path, { method, headers: { ...(method !== 'GET' ? { Origin: origin } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, data: await response.json(), cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Owner', email: 'owner@example.test', password: 'original owner password' } });
   assert.equal(setup.status, 201);
-  const delivered = async count => { for (let tick = 0; tick < 50 && sent.length < count; tick++) await new Promise(resolve => setTimeout(resolve, 20)); return sent; };
+  const delivered = async (count: number) => { for (let tick = 0; tick < 50 && sent.length < count; tick++) await new Promise(resolve => setTimeout(resolve, 20)); return sent; };
   return { app, request, sent, delivered, ownerCookie: setup.cookie };
 }
-const tokenOf = mail => /#password-reset=([\w-]{43})/.exec(mail.text)?.[1];
+const tokenOf = (mail: { text: string }): string => /#password-reset=([\w-]{43})/.exec(mail.text)?.[1] ?? '';
 
 test('a reset link resets the password once, within the hour, and ends every session', pg, async t => {
   const f = await fixture(t);
@@ -92,9 +94,9 @@ test('changing the password in settings retires an outstanding reset link', pg, 
 });
 
 test('a reset email that cannot be sent is logged without the address or the token', pg, async t => {
-  const f = await fixture(t), logged = [], originalError = console.error, workingFetch = globalThis.fetch;
-  globalThis.fetch = async (target, options) => new URL(target).hostname === 'api.cloudflare.com' ? Response.json({ success: false, errors: [{ code: 10000 }] }, { status: 500 }) : workingFetch(target, options);
-  console.error = (...args) => logged.push(args.map(String).join(' '));
+  const f = await fixture(t), logged: string[] = [], originalError = console.error, workingFetch = globalThis.fetch;
+  globalThis.fetch = async (target: any, options?: any) => new URL(target).hostname === 'api.cloudflare.com' ? Response.json({ success: false, errors: [{ code: 10000 }] }, { status: 500 }) : workingFetch(target, options);
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(' '));
   t.after(() => { console.error = originalError; });
   assert.equal((await f.request('/api/auth/request-password-reset', { method: 'POST', body: { email: 'owner@example.test' } })).status, 200);
   for (let tick = 0; tick < 50 && !logged.length; tick++) await new Promise(resolve => setTimeout(resolve, 20));
