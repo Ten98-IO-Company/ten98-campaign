@@ -99,6 +99,12 @@ export const oidcIdentities = pgTable('oidc_identities', {
 }, t => [
   primaryKey({ columns: [t.issuer, t.subject] }),
 ]);
+export const passwordResets = pgTable('password_resets', {
+  token_hash: text('token_hash').primaryKey(),
+  user_id: text('user_id').notNull().unique().references(() => users.id, { onDelete: 'cascade' }),
+  expires_at: bigint('expires_at', { mode: 'number' }).notNull(),
+  created_at: bigint('created_at', { mode: 'number' }).notNull(),
+});
 export const loginLimits = pgTable('login_limits', {
   key: text('key').primaryKey(),
   count: integer('count').notNull(),
