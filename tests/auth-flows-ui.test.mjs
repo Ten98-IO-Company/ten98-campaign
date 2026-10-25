@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { AuthStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow } from '@ten98/ui';
+import { AuthFrameProvider, AuthStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow } from '@ten98/ui';
 import { AppBrand } from '@ten98/ui/app';
 
 // Evaluate Campaign's real adapter against the shared flows.
@@ -18,6 +18,8 @@ const authStory = new Function('React', 'AuthStory', storyCode + '; return authS
 // startupAuthError is the module-level message read once from ?auth_error at startup.
 const load = (startupAuthError = '') => new Function('React', 'Brand', 'authStory', 'FirstUserSetupFlow', 'OidcProviderButtons', 'SignInFlow', 'startupAuthError', code + '; return Auth;')(React, AppBrand, authStory, FirstUserSetupFlow, OidcProviderButtons, SignInFlow, startupAuthError);
 const Auth = load();
+// The app mounts one AuthFrameProvider at the root (DS #157); screens render inside the same frame here.
+const framed = element => React.createElement(AuthFrameProvider, { brand: React.createElement(AppBrand, { product: 'Campaign' }), aside: authStory, passwordPolicy: { minLength: 12, maxLength: 128 } }, element);
 
 test('first boot is one screen: name, email, password, a prefilled workspace name and one Create owner account button', () => {
   let submitted;
@@ -28,10 +30,10 @@ test('first boot is one screen: name, email, password, a prefilled workspace nam
   // Discover's wording (#265): who the first account becomes. No custom hint, so the library's policy hint shows here
   // as on the invitation screen (#273).
   assert.equal(screen.props.description, 'The first account becomes the owner of this installation and its workspace. You can rename the workspace later.');
-  assert.deepEqual(screen.props.passwordPolicy, { minLength: 12, maxLength: 128 });
-  // Like Discover's, the screen sits beside the story panel in the shared split layout with the open form column.
-  assert.equal(screen.props.aside.type, AuthStory);
-  const html = renderToStaticMarkup(screen);
+  // Brand, story panel and password policy come from the root AuthFrameProvider, as in Discover; the landmark is 'Account access'.
+  for (const prop of ['brand', 'aside', 'passwordPolicy', 'busyLabel']) assert.equal(screen.props[prop], undefined, prop);
+  assert.equal(screen.props.label, 'Account access');
+  const html = renderToStaticMarkup(framed(screen));
   assert.match(html, /auth-split/); assert.match(html, /Plan\. Publish\./); assert.doesNotMatch(html, /t98-auth-layout--card/);
   assert.match(html, /<h1[^>]*>Create owner account<\/h1>/);
   for (const field of ['name', 'email', 'password']) assert.match(html, new RegExp(`<input[^>]*required[^>]*name="${field}"|<input[^>]*name="${field}"[^>]*required`), `${field} is required`);
@@ -54,7 +56,7 @@ test('sign-in submits credentials, and invitation single sign-on starts through 
   assert.equal(screen.type, SignInFlow);
   // Sign-in and first boot share one story panel and the default split layout, as in Discover.
   const setup = Auth({ session: { setupRequired: true }, error: '', busy: false, onSubmit() {} });
-  assert.equal(screen.props.aside, setup.props.aside); assert.equal(screen.props.surface, undefined); assert.equal(screen.props.eyebrow, undefined, 'No eyebrow above the form, as in Discover (#265).');
+  assert.equal(screen.props.aside, undefined); assert.equal(setup.props.aside, undefined); assert.equal(screen.props.label, 'Account access'); assert.equal(screen.props.surface, undefined); assert.equal(screen.props.eyebrow, undefined, 'No eyebrow above the form, as in Discover (#265).');
   const html = renderToStaticMarkup(screen);
   assert.match(html, /<h1[^>]*>Sign in to join<\/h1>/); assert.match(html, /role="alert"[^>]*>[^<]*Email or password is incorrect\.|Email or password is incorrect\./);
   assert.match(html, /Organization single sign-on/);
@@ -185,10 +187,20 @@ test('a claimed installation offers Sign in instead, which carries the typed ema
   claimed.props.signInInstead.onClick('me@example.test'); assert.deepEqual(signedIn, ['me@example.test']);
   const signIn = Auth({ session: { setupRequired: false }, error: '', busy: false, onSubmit() {}, signInInstead: { offered: false, email: 'me@example.test' } });
   assert.equal(signIn.type, SignInFlow); assert.deepEqual(signIn.props.defaultValues, { email: 'me@example.test' });
-  assert.equal(claimed.props.aside.props.eyebrow, 'Campaign management');
+  assert.equal(authStory.props.eyebrow, 'Campaign management');
 });
 
 test('the 409 path and the startup retry are wired in the app', () => {
-  assert.match(source, /\.catch\(\(err: any\) => \{ if \(session\.setupRequired && err\?\.status === 409\) setSignInInstead\(\{ offered: true, email: values\.email \|\| '' \}\); throw err; \}\)/);
+  assert.match(source, /\.catch\(\(err: any\) => \{ if \(session\.setupRequired && err\?\.status === 409\) setSignInInstead\(\{ offered: true, email: values\.email \|\| '' \}\);/);
   assert.match(source, /message=\{error \|\| 'Loading Campaign…'\} onRetry=\{error \? \(\) => \{ setError\(''\); loadSession\(\); \} : undefined\}/);
+});
+
+// A sign-in or owner setup with no HTTP answer is unconfirmed, as in Discover: the screen says so instead of an error.
+test('an unconfirmed sign-in or setup shows the unconfirmed notice instead of an error', () => {
+  for (const setupRequired of [false, true]) {
+    const screen = Auth({ session: { setupRequired }, error: 'Failed to fetch', busy: false, onSubmit() {}, unconfirmed: 'Could not be confirmed.' });
+    assert.equal(screen.props.unconfirmed, 'Could not be confirmed.');
+  }
+  assert.equal(Auth({ session: { setupRequired: false }, error: 'Failed to fetch', busy: false, onSubmit() {}, unconfirmed: 'Could not be confirmed.' }).props.error, undefined, 'Sign-in shows only the unconfirmed notice.');
+  assert.match(source, /if \(err\?\.status === undefined && err\?\.name !== 'AbortError'\) setAuthUnconfirmed\(/);
 });

@@ -28,7 +28,7 @@ test('the request stage checks availability, sends the trimmed email and confirm
   ui.effects.forEach(effect => effect()); await settle();
   let tree = ui.render();
   assert.equal(tree.type, PasswordRecoveryFlow); assert.equal(tree.props.stage, 'request'); assert.equal(tree.props.availability, 'enabled');
-  assert.equal(tree.props.aside, story); assert.deepEqual(tree.props.defaultValues, { email: 'me@example.test' });
+  assert.equal(tree.props.aside, undefined, 'The story panel comes from the root AuthFrameProvider.'); assert.equal(tree.props.label, 'Account access'); assert.deepEqual(tree.props.defaultValues, { email: 'me@example.test' });
   await tree.props.onSubmit({ email: '  me@example.test ' });
   assert.deepEqual(calls.at(-1), ['/auth/request-password-reset', 'POST', { email: 'me@example.test' }]);
   tree = ui.render(); assert.equal(tree.props.sent, true); assert.match(tree.props.messages.sent, /If an account with a password matches/);

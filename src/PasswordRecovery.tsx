@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { PasswordRecoveryFlow } from '@ten98/ui';
-import { AppBrand as Brand } from '@ten98/ui/app';
-import { authStory } from './auth-story';
 
 // Self-service password recovery (#284), ported from Discover's PasswordRecoveryPanel (src/components/PasswordRecoveryPanel.tsx)
 // so both apps word and behave the same. The reset token comes from the #password-reset= fragment and stays in memory.
@@ -47,9 +45,9 @@ export default function PasswordRecovery({ value, initialEmail, request, onReque
     }
   }
   const common = {
-    brand: <Brand product="Campaign" href="/"/>, aside: authStory, title: value.kind === 'request' ? 'Reset your password' : 'Choose a new password',
-    busy, busyLabel: value.kind === 'request' ? 'Requesting link…' : 'Changing password…', error, unconfirmed,
-    backToSignIn: { onClick: () => onSignIn() }, passwordPolicy: { minLength: 12, maxLength: 128 },
+    label: 'Account access', title: value.kind === 'request' ? 'Reset your password' : 'Choose a new password',
+    busy, error, unconfirmed,
+    backToSignIn: { onClick: () => onSignIn() },
     messages: {
       loading: 'Checking email recovery…',
       disabled: 'Email recovery is not set up for this installation. Ask your administrator to reset your password.',

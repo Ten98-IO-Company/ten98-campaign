@@ -118,8 +118,9 @@ test('Demand Gen exposes target CPC while Performance Max retains conversion-onl
 
 test('render and lazy-load failures show a reload action without exposing the original error', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
-  const mount = source.match(/render\(<AuthErrorBoundary fallback=\{\{ brand: <Brand product="Campaign"\/>, title: '([^']+)', message: '([^']+)', retryLabel: '([^']+)' \}\}><ToastProvider><App\/><\/ToastProvider><\/AuthErrorBoundary>\)/);
-  assert.ok(mount, 'The app root is wrapped by the shared boundary with Campaign copy.');
+  // The AuthFrameProvider sits outside the boundary (DS #157), so the fallback takes Campaign's brand from it.
+  const mount = source.match(/render\(<AuthFrameProvider brand=\{<Brand product="Campaign"\/>\} aside=\{authStory\} passwordPolicy=\{\{ minLength: 12, maxLength: 128 \}\}><AuthErrorBoundary fallback=\{\{ title: '([^']+)', message: '([^']+)', retryLabel: '([^']+)' \}\}><ToastProvider><App\/><\/ToastProvider><\/AuthErrorBoundary><\/AuthFrameProvider>\)/);
+  assert.ok(mount, 'The app root is wrapped by the auth frame and the shared boundary with Campaign copy.');
   const [, title, message, retryLabel] = mount;
   assert.equal(retryLabel, 'Reload app'); assert.doesNotMatch(source, /class AppBoundary /);
   let reloads = 0;
