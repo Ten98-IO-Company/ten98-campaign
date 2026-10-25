@@ -25,7 +25,7 @@ async function account(command: string, db: Database) {
     if (typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) throw new CliError('Use a password between 12 and 128 characters.');
     const next = await hashPassword(input.password);
     // The user row lock orders the reset against a sign-in or password change running in the app.
-    await db.transaction(async tx => { await lockUser(tx, existing.id); await tx.execute(sql`UPDATE users SET password = ${next} WHERE id = ${existing.id}`); await tx.execute(sql`DELETE FROM sessions WHERE user_id = ${existing.id}`); });
+    await db.transaction(async tx => { await lockUser(tx, existing.id); await tx.execute(sql`UPDATE users SET password = ${next} WHERE id = ${existing.id}`); await tx.execute(sql`DELETE FROM password_resets WHERE user_id = ${existing.id}`); await tx.execute(sql`DELETE FROM sessions WHERE user_id = ${existing.id}`); });
     console.log('Local password reset. All account sessions were signed out.');
   } else {
     if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 120 || /[\u0000-\u001f]/.test(input.name)) throw new CliError('Use a name between 1 and 120 characters.');
