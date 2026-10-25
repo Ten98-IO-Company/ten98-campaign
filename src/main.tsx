@@ -23,6 +23,7 @@ import AccountSettings from './AccountSettings';
 import OperationRecovery from './OperationRecovery';
 import AcceptInvitation from './AcceptInvitation';
 import { authStory } from './auth-story';
+import PasswordRecovery, { type PasswordRecoveryState } from './PasswordRecovery';
 import PostManagement from './PostManagement';
 import ContentApprovals from './ContentApprovals';
 import ApprovalPolicy from './ApprovalPolicy';
@@ -179,7 +180,7 @@ function App() {
   const discardSwitch = useRef(false);
   const discardAction = useRef<(() => void) | null>(null), dirtyScopes = useRef(new Map<Element, number>());
   const [inboxTarget, setInboxTarget] = useState<{ channel: 'sms' | 'whatsapp'; accountId?: string; search?: string; projectId: string } | null>(null);
-  const [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [notice, setNotice] = useState(''), [error, setError] = useState(''), [signInInstead, setSignInInstead] = useState<{ offered: boolean; email: string }>({ offered: false, email: '' }), [accountOpen, setAccountOpen] = useState(false);
+  const [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [notice, setNotice] = useState(''), [error, setError] = useState(''), [signInInstead, setSignInInstead] = useState<{ offered: boolean; email: string }>({ offered: false, email: '' }), [accountOpen, setAccountOpen] = useState(false), [recovery, setRecovery] = useState<PasswordRecoveryState | null>(startupReset);
   const rememberFocus = useFocusReturn(busy); // A failed owner setup or sign-in returns focus to the control that submitted it.
   const [mobile, setMobile] = useState(false), [currency, setCurrency] = useState('AED');
   const [remote, setRemote] = useState<any>({}), [connectionRevision, setConnectionRevision] = useState(0);
@@ -538,11 +539,12 @@ function App() {
   }
   if (!session) return <AppStateScreen state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading Campaign…'} onRetry={error ? () => { setError(''); loadSession(); } : undefined}/>;
   if (inviteToken && !(inviteSignIn && !session.user)) return <AcceptInvitation key={inviteToken + ':' + (session.user?.id || '')} token={inviteToken} signedInEmail={session.user?.email} request={api} onAccepted={() => { window.location.assign('/'); }} onSignIn={email => { setInviteSignIn({ email }); if (session.user) run(async () => { await api('/auth/logout', 'POST', {}); setSession(await api('/session')); }); }} onCancel={() => { setInviteSignIn(null); setInviteToken(''); }}/>;
+  if (!session.user && recovery) return <PasswordRecovery key={recovery.kind} value={recovery} initialEmail={signInInstead.email} request={api} onRequest={() => setRecovery({ kind: 'request' })} onSignIn={changed => { setRecovery(null); if (changed) setSession((current: any) => ({ ...current, passwordChanged: true })); }}/>;
   if (!session.user) return <Auth session={session} inviteToken={inviteToken} inviteEmail={inviteSignIn?.email} onBackToInvitation={() => { setError(''); setInviteSignIn(null); }} error={error} busy={busy} onOidcStart={() => run(async () => {
     const { authorizationUrl } = await api('/auth/oidc/start', 'POST', { token: inviteToken });
     if (typeof authorizationUrl !== 'string' || !/^https?:\/\//.test(authorizationUrl)) throw new Error('Single sign-on could not be started. Try again.');
     window.location.assign(authorizationUrl);
-  })} signInInstead={signInInstead} onSignInInstead={email => { setError(''); setSignInInstead({ offered: false, email }); loadSession(); }} onSubmit={async values => { rememberFocus(); await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values).catch((err: any) => { if (session.setupRequired && err?.status === 409) setSignInInstead({ offered: true, email: values.email || '' }); throw err; }); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
+  })} onForgotPassword={email => { setSignInInstead(current => ({ ...current, email })); setRecovery({ kind: 'request' }); }} signInInstead={signInInstead} onSignInInstead={email => { setError(''); setSignInInstead({ offered: false, email }); loadSession(); }} onSubmit={async values => { rememberFocus(); await run(async () => { await api('/auth/' + (session.setupRequired ? 'setup' : 'login'), 'POST', values).catch((err: any) => { if (session.setupRequired && err?.status === 409) setSignInInstead({ offered: true, email: values.email || '' }); throw err; }); const s = await api('/session'); ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); setState(null); setRemote({}); setSession(s); await reload(new URLSearchParams(window.location.search).get('project') || ''); }); }}/>;
   if (!state) return <AppStateScreen state={error ? 'error' : 'loading'} brand={<Brand product="Campaign"/>} message={error || 'Loading your campaigns…'} onRetry={error ? () => run(() => reload()) : undefined}/>;
   // After the first sign-up, the owner's workspace has no project yet: the next step creates it.
   const firstProjectWorkspace = !state.projects.length && state.workspaces.find(w => w.role === 'owner' || w.role === 'admin');
@@ -717,6 +719,14 @@ function takeInvite(location: Pick<Location, 'pathname' | 'search' | 'hash'>, hi
   return token;
 }
 const startupInvite = takeInvite(window.location, window.history);
+// A #password-reset= link opens the new-password step; the fragment leaves the address at once and the token stays in memory.
+function takeReset(location: Pick<Location, 'pathname' | 'search' | 'hash'>, history: Pick<History, 'state' | 'replaceState'>): PasswordRecoveryState | null {
+  const token = new URLSearchParams(location.hash.slice(1)).get('password-reset');
+  if (token === null) return null;
+  history.replaceState(history.state, '', location.pathname + location.search);
+  return { kind: 'reset', token: /^[\w-]{43}$/.test(token) ? token : null };
+}
+const startupReset = takeReset(window.location, window.history);
 // A link pasted into an open tab changes only the fragment, so the running app reads it the same way.
 function watchInvite(target: Pick<Window, 'location' | 'history' | 'addEventListener' | 'removeEventListener'>, onInvite: (token: string) => void) {
   const read = () => { const token = takeInvite(target.location, target.history); if (token) onInvite(token); };
@@ -738,7 +748,7 @@ function FirstProject({ workspaceName, user, busy, error, onCreate, onSignOut }:
 }
 // Campaign adapter: the first sign-up claims the installation as owner; invitation continuation stays app-owned.
 // With an invitation in memory the screen says so, prefills the invited email and offers a way back; signing in returns to the invitation.
-function Auth({ session, inviteToken = '', inviteEmail = '', onBackToInvitation, error, busy, onSubmit, onOidcStart, signInInstead, onSignInInstead }: { session: any; inviteToken?: string; inviteEmail?: string; onBackToInvitation?: () => void; error: string; busy: boolean; onSubmit: (data: any) => void; onOidcStart?: () => void; signInInstead?: { offered: boolean; email: string }; onSignInInstead?: (email: string) => void }) {
+function Auth({ session, inviteToken = '', inviteEmail = '', onBackToInvitation, error, busy, onSubmit, onOidcStart, signInInstead, onSignInInstead, onForgotPassword }: { session: any; inviteToken?: string; inviteEmail?: string; onBackToInvitation?: () => void; error: string; busy: boolean; onSubmit: (data: any) => void; onOidcStart?: () => void; signInInstead?: { offered: boolean; email: string }; onSignInInstead?: (email: string) => void; onForgotPassword?: (email: string) => void }) {
   const frame = { brand: <Brand product="Campaign" href="/"/>, label: 'Campaign sign in', error: error || startupAuthError || undefined, busy, busyLabel: 'Signing in…',
     aside: authStory };
   // First boot is one screen beside the story panel: no token, single sign-on or sample opt-in. A blank workspace name
@@ -748,7 +758,7 @@ function Auth({ session, inviteToken = '', inviteEmail = '', onBackToInvitation,
   const sso = inviteToken ? { id: 'sso', name: 'Organization single sign-on' } : { id: 'sso', name: 'Organization single sign-on', href: '/api/auth/oidc/start' };
   const invitation = inviteToken ? { title: 'Sign in to join', description: inviteEmail ? `Sign in as ${inviteEmail} to accept your workspace invitation.` : 'Sign in with the invited email to accept your workspace invitation.', defaultValues: inviteEmail ? { email: inviteEmail } : undefined, cancel: onBackToInvitation ? { label: 'Back to invitation', onClick: onBackToInvitation } : undefined } : { title: 'Sign in', description: 'Use your account to access your workspaces.', defaultValues: signInInstead?.email ? { email: signInInstead.email } : undefined };
   const ended = session.unsavedChangesLost ? 'Your session ended before your changes were saved. Sign in again, then make those changes again.' : 'Your session ended. Sign in again.';
-  return <SignInFlow {...frame} {...invitation} notice={session.sessionEnded ? { tone: 'warning', text: ended } : undefined} submitLabel="Sign in" passwordPolicy={{ maxLength: 128 }} onSubmit={({ email, password }) => { startupAuthError = ''; onSubmit({ email, password }); }} providers={session.oidcEnabled ? <OidcProviderButtons providers={[sso]} onStart={onOidcStart} dividerLabel="or continue with"/> : undefined}/>;
+  return <SignInFlow {...frame} {...invitation} notice={session.sessionEnded ? { tone: 'warning', text: ended } : session.passwordChanged ? { tone: 'success', text: 'Password changed. Sign in with your new password.' } : undefined} forgotPassword={onForgotPassword ? { onClick: onForgotPassword } : undefined} submitLabel="Sign in" passwordPolicy={{ maxLength: 128 }} onSubmit={({ email, password }) => { startupAuthError = ''; onSubmit({ email, password }); }} providers={session.oidcEnabled ? <OidcProviderButtons providers={[sso]} onStart={onOidcStart} dividerLabel="or continue with"/> : undefined}/>;
 }
 
 createRoot(document.getElementById('root')!).render(<AuthErrorBoundary fallback={{ brand: <Brand product="Campaign"/>, title: 'Page unavailable', message: 'This screen could not load. Reload the app to try again.', retryLabel: 'Reload app' }}><ToastProvider><App/></ToastProvider></AuthErrorBoundary>);
