@@ -81,6 +81,6 @@ test('every rate-limit scope the server uses is a valid clientLimitKey scope', a
   for (const file of (await readdir(dir)).filter(name => name.endsWith('.ts'))) {
     for (const match of (await readFile(new URL(file, dir), 'utf8')).matchAll(/clientKey\(req, ([^)]+)\)/g)) for (const literal of match[1].matchAll(/'([^']*)'/g)) scopes.add(literal[1]);
   }
-  assert.deepEqual([...scopes].sort(), ['invitation-get', 'invitation-post', 'ip', 'oidc', 'setup']);
+  assert.deepEqual([...scopes].sort(), ['invitation-get', 'invitation-post', 'ip', 'oidc', 'password-recovery-request', 'password-recovery-reset', 'setup']);
   for (const scope of scopes) assert.doesNotThrow(() => clientLimitKey(scope, '203.0.113.7', secret), scope);
 });

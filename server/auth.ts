@@ -122,6 +122,40 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       const row = await first<{ password: string | null; sessions: number }>(db.execute(sql`SELECT password, (SELECT count(*) FROM sessions WHERE user_id = ${userId} AND expires_at > ${Date.now()}) AS sessions FROM users WHERE id = ${userId}`));
       return { localPassword: Boolean(row?.password), activeSessions: row?.sessions ?? 0 };
     },
+    /**
+     * Self-service password recovery (#284), as Discover offers it. A request for an account with a local password
+     * replaces its reset link with a new one valid for one hour and returns the token to email; any other address returns
+     * null, and the route answers both the same way. Only a keyed hash of the token is stored.
+     */
+    async requestPasswordReset(req: IncomingMessage, email: string): Promise<{ email: string; token: string } | null> {
+      await limit(clientKey(req, 'password-recovery-request'), 20); await limit('password-recovery-email:' + digest(email), 3);
+      const found = await first<{ id: string; email: string; password: string | null }>(db.execute(sql`SELECT id, email, password FROM users WHERE email = ${email}`));
+      if (!found?.password) return null;
+      const token = randomBytes(32).toString('base64url'), now = Date.now();
+      const issued = await db.transaction(async tx => {
+        if (!(await lockUser(tx, found.id))?.password) return false;
+        await tx.execute(sql`DELETE FROM password_resets WHERE user_id = ${found.id}`);
+        await tx.execute(sql`INSERT INTO password_resets (token_hash, user_id, expires_at, created_at) VALUES (${digest(token)}, ${found.id}, ${now + 3600000}, ${now})`);
+        return true;
+      });
+      return issued ? { email: found.email, token } : null;
+    },
+    /** Sets a new password from an unexpired reset link, which it uses up, and ends every session of that account. */
+    async resetPassword(req: IncomingMessage, token: string, password: string): Promise<void> {
+      await limit(clientKey(req, 'password-recovery-reset'), 60); await limit('password-recovery-token:' + digest(token), 5);
+      const invalid = () => new HttpError(400, 'This link is invalid, expired or already used. Request a new link.');
+      if (!/^[\w-]{43}$/.test(token)) throw invalid();
+      const next = await hashPassword(password);
+      await db.transaction(async tx => {
+        // The token row is only a hint for which user to lock; it is checked again under the user lock.
+        const hint = await first<{ user_id: string }>(tx.execute(sql`SELECT user_id FROM password_resets WHERE token_hash = ${digest(token)}`));
+        if (!hint || !(await lockUser(tx, hint.user_id))?.password) throw invalid();
+        const used = await tx.execute(sql`DELETE FROM password_resets WHERE token_hash = ${digest(token)} AND user_id = ${hint.user_id} AND expires_at > ${Date.now()}`);
+        if (!used.rowCount) throw invalid();
+        await tx.execute(sql`UPDATE users SET password = ${next} WHERE id = ${hint.user_id}`);
+        await tx.execute(sql`DELETE FROM sessions WHERE user_id = ${hint.user_id}`);
+      });
+    },
     revokeOtherSessions(req: IncomingMessage, userId: string): Promise<number> {
       return db.transaction(async tx => { await lockUser(tx, userId); return (await tx.execute(sql`DELETE FROM sessions WHERE user_id = ${userId} AND token <> ${digest(sessionToken(req) || '')}`)).rowCount ?? 0; });
     },

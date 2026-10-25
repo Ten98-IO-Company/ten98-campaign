@@ -32,6 +32,11 @@ export function emailProvider(env: ProviderRecord): 'ses' | 'cloudflare' | null 
   if (ses && cloudflare) return env.EMAIL_PROVIDER === 'ses' || env.EMAIL_PROVIDER === 'cloudflare' ? env.EMAIL_PROVIDER : null;
   return ses ? 'ses' : 'cloudflare';
 }
+/** Whether the installation can send transactional email: one provider is in use and its sender is configured. */
+export function emailConfigured(env: ProviderRecord): boolean {
+  const provider = emailProvider(env);
+  return provider === 'ses' || provider === 'cloudflare' && Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS);
+}
 export const requireEmailProvider = (env: ProviderRecord) => emailProvider(env) ?? fail(409, 'EMAIL_PROVIDER_REQUIRED', 'Amazon SES and Cloudflare are both configured. Choose the email provider in Settings › Connections.');
 // SES refuses every message from a suspended, paused or misconfigured sender, so these stop the campaign for review
 // instead of failing one recipient after another. https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html
