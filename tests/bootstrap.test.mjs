@@ -44,7 +44,10 @@ test('the first sign-up claims the installation as owner of its named workspace,
     assert.equal(await count(pool, 'sessions'), 1, 'The new owner is signed in.');
     assert.equal(await claimed(pool), true);
     assert.equal((await request('/session')).data.setupRequired, false);
-    assert.equal((await request('/auth/setup', { ...body, email: 'second@example.test' })).status, 409, 'Sign-up closes once the installation is claimed.');
+    const second = await request('/auth/setup', { ...body, email: 'second@example.test' });
+    assert.equal(second.status, 409, 'Sign-up closes once the installation is claimed.');
+    // Discover's wording (#265); the screen pairs it with Sign in instead.
+    assert.equal(second.data.error, 'Setup is complete. Sign in with the owner account.');
     assert.equal(await count(pool, 'users'), 1);
   } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
 });
