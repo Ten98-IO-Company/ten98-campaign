@@ -13,7 +13,7 @@ import { handleZernioAdmin } from '../server/zernio-admin.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { postgresSkip, testApp, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
-import { seedAccounts } from './fixtures/accounts.ts';
+import { addMemberships, addUsers, grantOperators, seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 const profileId = 'profile-a';
@@ -108,18 +108,18 @@ test('provider team HTTP reads require live operator and administration and with
     const beforeDenied = calls.length; assert.equal((await request(route, { selected: null })).status, 401);
     for (const role of ['editor', 'viewer']) { await app.sql.run('UPDATE memberships SET role=? WHERE workspace_id=? AND user_id=?', role, workspaceId, userId); assert.equal((await request(route)).status, 403); }
     await app.sql.run("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?", workspaceId, userId);
-    await app.sql.run('DELETE FROM instance_operators WHERE user_id=?', userId); assert.equal((await request(route)).status, 403); await app.sql.run('INSERT INTO instance_operators (user_id) VALUES (?)', userId);
+    await app.sql.run('DELETE FROM instance_operators WHERE user_id=?', userId); assert.equal((await request(route)).status, 403); await grantOperators(app.sql, [userId]);
     assert.equal((await request(route, { method: 'POST', body: {} })).status, 405);
     const outsider = randomUUID(), hash = (await app.sql.get('SELECT password FROM users WHERE id=?', userId)).password;
-    await app.sql.run('INSERT INTO users (id, name, email, password) VALUES (?,?,?,?)', outsider, 'Outside', 'team-outsider@example.test', hash);
+    await addUsers(app.sql, [{ id: outsider, name: 'Outside', email: 'team-outsider@example.test', password: hash }]);
     const outsideCookie = (await request('/auth/login', { method: 'POST', body: { email: 'team-outsider@example.test', password } })).cookie;
     assert.equal((await request(route, { selected: outsideCookie })).status, 404); assert.equal(calls.length, beforeDenied);
     await app.sql.run("UPDATE memberships SET role='admin' WHERE workspace_id=? AND user_id=?", workspaceId, userId); assert.equal((await request(route)).status, 200); await app.sql.run("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?", workspaceId, userId);
     for (const status of [401, 403, 429, 500]) { rejection = status; const before = calls.length; result = await request(route); assert.equal(result.status, status === 403 ? 403 : status === 401 ? 400 : status === 500 ? 502 : status); assert.equal(calls.length, before + 1); assert.equal(result.data.users, undefined); assert.equal(JSON.stringify(result).includes('private-provider-error'), false); }
     rejection = 0;
-    await changedDuring(() => app.sql.run('DELETE FROM instance_operators WHERE user_id=?', userId), () => app.sql.run('INSERT INTO instance_operators (user_id) VALUES (?)', userId), 403);
+    await changedDuring(() => app.sql.run('DELETE FROM instance_operators WHERE user_id=?', userId), () => grantOperators(app.sql, [userId]), 403);
     await changedDuring(() => app.sql.run("UPDATE memberships SET role='viewer' WHERE workspace_id=? AND user_id=?", workspaceId, userId), () => app.sql.run("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?", workspaceId, userId), 403);
-    await changedDuring(() => app.sql.run('DELETE FROM memberships WHERE workspace_id=? AND user_id=?', workspaceId, userId), () => app.sql.run("INSERT INTO memberships (workspace_id, user_id, role) VALUES (?,?,'owner')", workspaceId, userId), 403);
+    await changedDuring(() => app.sql.run('DELETE FROM memberships WHERE workspace_id=? AND user_id=?', workspaceId, userId), () => addMemberships(app.sql, [[workspaceId, userId, 'owner']]), 403);
     await changedDuring(() => app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", state.projectId), () => app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', profileId, state.projectId), 409);
     await changedDuring(async () => { assert.equal((await request('/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-team-fixture-key' } } })).status, 200); }, async () => { assert.equal((await request('/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'team-fixture-key' } } })).status, 200); }, 409);
     const revoker = (await request('/auth/login', { method: 'POST', body: { email, password } })).cookie;

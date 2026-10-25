@@ -10,7 +10,7 @@ import { createStore } from '../server/database.ts';
 import { handleApprovals, assertPublishingApproval } from '../server/approvals.ts';
 import { postgresSkip, testApp, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
-import { seedAccounts } from './fixtures/accounts.ts';
+import { addMemberships, addUsers, seedAccounts } from './fixtures/accounts.ts';
 
 const profileId = 'review-profile';
 const accounts = [['fb-a', 'facebook'], ['fb-b', 'facebook'], ['yt-a', 'youtube'], ['yt-b', 'youtube']].map(([_id, platform]) => ({ _id, profileId, platform, isActive: true }));
@@ -60,8 +60,8 @@ async function fixture(t, { admin = true } = {}) {
   const passwordHash = (await app.sql.get('SELECT password FROM users WHERE id=?', state.user.id)).password;
   async function member(name, role) {
     const userId = randomUUID(), email = `${name}@example.test`;
-    await app.sql.run('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)', userId, name, email, passwordHash);
-    await app.sql.run('INSERT INTO memberships VALUES(?,?,?)', workspaceId, userId, role);
+    await addUsers(app.sql, [{ id: userId, name: name, email: email, password: passwordHash }]);
+    await addMemberships(app.sql, [[workspaceId, userId, role]]);
     const login = await post('/api/auth/login', { email, password }); assert.equal(login.status, 200);
     return login.cookie;
   }

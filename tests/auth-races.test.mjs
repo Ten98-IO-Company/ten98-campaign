@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { clientLimitKey } from '@ten98/runtime';
 import { createAuth, hashPassword, signInLimits } from '../server/auth.ts';
 import { blockWrites, postgresSkip, signInRedirectError, testApp, testDatabase } from './postgres.mjs';
-import { seedAccounts } from './fixtures/accounts.ts';
+import { addUsers, seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 function response() {
@@ -23,7 +23,7 @@ function afterQuery(db, marker) {
   } });
   return { db: watched, reached };
 }
-async function seedUser(db, id, email, password) { await db.$client.query('INSERT INTO users VALUES ($1, $2, $3, $4)', [id, 'Fixture', email, password]); }
+async function seedUser(db, id, email, password) { await addUsers(db.$client, [{ id: id, name: 'Fixture', email: email, password: password }]); }
 
 test('an old-password login already verifying cannot create a session after a password change', pg, async t => {
   const { db } = await testDatabase(t), oldPassword = 'old fixture password 2026', nextPassword = 'new fixture password 2026';

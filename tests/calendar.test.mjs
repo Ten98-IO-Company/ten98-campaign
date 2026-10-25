@@ -6,7 +6,7 @@ import { handleCalendar, calendarPlan } from '../server/calendar.ts';
 import { handleOperationRecovery } from '../server/operation-recovery.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
-import { seedAccounts } from './fixtures/accounts.ts';
+import { addWorkspaces, seedAccounts } from './fixtures/accounts.ts';
 
 // A fresh database holding one project mapped to one shared calendar.
 async function calendarDatabase(t, projectId, calendarId) {
@@ -356,7 +356,7 @@ test('Calendar plan identity cannot bypass unconfirmed legacy receipts without a
 
 test('Google Calendar mapping, managed event boundaries, stable writes, sync dates and retries', { skip: postgresSkip }, async t => {
   const { db, sql } = await testDatabase(t), store = createStore(db), originalFetch = globalThis.fetch;
-  await sql.run('INSERT INTO workspaces (id, name) VALUES (?,?)', 'workspace-a', 'Team');
+  await addWorkspaces(sql, [{ id: 'workspace-a', name: 'Team' }]);
   for (const id of ['project-a', 'project-b']) await sql.run('INSERT INTO projects (id,workspace_id,name) VALUES (?,?,?)', id, 'workspace-a', id);
   const env = { GOOGLE_SERVICE_ACCOUNT_EMAIL: 'calendar-service@example.test', GOOGLE_PRIVATE_KEY: privateKey };
   const calls = []; let remote = [], seq = 0, loseResponse = false, invalidWriteResponse = false, malformedEventResponse = false;

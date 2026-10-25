@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createApp } from '../server/index.ts';
 import { hashPassword } from '../server/auth.ts';
 import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
+import { addUsers } from './fixtures/accounts.ts';
 
 const origin = 'http://127.0.0.1:3018';
 async function start(app) {
@@ -99,7 +100,7 @@ test('failed claims roll back, and of two competing first sign-ups exactly one c
 // A claimed installation must keep login working and never reopen setup.
 test('claimed installations preserve login, invent no operator history, and never reopen setup after account deletion', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-existing-')), password = 'existing installation password', { pool, db } = await testDatabase(t);
-  await pool.query('INSERT INTO users VALUES ($1, $2, $3, $4)', ['existing', 'Existing owner', 'existing@example.test', await hashPassword(password)]);
+  await addUsers(pool, [{ id: 'existing', name: 'Existing owner', email: 'existing@example.test', password: await hashPassword(password) }]);
   await pool.query('UPDATE installation SET claimed = true');
   let app;
   try {

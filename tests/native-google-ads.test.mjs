@@ -12,6 +12,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import { firstProject } from './first-project.ts';
+import { grantOperators } from './fixtures/accounts.ts';
 
 const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_ADS_CLIENT_SECRET: 'fixture-client-secret', GOOGLE_ADS_REFRESH_TOKEN: 'fixture-refresh-token', GOOGLE_ADS_DEVELOPER_TOKEN: 'fixture-developer-token', GOOGLE_ADS_LOGIN_CUSTOMER_ID: '9999999999' };
 
@@ -75,7 +76,7 @@ test('native Google Shopping uses an atomic paused resource graph, customer mapp
     assert.equal((await request(route + 'connection', { customerId: '123-456-7890' })).status, 400);
     let result = await request(route + 'connection', { customerId }); assert.equal(result.status, 200); assert.equal(result.data.account.currencyCode, 'USD'); assert.equal(result.data.account.testAccount, true);
     const ownerId = state.user.id, workspaceId = state.workspaces[0].id;
-    await app.sql.run('DELETE FROM instance_operators WHERE user_id=?', ownerId); assert.equal((await request(route + 'connection', { customerId })).status, 403); await app.sql.run('INSERT INTO instance_operators VALUES(?)', ownerId);
+    await app.sql.run('DELETE FROM instance_operators WHERE user_id=?', ownerId); assert.equal((await request(route + 'connection', { customerId })).status, 403); await grantOperators(app.sql, [ownerId]);
     await app.sql.run('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?', 'viewer', ownerId, workspaceId); assert.equal((await request(route + 'shopping/create', {})).status, 403); await app.sql.run('UPDATE memberships SET role=? WHERE user_id=? AND workspace_id=?', 'owner', ownerId, workspaceId);
     const body = { name: 'Shopping launch', merchantId: '987654', feedLabel: 'AE_PRODUCTS', priority: 1, dailyBudget: 25, maxCpc: 1.5, countries: ['AE', 'SA'], euPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING', confirmCreate: true };
     result = await request(route + 'shopping/create', { ...body, validateOnly: true }); assert.equal(result.status, 200); assert.equal(result.data.validated, true); assert.equal(creates.length, 0); assert.equal((await app.store.list(projectId, 'campaigns')).length, 0);

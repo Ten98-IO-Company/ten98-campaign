@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createStore } from '../server/database.ts';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit, recordApprovedReschedule } from '../server/approvals.ts';
 import { blockWrites, postgresSkip, singleConnection, testDatabase } from './postgres.mjs';
-import { seedAccounts } from './fixtures/accounts.ts';
+import { addMemberships, seedAccounts } from './fixtures/accounts.ts';
 
 test('content approval policy binds current posts and creative to audited review requests and enforces role and project boundaries', { skip: postgresSkip }, async t => {
   const { db, pool, sql } = await testDatabase(t);
@@ -141,7 +141,7 @@ test('parallel review requests open one pending review and a parallel approve an
 async function selfReviewFixture(t, members, poolOptions) {
   const { db, pool, sql } = await testDatabase(t, poolOptions);
   await seedAccounts(pool, { users: [{ id: 'blair', name: 'Blair Owner', email: 'blair@example.test' }, { id: 'avery', name: 'Avery Admin', email: 'avery@example.test' }, { id: 'casey', name: 'Casey Editor', email: 'casey@example.test' }, { id: 'dana', name: 'Dana Admin', email: 'dana@example.test' }, { id: 'abe', name: 'Abe Admin', email: 'abe@example.test' }], workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A')");
-  const addMember = (id, role) => pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', ['w', id, role]);
+  const addMember = (id, role) => addMemberships(pool, [['w', id, role]]);
   for (const [id, role] of members) await addMember(id, role);
   const store = createStore(db), project = { id: 'project-a' }, roles = Object.fromEntries(members);
   const names = { blair: 'Blair Owner', avery: 'Avery Admin', casey: 'Casey Editor', dana: 'Dana Admin', abe: 'Abe Admin' };
@@ -208,7 +208,7 @@ async function proposalFixture(t, members, poolOptions) {
   const { db, pool, sql } = await testDatabase(t, poolOptions), originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
   await seedAccounts(pool, { users: [{ id: 'blair', name: 'Blair Owner', email: 'blair@example.test' }, { id: 'avery', name: 'Avery Admin', email: 'avery@example.test' }, { id: 'casey', name: 'Casey Editor', email: 'casey@example.test' }], workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a','w','A','profile-a')");
-  for (const [id, role] of members) await pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', ['w', id, role]);
+  for (const [id, role] of members) await addMemberships(pool, [['w', id, role]]);
   const store = createStore(db), project = { id: 'project-a', zernioProfileId: 'profile-a' }, roles = Object.fromEntries(members), names = { blair: 'Blair Owner', avery: 'Avery Admin', casey: 'Casey Editor' };
   const account = { _id: 'facebook-a', profileId: project.zernioProfileId, platform: 'facebook' }, remote = { _id: 'remote-a', status: 'scheduled', content: 'Live caption', scheduledFor: '2070-01-01T09:00:00Z', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] };
   globalThis.fetch = async (target, options = {}) => {

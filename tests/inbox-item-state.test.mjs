@@ -9,7 +9,7 @@ import { createWebhookService } from '../server/webhooks.ts';
 import { handleInbox } from '../server/inbox.ts';
 import { blockWrites, lockWaiters, postgresSkip, testApp, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
-import { seedAccounts } from './fixtures/accounts.ts';
+import { addMemberships, addUsers, seedAccounts } from './fixtures/accounts.ts';
 
 // Team triage overlay (ten98-campaign#41 change 1): waiting/first reply from the webhook drain and confirmed replies,
 // and the item-state read and update endpoints with their role, membership, lock and optimistic-concurrency gates.
@@ -115,8 +115,8 @@ async function appFixture(t) {
   const { workspace_id: workspaceId } = await app.sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId), ownerId = (await app.sql.get("SELECT id FROM users WHERE email='owner@example.test'")).id, hash = (await app.sql.get('SELECT password FROM users WHERE id=?', ownerId)).password;
   const people = {};
   for (const [name, role] of [['editor', 'editor'], ['second', 'editor'], ['viewer', 'viewer'], ['outsider', null]]) {
-    const userId = randomUUID(); await app.sql.run('INSERT INTO users VALUES(?,?,?,?)', userId, name, `${name}@example.test`, hash);
-    if (role) await app.sql.run('INSERT INTO memberships VALUES(?,?,?)', workspaceId, userId, role);
+    const userId = randomUUID(); await addUsers(app.sql, [{ id: userId, name: name, email: `${name}@example.test`, password: hash }]);
+    if (role) await addMemberships(app.sql, [[workspaceId, userId, role]]);
     people[name] = { id: userId, cookie: (await request('/api/auth/login', { method: 'POST', body: { email: `${name}@example.test`, password } })).cookie };
   }
   people.owner = { id: ownerId, cookie: owner };
