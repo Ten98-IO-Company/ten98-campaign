@@ -13,6 +13,7 @@ import { handleZernioAdmin } from '../server/zernio-admin.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { postgresSkip, testApp, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 const profileId = 'profile-a';
@@ -53,7 +54,7 @@ const snapshot = group => ({ name: group.name, accountIds: [...group.accountIds]
 const teamMember = (id = 'provider-caller') => ({ _id: id, name: '<img src="https://never.example/member">', email: 'member@example.test', role: 'provider-only-role', isRoot: false, profileAccess: ['profile-a'], createdAt: '2026-01-01T00:00:00Z', lastLoginAt: '2026-01-02T00:00:00Z' });
 
 test('provider team reads allowlist bounded native member fields and require one distinct caller', pg, async t => {
-  const { db, pool } = await testDatabase(t); await pool.query("INSERT INTO users (id, name, email, password) VALUES ('local-operator', 'Operator', 'local-operator@example.test', NULL); INSERT INTO instance_operators (user_id) VALUES ('local-operator')");
+  const { db, pool } = await testDatabase(t); await seedAccounts(pool, { users: [{ id: 'local-operator', name: 'Operator', email: 'local-operator@example.test' }], operators: ['local-operator'] });
   let payload, result, checks = 0; const calls = [];
   const context = { db, user: { id: 'local-operator', isOperator: true }, role: 'owner', req: { method: 'GET' }, assertProjectMapping(id) { assert.equal(id, profileId); checks++; }, send(status, data) { result = { status, data }; } };
   const api = async (...args) => { calls.push(args); return payload; };

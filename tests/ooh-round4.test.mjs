@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { createStore } from '../server/database.ts';
 import { handleOoh } from '../server/ooh.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 // Independent contract: https://direct.broadsign.com/api/v1/apidocs.json
 // GET proposal_item accepts include_screens; booking's 200 response has no JSON schema.
 async function fixture(t, run, { requireScreenQuery = true, bookingReply = '{}', bookedStatus = 10 } = {}) {
   const { pool, db } = await testDatabase(t), originalFetch = globalThis.fetch, calls = [], project = { id: 'ooh-round4' };
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('ooh-round4','w','OOH round 4')");
+  await seedAccounts(pool, { workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('ooh-round4','w','OOH round 4')");
   const store = createStore(db); let proposal, item, status = 1;
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target), payload = options.body && JSON.parse(options.body); calls.push({ path: url.pathname, search: url.search, method: options.method }); let result;

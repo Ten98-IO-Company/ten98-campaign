@@ -5,13 +5,11 @@ import { randomUUID } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { createLinks } from '../server/links.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 async function fixture(t) {
   const { db, pool } = await testDatabase(t);
-  await pool.query(`INSERT INTO workspaces (id, name) VALUES ('workspace', 'Workspace');
-    INSERT INTO projects (id, workspace_id, name) VALUES ('one', 'workspace', 'One'), ('two', 'workspace', 'Two');
-    INSERT INTO records (id, project_id, collection, data) VALUES ('campaign-one', 'one', 'campaigns', '{}'), ('campaign-two', 'two', 'campaigns', '{}');
-    INSERT INTO direct_campaigns (id, project_id, data) VALUES ('direct-one', 'one', '{}');`);
+  await seedAccounts(pool, { workspaces: [{ id: 'workspace', name: 'Workspace' }] }); await pool.query(`INSERT INTO projects (id, workspace_id, name) VALUES ('one', 'workspace', 'One'), ('two', 'workspace', 'Two'); INSERT INTO records (id, project_id, collection, data) VALUES ('campaign-one', 'one', 'campaigns', '{}'), ('campaign-two', 'two', 'campaigns', '{}'); INSERT INTO direct_campaigns (id, project_id, data) VALUES ('direct-one', 'one', '{}')`);
   const query = async (text, params) => (await pool.query(text, params)).rows;
   let links, base;
   const server = createServer(async (req, res) => {

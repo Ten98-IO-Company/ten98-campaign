@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { hashPassword } from '../server/auth.ts';
 import { blockWrites, postgresSkip, testApp } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const origin = 'http://127.0.0.1:3018';
 async function owners(t) {
@@ -131,7 +132,7 @@ test('a demotion racing an acceptance either follows the acceptance or refuses i
 test('an administrator manages editors and viewers but not owners or administrators', { skip: postgresSkip }, async t => {
   const { pool, request, workspaceId, first, second } = await owners(t);
   await pool.query("UPDATE memberships SET role = 'admin' WHERE user_id = 'second'");
-  await pool.query("INSERT INTO users VALUES ('third', 'Third', 'third@example.test', NULL)"); await pool.query("INSERT INTO memberships VALUES ($1, 'third', 'editor')", [workspaceId]);
+  await seedAccounts(pool, { users: [{ id: 'third', name: 'Third', email: 'third@example.test' }] }); await pool.query("INSERT INTO memberships VALUES ($1, 'third', 'editor')", [workspaceId]);
   const change = (target, body, method = 'PATCH') => request(`/workspaces/${workspaceId}/members/${target}`, { method, body, cookie: second.cookie });
   assert.equal((await change('third', { role: 'viewer' })).status, 200);
   assert.equal((await change('third', { role: 'admin' })).status, 403, 'An administrator cannot grant administrator.');
@@ -153,10 +154,10 @@ test('project assignees list editors and above for editors, without email addres
   assert.deepEqual(result.data.members.map(member => member.role).sort(), ['editor', 'owner', 'owner']);
   assert.ok(result.data.members.every(member => Object.keys(member).sort().join() === 'id,name,role'), 'No email addresses or other fields.');
   assert.equal((await request(`/projects/${projectId}/assignees`, { cookie: viewer })).status, 403);
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('other', 'Other')"); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('other-project', 'other', 'Other')");
+  await seedAccounts(pool, { workspaces: [{ id: 'other', name: 'Other' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('other-project', 'other', 'Other')");
   assert.equal((await request('/projects/other-project/assignees', { cookie: editor })).status, 404);
   // An editor of another workspace is never listed, even when the same person also belongs to this one with a lower role.
-  await pool.query("INSERT INTO users VALUES ('outsider', 'Outsider', 'outsider@example.test', NULL)"); await pool.query("INSERT INTO memberships VALUES ('other', 'outsider', 'owner'), ('other', 'viewer', 'editor')");
+  await seedAccounts(pool, { users: [{ id: 'outsider', name: 'Outsider', email: 'outsider@example.test' }] }); await seedAccounts(pool, { memberships: [['other', 'outsider', 'owner'], ['other', 'viewer', 'editor']] });
   const listed = (await request(`/projects/${projectId}/assignees`, { cookie: editor })).data.members.map(member => member.id);
   assert.ok(!listed.includes('outsider') && !listed.includes('viewer'), JSON.stringify(listed));
 });

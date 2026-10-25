@@ -5,10 +5,11 @@ import { createStore } from '../server/database.ts';
 import { operation, IntegrationError } from '../server/provider-core.ts';
 import { handleOperationRecovery } from '../server/operation-recovery.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 test('Broadsign contracts, approved inventory, paid confirmation, and durable partial failures', { skip: postgresSkip }, async t => {
   const { pool, db, sql } = await testDatabase(t), originalFetch = globalThis.fetch, calls = [];
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'),('project-b','w','B'),('project-c','w','C')");
+  await seedAccounts(pool, { workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'),('project-b','w','B'),('project-c','w','C')");
   const store = createStore(db);
   const project = { id: 'project-a' }, config = { env: {}, BROADSIGN_API_KEY: 'private-server-key', BROADSIGN_ENVIRONMENT: 'sandbox' };
   const connection = { domainId: 7, clientId: 'brand-a', clientName: 'Brand A', screenIds: [101, 102] };

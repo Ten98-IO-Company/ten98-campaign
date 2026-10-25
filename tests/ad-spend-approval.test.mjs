@@ -7,6 +7,7 @@ import { handleApprovals, assertAdSpendApproval } from '../server/approvals.ts';
 import { handleNativeGoogleAds } from '../server/native-google-ads.ts';
 import { handleMicrosoftAds } from '../server/native-microsoft-ads.ts';
 import { blockWrites, postgresSkip, singleConnection, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 // Council decision ten98-code-system#35 (Q1): with require_ad_approval on, a write that starts spend or raises a budget
 // needs an approved review of exactly (subject id, platform, action, amount in minor units, currency). Every provider
@@ -396,7 +397,7 @@ test('migration 0007 copies each project’s post approval setting to ad approva
   const { pool } = await testDatabase(t);
   // Undo 0007 on this disposable database, recreate the pre-0007 state, then apply the migration file as shipped.
   await pool.query('DROP INDEX post_approval_reviews_fingerprint; ALTER TABLE post_approval_reviews DROP COLUMN kind, DROP COLUMN consumed_by, DROP COLUMN consumed_at; ALTER TABLE project_approval_policy DROP COLUMN require_ad_approval');
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('u','U','u@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('on','w','On'),('off','w','Off'),('none','w','None'); INSERT INTO project_approval_policy VALUES ('on', true, 'u', 'now'), ('off', false, 'u', 'now')");
+  await seedAccounts(pool, { users: [{ id: 'u', name: 'U', email: 'u@example.test' }], workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('on','w','On'),('off','w','Off'),('none','w','None'); INSERT INTO project_approval_policy VALUES ('on', true, 'u', 'now'), ('off', false, 'u', 'now')");
   await pool.query(await readFile(new URL('../migrations/0007_ad_spend_approval.sql', import.meta.url), 'utf8'));
   assert.deepEqual((await pool.query('SELECT project_id, require_approval, require_ad_approval FROM project_approval_policy ORDER BY project_id')).rows, [{ project_id: 'off', require_approval: false, require_ad_approval: false }, { project_id: 'on', require_approval: true, require_ad_approval: true }]);
   await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('new','w','New'); INSERT INTO project_approval_policy (project_id, require_approval, updated_by, updated_at) VALUES ('new', true, 'u', 'now')");

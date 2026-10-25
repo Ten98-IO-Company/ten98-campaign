@@ -10,6 +10,7 @@ import { createStore } from '../server/database.ts';
 import { handleApprovals, assertPublishingApproval } from '../server/approvals.ts';
 import { postgresSkip, testApp, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const profileId = 'review-profile';
 const accounts = [['fb-a', 'facebook'], ['fb-b', 'facebook'], ['yt-a', 'youtube'], ['yt-b', 'youtube']].map(([_id, platform]) => ({ _id, profileId, platform, isActive: true }));
@@ -204,7 +205,7 @@ test('an invalid published-edit proposal opens no review', { skip: postgresSkip 
 // Snapshots only gain a key for a proposed published edit, so reviews approved before that coverage keep matching.
 test('an approved local post keeps its fingerprint and stays approved', { skip: postgresSkip }, async t => {
   const { db, pool, sql } = await testDatabase(t);
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('blair','Blair Owner','blair@example.test'),('casey','Casey Editor','casey@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'); INSERT INTO memberships VALUES ('w','blair','owner'),('w','casey','editor')");
+  await seedAccounts(pool, { users: [{ id: 'blair', name: 'Blair Owner', email: 'blair@example.test' }, { id: 'casey', name: 'Casey Editor', email: 'casey@example.test' }], workspaces: [{ id: 'w', name: 'W' }], memberships: [['w', 'blair', 'owner'], ['w', 'casey', 'editor']] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A')");
   const store = createStore(db), project = { id: 'project-a' }, roles = { blair: 'owner', casey: 'editor' };
   const invoke = async (path, userId, body = {}) => { let result; await handleApprovals({ db, store, project, role: roles[userId], user: { id: userId, name: userId }, req: { method: 'POST' }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body, send(status, data) { result = { status, data }; } }); return result; };
   assert.equal((await invoke('policy', 'blair', { requireApproval: true })).status, 200);

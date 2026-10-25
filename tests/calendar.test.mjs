@@ -6,11 +6,12 @@ import { handleCalendar, calendarPlan } from '../server/calendar.ts';
 import { handleOperationRecovery } from '../server/operation-recovery.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 // A fresh database holding one project mapped to one shared calendar.
 async function calendarDatabase(t, projectId, calendarId) {
   const database = await testDatabase(t);
-  await database.pool.query("INSERT INTO workspaces (id, name) VALUES ('workspace','W')");
+  await seedAccounts(database.pool, { workspaces: [{ id: 'workspace', name: 'W' }] });
   await database.sql.run('INSERT INTO projects (id, workspace_id, name) VALUES (?,?,?)', projectId, 'workspace', projectId);
   await database.sql.run('INSERT INTO calendar_connections VALUES (?,?)', projectId, calendarId);
   return database;

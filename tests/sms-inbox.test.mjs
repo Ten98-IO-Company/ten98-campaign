@@ -13,6 +13,7 @@ import { sendDirect } from '../server/direct-providers.ts';
 import { HttpError } from '../server/auth.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 const token = (prefix, value) => prefix + String(value).padStart(32, '0');
@@ -20,7 +21,7 @@ const token = (prefix, value) => prefix + String(value).padStart(32, '0');
 const failure = pattern => error => pattern.test(error.cause?.message ?? error.message);
 async function fixture(t) {
   const { db, pool } = await testDatabase(t);
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner', 'Owner', 'owner@example.test'); INSERT INTO workspaces (id, name) VALUES ('wa', 'A'), ('wb', 'B'); INSERT INTO projects (id, workspace_id, name) VALUES ('a', 'wa', 'A'), ('b', 'wb', 'B'); INSERT INTO memberships VALUES ('wa', 'owner', 'owner'), ('wb', 'owner', 'owner')");
+  await seedAccounts(pool, { users: [{ id: 'owner', name: 'Owner', email: 'owner@example.test' }], workspaces: [{ id: 'wa', name: 'A' }, { id: 'wb', name: 'B' }], memberships: [['wa', 'owner', 'owner'], ['wb', 'owner', 'owner']] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('a', 'wa', 'A'), ('b', 'wb', 'B')");
   const env = { TWILIO_ACCOUNT_SID: token('AC', 1), TWILIO_AUTH_TOKEN: 'sms-inbox-fixture-secret', TWILIO_FROM_NUMBER: '+12025550100' }, appUrl = 'https://campaign.example.test', contacts = createContacts({ db }), originalFetch = globalThis.fetch, calls = [];
   const store = { activity() {} }, direct = createDirectCampaigns({ db, env, appUrl, secret: 'fixture-session-secret-with-enough-entropy', store }), inbox = createSmsInbox({ db, env, appUrl, contacts }); await direct.attachSmsInbox(inbox);
   let hook, counter = 1, access = true;
@@ -172,7 +173,7 @@ test('signed STOP excludes future-project imports and campaign sends; START lift
   const f = await fixture(t);
   try {
     await f.outbound(); await f.inbound({ MessageSid: token('SM', 901), Body: 'STOP' });
-    await f.pool.query("INSERT INTO workspaces (id, name) VALUES ('wf', 'Future'); INSERT INTO projects (id, workspace_id, name) VALUES ('future', 'wf', 'Future'); INSERT INTO memberships VALUES ('wf', 'owner', 'owner')");
+    await seedAccounts(f.pool, { workspaces: [{ id: 'wf', name: 'Future' }], memberships: [['wf', 'owner', 'owner']] }); await f.pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('future', 'wf', 'Future')");
     const contact = await f.contacts.save('future', { phone: '+12025550123', consents: { sms: true }, consentSource: 'New project signup cannot clear STOP' }); assert.equal(contact.consents.sms, false);
     await f.contacts.remove('future', contact.id); const imported = await f.contacts.import('future', { csv: 'phone,name\n+12025550123,Imported', consents: { sms: true }, consentSource: 'Imported opt-in cannot clear STOP' }); assert.equal(imported.contacts[0].consents.sms, false);
     await f.inbound({ MessageSid: token('SM', 902), Body: 'START' }); assert.equal((await f.contacts.list('future'))[0].consents.sms, false);
@@ -219,7 +220,7 @@ test('Twilio HTTP 400 code 21610 creates durable global suppression for campaign
       }
       assert.equal(f.calls.length, 1); assert.ok(await f.contacts.smsSuppression('+12025550123'));
       const ledger = JSON.stringify((await f.pool.query('SELECT * FROM direct_sms_suppressions')).rows); assert.doesNotMatch(ledger, /PRIVATE_PROVIDER_TEXT|12025550123/);
-      await f.pool.query("INSERT INTO workspaces (id, name) VALUES ('wf', 'Future'); INSERT INTO projects (id, workspace_id, name) VALUES ('future', 'wf', 'Future'); INSERT INTO memberships VALUES ('wf', 'owner', 'owner')"); assert.equal((await f.contacts.save('future', { phone: '+12025550123', consents: { sms: true }, consentSource: 'New signup' })).consents.sms, false);
+      await seedAccounts(f.pool, { workspaces: [{ id: 'wf', name: 'Future' }], memberships: [['wf', 'owner', 'owner']] }); await f.pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('future', 'wf', 'Future')"); assert.equal((await f.contacts.save('future', { phone: '+12025550123', consents: { sms: true }, consentSource: 'New signup' })).consents.sms, false);
       const draft = await f.request('direct/campaigns', 'POST', { name: 'Future blocked', channel: 'sms', text: 'Must not send' }, undefined, 'future'); assert.equal((await f.request(`direct/campaigns/${draft.data.campaign.id}/preview`, 'POST', {}, undefined, 'future')).data.audience.eligible, 0); await f.direct.processPending(); assert.equal(f.calls.length, 1);
     } finally { await f.close(); }
   }
@@ -236,7 +237,7 @@ test('signed 21610 delivery callbacks suppress campaign and inbox destinations f
         await f.request(`direct/campaigns/${id}/send`, 'POST', { confirmed: true, previewToken: preview.data.previewToken }); await f.direct.processPending(); delivery = (await f.request(`direct/campaigns/${id}`)).data.deliveries[0];
       } else delivery = await f.outbound();
       await f.callback(`/api/webhooks/twilio/status/${delivery.id}`, { MessageSid: delivery.providerId, MessageStatus: 'undelivered', To: '+12025550123', From: f.env.TWILIO_FROM_NUMBER, ErrorCode: '21610' });
-      await f.pool.query("INSERT INTO workspaces (id, name) VALUES ('wf', 'Future'); INSERT INTO projects (id, workspace_id, name) VALUES ('future', 'wf', 'Future')"); assert.equal((await f.contacts.save('future', { phone: '+12025550123', consents: { sms: true }, consentSource: 'Cannot override provider opt-out' })).consents.sms, false);
+      await seedAccounts(f.pool, { workspaces: [{ id: 'wf', name: 'Future' }] }); await f.pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('future', 'wf', 'Future')"); assert.equal((await f.contacts.save('future', { phone: '+12025550123', consents: { sms: true }, consentSource: 'Cannot override provider opt-out' })).consents.sms, false);
     } finally { await f.close(); }
   }
 });
