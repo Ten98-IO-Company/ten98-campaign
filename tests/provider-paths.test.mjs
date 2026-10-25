@@ -35,8 +35,13 @@ test('the provider path guard refuses dot segments, backslashes and fragments, a
   for (const path of ['/posts/../accounts', '/posts/%2e%2e/accounts', '/posts/..%2Faccounts', '/posts/.', '/posts/a\\b', '/posts/a%5Cb', '/posts/a#b', '/posts/a?b', '/posts/a?b=1']) assert.throws(() => assertProviderPath(path, false), error => error.code === 'INVALID_PROVIDER_PATH', path);
   for (const url of ['https://www.googleapis.com/calendar/v3/calendars/../events', 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/%2e%2e/x.json', 'https://www.googleapis.com/drive/v3/files/a#b']) assert.throws(() => assertProviderPath(url), error => error.code === 'INVALID_PROVIDER_PATH', url);
   // An encoded slash stays allowed inside one segment: Shopify collection GIDs and opaque Zernio IDs are sent that way.
-  for (const path of ['/posts/abc123', `/commerce/collections/${encodeURIComponent('gid://shopify/Collection/7001')}`, `/inbox/conversations/${encodeURIComponent('a%2Fb')}`]) assert.doesNotThrow(() => assertProviderPath(path, false), path);
+  for (const path of ['/posts/abc123', `/commerce/collections/${encodeURIComponent('gid://shopify/Collection/7001')}`, '/posts/a%20b', '/posts/a%41%FF']) assert.doesNotThrow(() => assertProviderPath(path, false), path);
   assert.doesNotThrow(() => assertProviderPath('https://www.googleapis.com/calendar/v3/calendars/a%40b.test/events?maxResults=1&q=../x'));
+  assert.doesNotThrow(() => assertProviderPath('https://www.googleapis.com/drive/v3/files?q=name contains a b'), 'Inner spaces in a query stay allowed.');
+  // The path is checked as the URL parser and the provider read it: whitespace or control characters, any escape
+  // elsewhere in a segment, a backslash after the host, ';' parameters and doubly encoded escapes cannot hide a dot segment.
+  for (const path of ['/posts/.\t./accounts', '/posts/.\n./accounts', '/posts/%2\re%2\re/accounts', '/posts/.. ', ' /posts/x', '/posts/x\u0000', '/posts/..%2F..%2Faccounts%FF', '/posts/..%2Faccounts%', '/posts/..%5Caccounts%FF', '/posts/..;/accounts', '/posts/%252e%252e/accounts', `/inbox/conversations/${encodeURIComponent('a%2Fb')}`]) assert.throws(() => assertProviderPath(path, false), error => error.code === 'INVALID_PROVIDER_PATH', JSON.stringify(path));
+  for (const url of ['https://api.twilio.com\\2010-04-01\\Accounts\\..\\x', 'https://api.twilio.com\\..\\x', 'https://www.googleapis.com/calendar/v3/calendars/.\t./events ']) assert.throws(() => assertProviderPath(url), error => error.code === 'INVALID_PROVIDER_PATH', JSON.stringify(url));
   for (const value of ['', '.', '..']) assert.throws(() => pathSegment(value), error => error.code === 'INVALID_PROVIDER_PATH', value);
   assert.equal(pathSegment('a/b?c'), 'a%2Fb%3Fc');
 });

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { IntegrationError, fail, reportObject as plain, operation, redact, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
+import { IntegrationError, assertProviderPath, fail, reportObject as plain, operation, redact, zernioClient, scopedAccounts, requireAccount } from './provider-core.ts';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
@@ -288,6 +288,8 @@ async function attachment(context: ProviderRecord, api: ZernioApi, accounts: Pro
   }
   let target;
   try {
+    // The media URL is fetched directly with the Zernio key, so it passes the same path guard as every provider request.
+    assertProviderPath(item.url);
     target = new URL(item.url);
     const parts = target.pathname.match(/^\/api\/v1\/whatsapp\/media\/([^/]+)$/);
     if (target.origin !== 'https://zernio.com' || target.username || target.password || target.hash || !parts || !valid(decodeURIComponent(parts[1])) || [...target.searchParams.keys()].some(name => name !== 'accountId') || target.searchParams.getAll('accountId').length > 1 || target.searchParams.has('accountId') && target.searchParams.get('accountId') !== account._id || item.payload?.id != null && String(item.payload.id) !== decodeURIComponent(parts[1])) throw new Error();

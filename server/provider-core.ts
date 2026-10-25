@@ -49,10 +49,16 @@ async function providerJson(response: Response, signal: AbortSignal, allowEmpty 
 // refuses what encoding cannot fix and what slipped through unencoded, before anything is sent.
 const INVALID_PATH = () => fail(400, 'INVALID_PROVIDER_PATH', 'This provider resource ID is invalid.');
 export function assertProviderPath(path: string, query = true) {
-  const route = path.replace(/^https:\/\/[^/?#]*/i, ''), pathPart = query ? route.split('?')[0] : route;
+  // URL parsing drops control characters and surrounding whitespace before it resolves the path, so the path is checked
+  // only when it has neither; the check then sees what the parser sees.
+  if (/[\u0000-\u001f\u007f]/.test(path) || path !== path.trim()) INVALID_PATH();
+  const route = path.replace(/^https:\/\/[^/\\?#]*/i, ''), pathPart = query ? route.split('?')[0] : route;
   // Each segment is also checked as the provider sees it after one decoding, so '..%2Fx' cannot become '../x' there.
-  const decoded = (segment: string) => { try { return decodeURIComponent(segment); } catch { return segment; } };
-  if (route.includes('#') || !query && route.includes('?') || pathPart.includes('\\') || pathPart.split('/').some(segment => decoded(segment).includes('\\') || decoded(segment).split('/').some(part => part === '.' || part === '..'))) INVALID_PATH();
+  // Only the escapes that can form a dot segment or a separator are decoded; that cannot fail, whatever else the segment holds.
+  const decoded = (segment: string) => segment.replace(/%(2e|2f|5c)/gi, escape => decodeURIComponent(escape));
+  // Dot segments with a ';' parameter, and doubly encoded dots or separators, are refused for servers that decode further.
+  const unsafe = (segment: string) => /%25(2e|2f|5c)/i.test(segment) || decoded(segment).includes('\\') || decoded(segment).split('/').some(part => /^\.\.?(;|$)/.test(part));
+  if (route.includes('#') || !query && route.includes('?') || pathPart.includes('\\') || pathPart.split('/').some(unsafe)) INVALID_PATH();
 }
 /** One provider path segment: encoded, and never '.' or '..', which URL parsing would resolve even when encoded. */
 export function pathSegment(value: unknown): string {
