@@ -10,6 +10,7 @@ import { handleZernioConnections } from '../server/zernio-connections.ts';
 import { handleIntegration } from '../server/integrations.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { addWorkspaces } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 const profileId = 'profile-a';
@@ -122,7 +123,7 @@ test('connection UI retains write identity after gateway/pending responses and i
 
 test('credential connection dispatch uses authenticated mapped-profile integration routing', pg, async t => {
   const { db, pool } = await testDatabase(t), previous = globalThis.fetch, calls = []; let response;
-  await pool.query(`INSERT INTO workspaces (id, name) VALUES ('w', 'W'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'w', 'Project A', '${profileId}')`);
+  await addWorkspaces(pool, [{ id: 'w', name: 'W' }]); await pool.query(`INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'w', 'Project A', '${profileId}')`);
   try {
     globalThis.fetch = async (target, options = {}) => { const url = new URL(target); calls.push({ url, options }); assert.equal(options.headers.Authorization, 'Bearer synthetic-key'); const body = options.body && JSON.parse(options.body); return new Response(JSON.stringify(url.pathname.endsWith('/users') ? { currentUserId: 'api-user' } : url.pathname.endsWith('/accounts') ? { accounts: [{ _id: 'blue-a', platform: 'bluesky', username: 'brand.bsky.social', profileId, isActive: true }] } : { account: { _id: 'blue-a', platform: 'bluesky', username: body.identifier } })); };
     const dispatch = () => handleIntegration({ db, req: { method: 'POST', headers: { 'idempotency-key': 'router-connection' } }, url: new URL('https://campaign.example.test/api/projects/project-a/integrations/connections/bluesky/credentials'), project: { id: 'project-a', zernioProfileId: profileId }, config: { env: { ZERNIO_API_KEY: 'synthetic-key' } }, role: 'owner', body: { identifier: 'brand.bsky.social', appPassword: 'fixture' }, send(status, data) { response = { status, data }; } });
