@@ -51,7 +51,7 @@ test('the invitation shows Campaign\'s role label and the shared flow date, and 
   const tree = ui.render(), html = renderToStaticMarkup(tree);
   // The flow's roleLabel prop shows the label Team settings uses; the invitation keeps its role value. Like every
   // signed-out screen it sits beside the shared story panel, in the default split layout (#272).
-  assert.equal(tree.props.invitation.role, 'editor'); assert.equal(tree.props.roleLabel, roleLabel); assert.equal(tree.props.aside, story); assert.equal(tree.props.surface, undefined); assert.match(html, />Editor</); assert.doesNotMatch(html, />editor</);
+  assert.equal(tree.props.invitation.role, 'editor'); assert.equal(tree.props.roleLabel, roleLabel); assert.equal(tree.props.aside, undefined, 'The story panel comes from the root AuthFrameProvider.'); assert.equal(tree.props.label, 'Account access'); assert.equal(tree.props.surface, undefined); assert.match(html, />Editor</); assert.doesNotMatch(html, />editor</);
   assert.equal(tree.props.formatDate, undefined, 'The flow keeps its own Intl date format, the same one Team settings shows.');
   assert.match(html, />Oct 30, 2026</); assert.doesNotMatch(html, /10\/30\/2026/);
   tree.props.onSignIn(); assert.deepEqual(signIns, ['new@example.test']);
@@ -70,7 +70,7 @@ test('an invitation opened as another account offers Switch account, and Cancel 
   tree.props.onSwitchAccount(); assert.deepEqual(signIns, ['New@Example.test']);
   await tree.props.onSubmit({}); assert.equal(calls.filter(([path]) => path === '/invitations/accept').length, 0, 'A mismatched session cannot accept.');
   assert.equal(tree.props.cancel.label, 'Cancel'); tree.props.cancel.onClick(); assert.equal(cancelled, 1);
-  assert.deepEqual(tree.props.passwordPolicy, { minLength: 12, maxLength: 128 }, 'The library hint, as on owner setup.');
+  assert.equal(tree.props.passwordPolicy, undefined, 'The policy, and so the library hint, come from the root AuthFrameProvider.');
   const same = view({ token: 'T'.repeat(43), signedInEmail: 'new@example.test', request, onAccepted() {}, onSignIn() {} });
   same.render(); same.effects.forEach(effect => effect()); for (let tick = 0; tick < 3; tick++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(same.render().props.state, 'details', 'The invited email in another case is the same account.');

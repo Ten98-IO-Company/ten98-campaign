@@ -86,7 +86,7 @@ test('a failed owner setup or sign-in returns focus to the control that submitte
   assert.match(source, /^import \{[^}]*\buseFocusReturn\b[^}]*\} from '@ten98\/ui';$/m); assert.doesNotMatch(source, /from '\.\/focus-return'/);
   const hook = source.indexOf('  const rememberFocus = useFocusReturn(busy);', app);
   assert.ok(hook > app && hook < source.indexOf('  if (!session) return', app), 'The hook runs before the App returns early.');
-  assert.match(source, / onSubmit=\{async values => \{ rememberFocus\(\); await run\(async \(\) => \{ await api\('\/auth\/' \+ \(session\.setupRequired \? 'setup' : 'login'\), 'POST', values\)[;.]/);
+  assert.match(source, / onSubmit=\{async values => \{ rememberFocus\(\);(?: setAuthUnconfirmed\(''\);)? await run\(async \(\) => \{ await api\('\/auth\/' \+ \(session\.setupRequired \? 'setup' : 'login'\), 'POST', values\)[;.]/);
 });
 
 // The three reported surfaces remember focus inside their single-flight lock, after a repeat is refused.
