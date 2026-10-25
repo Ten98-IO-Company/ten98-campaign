@@ -169,6 +169,8 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
         if ((await findSession(tx, sessionToken(req)))?.id !== userId) throw new HttpError(403, 'Your sign-in session ended. Sign in again before changing your password.');
         if (locked?.password !== previous) throw new HttpError(409, 'Your password changed during this request. Sign in again.');
         await tx.execute(sql`UPDATE users SET password = ${next} WHERE id = ${userId}`);
+        // A new password retires any outstanding reset link (#284).
+        await tx.execute(sql`DELETE FROM password_resets WHERE user_id = ${userId}`);
         await tx.execute(sql`DELETE FROM sessions WHERE user_id = ${userId}`);
         await establish(res, userId, req, tx);
       });
