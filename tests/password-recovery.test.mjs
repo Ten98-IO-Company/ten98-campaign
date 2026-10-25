@@ -78,3 +78,28 @@ test('without transactional email the request explains the alternative and sends
   assert.equal(asked.status, 503); assert.match(asked.data.error, /Ask your administrator/);
   assert.equal(f.sent.length, 0); assert.equal((await f.app.sql.get('SELECT count(*)::int AS n FROM password_resets')).n, 0);
 });
+
+// Review follow-ups on #287: a password changed in settings retires an outstanding link, and a failed send is logged
+// without the address or the token.
+test('changing the password in settings retires an outstanding reset link', pg, async t => {
+  const f = await fixture(t);
+  await f.request('/api/auth/request-password-reset', { method: 'POST', body: { email: 'owner@example.test' } });
+  const token = tokenOf((await f.delivered(1))[0]);
+  const changed = await f.request('/api/account/password', { method: 'POST', body: { currentPassword: 'original owner password', newPassword: 'a password chosen in settings' }, cookie: f.ownerCookie });
+  assert.equal(changed.status, 200, JSON.stringify(changed.data));
+  assert.equal((await f.app.sql.get('SELECT count(*)::int AS n FROM password_resets')).n, 0);
+  assert.equal((await f.request('/api/auth/reset-password', { method: 'POST', body: { token, newPassword: 'a brand new owner password' } })).status, 400);
+});
+
+test('a reset email that cannot be sent is logged without the address or the token', pg, async t => {
+  const f = await fixture(t), logged = [], originalError = console.error, workingFetch = globalThis.fetch;
+  globalThis.fetch = async (target, options) => new URL(target).hostname === 'api.cloudflare.com' ? Response.json({ success: false, errors: [{ code: 10000 }] }, { status: 500 }) : workingFetch(target, options);
+  console.error = (...args) => logged.push(args.map(String).join(' '));
+  t.after(() => { console.error = originalError; });
+  assert.equal((await f.request('/api/auth/request-password-reset', { method: 'POST', body: { email: 'owner@example.test' } })).status, 200);
+  for (let tick = 0; tick < 50 && !logged.length; tick++) await new Promise(resolve => setTimeout(resolve, 20));
+  console.error = originalError;
+  assert.equal(logged.length, 1, logged.join('\n')); assert.match(logged[0], /^Password reset email was not sent:/);
+  const { token_hash: stored } = await f.app.sql.get('SELECT token_hash FROM password_resets');
+  assert.doesNotMatch(logged[0], /owner@example\.test/); assert.ok(!logged[0].includes(stored));
+});

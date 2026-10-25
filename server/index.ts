@@ -243,7 +243,7 @@ export async function createApp(options: AppOptions = {}) {
           if (reset) {
             const link = new URL('/#password-reset=' + reset.token, appUrl).href, sendEnv = { ...env };
             const text = ['A password reset was requested for your ten98 Campaign account.', '', 'Open this link within one hour to choose a new password:', link, '', 'If you did not ask for this, ignore this email; your password stays the same.'].join('\n');
-            setImmediate(() => { sendDirect({ channel: 'email', campaign: { emailPurpose: 'transactional', subject: 'Reset your ten98 Campaign password', text }, contact: { email: reset.email }, env: sendEnv }).catch(() => undefined); });
+            setImmediate(() => { sendDirect({ channel: 'email', campaign: { emailPurpose: 'transactional', subject: 'Reset your ten98 Campaign password', text }, contact: { email: reset.email }, env: sendEnv }).catch(error => { console.error('Password reset email was not sent:', error?.code || error?.message || 'unknown error'); }); });
           }
           return send(200, { ok: true });
         }
