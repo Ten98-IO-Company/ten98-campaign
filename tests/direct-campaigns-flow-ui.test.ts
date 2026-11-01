@@ -141,10 +141,24 @@ test('operator-only setup text is gated and the request paths are unchanged', ()
   assert.deepEqual([...new Set([...source.matchAll(/'\/(preview|send|schedule|test|suppress)'/g)].map(match => match[1]))].sort(), ['preview', 'suppress', 'test']);
 });
 
-// The Messages Contacts tab and its switch belong to #189; this flow adds only the operator flag to that mount.
-test('main mounts the campaign and contact views through the Messages Contacts tab and passes the operator flag', () => {
-  assert.match(mainSource, /\['campaigns', 'people'\]\.includes\(directView\) && [^\n]*<DirectCampaigns key=\{state\.projectId\} projectId=\{state\.projectId\} view=\{directView === 'people' \? 'contacts' : 'campaigns'\} isOperator=\{canMap\}/);
-  assert.doesNotMatch(mainSource, /section: 'people', label: 'Contacts'/, 'There is no second Contacts tab.');
+test('main mounts Campaign messaging and Messages contacts with their scope, access and shared launcher', async () => {
+  const jsx = mainSource.match(/<DirectCampaigns [^\r\n]+?\/>/)?.[0]; assert.ok(jsx);
+  const { code } = await transformWithOxc(`const element = (${jsx});`, 'DirectMount.tsx', { jsx: { runtime: 'classic' } });
+  const launched: string[] = [], pages: string[] = [], intent = { id: 1, projectId: 'p1', destination: 'sms' };
+  const scope = { DirectCampaigns: module.DirectCampaigns, creationIntent: intent, campaignGuardChanged() {}, startCampaignCreation: (kind: string) => launched.push(kind), state: { projectId: 'p1', campaigns: [] }, directView: 'campaigns', canMap: true, canWrite: false, addIntent: null, setPage: (page: string) => pages.push(page) };
+  for (const [view, expected] of [['campaigns', 'campaigns'], ['people', 'contacts']]) {
+    scope.directView = view;
+    const element = new Function('React', 'scope', `with (scope) { ${code}; return element; }`)(React, scope);
+    assert.equal(element.key, 'p1'); assert.equal(element.props.projectId, 'p1'); assert.equal(element.props.view, expected);
+    assert.equal(element.props.isOperator, true); assert.equal(element.props.readOnly, true); assert.equal(element.props.createIntent, intent);
+    element.props.onCreateCampaign(); element.props.onOpenIntegrations();
+  }
+  assert.deepEqual(launched, ['email', 'email']); assert.deepEqual(pages, ['Integrations', 'Integrations']);
+  const campaign = mainSource.split(/\r?\n/).find(line => line.includes("id: 'campaign', label: 'Campaign'"))!;
+  const messages = mainSource.split(/\r?\n/).find(line => line.includes("id: 'messages', label: 'Messages'"))!;
+  assert.match(campaign, /page: 'Direct campaigns', sections: \['campaigns'\], label: 'Email, SMS & WhatsApp'/);
+  assert.match(messages, /page: 'Direct campaigns', sections: \['people', 'contacts'\], label: 'Contacts'/);
+  assert.doesNotMatch(messages, /sections: \['campaigns'\]/, 'Message creation has one home under Campaign.');
 });
 
 

@@ -33,9 +33,10 @@ function wiredAgenda(state: { projectId: string; posts: Row[]; campaigns: Row[];
   const hooks: Record<string, unknown> = new Function('useState', 'React', 'CampaignPublishingAgenda', stripTypeScriptTypes(declarations.join('\n')) + `; return { ${names.join(', ')} };`)(useState, React, Agenda);
   for (const name of names.filter(name => name.startsWith('set'))) hooks[name] = (value: unknown) => (updates[name] ||= []).push(value);
   const calendarPosts = state.posts.flatMap(post => postScheduleEntries(post as any));
-  const scope = { ...hooks, React, CampaignPublishingAgenda: Agenda, Inline: ui.Inline, Button: ui.Button, state, calendarPosts, calendarOverlay: [], remote: {}, canWrite: true, approvalSummary: null, approvalGate: () => null, postLabel: (post: Row) => post.content || 'Media post', setModal() {}, eventActions: () => null };
+  const creations: { kind: string; context: unknown }[] = [];
+  const scope = { ...hooks, React, CampaignPublishingAgenda: Agenda, Inline: ui.Inline, Button: ui.Button, state, calendarPosts, calendarOverlay: [], remote: {}, canWrite: true, approvalSummary: null, approvalGate: () => null, postLabel: (post: Row) => post.content || 'Media post', startCampaignCreation: (kind: string, context: unknown) => creations.push({ kind, context }), setModal() {}, eventActions: () => null };
   const element: Node = new Function('scope', `with (scope) { ${elementCode}; return element; }`)(scope);
-  return { element, updates };
+  return { element, updates, creations };
 }
 const children = (node: Node): Node[] => node && typeof node === 'object' ? React.Children.toArray(node.props?.children) as Node[] : [];
 const find = (node: Node, match: (node: NonNullable<Node>) => boolean): Node => { if (!node || typeof node !== 'object') return undefined; if (match(node)) return node; for (const child of children(node)) { const found = find(child, match); if (found) return found; } };
@@ -66,6 +67,12 @@ test('Week is the default calendar view, and week and filter changes go back to 
   assert.deepEqual(control?.props?.options.map((option: { value: string }) => option.value), ['week', 'month', 'list']);
   element!.props!.onWeekChange('2099-10-26'); element!.props!.onFiltersChange({ campaign: 'c1' }); control!.props!.onValueChange('month');
   assert.deepEqual(Object.values(updates).flat(), ['2099-10-26', { campaign: 'c1' }, 'month']);
+});
+
+test('calendar day creation enters the shared flow with the original local midday preset', () => {
+  const { element, creations } = wiredAgenda({ projectId: 'p1', posts: [], campaigns: [] });
+  element!.props!.onCreateDay('2099-10-25');
+  assert.deepEqual(creations, [{ kind: 'social', context: { day: '2099-10-25T12:00' } }]);
 });
 
 test('field activity reaches the calendar through main.tsx with no Google events loaded (#185)', () => {

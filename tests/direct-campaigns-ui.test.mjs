@@ -295,7 +295,8 @@ test('the email provider choice offers a working Open integrations button wherev
   assert.match(await testFailure(sendErrors.INTEGRATION_NOT_CONFIGURED), button, 'A test refused for a missing provider links to Integrations.');
   assert.doesNotMatch(await testFailure(sendErrors.TEST_SEND_LIMIT), button);
   const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
-  assert.match(main, /<DirectCampaigns [^>]*onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\}/);
+  const mount = main.match(/<DirectCampaigns [^\r\n]+/)?.[0]; assert.ok(mount);
+  assert.match(mount, /onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\}/);
 });
 
 test('the Amazon SES feedback webhook URL is shown with a copy action only when SES sends email', async () => {
@@ -324,7 +325,7 @@ test('Save and check audience validates the form through its ref, saves the draf
   const saveDraft = section('async function saveDraft(', '  async function save(');
   async function run(valid = true) {
     const requests = [], notices = [], previews = [], reported = [];
-    const context = { formRef: { current: { reportValidity: () => { reported.push(true); return valid; } } }, readOnly: false, editable: true, draft: blankDraft, audienceMode: 'all', editingId: 'campaign-1', path: '/projects/a/direct', version: { current: 1 }, campaignBody, selectedTemplate: null, templateRestriction, action: async (_, perform) => perform(1), acceptCampaign() {}, setEditingId() {}, setNotice: value => notices.push(value), setError() {}, setPreview: value => previews.push(value), requester: { current: async (path, method, body) => { requests.push([path, method, body]); return path.endsWith('/preview') ? { previewToken: 'review', audience: { eligible: 2 } } : { campaign: { id: 'campaign-1', status: 'draft' } }; } } };
+    const context = { formRef: { current: { reportValidity: () => { reported.push(true); return valid; } } }, readOnly: false, editable: true, draft: blankDraft, audienceMode: 'all', savedDraft: { current: '' }, editingId: 'campaign-1', path: '/projects/a/direct', version: { current: 1 }, campaignBody, selectedTemplate: null, templateRestriction, action: async (_, perform) => perform(1), acceptCampaign() {}, setEditingId() {}, setNotice: value => notices.push(value), setError() {}, setPreview: value => previews.push(value), requester: { current: async (path, method, body) => { requests.push([path, method, body]); return path.endsWith('/preview') ? { previewToken: 'review', audience: { eligible: 2 } } : { campaign: { id: 'campaign-1', status: 'draft' } }; } } };
     context.saveDraft = compile(saveDraft, context);
     await compile(section('async function checkAudience(', '  async function openCampaign('), context)();
     return { requests, notices, previews, reported };
@@ -397,13 +398,13 @@ test('the import notice counts every processed row and the preview explains what
   assert.match(source, /\{importResult\.dryRun && importResult\.updated > 0 && <Text tone="muted" size="sm">Merging updates an existing contact's details from the file, such as name and company, and keeps the permissions and evidence already recorded\.<\/Text>\}/);
 });
 
-test('Messages shows campaigns and contacts as its own tabs, so a view hides the inner tab strip', async () => {
+test('Campaign messaging and Messages contacts share the maintained editor without adding an inner tab strip', async () => {
   const source = (await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
   // #128 removed the inner tab strip altogether: the view picks contacts, the campaign page or the campaign list.
   assert.match(source, /\{view === 'contacts' \? contactsView : pageOpen \? campaignPage : campaignList\}/);
   assert.doesNotMatch(source, /<Tabs /);
   const app = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
-  assert.match(app, /\['campaigns', 'people'\]\.includes\(directView\) && <Suspense[^\n]*<DirectCampaigns key=\{state\.projectId\} projectId=\{state\.projectId\} view=\{directView === 'people' \? 'contacts' : 'campaigns'\}/);
+  assert.match(app, /\['campaigns', 'people'\]\.includes\(directView\) && <Suspense[^\n]*<DirectCampaigns [^\n]*key=\{state\.projectId\} projectId=\{state\.projectId\} view=\{directView === 'people' \? 'contacts' : 'campaigns'\}/);
   assert.match(app, /<SegmentedControl label="Contacts to show" value=\{directView\}[^\n]*'Your contacts'[^\n]*'From social accounts'/);
 });
 

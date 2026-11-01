@@ -12,14 +12,14 @@ test('campaign rows open the matching native advertising view and manual records
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), start = source.indexOf('function openCampaign('), end = source.indexOf('  const campaignTable', start);
   assert.ok(start > 0 && end > start);
   const calls = [], record = name => (...value) => calls.push([name, ...value]);
-  const { open, add, openItem } = new Function('setPage', 'setAdsView', 'setModal', 'navigate', 'setAddIntent', 'state', `${stripTypeScriptTypes(source.slice(start, end))}; return { open: openCampaign, add: addToCampaign, openItem: openCampaignItem };`)(record('page'), record('view'), record('modal'), record('navigate'), record('intent'), { projectId: 'project-a', campaigns: [{ id: 'c1', startDate: '2999-03-01', endDate: '2999-03-31' }, { id: 'past', startDate: '2001-01-01', endDate: '2001-01-31' }] });
+  const { open, add, openItem } = new Function('setPage', 'setAdsView', 'setModal', 'navigate', 'setAddIntent', 'startCampaignCreation', 'state', `${stripTypeScriptTypes(source.slice(start, end))}; return { open: openCampaign, add: addToCampaign, openItem: openCampaignItem };`)(record('page'), record('view'), record('modal'), record('navigate'), record('intent'), record('create'), { projectId: 'project-a', campaigns: [{ id: 'c1', startDate: '2999-03-01', endDate: '2999-03-31' }, { id: 'past', startDate: '2001-01-01', endDate: '2001-01-31' }] });
   for (const [provider, view] of [['googleAdsNative', 'shopping'], ['microsoft', 'microsoft']]) { calls.length = 0; open({ nativeProvider: provider, id: 'native' }); assert.deepEqual(calls, [['page', 'Ads manager', view]]); }
   calls.length = 0; open({ id: 'manual' }); assert.deepEqual(calls, [['navigate', { page: 'Campaigns', section: '', projectId: 'project-a', item: 'manual' }]]);
-  // Add creates posts and bookings linked to the campaign and inside its dates; work made on another page opens there with the campaign set.
+  // Every campaign creation choice enters the common flow with its campaign and date context; links remain supporting material.
   calls.length = 0; for (const kind of ['post', 'placement', 'activation', 'message', 'ad', 'link']) add(kind, 'c1');
-  assert.deepEqual(calls, [['modal', { type: 'post', campaignId: 'c1', day: '2999-03-01T09:00' }], ['modal', { type: 'placement', campaignId: 'c1', dates: { start: '2999-03-01', end: '2999-03-31' } }],
-    ['intent', { page: 'Field activity', campaignId: 'c1' }], ['page', 'Field activity'], ['intent', { page: 'Direct campaigns', campaignId: 'c1' }], ['page', 'Direct campaigns'], ['page', 'Ads manager'], ['intent', { page: 'Links & tracking', campaignId: 'c1' }], ['page', 'Links & tracking']]);
-  calls.length = 0; add('post', 'past'); assert.deepEqual(calls, [['modal', { type: 'post', campaignId: 'past' }]], 'A campaign that already started leaves the post time to the composer default.');
+  const context = { campaignId: 'c1', dates: { start: '2999-03-01', end: '2999-03-31' }, day: '2999-03-01T09:00' };
+  assert.deepEqual(calls, [['create', 'social', context], ['create', 'billboards', context], ['create', 'field', context], ['create', 'email', context], ['create', 'advertising', context], ['intent', { page: 'Links & tracking', campaignId: 'c1' }], ['page', 'Links & tracking']]);
+  calls.length = 0; add('post', 'past'); assert.deepEqual(calls, [['create', 'social', { campaignId: 'past', dates: { start: '2001-01-01', end: '2001-01-31' } }]], 'A campaign that already started leaves the post time to the composer default.');
   calls.length = 0; const post = { id: 'p1' }; openItem('post', post); openItem('activation', { id: 'a1' }); assert.deepEqual(calls, [['modal', { type: 'post', item: post }], ['page', 'Field activity']]);
 });
 

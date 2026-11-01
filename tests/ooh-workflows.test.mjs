@@ -79,7 +79,7 @@ test('OOH write keys allow a manual retry after definitive rejection and preserv
   const writesBeforeRefresh = calls.length;
   await assert.rejects(write(target, { name: 'Changed draft' }), /Refresh the booking details/); assert.equal(calls.length, writesBeforeRefresh, 'A changed proposal cannot bypass the stale-details lock with a fresh request key.');
   assert.match(source, /<Stack as="fieldset" disabled=\{refreshRequired\}>/); assert.match(source, /Broadsign saved the action/);
-  const refreshCode = source.slice(source.indexOf('async function refresh()'), source.indexOf('  useEffect('));
+  const refreshStart = source.indexOf('async function refresh()'), refreshCode = source.slice(refreshStart, source.indexOf('  useEffect(', refreshStart));
   const refresh = new Function('action', 'load', 'onChanged', 'pendingKeys', 'refreshNeeded', 'setRefreshRequired', 'setNotice', `return (${refreshCode});`)(run => run(), load, undefined, pendingKeys, refreshNeeded, setRefreshRequired, value => { notice = value; });
   await assert.rejects(refresh(), /Reload failed/); assert.equal(refreshRequired, true); assert.equal(pendingKeys.current.get(signature), 'operation-key-2');
   reloadError = undefined; await refresh(); assert.equal(refreshRequired, false); assert.equal(refreshNeeded.current, false); assert.equal(pendingKeys.current.size, 0); assert.equal(notice, 'Provider details refreshed.'); assert.equal(calls.length, writesBeforeRefresh, 'Refreshing never replays a provider write.');

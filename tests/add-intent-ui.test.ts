@@ -17,7 +17,7 @@ const library: Record<string, unknown> = { ...ui, useFocusReturn: () => () => {}
 const campaigns = [{ id: 'c1', name: 'Autumn launch', currency: 'AED' }, { id: 'c2', name: 'Spring sampling', currency: 'AED', startDate: '2026-10-26', endDate: '2026-11-30' }];
 const request = () => new Promise(() => {});
 
-const offlineCode = await compile('OfflineActivations.tsx'), offlineLibrary = { ...shared, ...library };
+const offlineCode = await compile('OfflineActivations.tsx'), offlineLibrary = { ...shared, ...library, useConfirmDialog: () => [async () => false, null] };
 function mountOffline(props: Row) {
   const h = hooks(), { OfflineActivations } = new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(offlineLibrary), offlineCode + '; return { OfflineActivations };')(React, h.useEffect, h.useRef, h.useState, ...Object.values(offlineLibrary));
   const all = { projectId: 'p1', brand: 'Brand', campaigns, activations: [], request, onChanged() {}, ...props };

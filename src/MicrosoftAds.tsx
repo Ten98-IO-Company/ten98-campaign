@@ -2,15 +2,18 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Card, Checkbox, ConfirmDialog, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
 import { adSpendBlock, type AdSpendBlock } from './approval-status';
 import AdSpendNotice from './AdSpendNotice';
+import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
 
 type Row = Record<string, any>;
-type Props = { projectId: string; role: string; isOperator: boolean; request: (path: string, method?: string, body?: any, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void; onOpenApprovals?: () => void };
+type Props = { projectId: string; role: string; isOperator: boolean; request: (path: string, method?: string, body?: any, key?: string) => Promise<any>; onChanged?: () => void | Promise<void>; mode?: 'workflow' | 'connection'; onOpenIntegrations?: () => void; onOpenApprovals?: () => void; onCreateCampaign?: () => void; createIntent?: CampaignCreationIntent; onCreateHandled?: () => void; onGuardChange?: (guard: CampaignEditorGuard | null) => void };
 const lines = (value: FormDataEntryValue | null) => String(value || '').split('\n').map(row => row.trim()).filter(Boolean);
 const today = () => new Date().toISOString().slice(0, 10);
 
-export default function MicrosoftAds({ projectId, role, isOperator, request, onChanged, mode = 'workflow', onOpenIntegrations, onOpenApprovals }: Props) {
+export default function MicrosoftAds({ projectId, role, isOperator, request, onChanged, mode = 'workflow', onOpenIntegrations, onOpenApprovals, onCreateCampaign, createIntent, onCreateHandled, onGuardChange }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/microsoft-ads`, active = useRef(true), readVersion = useRef(0), pending = useRef(false), keys = useRef(new Map<string, string>()), requester = useRef(request); requester.current = request;
   const [status, setStatus] = useState<Row | null>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [report, setReport] = useState<Row | null>(null), [confirming, setConfirming] = useState<{ campaign: Row; body: Row }>(), [spendBlock, setSpendBlock] = useState<AdSpendBlock | null>(null);
+  const [creation, setCreation] = useState({ open: false, id: 0 }), [creationDraft, setCreationDraft] = useState('');
+  const handledCreation = useRef<number | null>(null), creationForm = useRef<HTMLFormElement | null>(null), creationBaseline = useRef(''), creationRevision = useRef('');
   const canWrite = ['owner', 'admin', 'editor'].includes(role), canMap = isOperator && ['owner', 'admin'].includes(role);
   async function load() {
     if (!active.current) return;
@@ -22,6 +25,21 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
     } catch (failure) { if (active.current && read === readVersion.current) throw failure; }
   }
   useEffect(() => { active.current = true; const loading = load(), read = readVersion.current; loading.catch(failure => { if (active.current && read === readVersion.current) setError(failure.message); }); return () => { active.current = false; }; }, [projectId, mode]);
+  useEffect(() => {
+    if (!createIntent || createIntent.projectId !== projectId || createIntent.destination !== 'microsoft-search' || handledCreation.current === createIntent.id || mode !== 'workflow' || !canWrite || !status?.configured || !status.mapping) return;
+    handledCreation.current = createIntent.id; setCreation({ open: true, id: createIntent.id }); onCreateHandled?.();
+  }, [createIntent, projectId, mode, canWrite, status, onCreateHandled]);
+  function captureCreationForm(element: HTMLElement | null) {
+    if (!element || element === creationForm.current) return;
+    creationForm.current = element as HTMLFormElement;
+    creationBaseline.current = creationRevision.current = JSON.stringify(Array.from(new FormData(creationForm.current).entries())); setCreationDraft(creationRevision.current);
+  }
+  function creationChanged() { if (creationForm.current) { creationRevision.current = JSON.stringify(Array.from(new FormData(creationForm.current).entries())); setCreationDraft(creationRevision.current); } }
+  useEffect(() => {
+    if (mode !== 'workflow') return;
+    onGuardChange?.({ dirty: canWrite && creationRevision.current !== creationBaseline.current, busy, revision: creationRevision.current, discard: () => { creationForm.current?.reset(); creationRevision.current = creationBaseline.current; setCreationDraft(creationBaseline.current); setCreation(previous => ({ ...previous, open: false })); } });
+    return () => onGuardChange?.(null);
+  }, [creationDraft, busy, canWrite, mode, onGuardChange]);
   async function action(run: () => Promise<void>) {
     if (pending.current || !active.current) return; readVersion.current++; pending.current = true; setBusy(true); setError(''); setNotice(''); setSpendBlock(null);
     try { await run(); } catch (failure) { const block = adSpendBlock(failure); if (active.current && block) setSpendBlock(block); else if (active.current) setError((failure as Error).message || 'Microsoft Advertising could not complete this action.'); }
@@ -40,11 +58,11 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
     await action(async () => { const result = await requester.current(path + '/connection', 'POST', { customerId: values.get('customerId'), accountId: values.get('accountId'), confirmed: true }); if (!active.current) return; setStatus(previous => ({ ...previous, mapping: result.mapping })); await load(); if (active.current) setNotice('Account connected to this project.'); });
   }
   async function create(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const form = event.currentTarget, values = new FormData(form);
+    event.preventDefault(); const form = event.currentTarget, values = new FormData(form), submittedRevision = creationRevision.current;
     const body = { name: values.get('name'), dailyBudget: Number(values.get('dailyBudget')), maxCpc: Number(values.get('maxCpc')), finalUrl: values.get('finalUrl'), headlines: lines(values.get('headlines')), descriptions: lines(values.get('descriptions')), keywords: lines(values.get('keywords')), matchType: values.get('matchType'), locationIds: String(values.get('locationIds') || '').split(/[\s,]+/).filter(Boolean), confirmed: true };
     await action(async () => {
       const result = await write(path + '/campaigns', body); if (!active.current) return;
-      setCampaigns(previous => [result.providerCampaign, ...previous.filter(row => row.id !== result.providerCampaign.id)]); form.reset(); setNotice('Paused search campaign, location targets, responsive ad and keywords were created and read back. Review targeting and editorial approval before activation.');
+      setCampaigns(previous => [result.providerCampaign, ...previous.filter(row => row.id !== result.providerCampaign.id)]); if (creationRevision.current === submittedRevision) { form.reset(); creationRevision.current = creationBaseline.current; setCreationDraft(creationBaseline.current); } setNotice('Paused search campaign, location targets, responsive ad and keywords were created and read back. Review targeting and editorial approval before activation.');
       try { await onChanged?.(); } catch { if (active.current) setNotice('Microsoft confirmed the paused campaign. Refresh the campaign plan to see it here.'); }
     });
   }
@@ -71,12 +89,12 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
       <Text tone="muted">Use numeric IDs from Microsoft Advertising, not its alphanumeric account number. Microsoft must confirm the account’s owning customer. Each account belongs to one project and its mapping is fixed.</Text><Checkbox required label="I approve assigning this Microsoft account to this project."/><FormActions><Button variant="secondary" type="submit">Verify and approve account</Button></FormActions>
     </Stack></Stack></Disclosure>}
     {mode === 'workflow' && status?.mapping && status.configured && <>
-      {canWrite && <Disclosure summary="Create paused Microsoft search campaign"><Stack as="form" onSubmit={create}><Stack as="fieldset" gap={3} disabled={busy}>
+      {canWrite && <Disclosure summary="Create paused Microsoft search campaign" open={creation.open} onOpenChange={open => { if (open && onCreateCampaign) onCreateCampaign(); else setCreation(previous => ({ ...previous, open })); }}><Stack as="form" key={creation.id} ref={captureCreationForm} onInput={creationChanged} onChange={creationChanged} onSubmit={create}><Stack as="fieldset" gap={3} disabled={busy}>
         <FormGrid><Field label="Campaign name *"><Input name="name" required maxLength={128}/></Field><Field label={`Daily budget (${status.mapping.currency}) *`}><Input name="dailyBudget" type="number" required min="0.01" max="1000000" step="0.01"/></Field><Field label={`Maximum CPC (${status.mapping.currency}) *`}><Input name="maxCpc" type="number" required min="0.01" max="1000000" step="0.01"/></Field><Field label="Landing page URL *"><Input name="finalUrl" type="url" pattern="https://.+" required maxLength={2048}/></Field></FormGrid>
         <Field label="Microsoft location target IDs *"><Input name="locationIds" required placeholder="Numeric IDs, separated by commas" pattern="[0-9,\s]+"/></Field><Text tone="muted">Use Microsoft’s <Link href="https://learn.microsoft.com/en-us/advertising/guides/geographical-location-codes" target="_blank" rel="noreferrer">location target IDs</Link>. Standard Microsoft location-interest matching applies; review presence and other targeting in Microsoft before activation.</Text>
         <Field label="Headlines · 3–15 distinct lines, 30 characters each *"><Textarea name="headlines" rows={5} required maxLength={500}/></Field><Field label="Descriptions · 2–4 distinct lines, 90 characters each *"><Textarea name="descriptions" rows={4} required maxLength={400}/></Field><Text tone="muted">Use literal Latin-script creative here. Dynamic substitutions and double-width creative require the native Microsoft editor.</Text>
         <Field label="Keywords · one per line, up to 100 *"><Textarea name="keywords" rows={4} required maxLength={8100}/></Field><Field label="Keyword matching"><Select name="matchType" defaultValue="Exact"><Option value="Exact">Exact</Option><Option value="Phrase">Phrase</Option><Option value="Broad">Broad</Option></Select></Field>
-        <Checkbox required label="I reviewed the copy, location IDs, bid cap and daily budget. Create the campaign paused."/><FormActions><Button variant="primary" type="submit">Create paused Microsoft campaign</Button></FormActions>
+        <Checkbox name="confirmed" required label="I reviewed the copy, location IDs, bid cap and daily budget. Create the campaign paused."/><FormActions><Button variant="primary" type="submit">Create paused Microsoft campaign</Button></FormActions>
       </Stack></Stack></Disclosure>}
       <Stack as="section" gap={3}><Heading level={3} size="sm">Search campaigns</Heading>{!campaigns.length && <Text tone="muted">No search campaigns were returned for this account.</Text>}{campaigns.map(campaign => <Card as="article" headingLevel={4} key={campaign.id} title={campaign.name}><Stack gap={3}><Text>Microsoft campaign {campaign.id} · {campaign.status} · {campaign.sharedBudget ? 'Shared budget' : ['DailyBudgetStandard', 'DailyBudgetAccelerated'].includes(campaign.budgetType) ? 'Daily budget' : 'Budget'} {campaign.dailyBudget ?? 'Not reported'} {status.mapping.currency}</Text>
         {canWrite && ['Active', 'Paused'].includes(campaign.status) ? <Stack as="form" key={`${campaign.id}:${campaign.status}:${campaign.dailyBudget}`} onSubmit={event => reviewChange(event as React.FormEvent<HTMLFormElement>, campaign)}><Stack as="fieldset" gap={3} disabled={busy}><FormGrid><Field label="Status"><Select name="status" defaultValue={campaign.status}><Option value="Paused">Paused</Option><Option value="Active">Active · may incur charges</Option></Select></Field>{campaign.sharedBudget === false && ['DailyBudgetStandard', 'DailyBudgetAccelerated'].includes(campaign.budgetType) && <Field label={`Daily budget (${status.mapping.currency})`}><Input name="dailyBudget" type="number" required min="0.01" max="1000000" step="0.01" defaultValue={campaign.dailyBudget}/></Field>}</FormGrid><FormActions><Button variant="secondary" type="submit">Review Microsoft campaign change</Button></FormActions></Stack></Stack> : <Text tone="muted">Manage this campaign in Microsoft Advertising.</Text>}
