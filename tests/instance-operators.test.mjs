@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { setInstanceOperator } from '../server/instance-operators.ts';
 import { blockWrites, postgresSkip, testApp, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 const cli = fileURLToPath(new URL('../server/cli.ts', import.meta.url));
@@ -16,7 +17,7 @@ function runCli(url, command, input) {
   const preloads = process.execArgv.flatMap((value, index, values) => value === '--import' ? [value, values[index + 1]] : []);
   return spawnSync(process.execPath, [...preloads, cli, command], { input: JSON.stringify(input), env: { DATABASE_URL: url }, encoding: 'utf8', timeout: 120000 });
 }
-const seed = pool => pool.query("INSERT INTO users VALUES ('owner','Owner','owner@example.test','preserved-owner-hash'),('member','Member','member@example.test','preserved-member-hash'); INSERT INTO instance_operators VALUES ('owner'); INSERT INTO workspaces (id, name) VALUES ('workspace','Workspace'); INSERT INTO memberships VALUES ('workspace','owner','owner'),('workspace','member','editor')");
+const seed = pool => seedAccounts(pool, { users: [{ id: 'owner', name: 'Owner', email: 'owner@example.test', password: 'preserved-owner-hash' }, { id: 'member', name: 'Member', email: 'member@example.test', password: 'preserved-member-hash' }], workspaces: [{ id: 'workspace', name: 'Workspace' }], memberships: [['workspace', 'owner', 'owner'], ['workspace', 'member', 'editor']], operators: ['owner'] });
 const history = async pool => (await pool.query('SELECT * FROM instance_operator_audit ORDER BY created_at, id')).rows;
 async function failInserts(pool, table) {
   await pool.query(`CREATE FUNCTION fail_${table}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic audit failure'; END $$; CREATE TRIGGER fail_${table} BEFORE INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION fail_${table}()`);

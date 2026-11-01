@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { hashPassword } from '../server/auth.ts';
 import { postgresSkip, testApp } from './postgres.mjs';
+import { addMemberships, addUsers } from './fixtures/accounts.ts';
 
 type Result = { status: number; data: any; cookie?: string };
 const origin = 'http://127.0.0.1:3027', password = 'first project fixture password';
@@ -21,8 +22,8 @@ test('the first project may include the sample once, seeded only by an owner or 
   const sampleRecords = async (projectId: string) => (await Promise.all(['campaigns', 'posts', 'assets', 'providers', 'placements'].map(collection => app.store.list(projectId, collection)))).flat();
   async function member(email: string, role: string, workspaceId: string) {
     const id = 'member-' + role;
-    await app.sql.run('INSERT INTO users VALUES (?, ?, ?, ?)', id, role, email, await hashPassword(password));
-    await app.sql.run('INSERT INTO memberships VALUES (?, ?, ?)', workspaceId, id, role);
+    await addUsers(app.sql, [{ id: id, name: role, email: email, password: await hashPassword(password) }]);
+    await addMemberships(app.sql, [[workspaceId, id, role]]);
     return (await request('/auth/login', undefined, { email, password })).cookie!;
   }
   try {

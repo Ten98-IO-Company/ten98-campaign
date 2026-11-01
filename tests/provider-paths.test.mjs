@@ -6,6 +6,7 @@ import { handleCalendar } from '../server/calendar.ts';
 import { getSmsStatus } from '../server/direct-providers.ts';
 import { assertProviderPath, pathSegment, providerRequest, zernioClient } from '../server/provider-core.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { addWorkspaces } from './fixtures/accounts.ts';
 
 // ten98-campaign#33: an ID placed in a provider path must reach the intended endpoint as one segment, or be refused
 // before anything is sent. The allowed provider hosts carry Campaign's credentials, so a traversal ID that reaches a
@@ -63,7 +64,7 @@ test('Zernio routes send a traversal ID as one encoded segment or not at all', a
 
 test('Google Calendar reads keep a traversal calendar ID inside the calendar path, including a legacy mapping', { skip: postgresSkip }, async t => {
   const { db, sql } = await testDatabase(t), store = createStore(db);
-  await sql.run('INSERT INTO workspaces (id, name) VALUES (?,?)', 'workspace', 'Paths');
+  await addWorkspaces(sql, [{ id: 'workspace', name: 'Paths' }]);
   await sql.run('INSERT INTO projects (id,workspace_id,name) VALUES (?,?,?)', 'project', 'workspace', 'Paths');
   const calls = stubFetch(t, url => url.hostname === 'oauth2.googleapis.com' ? Response.json({ access_token: 'path-token' }) : Response.json({ kind: 'calendar#events', items: [] }));
   const invoke = async (suffix, method = 'GET', body = {}) => {

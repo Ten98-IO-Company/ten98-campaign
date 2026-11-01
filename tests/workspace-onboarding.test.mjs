@@ -8,6 +8,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { hashPassword } from '../server/auth.ts';
 import { adSpendBlock } from '../src/approval-status.ts';
 import { postgresSkip, testApp } from './postgres.mjs';
+import { addUsers } from './fixtures/accounts.ts';
 
 test('failed no-project refresh and workspace readback remain visible through the actual app handlers', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), context = {
@@ -48,7 +49,7 @@ test('an account without project access can create its workspace through the act
     }
     await api('/auth/setup', 'POST', { name: 'Existing owner', email: 'owner@example.test', password: 'existing owner fixture password' });
     const existing = await api('/state'), userId = randomUUID();
-    await app.sql.run('INSERT INTO users VALUES(?,?,?,?)', userId, 'New member', 'new-member@example.test', await hashPassword('new member fixture password'));
+    await addUsers(app.sql, [{ id: userId, name: 'New member', email: 'new-member@example.test', password: await hashPassword('new member fixture password') }]);
     await api('/auth/login', 'POST', { email: 'new-member@example.test', password: 'new member fixture password' });
     const empty = await api('/state'); assert.equal(empty.projectId, null); assert.deepEqual(empty.projects, []); assert.deepEqual(empty.workspaces, []);
     const pendingWork = { current: 0 }, opened = [], context = { pendingWork, run: async work => { pendingWork.current++; try { return await work(); } finally { pendingWork.current--; } }, api, reload: async id => opened.push(await api('/state?projectId=' + encodeURIComponent(id))) };

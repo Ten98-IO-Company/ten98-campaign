@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addMemberships, addUsers } from './fixtures/accounts.ts';
 
 test('HTTP platform variants publish, schedule, refresh, edit and retry the exact approved creative with fail-closed provider preflight', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-platform-posts-')), distDir = join(dataDir, 'dist');
@@ -63,8 +64,8 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     const state = (await request('/api/state')).data, projectId = state.projectId, project = `/api/projects/${projectId}`, integrations = `${project}/integrations/social`;
     assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);
     const viewerId = randomUUID(), owner = await app.sql.get('SELECT password FROM users WHERE id=?', state.user.id);
-    await app.sql.run('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)', viewerId, 'Platform viewer', 'platform-viewer@example.test', owner.password);
-    await app.sql.run("INSERT INTO memberships VALUES(?,?,'viewer')", state.workspaces[0].id, viewerId);
+    await addUsers(app.sql, [{ id: viewerId, name: 'Platform viewer', email: 'platform-viewer@example.test', password: owner.password }]);
+    await addMemberships(app.sql, [[state.workspaces[0].id, viewerId, 'viewer']]);
     const viewerCookie = (await post('/api/auth/login', { email: 'platform-viewer@example.test', password: 'platform fixture password that is long enough' })).cookie;
     const image = { type: 'image', url: 'https://cdn.example.test/common.jpg', width: 1200, height: 1200, size: 2000, mimeType: 'image/jpeg', altText: 'Common creative' };
     const instagramImage = { ...image, url: 'https://cdn.example.test/instagram.jpg', altText: 'Square Instagram creative' };

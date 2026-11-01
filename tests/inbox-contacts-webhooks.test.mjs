@@ -4,6 +4,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { createContacts } from '../server/contacts.ts';
 import { createWebhookService } from '../server/webhooks.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const env = { ZERNIO_WEBHOOK_SECRET: 'signed-inbox-fixture-secret' };
 const originalFetch = globalThis.fetch;
@@ -11,7 +12,7 @@ before(() => { globalThis.fetch = () => { throw new Error('Webhook workers must 
 after(() => { globalThis.fetch = originalFetch; });
 async function fixture(t) {
   const { db, pool, sql } = await testDatabase(t);
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('workspace-a', 'Workspace A')");
+  await seedAccounts(pool, { workspaces: [{ id: 'workspace-a', name: 'Workspace A' }] });
   await pool.query("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'workspace-a', 'A', 'profile-a'), ('project-b', 'workspace-a', 'B', 'profile-b')");
   const contacts = createContacts({ db }), service = createWebhookService({ db, contacts, env });
   return { db, pool, sql, contacts, service };

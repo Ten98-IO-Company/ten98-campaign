@@ -10,6 +10,7 @@ import * as designSystem from '@ten98/ui';
 import { handleZernioMeasurement } from '../server/zernio-measurement.ts';
 import { handleIntegration } from '../server/integrations.ts';
 import { IntegrationError } from '../server/provider-core.ts';
+import { addWorkspaces } from './fixtures/accounts.ts';
 
 const profileId = 'profile-a', platforms = ['metaads', 'googleads', 'linkedinads', 'tiktokads', 'pinterestads', 'xads', 'openaiads', 'redditads'];
 const pixel = (platform, id = `${platform}-pixel`) => ({ id, name: 'Website pixel', platform, kind: 'pixel', status: 'active', siteTagId: `site-${id}`, lastFiredTime: null, installed: false, code: '<script>example("public-pixel-id")</script>', secret: 'must-not-escape' });
@@ -128,7 +129,7 @@ test('measurement write keys survive server failures and pending receipts until 
 
 test('the integration router authenticates scoped measurement requests and preserves unknown creation when mapping changes after a write', pg, async t => {
   const { db, pool } = await testDatabase(t), original = globalThis.fetch, project = { id: 'project-a', zernioProfileId: profileId }; let changed = false, writes = 0;
-  await pool.query(`INSERT INTO workspaces (id, name) VALUES ('w', 'W'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'w', 'Project A', '${profileId}')`);
+  await addWorkspaces(pool, [{ id: 'w', name: 'W' }]); await pool.query(`INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a', 'w', 'Project A', '${profileId}')`);
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); assert.equal(url.origin, 'https://zernio.com'); assert.equal(options.headers.Authorization, 'Bearer fixture-key');
     if (url.pathname === '/api/v1/accounts') return Response.json({ accounts: [{ _id: 'openaiads', platform: 'openaiads', profileId, isActive: true }] });

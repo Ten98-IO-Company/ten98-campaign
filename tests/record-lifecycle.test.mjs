@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addMemberships, addUsers } from './fixtures/accounts.ts';
 
 test('record deletion preserves assignments and administrators can remove sample data without touching real or other-project records', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-record-lifecycle-')), origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir, env: {}, appUrl: origin });
@@ -23,8 +24,8 @@ test('record deletion preserves assignments and administrators can remove sample
     const cookies = {};
     for (const role of ['admin', 'editor', 'viewer']) {
       const id = randomUUID(), email = `lifecycle-${role}@example.test`;
-      await app.sql.run('INSERT INTO users VALUES(?,?,?,?)', id, role, email, hash);
-      await app.sql.run('INSERT INTO memberships VALUES(?,?,?)', workspaceId, id, role);
+      await addUsers(app.sql, [{ id: id, name: role, email: email, password: hash }]);
+      await addMemberships(app.sql, [[workspaceId, id, role]]);
       cookies[role] = (await request('/api/auth/login', { method: 'POST', body: { email, password: secret }, cookie: null })).cookie;
     }
     async function create(collection, body) { const result = await request(`${project}/${collection}`, { method: 'POST', body }); assert.equal(result.status, 201); return result.data.record; }

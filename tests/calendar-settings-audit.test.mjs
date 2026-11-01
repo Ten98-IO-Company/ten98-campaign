@@ -6,12 +6,13 @@ import { stripTypeScriptTypes } from 'node:module';
 import { createStore } from '../server/database.ts';
 import { handleCalendar } from '../server/calendar.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { addWorkspaces } from './fixtures/accounts.ts';
 
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 
 test('Calendar listing accepts a genuine empty collection and honors browser-local instant boundaries', { skip: postgresSkip }, async t => {
   const { db, sql } = await testDatabase(t), store = createStore(db), originalFetch = globalThis.fetch;
-  await sql.run('INSERT INTO workspaces (id, name) VALUES (?,?)', 'workspace', 'Calendar audit');
+  await addWorkspaces(sql, [{ id: 'workspace', name: 'Calendar audit' }]);
   await sql.run('INSERT INTO projects (id,workspace_id,name) VALUES (?,?,?)', 'project', 'workspace', 'Calendar audit');
   const calls = [], events = [{ id: 'lateoctober', summary: 'October 31 late in New York', start: { dateTime: '2026-11-01T03:30:00Z' }, end: { dateTime: '2026-11-01T03:45:00Z' } }, { id: 'septemberlate', summary: 'September 30 late in New York', start: { dateTime: '2026-10-01T03:30:00Z' }, end: { dateTime: '2026-10-01T03:45:00Z' } }];
   let empty = false;

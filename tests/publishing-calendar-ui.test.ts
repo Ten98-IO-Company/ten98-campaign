@@ -182,3 +182,22 @@ test('#185: field activity is on the calendar without Google Calendar, labelled 
   const synced = find(Agenda({ ...props, googleEvents: [copy], view: 'list' }), ofType(ui.PublishingAgenda))!;
   assert.deepEqual(synced.props!.entries.map((item: { id: string }) => item.id), ['activation:doors', 'activation:road'], 'With Google Calendar connected the published copy is not listed again.');
 });
+
+test('#200: week entries keep metadata in one wrapping text flow and retain their action', () => {
+  const post = entry('sunday', at(25, 9), { campaignId: 'launch' });
+  let selected: unknown;
+  const props = { ...base, posts: [post], campaigns: [{ id: 'launch', name: 'Autumn launch' }], view: 'week', weekStart: '2099-10-19', onSelect(value: unknown) { selected = value; } };
+  const button = find(Agenda(props), node => node.type === ui.Button && text(node).includes('sunday caption'))!;
+  const contents = children(button);
+  assert.equal(contents.length, 1, 'A single flex child prevents metadata from shrinking into separate narrow columns.');
+  assert.equal(contents[0]!.type, ui.Text);
+  assert.equal(contents[0]!.props!.as, 'span', 'Button contents remain phrasing content.');
+  assert.equal(contents[0]!.props!.align, 'start');
+  assert.equal(contents[0]!.props!.truncate, true, 'The shared text frame constrains the caption to the button width.');
+  assert.ok(find(contents[0], node => node.type === ui.Text && node.props?.preserveWhitespace), 'The inner text flow wraps metadata normally.');
+  assert.match(text(button), /Facebook[\s\S]*sunday caption[\s\S]*Scheduled[\s\S]*Autumn launch/);
+  const caption = find(contents[0], node => node.type === ui.Text && node.props?.truncate && text(node) === 'sunday caption');
+  assert.equal(text(caption), 'sunday caption', 'The caption retains shared single-line truncation.');
+  button.props!.onClick();
+  assert.equal(selected, post.post);
+});

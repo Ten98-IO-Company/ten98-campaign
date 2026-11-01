@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { createHmac, randomBytes } from 'node:crypto';
 import { createAuth, hashPassword } from '../server/auth.ts';
 import { postgresSkip, signInRedirectError, testDatabase } from './postgres.mjs';
+import { addUsers } from './fixtures/accounts.ts';
 
 test('same-host instances keep session and OIDC cookies isolated while safely migrating their own legacy cookies', { skip: postgresSkip }, async t => {
   const { db: dbA, sql: sqlA } = await testDatabase(t), { db: dbB, sql: sqlB } = await testDatabase(t);
   const secret = 'cookie fixture session secret of sufficient length', issuer = 'https://identity.example', password = 'cookie isolation fixture password', hash = await hashPassword(password);
   const config = appUrl => ({ appUrl, sessionSecret: secret, oidcEnabled: true, oidcIssuer: issuer, oidcClientId: appUrl, oidcAllowedEmails: [] });
   const configA = config('http://127.0.0.1:3018'), configB = config('http://127.0.0.1:3019'), digest = value => createHmac('sha256', secret).update(value).digest('hex');
-  for (const [sql, id] of [[sqlA, 'alice'], [sqlB, 'bob']]) { await sql.run('INSERT INTO users VALUES(?,?,?,?)', id, id, id + '@example.test', hash); await sql.run('INSERT INTO oidc_identities VALUES(?,?,?)', issuer, 'existing-identity', id); }
+  for (const [sql, id] of [[sqlA, 'alice'], [sqlB, 'bob']]) { await addUsers(sql, [{ id: id, name: id, email: id + '@example.test', password: hash }]); await sql.run('INSERT INTO oidc_identities VALUES(?,?,?)', issuer, 'existing-identity', id); }
   const jar = new Map(), request = () => ({ headers: { cookie: [...jar].map(([name, value]) => name + '=' + value).join('; ') }, socket: { remoteAddress: '127.0.0.1' } });
   function response() { return { headers: {}, setHeader(name, value) { this.headers[name] = value; }, getHeader(name) { return this.headers[name]; }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers); }, end() {} }; }
   const setCookies = res => { const value = res.headers['Set-Cookie']; return Array.isArray(value) ? value : value ? [value] : []; };

@@ -8,6 +8,7 @@ import type { TestContext } from 'node:test';
 import type { AddressInfo } from 'node:net';
 import { hashPassword } from '../server/auth.ts';
 import { postgresSkip, testApp } from './postgres.mjs';
+import { addMemberships, addUsers } from './fixtures/accounts.ts';
 
 const origin = 'http://127.0.0.1:3019', password = 'leave workspace fixture password';
 type Member = { id: string; cookie: string };
@@ -23,8 +24,8 @@ async function team(t: TestContext) {
   const setup = await request('/auth/setup', { method: 'POST', body: { name: 'First owner', email: 'first@example.test', password } });
   const workspaceId: string = (await request('/state', { cookie: setup.cookie })).data.workspaces[0].id;
   const member = async (role: string): Promise<Member> => {
-    await pool.query('INSERT INTO users VALUES ($1, $2, $3, $4)', [role, role, `${role}@example.test`, await hashPassword(password)]);
-    await pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', [workspaceId, role, role]);
+    await addUsers(pool, [{ id: role, name: role, email: `${role}@example.test`, password: await hashPassword(password) }]);
+    await addMemberships(pool, [[workspaceId, role, role]]);
     return { id: role, cookie: (await request('/auth/login', { method: 'POST', body: { email: `${role}@example.test`, password } })).cookie };
   };
   const leave = (actor: Member, target = actor) => request(`/workspaces/${workspaceId}/members/${target.id}`, { method: 'DELETE', cookie: actor.cookie });

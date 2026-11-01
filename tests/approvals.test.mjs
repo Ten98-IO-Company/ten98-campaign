@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { createStore } from '../server/database.ts';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit, recordApprovedReschedule } from '../server/approvals.ts';
 import { blockWrites, postgresSkip, singleConnection, testDatabase } from './postgres.mjs';
+import { addMemberships, seedAccounts } from './fixtures/accounts.ts';
 
 test('content approval policy binds current posts and creative to audited review requests and enforces role and project boundaries', { skip: postgresSkip }, async t => {
   const { db, pool, sql } = await testDatabase(t);
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner','Workspace owner','owner@example.test'),('admin','Reviewer','admin@example.test'),('editor','Author','editor@example.test'),('viewer','Reader','viewer@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'),('project-b','w','B'); INSERT INTO memberships VALUES ('w','owner','owner'),('w','admin','admin'),('w','editor','editor'),('w','viewer','viewer')");
+  await seedAccounts(pool, { users: [{ id: 'owner', name: 'Workspace owner', email: 'owner@example.test' }, { id: 'admin', name: 'Reviewer', email: 'admin@example.test' }, { id: 'editor', name: 'Author', email: 'editor@example.test' }, { id: 'viewer', name: 'Reader', email: 'viewer@example.test' }], workspaces: [{ id: 'w', name: 'W' }], memberships: [['w', 'owner', 'owner'], ['w', 'admin', 'admin'], ['w', 'editor', 'editor'], ['w', 'viewer', 'viewer']] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'),('project-b','w','B')");
   const store = createStore(db), project = { id: 'project-a' }, foreignProject = { id: 'project-b' };
   const context = (role = 'editor', selectedProject = project) => ({ db, store, project: selectedProject, role, user: { id: role, name: { owner: 'Workspace owner', admin: 'Reviewer', editor: 'Author', viewer: 'Reader' }[role] } });
   async function invoke(path, { method = 'GET', body = {}, role = 'editor', selectedProject = project } = {}) {
@@ -116,7 +117,7 @@ test('content approval policy binds current posts and creative to audited review
 
 test('parallel review requests open one pending review and a parallel approve and reject record one decision', { skip: postgresSkip }, async t => {
   const { db, pool, sql } = await testDatabase(t);
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('admin','Reviewer','admin@example.test'),('editor','Author','editor@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'); INSERT INTO memberships VALUES ('w','admin','admin'),('w','editor','editor')");
+  await seedAccounts(pool, { users: [{ id: 'admin', name: 'Reviewer', email: 'admin@example.test' }, { id: 'editor', name: 'Author', email: 'editor@example.test' }], workspaces: [{ id: 'w', name: 'W' }], memberships: [['w', 'admin', 'admin'], ['w', 'editor', 'editor']] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A')");
   const store = createStore(db), project = { id: 'project-a' };
   const post = await store.create(project.id, 'posts', { content: 'Race fixture', platforms: ['facebook'], accounts: ['brand-account-a'], status: 'draft', mediaItems: [] });
   const invoke = async (path, role, body = {}) => { let result; await handleApprovals({ db, store, project, role, user: { id: role, name: role }, req: { method: 'POST' }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body, send(status, data) { result = { status, data }; } }); return result; };
@@ -139,8 +140,8 @@ test('parallel review requests open one pending review and a parallel approve an
 // Council decision ten98-code-system#30: self-review is refused unless the requester is the single active owner/admin.
 async function selfReviewFixture(t, members, poolOptions) {
   const { db, pool, sql } = await testDatabase(t, poolOptions);
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('blair','Blair Owner','blair@example.test'),('avery','Avery Admin','avery@example.test'),('casey','Casey Editor','casey@example.test'),('dana','Dana Admin','dana@example.test'),('abe','Abe Admin','abe@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A')");
-  const addMember = (id, role) => pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', ['w', id, role]);
+  await seedAccounts(pool, { users: [{ id: 'blair', name: 'Blair Owner', email: 'blair@example.test' }, { id: 'avery', name: 'Avery Admin', email: 'avery@example.test' }, { id: 'casey', name: 'Casey Editor', email: 'casey@example.test' }, { id: 'dana', name: 'Dana Admin', email: 'dana@example.test' }, { id: 'abe', name: 'Abe Admin', email: 'abe@example.test' }], workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A')");
+  const addMember = (id, role) => addMemberships(pool, [['w', id, role]]);
   for (const [id, role] of members) await addMember(id, role);
   const store = createStore(db), project = { id: 'project-a' }, roles = Object.fromEntries(members);
   const names = { blair: 'Blair Owner', avery: 'Avery Admin', casey: 'Casey Editor', dana: 'Dana Admin', abe: 'Abe Admin' };
@@ -206,8 +207,8 @@ test('the self-approval exception counts active owners and administrators at rev
 async function proposalFixture(t, members, poolOptions) {
   const { db, pool, sql } = await testDatabase(t, poolOptions), originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('blair','Blair Owner','blair@example.test'),('avery','Avery Admin','avery@example.test'),('casey','Casey Editor','casey@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a','w','A','profile-a')");
-  for (const [id, role] of members) await pool.query('INSERT INTO memberships VALUES ($1, $2, $3)', ['w', id, role]);
+  await seedAccounts(pool, { users: [{ id: 'blair', name: 'Blair Owner', email: 'blair@example.test' }, { id: 'avery', name: 'Avery Admin', email: 'avery@example.test' }, { id: 'casey', name: 'Casey Editor', email: 'casey@example.test' }], workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('project-a','w','A','profile-a')");
+  for (const [id, role] of members) await addMemberships(pool, [['w', id, role]]);
   const store = createStore(db), project = { id: 'project-a', zernioProfileId: 'profile-a' }, roles = Object.fromEntries(members), names = { blair: 'Blair Owner', avery: 'Avery Admin', casey: 'Casey Editor' };
   const account = { _id: 'facebook-a', profileId: project.zernioProfileId, platform: 'facebook' }, remote = { _id: 'remote-a', status: 'scheduled', content: 'Live caption', scheduledFor: '2070-01-01T09:00:00Z', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] };
   globalThis.fetch = async (target, options = {}) => {
@@ -461,7 +462,7 @@ test('approving a proposal validates the proposed post against the platform rest
 // A time of now or in the past, clearing the time, or any other change makes the approval stale.
 test('a time-only move to a future time keeps the approval; a move to now or the past makes it stale', { skip: postgresSkip }, async t => {
   const { db, pool, sql } = await testDatabase(t);
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner','Workspace owner','owner@example.test'),('editor','Author','editor@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A'); INSERT INTO memberships VALUES ('w','owner','owner'),('w','editor','editor')");
+  await seedAccounts(pool, { users: [{ id: 'owner', name: 'Workspace owner', email: 'owner@example.test' }, { id: 'editor', name: 'Author', email: 'editor@example.test' }], workspaces: [{ id: 'w', name: 'W' }], memberships: [['w', 'owner', 'owner'], ['w', 'editor', 'editor']] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project-a','w','A')");
   const store = createStore(db), project = { id: 'project-a' };
   const context = role => ({ db, store, project, role, user: { id: role, name: { owner: 'Workspace owner', editor: 'Author' }[role] } });
   const invoke = async (path, role, body = {}, method = 'POST') => { let result; await handleApprovals({ ...context(role), req: { method }, url: new URL(`http://localhost/api/projects/${project.id}/approvals/${path}`), body, send(status, data) { result = { status, data }; } }); return result; };

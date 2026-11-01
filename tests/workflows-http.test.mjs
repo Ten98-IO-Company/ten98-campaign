@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addMemberships, addUsers } from './fixtures/accounts.ts';
 
 test('HTTP publishing approvals, Drive delivery links and provider outcome reviews are wired end to end', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-workflows-http-')), distDir = join(dataDir, 'dist');
@@ -49,9 +50,9 @@ test('HTTP publishing approvals, Drive delivery links and provider outcome revie
     const passwordHash = (await app.sql.get('SELECT password FROM users WHERE id=?', state.user.id)).password;
     async function member(name, role) {
       const userId = randomUUID(), email = `${name}@example.test`;
-      await app.sql.run('INSERT INTO users(id,name,email,password) VALUES(?,?,?,?)', userId, name, email, passwordHash);
+      await addUsers(app.sql, [{ id: userId, name: name, email: email, password: passwordHash }]);
       const login = await post('/api/auth/login', { email, password: 'a sufficiently long workflow fixture password' }); assert.equal(login.status, 200);
-      if (role) await app.sql.run('INSERT INTO memberships VALUES(?,?,?)', workspaceId, userId, role);
+      if (role) await addMemberships(app.sql, [[workspaceId, userId, role]]);
       return { id: userId, cookie: login.cookie, email };
     }
     const viewer = await member('workflow-viewer', 'viewer'), editor = await member('workflow-editor', 'editor'), admin = await member('workflow-admin', 'admin'), outsider = await member('workflow-outsider');

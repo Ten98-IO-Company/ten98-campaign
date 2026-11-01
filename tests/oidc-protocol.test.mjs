@@ -8,6 +8,7 @@ import { createServer } from 'node:http';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { createAuth } from '../server/auth.ts';
 import { postgresSkip, signInRedirectError, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 const appUrl = 'https://campaign.example', clientId = 'campaign-fixture-client', clientSecret = randomBytes(24).toString('base64url');
@@ -59,7 +60,7 @@ async function authentikIssuer(t) {
 
 async function signIn(t) {
   const { db } = await testDatabase(t), idp = await authentikIssuer(t);
-  await db.$client.query("INSERT INTO users VALUES ('first-owner', 'Owner', 'owner@example.test', NULL)");
+  await seedAccounts(db.$client, { users: [{ id: 'first-owner', name: 'Owner', email: 'owner@example.test' }] });
   const { discovery, ...real } = await import('openid-client');
   // The fixture issuer is plain HTTP on loopback; every other openid-client step runs unmodified.
   const client = { ...real, discovery: (url, id, secret) => discovery(url, id, secret, undefined, { execute: [real.allowInsecureRequests] }) };

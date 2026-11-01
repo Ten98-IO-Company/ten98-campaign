@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { createStore } from '../server/database.ts';
 import { handleAgent } from '../server/agent.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 test('an errored or malformed acknowledged model result cannot save suggestions or silently complete; usage remains reviewable', { skip: postgresSkip }, async t => {
   const { db, pool } = await testDatabase(t), originalFetch = globalThis.fetch;
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('author','Author','author@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ('project','w','Project')");
+  await seedAccounts(pool, { users: [{ id: 'author', name: 'Author', email: 'author@example.test' }], workspaces: [{ id: 'w', name: 'W' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('project','w','Project')");
   const store = createStore(db), usage = { prompt_tokens: 12, completion_tokens: 8, cost: 0.001 };
   let calls = 0, prepared = 0, next;
   globalThis.fetch = async () => { calls++; return new Response(JSON.stringify(next)); };

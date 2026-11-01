@@ -3,13 +3,11 @@ import assert from 'node:assert/strict';
 import { handleInvitations } from '../server/invitations.ts';
 import { HttpError, memberRole } from '../server/auth.ts';
 import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 async function fixture(t) {
   const { pool, db } = await testDatabase(t), established = [];
-  await pool.query(`INSERT INTO users VALUES ('owner','Owner','owner@example.test','OWNER_HASH'),('admin','Admin','admin@example.test','ADMIN_HASH'),('viewer','Viewer','viewer@example.test','VIEWER_HASH'),('outside','Outside','outside@example.test','OUTSIDE_HASH'),('existing','Existing','existing@example.test','EXISTING_HASH');
-    INSERT INTO workspaces (id, name) VALUES ('workspace-a','Studio A'),('workspace-b','Studio B');
-    INSERT INTO memberships VALUES ('workspace-a','owner','owner'),('workspace-a','admin','admin'),('workspace-a','viewer','viewer'),('workspace-b','outside','owner');
-    INSERT INTO instance_operators VALUES ('owner');`);
+  await seedAccounts(pool, { users: [{ id: 'owner', name: 'Owner', email: 'owner@example.test', password: 'OWNER_HASH' }, { id: 'admin', name: 'Admin', email: 'admin@example.test', password: 'ADMIN_HASH' }, { id: 'viewer', name: 'Viewer', email: 'viewer@example.test', password: 'VIEWER_HASH' }, { id: 'outside', name: 'Outside', email: 'outside@example.test', password: 'OUTSIDE_HASH' }, { id: 'existing', name: 'Existing', email: 'existing@example.test', password: 'EXISTING_HASH' }], workspaces: [{ id: 'workspace-a', name: 'Studio A' }, { id: 'workspace-b', name: 'Studio B' }], memberships: [['workspace-a', 'owner', 'owner'], ['workspace-a', 'admin', 'admin'], ['workspace-a', 'viewer', 'viewer'], ['workspace-b', 'outside', 'owner']], operators: ['owner'] });
   const users = Object.fromEntries((await pool.query('SELECT id, name, email FROM users')).rows.map(user => [user.id, user]));
   const auth = { async limit() {}, clientKey: (req, scope) => scope + ':test-client' }, workspaceAccess = async (workspaceId, userId) => {
     const role = await memberRole(db, workspaceId, userId);
@@ -108,7 +106,7 @@ test('workspace invitations use hashed single-use links, enforce current authori
   await request('/workspaces/workspace-a/invitations/' + race.data.invitation.id, { method: 'DELETE' });
   assert.equal((await pending).status, 410); assert.equal(await one("SELECT * FROM users WHERE email = 'race@example.test'"), undefined);
   const eventualOwner = await create('outside@example.test', 'editor');
-  await pool.query("INSERT INTO memberships VALUES ('workspace-a','outside','owner')");
+  await seedAccounts(pool, { memberships: [['workspace-a', 'outside', 'owner']] });
   result = await accept(eventualOwner, { user: users.outside, body: {} }); assert.equal(result.status, 200); assert.equal(result.data.alreadyMember, true); assert.equal(result.data.role, 'owner');
   assert.equal((await one("SELECT count(*) AS count FROM memberships WHERE workspace_id = 'workspace-a' AND role = 'owner'")).count, 2);
   const ownerInvite = await create('new-owner@example.test', 'owner'); result = await accept(ownerInvite); assert.equal(result.status, 200); assert.equal(result.data.role, 'owner'); assert.equal(result.data.user.isOperator, false);
@@ -153,7 +151,7 @@ test('an invitation accepted twice at once joins once, and one new address invit
   await gate.waiting(2); await gate.release();
   assert.deepEqual((await Promise.all(acceptances)).map(result => result.status).sort(), [200, 410]);
   assert.equal((await one("SELECT count(*) AS count FROM memberships WHERE user_id = 'existing'")).count, 1);
-  await pool.query("INSERT INTO memberships VALUES ('workspace-b','owner','owner')");
+  await seedAccounts(pool, { memberships: [['workspace-b', 'owner', 'owner']] });
   const inA = await create('twice@example.test'), inB = await request('/workspaces/workspace-b/invitations', { method: 'POST', body: { email: 'twice@example.test', role: 'editor' } });
   // Without the email lock both acceptances see no account and race to create it.
   const users_ = await blockWrites(pool, 'users');

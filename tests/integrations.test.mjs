@@ -7,6 +7,7 @@ import { providerRequest, zernioClient, scopedAccounts, adAccounts, remotePostMo
 import { createStore } from '../server/database.ts';
 import { handleApprovals, assertProviderPostEdit } from '../server/approvals.ts';
 import { blockWrites, postgresSkip, testDatabase } from './postgres.mjs';
+import { seedAccounts } from './fixtures/accounts.ts';
 
 test('only documented exact product GET absence codes survive and revoked access cannot prove deletion', async () => {
   const originalFetch = globalThis.fetch; let code = 'product_not_found', status = 404, revoked = false, revoke = false;
@@ -167,7 +168,7 @@ test('provider contracts, tenant boundaries, durable retries, and private Drive 
   const { db, pool } = await testDatabase(t), store = createStore(db);
   const calls = [];
   const project = { id: 'project-a', workspaceId: 'workspace-a', zernioProfileId: 'profile-a', driveFolderId: 'folder_a' };
-  await pool.query("INSERT INTO workspaces (id, name) VALUES ('workspace-a', 'Workspace A'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id, drive_folder_id) VALUES ('project-a', 'workspace-a', 'Project A', 'profile-a', 'folder_a')");
+  await seedAccounts(pool, { workspaces: [{ id: 'workspace-a', name: 'Workspace A' }] }); await pool.query("INSERT INTO projects (id, workspace_id, name, zernio_profile_id, drive_folder_id) VALUES ('project-a', 'workspace-a', 'Project A', 'profile-a', 'folder_a')");
   const account = { _id: 'account-a', profileId: 'profile-a', platform: 'instagram', isActive: true };
   let provider = async (url, options) => {
     if (url.pathname.endsWith('/accounts')) return { accounts: [account, { ...account, _id: 'account-b', profileId: 'profile-b', accessToken: 'DO-NOT-EXPOSE' }] };
@@ -722,7 +723,7 @@ test('parallel identical ad creations with different action keys send one paid r
 // Council decision ten98-code-system#30 (Q2): a provider update needs an approval of the proposed content.
 test('with approval required, social/update needs an approved review of the proposed content before any provider update', { skip: postgresSkip }, async t => {
   const { db, pool } = await testDatabase(t), originalFetch = globalThis.fetch, updates = [];
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner','Owner','owner@example.test'),('editor','Editor','editor@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO memberships VALUES ('w','owner','owner'),('w','editor','editor'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('q2-project','w','Q2','profile-q2')");
+  await seedAccounts(pool, { users: [{ id: 'owner', name: 'Owner', email: 'owner@example.test' }, { id: 'editor', name: 'Editor', email: 'editor@example.test' }], workspaces: [{ id: 'w', name: 'W' }], memberships: [['w', 'owner', 'owner'], ['w', 'editor', 'editor']] }); await pool.query("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('q2-project','w','Q2','profile-q2')");
   const project = { id: 'q2-project', zernioProfileId: 'profile-q2' }, store = createStore(db), account = { _id: 'facebook-q2', profileId: project.zernioProfileId, platform: 'facebook' };
   let remote = { _id: 'remote-q2', status: 'draft', content: 'Reviewed caption', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] }, keySequence = 0;
   const context = (role, extra) => { const value = { db, store, project, role, user: { id: role, name: role }, ...extra }; value.assertProviderPostEdit = () => assertProviderPostEdit(value); return value; };
@@ -770,7 +771,7 @@ test('with approval required, social/update needs an approved review of the prop
 async function proposalFixture(t) {
   const { db, pool } = await testDatabase(t), originalFetch = globalThis.fetch, updates = [];
   t.after(() => { globalThis.fetch = originalFetch; });
-  await pool.query("INSERT INTO users (id, name, email) VALUES ('owner','Owner','owner@example.test'),('admin','Admin','admin@example.test'); INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO memberships VALUES ('w','owner','owner'),('w','admin','admin'); INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('proposal-project','w','Proposal','profile-proposal')");
+  await seedAccounts(pool, { users: [{ id: 'owner', name: 'Owner', email: 'owner@example.test' }, { id: 'admin', name: 'Admin', email: 'admin@example.test' }], workspaces: [{ id: 'w', name: 'W' }], memberships: [['w', 'owner', 'owner'], ['w', 'admin', 'admin']] }); await pool.query("INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('proposal-project','w','Proposal','profile-proposal')");
   const project = { id: 'proposal-project', zernioProfileId: 'profile-proposal' }, store = createStore(db), account = { _id: 'facebook-proposal', profileId: project.zernioProfileId, platform: 'facebook' };
   let remote = { _id: 'remote-proposal', status: 'draft', content: 'Live caption', platforms: [{ platform: 'facebook', accountId: account._id, status: 'pending' }] }, keySequence = 0;
   const context = (role, extra) => { const value = { db, store, project, role, user: { id: role, name: role }, config: { env: {}, ZERNIO_API_KEY: 'sk_test_stub' }, assertProjectMapping(expected) { if (expected !== project.zernioProfileId) throw new Error('Mapping changed'); }, ...extra }; value.assertProviderPostEdit = () => assertProviderPostEdit(value); return value; };

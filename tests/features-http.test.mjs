@@ -7,6 +7,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addMemberships, addUsers } from './fixtures/accounts.ts';
 
 test('HTTP feature wiring preserves signed bytes, project boundaries, protected records and public map configuration', { skip: postgresSkip }, async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'ten98-features-http-')), distDir = join(dataDir, 'dist');
@@ -51,14 +52,14 @@ test('HTTP feature wiring preserves signed bytes, project boundaries, protected 
     assert.deepEqual(maps.data, { configured: true, browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY, mapId: env.GOOGLE_MAPS_MAP_ID });
     assert.equal(JSON.stringify(maps).includes(env.GOOGLE_PRIVATE_KEY), false); assert.equal(JSON.stringify(maps).includes(env.ZERNIO_WEBHOOK_SECRET), false);
     const passwordHash = (await app.sql.get('SELECT password FROM users WHERE id=?', initialState.user.id)).password, viewerId = randomUUID();
-    await app.sql.run('INSERT INTO users VALUES(?,?,?,?)', viewerId, 'Other member', 'member-http@example.test', passwordHash);
+    await addUsers(app.sql, [{ id: viewerId, name: 'Other member', email: 'member-http@example.test', password: passwordHash }]);
     const viewerCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'member-http@example.test', password: 'a sufficiently long fixture password' } })).cookie;
     assert.equal((await request(project + '/maps/config', { cookie: viewerCookie })).status, 404);
     assert.equal((await request(project + '/inbox/cache', { cookie: viewerCookie })).status, 404);
     const privateWorkspace = await request('/api/workspaces', { method: 'POST', body: { name: 'Other workspace' }, cookie: viewerCookie });
     assert.equal((await request(`/api/projects/${privateWorkspace.data.projectId}/maps/config`)).status, 404);
     assert.equal((await request(`/api/projects/${privateWorkspace.data.projectId}/calendar/connection`, { method: 'POST', body: { calendarId: 'not-operator@example.test' }, cookie: viewerCookie })).status, 403);
-    await app.sql.run("INSERT INTO memberships VALUES(?,?,'viewer')", workspaceId, viewerId);
+    await addMemberships(app.sql, [[workspaceId, viewerId, 'viewer']]);
     const agent = await request(project + '/agent/status', { cookie: viewerCookie }); assert.equal(agent.status, 200); assert.equal(agent.data.configured, false);
     assert.equal((await request(project + '/agent/run', { method: 'POST', body: { message: 'Prepare a campaign' }, cookie: viewerCookie })).status, 403);
     assert.equal((await request(project + '/calendar/status')).data.mapped, false);

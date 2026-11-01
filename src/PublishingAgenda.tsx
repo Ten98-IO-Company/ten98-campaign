@@ -176,11 +176,14 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
   </Inline> : item.event ? <Inline key={item.id} gap={2} align="center">
     <Text as="span" size="sm" tone="muted" numeric>{item.time}</Text><Text as="span" size="sm" truncate>{item.label}</Text><Badge tone="neutral" dot>Google Calendar</Badge>{googleEventActions?.(item.event)}
   </Inline> : <Button key={item.id} variant="ghost" size="sm" onClick={item.onSelect}>
-    <Text as="span" size="sm" tone="muted" numeric>{item.time}</Text>
-    {item.network && <Text as="span" size="sm" weight="semibold">{item.network}</Text>}
-    <Text as="span" size="sm" truncate>{item.snippet}</Text>
-    <Badge tone={item.tone} dot>{item.status}</Badge>
-    {item.campaign && <Badge palette={campaignPalette(String(item.campaign.id))}>{String(item.campaign.name || item.campaign.id)}</Badge>}
+    {/* One flex child lets metadata wrap normally instead of squeezing each part into a narrow column. */}
+    <Text as="span" align="start" truncate><Text as="span" preserveWhitespace>
+      <Text as="span" size="sm" tone="muted" numeric>{item.time}</Text>{' '}
+      {item.network && <><Text as="span" size="sm" weight="semibold">{item.network}</Text>{' '}</>}
+      <Text as="span" size="sm" truncate>{item.snippet}</Text>{' '}
+      <Badge tone={item.tone} dot>{item.status}</Badge>
+      {item.campaign && <>{' '}<Badge palette={campaignPalette(String(item.campaign.id))}>{String(item.campaign.name || item.campaign.id)}</Badge></>}
+    </Text></Text>
   </Button>;
   const weekView = <Stack gap={3}>
     <Inline justify="between" align="center">
