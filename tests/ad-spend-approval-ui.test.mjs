@@ -131,7 +131,15 @@ test('a held-back spend change explains the review the server opened and links t
   }
   assert.match(main, /\{spendBlock && <AdSpendNotice block=\{spendBlock\} onOpenApprovals=\{\(\) => \{ setSpendBlock\(null\); setPage\('Approvals'\); \}\} onDismiss=\{\(\) => setSpendBlock\(null\)\}\/>\}/);
   for (const [name, source] of [['AdDetails', details], ['MicrosoftAds', microsoft], ['NativeGoogleAds', google]]) assert.match(source, /\{spendBlock && <AdSpendNotice block=\{spendBlock\} onOpenApprovals=\{onOpenApprovals\}\/>\}/, name);
-  for (const mount of [/<AdDetails request=\{integrate\}[^\n]*?onOpenApprovals=\{\(\) => setPage\('Approvals'\)\}/, /<NativeGoogleAds onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\} onOpenApprovals=\{\(\) => setPage\('Approvals'\)\}/, /<MicrosoftAds onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\} onOpenApprovals=\{\(\) => setPage\('Approvals'\)\}/]) assert.match(main, mount);
+  assert.match(main, /<AdDetails request=\{integrate\}[^\n]*?onOpenApprovals=\{\(\) => setPage\('Approvals'\)\}/);
+  for (const name of ['NativeGoogleAds', 'MicrosoftAds']) {
+    const mounts = [...main.matchAll(new RegExp(`<${name}\\b[^\\r\\n]*?/>`, 'g'))].map(match => match[0]).filter(mount => !/\bmode="connection"/.test(mount));
+    assert.equal(mounts.length, 1, `${name} mounts one native workflow editor.`);
+    const [mount] = mounts;
+    assert.match(mount, /onOpenApprovals=\{\(\) => setPage\('Approvals'\)\}/, name);
+    assert.match(mount, /onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\}/, name);
+    assert.match(mount, /onCreateCampaign=\{\(\) => startCampaignCreation\('advertising'\)\}/, `${name} starts the shared creation flow.`);
+  }
 });
 
 test('the Approvals badge counts pending ad spend reviews beside pending posts', () => {
@@ -148,7 +156,7 @@ test('the Approvals badge counts pending ad spend reviews beside pending posts',
 test('an OOH booking held back by ad spend approval explains itself, and a missing account currency points to Integrations', async () => {
   const failure = code => Object.assign(new Error('Server message'), { status: code === 'AD_SPEND_APPROVAL_REQUIRED' ? 403 : 409, code });
   const ooh = await read('OohProviders.tsx'), main = await read('main.tsx');
-  const make = () => { const errors = [], blocks = [], reviews = []; return { errors, blocks, reviews, run: compile(ooh.slice(ooh.indexOf('async function action('), ooh.indexOf('  async function saveMapping(')), { busy: false, active: { current: true }, setBusy() {}, setNotice() {}, setError: value => { if (value) errors.push(value); }, setSpendBlock: value => { if (value) blocks.push(value); }, adSpendBlock, onSpendReview: () => { reviews.push(1); } }) }; };
+  const make = () => { const errors = [], blocks = [], reviews = []; return { errors, blocks, reviews, run: compile(ooh.slice(ooh.indexOf('async function action('), ooh.indexOf('  async function saveMapping(')), { busy: false, pending: { current: false }, active: { current: true }, setBusy() {}, setNotice() {}, setError: value => { if (value) errors.push(value); }, setSpendBlock: value => { if (value) blocks.push(value); }, adSpendBlock, onSpendReview: () => { reviews.push(1); } }) }; };
   const held = make(); await held.run(async () => { throw failure('AD_SPEND_APPROVAL_REQUIRED'); });
   assert.deepEqual(held.blocks.map(block => block.code), ['AD_SPEND_APPROVAL_REQUIRED']); assert.deepEqual(held.errors, []); assert.equal(held.reviews.length, 1, 'The Approvals badge picks up the opened review.');
   const currency = make(); await currency.run(async () => { throw failure('AD_SPEND_AMOUNT_UNAVAILABLE'); });
@@ -156,7 +164,7 @@ test('an OOH booking held back by ad spend approval explains itself, and a missi
   const plain = make(); await plain.run(async () => { throw failure('INVALID_OOH_PRICE'); }); assert.deepEqual(plain.errors, ['Server message']); assert.deepEqual(plain.blocks, []);
   assert.match(ooh, /spendBlock\.review \? <AdSpendNotice block=\{spendBlock\} onOpenApprovals=\{onOpenApprovals\}/);
   assert.match(ooh, /title="Set the Broadsign account currency"[^\n]*onClick=\{onOpenIntegrations\}>Open Connections</);
-  assert.match(main, /<OohProviders onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\} onOpenApprovals=\{\(\) => setPage\('Approvals'\)\} onSpendReview=/);
+  assert.match(main, /<OohProviders[^\r\n]*onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\} onOpenApprovals=\{\(\) => setPage\('Approvals'\)\} onSpendReview=/);
   assert.equal(adSpendActionLabel('ooh/booking'), 'Submit OOH booking');
 });
 

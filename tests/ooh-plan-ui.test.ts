@@ -8,7 +8,7 @@ import * as ui from '@ten98/ui';
 import { assertNoMarkup, readText } from './read-text.ts';
 
 type Row = Record<string, any>;
-const library = ui as unknown as Record<string, any>;
+const library = { ...ui, useConfirmDialog: () => [async () => false, null] } as unknown as Record<string, any>;
 const { Button, DataTable, EmbedHost, Fieldset, MetricGrid, Tabs } = library;
 const read = (name: string) => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8');
 const [mapSource, providerSource, mainSource] = await Promise.all([read('OohMap.tsx'), read('OohProviders.tsx'), read('main.tsx')]);
@@ -139,14 +139,15 @@ test('the OOH page shows Bookings and Inventory tabs only when Broadsign is conn
   assert.equal(none.find(node => node.type === Button && node.props.type === 'submit').props.disabled, true, 'Nothing selected, nothing to save.');
   const unconnected = oohProviders([{ configured: true, environment: 'sandbox', connection: null }, [], [], [], false, '', '', {}, false, null, 'bookings']);
   assert.equal(elements(unconnected()).some(node => node.type === Tabs), false, 'Without Broadsign the page is the bookings view alone.');
-  assert.match(text(unconnected()), /Bookings view/); assert.doesNotMatch(text(unconnected()), /Sync provider inventory|Broadsign/);
+  assert.match(text(unconnected()), /Bookings view/); assert.match(text(unconnected()), /Ask an administrator to connect this project’s Broadsign screens/);
+  assert.doesNotMatch(text(unconnected({ role: 'viewer' })), /Sync provider inventory|Broadsign/);
   assert.match(text(unconnected({ role: 'admin', isOperator: true })), /Broadsign/, 'Whoever can map inventory is told where to connect it.');
   assert.doesNotMatch(text(oohProviders([null, [], [], [], false, '', '', {}, false, null, 'bookings'])()), /Bookings view/, 'The bookings view mounts once, after the provider status is known.');
   assert.match(text(oohProviders([null, [], [], [], false, 'Load failed', '', {}, false, null, 'bookings'])()), /Load failed.*Bookings view/);
 });
 
 test('main wires the OOH page through the plan view and the grouped booking form', () => {
-  assert.match(mainSource, /<OohProviders onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\}[^\r\n]*?bookings=\{<OohMap /);
+  assert.match(mainSource, /<OohProviders[^\r\n]*onOpenIntegrations=\{\(\) => setPage\('Integrations'\)\}[^\r\n]*?bookings=\{<OohMap /);
   // A booking started from a campaign page preselects that campaign; editing keeps the booking's own.
   assert.match(mainSource, /\{modal\.type === 'placement' && <BookingFields item=\{modal\.item\} partners=\{state\.providers\} campaigns=\{state\.campaigns\} defaultCampaignId=\{modal\.campaignId\} defaultDates=\{modal\.dates\}\/>\}/);
   assert.doesNotMatch(mainSource, /label="Latitude"|<Stat label="Live billboards"/, 'The page and form no longer live in main.');

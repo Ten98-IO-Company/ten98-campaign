@@ -358,5 +358,5 @@ test('the read-only editor alert names what manages the record: Broadsign for bo
   const appSource = source(), alert = appSource.match(/\{providerManaged && <Alert tone="warning">(\{[^\r\n]*?\})<\/Alert>\}/)?.[1]; assert.ok(alert);
   const text = type => new Function('modal', 'return ' + alert.slice(1, -1) + ';')({ type });
   assert.equal(text('placement'), 'This booking is managed in Broadsign. Change it there.');
-  assert.equal(text('campaign'), 'This campaign is managed by its ad network. Change delivery, dates or budget under Ads.');
+  assert.equal(text('campaign'), 'This campaign is managed by its ad network. Change delivery, dates or budget in Campaign → Ads.');
 });

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, MetricCard, MetricGrid, Select, Stack, Text, Textarea } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, MetricCard, MetricGrid, Select, Stack, Text, Textarea, useConfirmDialog } from '@ten98/ui';
 import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentChannelList, consentWording, type ActivationType, type ConsentChannel } from '../shared/offline-activations.ts';
+import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
 
 type Row = { id: string; [key: string]: any };
 type Material = { label: string; done: boolean };
-type Props = { projectId: string; brand: string; campaigns: Row[]; activations: Row[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; readOnly?: boolean; onChanged: () => Promise<void> | void; createFor?: string; onCreateHandled?: () => void };
+type Props = { projectId: string; brand: string; campaigns: Row[]; activations: Row[]; request: (path: string, method?: string, body?: unknown) => Promise<any>; readOnly?: boolean; onChanged: () => Promise<void> | void; createFor?: string; createIntent?: CampaignCreationIntent; onCreateHandled?: () => void; onCreateCampaign?: () => void; onGuardChange?: (guard: CampaignEditorGuard | null) => void };
 type Draft = { name: string; type: ActivationType; campaignId: string; status: string; startAt: string; endAt: string; location: string; notes: string; ownerId: string; teamIds: string[]; materials: Material[]; budget: string; spent: string; reached: string; promoCode: string };
 
 const STATUS_LABELS: Record<string, string> = { planned: 'Planned', completed: 'Completed', cancelled: 'Cancelled' };
@@ -107,11 +108,23 @@ export function patchBody(draft: Draft, existing: Row | null) {
   return body;
 }
 
-export default function OfflineActivations({ projectId, brand, campaigns, activations, request, readOnly = false, onChanged, createFor, onCreateHandled }: Props) {
+export default function OfflineActivations({ projectId, brand, campaigns, activations, request, readOnly = false, onChanged, createFor, createIntent, onCreateHandled, onCreateCampaign, onGuardChange }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/activations`, requester = useRef(request); requester.current = request;
   const [filter, setFilter] = useState(''), [members, setMembers] = useState<Row[]>([]), [editing, setEditing] = useState<Row | 'new' | null>(null), [draft, setDraft] = useState<Draft>(blankDraft()), [dirty, setDirty] = useState(false);
   const [link, setLink] = useState<Row | null>(null), [linkLoading, setLinkLoading] = useState(false), opened = useRef(''), [landing, setLanding] = useState(''), [linkError, setLinkError] = useState(''), [linking, setLinking] = useState(false);
   const [material, setMaterial] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [removing, setRemoving] = useState<Row>(), [capturing, setCapturing] = useState<Row | null>(null), [results, setResults] = useState<Record<string, Result> | null>(null);
+  const [working, setWorking] = useState(false), [confirm, confirmDialog] = useConfirmDialog(), handledCreation = useRef<number | null>(null);
+  const unsaved = !readOnly && !!editing && (dirty || !!material.trim() || !link && !!landing.trim()), revision = JSON.stringify([editing && (editing === 'new' ? editing : editing.id), draft, material, landing]);
+  function discardEditing() { setEditing(null); setDirty(false); setMaterial(''); setLanding(''); }
+  async function closeEditing() {
+    if (working || linking) return;
+    if (unsaved && !await confirm({ title: 'Discard unsaved changes?', description: 'Your activation edits will be lost.', confirmLabel: 'Discard changes', cancelLabel: 'Keep editing', danger: true })) return;
+    discardEditing();
+  }
+  useEffect(() => {
+    onGuardChange?.({ dirty: unsaved, busy: working || linking, revision, discard: discardEditing });
+    return () => onGuardChange?.(null);
+  }, [unsaved, working, linking, revision, onGuardChange]);
   useEffect(() => { if (readOnly) return; let current = true; requester.current(`/projects/${encodeURIComponent(projectId)}/assignees`).then(result => { if (current) setMembers(result.members || []); }, () => { if (current) setMembers([]); }); return () => { current = false; }; }, [projectId, readOnly]);
   useEffect(() => { let current = true; requester.current(`${path}/results`).then(result => { if (current) setResults(result.results || {}); }, () => { if (current) setResults({}); }); return () => { current = false; }; }, [path, activations]);
   const campaignOf = (id: string) => campaigns.find(campaign => campaign.id === id);
@@ -132,6 +145,13 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
     if (editable && campaign) { const start = campaign.startDate?.slice(0, 10), end = campaign.endDate?.slice(0, 10); setFilter(createFor); open('new', createFor); if (start && end) setDraft(current => ({ ...current, startAt: start + 'T09:00', endAt: end + 'T17:00' })); }
     onCreateHandled?.();
   }, [createFor]);
+  useEffect(() => {
+    if (!createIntent || createIntent.projectId !== projectId || createIntent.destination !== 'activation' || handledCreation.current === createIntent.id || readOnly) return;
+    const campaign = campaignOf(createIntent.campaignId || ''), start = createIntent.dates?.start || campaign?.startDate?.slice(0, 10) || createIntent.day?.slice(0, 10), end = createIntent.dates?.end || campaign?.endDate?.slice(0, 10) || createIntent.day?.slice(0, 10);
+    handledCreation.current = createIntent.id; setFilter(campaign?.id || ''); open('new', campaign?.id || '');
+    if (start || end) setDraft(current => ({ ...current, startAt: start ? start + 'T09:00' : '', endAt: end ? end + 'T17:00' : '' }));
+    onCreateHandled?.();
+  }, [createIntent, projectId, readOnly, campaigns, onCreateHandled]);
   // Creates (or reuses) the campaign short link for this activation's tagged landing page and keeps it on the activation.
   async function createLink(activation: Row) {
     setLinkError(''); setLinking(true);
@@ -144,12 +164,13 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
     finally { setLinking(false); }
   }
   async function save() {
-    setError('');
+    setError(''); setWorking(true);
     try {
       const existing = editing !== 'new' && editing ? editing : null;
       await request(existing ? `${path}/${encodeURIComponent(existing.id)}` : path, existing ? 'PATCH' : 'POST', patchBody(draft, existing));
       setEditing(null); setNotice(existing ? 'Activation saved.' : 'Activation planned.'); await onChanged();
     } catch (failure) { setError((failure as Error).message || 'The activation could not be saved.'); }
+    finally { setWorking(false); }
   }
   async function remove(activation: Row) {
     try { await request(`${path}/${encodeURIComponent(activation.id)}`, 'DELETE'); setEditing(null); setNotice('Activation deleted.'); await onChanged(); }
@@ -165,7 +186,7 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
       {error && !editing && <Alert tone="danger" variant="inline" onDismiss={() => setError('')}>{error}</Alert>}
       <Inline justify="between" align="center">
         <Select width="auto" aria-label="Campaign" value={filter} onChange={event => setFilter(event.target.value)} options={[{ value: '', label: 'All campaigns' }, ...campaigns.map(campaign => ({ value: campaign.id, label: campaign.name }))]}/>
-        {editable && <Button disabled={!campaigns.length} onClick={() => open('new')}>New activation</Button>}
+        {editable && <Button disabled={!campaigns.length} onClick={() => onCreateCampaign ? onCreateCampaign() : open('new')}>New activation</Button>}
       </Inline>
       <DataTable searchable={false} sortable={false} pagination={false} responsive="stack" ariaLabel="Field activations" rows={rows} rowKey={activation => activation.id}
         emptyState={<EmptyState title={campaigns.length ? 'No field activity planned' : 'Create a campaign first'} description={campaigns.length ? 'Plan a roadshow stop, door-to-door area, event, street team or sampling shift.' : 'Activations belong to a campaign, so their spend and leads roll up into it.'}/>}
@@ -180,8 +201,8 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
         rowActionsLabel="Actions" rowActions={activation => <Inline gap={2}>{editable && activation.status !== 'cancelled' && <Button size="sm" onClick={() => setCapturing(activation)} aria-label={`Capture leads at ${activation.name}`}>Capture leads</Button>}<Button variant="secondary" size="sm" onClick={() => open(activation)} aria-label={`${editable ? 'Edit' : 'View'} ${activation.name}`}>{editable ? 'Edit' : 'View'}</Button></Inline>}/>
       {rows.length > 0 && <ResultsSummary rows={rows} results={results} currency={filter ? campaignOf(filter)?.currency || 'AED' : new Set(rows.map(row => campaignOf(row.campaignId)?.currency || 'AED')).size === 1 ? campaignOf(rows[0].campaignId)?.currency || 'AED' : null}/>}
     </Stack>
-    <Dialog open={!!editing} onOpenChange={next => { if (!next) setEditing(null); }} dirty={dirty} size="wide" eyebrow={campaignOf(draft.campaignId)?.name} title={editing === 'new' ? 'New activation' : editable ? 'Edit activation' : 'Activation'} onSubmit={editable ? save : undefined}
-      footer={editable ? <Inline gap={2} justify="end">{current && <Button variant="ghost" onClick={() => setRemoving(current)}>Delete</Button>}<Button variant="secondary" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit">{current ? 'Save activation' : 'Plan activation'}</Button></Inline> : undefined}>
+    <Dialog open={!!editing} onOpenChange={next => { if (!next) discardEditing(); }} onBeforeClose={() => { void closeEditing(); return false; }} closeDisabled={working || linking} size="wide" eyebrow={campaignOf(draft.campaignId)?.name} title={editing === 'new' ? 'New activation' : editable ? 'Edit activation' : 'Activation'} onSubmit={editable ? save : undefined}
+      footer={editable ? <Inline gap={2} justify="end">{current && <Button variant="ghost" onClick={() => setRemoving(current)}>Delete</Button>}<Button variant="secondary" disabled={working || linking} onClick={() => { void closeEditing(); }}>Cancel</Button><Button type="submit">{current ? 'Save activation' : 'Plan activation'}</Button></Inline> : undefined}>
       <Stack gap={3}>
         {error && <Alert tone="danger" variant="inline">{error}</Alert>}
         <FormGrid>
@@ -218,5 +239,6 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
     </Dialog>
     {capturing && <LeadCapture brand={brand} activation={capturing} request={request} path={path} onClose={() => { setCapturing(null); void onChanged(); }}/>}
     {removing && <ConfirmDialog open onOpenChange={next => { if (!next) setRemoving(undefined); }} title={`Delete “${removing.name}”?`} description="Its plan, checklist and spend are removed. Contacts captured there stay in Contacts." confirmLabel="Delete" danger onConfirm={() => remove(removing)}/>}
+    {confirmDialog}
   </Card>;
 }

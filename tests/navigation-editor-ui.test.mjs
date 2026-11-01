@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
+import { campaignCreationRoute } from '../src/campaign-creation.ts';
 
 const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
 const routes = source.slice(source.indexOf('const pageRoutes:'), source.indexOf('const channels:'));
@@ -134,21 +135,25 @@ function app(href = 'https://campaign.example/?view=overview&project=a', initial
     history: { get state() { return entries[index].state; }, pushState(state, _title, url) { entries.splice(index + 1); entries.push({ state, url: new URL(url, entries[index].url) }); index++; }, replaceState(state, _title, url) { entries[index] = { state, url: new URL(url || entries[index].url, entries[index].url) }; }, go(delta) { queueMicrotask(() => { if (index + delta < 0 || index + delta >= entries.length) return; index += delta; listeners.get('popstate')?.(); }); } },
   };
   const dialog = { contains: () => true, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {}, close() { this.open = false; }, showModal() { this.open = true; } }, context = {
-    window, document: { activeElement: null }, pageSections, navigationUrl, readNavigation, editorValues, DOMException, setTimeout,
+    window, document: { activeElement: null }, pageSections, navigationUrl, readNavigation, editorValues, campaignCreationRoute, DOMException, setTimeout,
     state: initial, navigationRef: { current: readNavigation(window.location.search) }, historyIndex: { current: 0 }, restoringPop: { current: null },
     modal: null, modalRef: { current: null }, dialogRef: { current: dialog }, triggerRef: { current: null }, signedOutFocus: { current: false }, draftDirty: false, discardPrompt: false, discardAction: { current: null }, dirtyScopes: { current: new Map() },
     inboxDirty: false, inboxDraft: { current: { dirty: false, revision: 0 } }, discardSwitch: { current: false }, pendingKeys: { current: new Map() },
+    campaignEditor: { current: null }, campaignDirty: false, creationIntent: null, addIntent: null, creationSerial: { current: 0 }, canWrite: true, busy: false,
     loadVersion: { current: 0 }, activeProject: { current: initial?.projectId || '' }, workspace: { id: 'workspace-a' }, FormData: class { constructor(form) { return new Map(Object.entries(form)); } }, error: '', calls: [],
     api: async path => { context.calls.push(path); return stateFor(path.includes('projectId=b') ? 'b' : 'a'); },
     setState: value => { context.state = value; }, setNavigation: value => { context.navigation = value; }, setLoading: value => { context.loading = value; },
     setDraftDirty: value => { context.draftDirty = value; }, setInboxDirty: value => { context.inboxDirty = value; }, setDiscardPrompt: value => { context.discardPrompt = value; }, setModal: value => { context.modal = value; context.modalRef.current = value; }, setError: value => { context.error = value; }, setNotice: value => { context.notice = value; }, setRemote: () => {}, setSession: value => { context.session = typeof value === 'function' ? value(context.session) : value; }, setPublishing: value => { context.publishing = value; },
+    setCampaignDirty: value => { context.campaignDirty = value; }, setCreationIntent: value => { context.creationIntent = typeof value === 'function' ? value(context.creationIntent) : value; }, setAddIntent: value => { context.addIntent = value; },
     run: async work => { try { return await work(); } catch (error) { if (error.name !== 'AbortError') context.error = error.message; } },
   };
+  const guardCallback = source.match(/^  const campaignGuardChanged = (.+)$/m)[1];
+  context.campaignGuardChanged = new Function(...Object.keys(context), 'useCallback', stripTypeScriptTypes('const callback = ' + guardCallback) + '; return callback;')(...Object.values(context), callback => callback);
   const invoke = (name, ...args) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(declaration(name))});`)(...Object.values(context))(...args);
-  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'keepEditing', 'discardChanges', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'clearSignedInState', 'signOut', 'sessionExpired', 'submitForm', 'saveEditor']) context[name] = (...args) => invoke(name, ...args);
+  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'keepEditing', 'discardChanges', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'clearSignedInState', 'signOut', 'sessionExpired', 'submitForm', 'saveEditor', 'startCampaignCreation', 'continueCampaignCreation', 'creationHandled', 'addToCampaign']) context[name] = (...args) => invoke(name, ...args);
   const popStart = source.indexOf('    const onPop = () =>'), popEnd = source.indexOf('\n  }, [state, draftDirty]);', popStart);
   context.listen = () => new Function(...Object.keys(context), `return (${stripTypeScriptTypes('function listen(){' + source.slice(popStart, popEnd) + '}')})();`)(...Object.values(context));
-  const unloadStart = source.indexOf('    if (!(draftDirty && modal) && !inboxDirty) return;'), unloadEnd = source.indexOf('\n  }, [draftDirty, modal, inboxDirty]);', unloadStart);
+  const unloadStart = source.indexOf('    if (!(draftDirty && modal) && !inboxDirty && !campaignDirty) return;'), unloadEnd = source.indexOf('\n  }, [draftDirty, modal, inboxDirty, campaignDirty]);', unloadStart);
   context.warnOnUnload = () => new Function(...Object.keys(context), 'modal', `return (${stripTypeScriptTypes('function listen(){' + source.slice(unloadStart, unloadEnd) + '}')})();`)(...Object.values(context), context.modalRef.current);
   context.unload = event => listeners.get('beforeunload')?.(event);
   const modalStart = source.indexOf('    const dialog = dialogRef.current;'), modalEnd = source.indexOf('\n  }, [modal]);', modalStart);
@@ -174,9 +179,9 @@ test('all page URLs round-trip, preserve connection links, and reject sections f
   assert.equal(new URL(navigationUrl({ page: 'Calendar', section: '', projectId: 'a' }, 'https://campaign.example/?view=campaigns&item=c1'), 'https://campaign.example').searchParams.get('item'), null, 'Leaving the campaign page drops its id.');
 });
 
-test('seven work areas plus Settings give every page and section exactly one tab, and old URLs open that tab', () => {
-  assert.deepEqual(areas.map(area => area.label), ['Home', 'Planner', 'Messages', 'Ads', 'Offline', 'Library', 'Reports', 'Settings']);
-  for (const area of areas) assert.ok(area.tabs.length <= 5, area.label + ' has at most five tabs');
+test('Campaign owns its six creation kinds and every existing page and section still has exactly one home', () => {
+  assert.deepEqual(areas.map(area => area.label), ['Home', 'Campaign', 'Planner', 'Messages', 'Library', 'Reports', 'Settings']);
+  for (const area of areas) assert.ok(area.tabs.length <= (area.id === 'campaign' ? 6 : 5), area.label + ' keeps its intended tab count');
   for (const [page, view] of Object.entries(pageRoutes)) for (const section of pageSections[page] || ['']) {
     const homes = areas.flatMap(area => area.tabs.filter(tab => tab.page === page && (!tab.sections || tab.sections.includes(section))).map(tab => [area, tab]));
     assert.equal(homes.length, 1, `${page} › ${section} has one home`);
@@ -188,12 +193,146 @@ test('seven work areas plus Settings give every page and section exactly one tab
     const url = new URL(navigationUrl({ page: tab.page, section: tab.sections?.[0] || pageSections[tab.page]?.[0] || '', projectId: 'a' }, 'https://campaign.example/'), 'https://campaign.example');
     const route = readNavigation(url.search); assert.equal(areaTab(route.page, route.section), tab);
   }
-  assert.equal(areaTab('Publishing', 'recycling').label, 'Posts'); assert.equal(areaOf('Publishing', 'queues').label, 'Settings'); assert.equal(areaOf('Publishing', 'destinations').label, 'Settings');
+  assert.equal(areaTab('Publishing', 'recycling').label, 'Social'); assert.equal(areaOf('Publishing', 'queues').label, 'Settings'); assert.equal(areaOf('Publishing', 'destinations').label, 'Settings');
   assert.equal(areaOf('Publishing', 'library').label, 'Library'); assert.equal(areaTab('Publishing', 'library').label, 'From your accounts'); assert.equal(areaTab('Ads manager', 'shopping').label, 'Ads');
   assert.equal(areaTab('Direct campaigns', 'templates').label, 'WhatsApp templates'); assert.equal(areaTab('Direct campaigns', 'people').label, 'Contacts'); assert.equal(areaTab('Direct campaigns', 'contacts').label, 'Contacts', 'The old social-contacts URL opens the Contacts tab.'); assert.equal(areaTab('Analytics', 'accounts').label, 'Social accounts');
   assert.equal(areaOf(readNavigation('?view=assistant').page, '').label, 'Planner');
-  assert.deepEqual(areas.find(area => area.id === 'offline').tabs.map(tab => tab.label), ['Billboards', 'Field activity', 'Partners']);
+  assert.deepEqual(areas.find(area => area.id === 'campaign').tabs.map(tab => tab.label), ['Plans', 'Social', 'Ads', 'Email, SMS & WhatsApp', 'Billboards', 'Field activity']);
+  assert.equal(areaOf('Media providers', '').label, 'Settings'); assert.equal(areaTab('Media providers', '').label, 'Media partners');
   assert.equal(areaTab(readNavigation('?view=activations').page, '').label, 'Field activity');
+});
+
+function campaignGuard(ui, revision = 'first edit', busy = false) {
+  const result = { discarded: 0, guard: { dirty: true, busy, revision, discard() { result.discarded++; } } };
+  ui.campaignGuardChanged(result.guard); return result;
+}
+
+test('campaign drafts guard navigation and the shared launcher, retaining edits on Keep editing and changed revisions', () => {
+  const ui = app('https://campaign.example/?view=direct&project=a'), draft = campaignGuard(ui);
+  ui.startCampaignCreation('sms'); assert.equal(ui.discardPrompt, true); assert.equal(ui.modalRef.current, null);
+  ui.keepEditing(); assert.equal(draft.discarded, 0); assert.equal(ui.campaignDirty, true);
+  ui.setPage('Calendar'); assert.equal(ui.discardPrompt, true);
+  campaignGuard(ui, 'a newer edit'); ui.discardChanges();
+  assert.equal(draft.discarded, 0); assert.equal(ui.navigationRef.current.page, 'Direct campaigns'); assert.match(ui.notice, /draft changed/);
+  ui.startCampaignCreation('whatsapp'); ui.discardChanges();
+  assert.equal(ui.modalRef.current.type, 'campaign-start'); assert.equal(ui.modalRef.current.campaignKind, 'whatsapp'); assert.equal(ui.campaignEditor.current, null);
+});
+
+test('pending campaign work blocks navigation and creation until it finishes, including native Back', async () => {
+  const ui = app(); ui.setPage('Direct campaigns'); ui.listen(); const draft = campaignGuard(ui, 'sending', true);
+  ui.setPage('Calendar'); assert.equal(ui.navigationRef.current.page, 'Direct campaigns'); assert.equal(ui.discardPrompt, false); assert.match(ui.notice, /operation to finish/);
+  ui.startCampaignCreation('plan'); assert.equal(ui.modalRef.current, null); assert.equal(draft.discarded, 0);
+  ui.window.history.go(-1); await tick();
+  assert.equal(ui.navigationRef.current.page, 'Direct campaigns'); assert.equal(new URL(ui.window.location.href).searchParams.get('view'), 'direct'); assert.equal(ui.discardPrompt, false);
+  ui.campaignGuardChanged({ ...draft.guard, busy: false }); ui.window.history.go(-1); await tick();
+  assert.equal(ui.discardPrompt, true); ui.keepEditing(); assert.equal(draft.discarded, 0);
+  ui.window.history.go(-1); await tick(); ui.discardChanges(); await tick();
+  assert.equal(ui.navigationRef.current.page, 'Overview'); assert.equal(draft.discarded, 1);
+});
+
+test('a campaign operation starting while discard is open cannot be discarded or navigated away', () => {
+  const ui = app('https://campaign.example/?view=direct&project=a'), draft = campaignGuard(ui);
+  ui.setPage('Calendar'); assert.equal(ui.discardPrompt, true);
+  ui.campaignGuardChanged({ ...draft.guard, busy: true }); ui.discardChanges();
+  assert.equal(ui.navigationRef.current.page, 'Direct campaigns'); assert.equal(draft.discarded, 0); assert.match(ui.notice, /operation to finish/);
+});
+
+test('accepted section navigation discards a campaign even when its editor component stays mounted', () => {
+  const ui = app('https://campaign.example/?view=direct&section=campaigns&project=a'), draft = campaignGuard(ui);
+  ui.setPage('Direct campaigns', 'people'); assert.equal(ui.discardPrompt, true); assert.equal(draft.discarded, 0);
+  ui.discardChanges();
+  assert.equal(ui.navigationRef.current.page, 'Direct campaigns'); assert.equal(ui.navigationRef.current.section, 'people');
+  assert.equal(draft.discarded, 1); assert.equal(ui.campaignEditor.current, null); assert.equal(ui.campaignDirty, false);
+});
+
+test('project switching retains campaign drafts through failed, obsolete and newly edited loads', async () => {
+  for (const outcome of ['success', 'failure', 'obsolete', 'edited', 'busy']) {
+    const ui = app('https://campaign.example/?view=direct&project=a'), response = deferred(), draft = campaignGuard(ui);
+    ui.api = async path => { ui.calls.push(path); return response.promise; };
+    ui.changeProject('b'); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []); ui.discardChanges();
+    assert.equal(draft.discarded, 0, 'The original campaign draft remains until the new project is verified.');
+    if (outcome === 'obsolete') ui.setPage('Direct campaigns');
+    if (outcome === 'edited') campaignGuard(ui, 'edited while loading');
+    if (outcome === 'busy') ui.campaignGuardChanged({ ...draft.guard, busy: true });
+    if (outcome === 'failure') response.reject(new Error('Offline')); else response.resolve(stateFor('b'));
+    await tick();
+    assert.equal(ui.state.projectId, outcome === 'success' ? 'b' : 'a');
+    assert.equal(draft.discarded, outcome === 'success' ? 1 : 0);
+    assert.equal(ui.campaignDirty, outcome !== 'success');
+    if (outcome === 'failure') assert.equal(ui.error, 'Offline');
+    if (outcome === 'edited') assert.match(ui.error, /draft changed/);
+    if (outcome === 'busy') assert.match(ui.error, /operation to finish/);
+  }
+});
+
+test('campaign-only edits protect browser unload and an expired session reports their loss', () => {
+  const ui = app('https://campaign.example/?view=direct&project=a'); campaignGuard(ui);
+  const cleanup = ui.warnOnUnload(); let prevented = 0; const event = { preventDefault() { prevented++; } };
+  ui.unload(event); assert.equal(prevented, 1); assert.equal(event.returnValue, ''); cleanup();
+  ui.session = { user: { id: 'u' } }; ui.sessionExpired();
+  assert.equal(ui.session.unsavedChangesLost, true); assert.equal(ui.campaignEditor.current, null); assert.equal(ui.campaignDirty, false);
+});
+
+test('creation continues through the maintained editors with calendar and parent-plan presets intact', () => {
+  const state = { ...stateFor('a'), campaigns: [{ id: 'plan1', startDate: '2099-10-24', endDate: '2099-10-31' }] };
+  const social = app('https://campaign.example/?view=calendar&project=a', state);
+  social.startCampaignCreation('social', { day: '2099-10-25T12:00' }); social.continueCampaignCreation('post');
+  assert.equal(social.navigationRef.current.page, 'Publishing'); assert.equal(social.navigationRef.current.section, 'posts');
+  assert.equal(social.modalRef.current.type, 'post'); assert.equal(social.modalRef.current.day, '2099-10-25T12:00');
+  for (const [kind, destination, page, section, modalType, linked] of [
+    ['plan', 'plan', 'Campaigns', '', 'campaign', false],
+    ['social', 'post', 'Publishing', 'posts', 'post', true],
+    ['advertising', 'ad', 'Ads manager', 'campaigns', 'ad', false],
+    ['advertising', 'google-shopping', 'Ads manager', 'shopping', null, false],
+    ['advertising', 'microsoft-search', 'Ads manager', 'microsoft', null, false],
+    ['email', 'email', 'Direct campaigns', 'campaigns', null, true],
+    ['sms', 'sms', 'Direct campaigns', 'campaigns', null, true],
+    ['whatsapp', 'whatsapp', 'Direct campaigns', 'campaigns', null, true],
+    ['billboards', 'placement', 'OOH media', '', 'placement', true],
+    ['billboards', 'broadsign', 'OOH media', '', null, false],
+    ['field', 'activation', 'Field activity', '', null, true],
+  ]) {
+    const ui = app('https://campaign.example/?view=campaigns&project=a', state);
+    ui.addToCampaign(({ plan: 'post', social: 'post', advertising: 'ad', email: 'message', sms: 'message', whatsapp: 'message', billboards: 'placement', field: 'activation' })[kind], 'plan1');
+    ui.continueCampaignCreation(destination);
+    assert.equal(ui.navigationRef.current.page, page, destination); assert.equal(ui.navigationRef.current.section, section, destination);
+    const opened = modalType ? ui.modalRef.current : ui.creationIntent;
+    if (modalType) assert.equal(opened.type, modalType); else { assert.equal(opened.destination, destination); assert.equal(opened.projectId, 'a'); }
+    assert.equal(opened.campaignId, linked ? 'plan1' : undefined);
+    assert.deepEqual(opened.dates, { start: '2099-10-24', end: '2099-10-31' });
+    assert.equal(opened.day, '2099-10-24T09:00'); assert.deepEqual(ui.calls, [], 'Opening an editor performs no provider or persistence write.');
+  }
+});
+
+test('creation refuses stale scope and lost write access, and late acknowledgements cannot clear a newer intent', () => {
+  for (const changes of [{ canWrite: false }, { busy: true }, { activeProject: { current: 'b' } }]) {
+    const ui = app(); Object.assign(ui, changes); ui.startCampaignCreation('email'); assert.equal(ui.modalRef.current, null);
+    ui.setModal({ type: 'campaign-start', campaignKind: 'email' }); ui.continueCampaignCreation('email'); assert.equal(ui.creationIntent, null); assert.deepEqual(ui.calls, []);
+  }
+  const ui = app(); ui.startCampaignCreation('email'); ui.continueCampaignCreation('email'); const first = ui.creationIntent.id;
+  ui.startCampaignCreation('sms'); ui.continueCampaignCreation('sms');
+  ui.creationHandled(first); assert.equal(ui.creationIntent.destination, 'sms'); ui.creationHandled(ui.creationIntent.id); assert.equal(ui.creationIntent, null);
+});
+
+test('same-route direct and native handoffs close the chooser and keep their creation fields', () => {
+  for (const [href, kind, destination, linked] of [
+    ['?view=direct&section=campaigns&project=a', 'email', 'email', true],
+    ['?view=direct&section=campaigns&project=a', 'sms', 'sms', true],
+    ['?view=direct&section=campaigns&project=a', 'whatsapp', 'whatsapp', true],
+    ['?view=ads&section=shopping&project=a', 'advertising', 'google-shopping', false],
+    ['?view=ads&section=microsoft&project=a', 'advertising', 'microsoft-search', false],
+    ['?view=ooh&project=a', 'billboards', 'broadsign', false],
+    ['?view=activations&project=a', 'field', 'activation', true],
+  ]) {
+    const ui = app('https://campaign.example/' + href);
+    const original = { ...ui.navigationRef.current }, context = { campaignId: 'plan1', day: '2099-10-24T12:00', dates: { start: '2099-10-24', end: '2099-10-31' } };
+    ui.startCampaignCreation(kind, context); assert.equal(ui.modalRef.current.type, 'campaign-start'); ui.continueCampaignCreation(destination);
+    assert.equal(ui.modalRef.current, null, destination + ' closes the chooser even without navigation.');
+    assert.deepEqual(ui.navigationRef.current, original); assert.equal(ui.historyIndex.current, 0);
+    assert.equal(ui.creationIntent.destination, destination); assert.equal(ui.creationIntent.projectId, 'a');
+    assert.equal(ui.creationIntent.campaignId, linked ? 'plan1' : undefined); assert.equal(ui.creationIntent.day, context.day); assert.deepEqual(ui.creationIntent.dates, context.dates);
+    assert.deepEqual(ui.calls, []);
+  }
 });
 
 test('initial deep links verify membership before requesting a project and never retain a foreign project URL', async () => {

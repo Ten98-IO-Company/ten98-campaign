@@ -12,7 +12,7 @@ import { addUsers } from './fixtures/accounts.ts';
 
 test('failed no-project refresh and workspace readback remain visible through the actual app handlers', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), context = {
-    state: { projectId: null, projects: [] }, navigationRef: { current: {} }, writeNavigation() {}, loadVersion: { current: 0 }, activeProject: { current: '' }, pendingWork: { current: 0 }, inboxDraft: { current: { dirty: false, revision: 0 } },
+    state: { projectId: null, projects: [] }, navigationRef: { current: {} }, writeNavigation() {}, loadVersion: { current: 0 }, activeProject: { current: '' }, pendingWork: { current: 0 }, inboxDraft: { current: { dirty: false, revision: 0 } }, campaignEditor: { current: null }, campaignGuardChanged() {},
     setLoading() {}, setState() {}, setBusy() {}, setNotice() {}, setSpendBlock() {}, adSpendBlock, loadApprovalSummary() {}, errors: [],
   };
   let failRead = false, creates = 0;

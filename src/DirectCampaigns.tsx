@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, AudienceSummary, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, ContentPreview, CopyButton, DataTable, DateTimeField, DescriptionList, Disclosure, EmptyState, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Inline, Input, List, ListItem, LoadMore, OperationResults, Option, Popover, Progress, RadioGroup, ReviewConfirm, SandboxedPreview, Select, Stack, StatusLine, Text, Textarea, Tooltip, type OperationStatus, type Tone, useFocusReturn } from '@ten98/ui';
 import WhatsAppTemplate, { templateMissing, templateRestriction, templatePreviewText } from './WhatsAppTemplate';
 import { useRevealPanel } from './focus-return';
+import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
 
 // Provider deliverability reports that are not a recipient's own suppression, such as a Cloudflare policy block (#77).
 type DeliverabilityAlert = { provider: string; kind: string; contacts: number; expiresAt: string | null };
@@ -17,7 +18,7 @@ const deliverabilityAlerts = (status: any): DeliverabilityAlert[] => (Array.isAr
 
 type Row = { id: string; [key: string]: any };
 type Channel = 'email' | 'sms' | 'whatsapp';
-type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string>; onOpenIntegrations?: () => void; view?: 'campaigns' | 'contacts'; isOperator?: boolean; plannerCampaigns?: Row[]; createFor?: string; onCreateHandled?: () => void };
+type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; readOnly?: boolean; onOpenReplies?: (channel: 'sms' | 'whatsapp', accountId?: string, phone?: string) => void; onShortenText?: (text: string, campaignId?: string) => Promise<string>; onOpenIntegrations?: () => void; view?: 'campaigns' | 'contacts'; isOperator?: boolean; plannerCampaigns?: Row[]; createFor?: string; createIntent?: CampaignCreationIntent; onCreateCampaign?: () => void; onCreateHandled?: () => void; onGuardChange?: (guard: CampaignEditorGuard | null) => void };
 type EmailPurpose = 'transactional' | 'marketing';
 type Draft = { name: string; campaignId: string; channel: Channel; emailPurpose: EmailPurpose; subject: string; text: string; html: string; accountId: string; templateName: string; templateLanguage: string; templateComponents: any[]; contactIds: string[]; tags: string[] };
 const labels = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
@@ -117,14 +118,15 @@ function CampaignResults({ campaign }: { campaign: Row }) {
   return <Text as="span" size="sm" tone="muted">{parts.join(' · ')}</Text>;
 }
 
-export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations, view = 'campaigns', isOperator = false, plannerCampaigns = [], createFor, onCreateHandled }: Props) {
+export default function DirectCampaigns({ projectId, request, readOnly = false, onOpenReplies, onShortenText, onOpenIntegrations, view = 'campaigns', isOperator = false, plannerCampaigns = [], createFor, createIntent, onCreateCampaign, onCreateHandled, onGuardChange }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/direct`, requester = useRef(request), version = useRef(0), csvRead = useRef(0), pending = useRef(false), actionVersion = useRef(0), formRef = useRef<HTMLFormElement>(null);
   requester.current = request;
+  const consumedIntent = useRef(''), savedDraft = useRef(''), reportGuard = useRef(onGuardChange), discardAction = useRef<(() => void) | null>(null); reportGuard.current = onGuardChange;
   const [status, setStatus] = useState<any>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [contacts, setContacts] = useState<Row[]>([]);
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [editingId, setEditingId] = useState(''), [draft, setDraft] = useState<Draft>(blank), [audienceMode, setAudienceMode] = useState('all');
   const [detail, setDetail] = useState<any>(null), [preview, setPreview] = useState<{ signature: string; result: any } | null>(null), [templates, setTemplates] = useState<any[]>([]), [templateAccount, setTemplateAccount] = useState('');
   // Review and send: the primary button checks the audience itself, then opens the same final confirmation.
-  const [pendingSend, setPendingSend] = useState('');
+  const [pendingSend, setPendingSend] = useState(''), [discardRevision, setDiscardRevision] = useState<string | null>(null);
   const [confirmationMode, setConfirmationMode] = useState(''), [confirmed, setConfirmed] = useState(false), [transactionalConfirmed, setTransactionalConfirmed] = useState(false), [scheduledAt, setScheduledAt] = useState('');
   const [search, setSearch] = useState(''), [contactEditId, setContactEditId] = useState(''), [contact, setContact] = useState(contactBlank), [csv, setCsv] = useState(''), [importConsent, setImportConsent] = useState({ email: false, sms: false, whatsapp: false, emailMarketing: false }), [importSource, setImportSource] = useState(''), [importResult, setImportResult] = useState<any>(null);
   const [suppression, setSuppression] = useState<{ id: string; channel: Channel; reason: string } | null>(null);
@@ -136,6 +138,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   const [reveal, setReveal] = useState({ panel: '', tick: 0 }), revealPanel = (panel: string) => setReveal(previous => ({ panel, tick: previous.tick + 1 }));
   useRevealPanel(reveal.tick, reveal.panel);
   const signature = JSON.stringify({ editingId, draft, audienceMode }), current = campaigns.find(item => item.id === editingId), editable = !current || current.status === 'draft';
+  const draftSnapshot = JSON.stringify({ draft, audienceMode });
   const testable = !readOnly && current?.status === 'draft' && (current.channel === 'email' || current.channel === 'sms');
   const retryCancellation = current?.status === 'cancelled' && current.channel === 'whatsapp' && !!current.providerId && current.providerStatus !== 'cancelled' && !!current.lastError;
   const validPreview = preview?.signature === signature ? preview.result : null, ready = !readOnly && editable && !!current && !!validPreview?.previewToken && validPreview?.audience?.eligible > 0 && validPreview.audience.eligible <= 500 && !!status?.providers?.[draft.channel] && status?.publicCallbacks === true;
@@ -183,17 +186,36 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
     setDetail((previous: any) => ({ ...(previous?.campaign?.id === campaign.id ? previous : {}), campaign }));
   }
   function openDraft(campaign?: Row) {
-    setEditingId(campaign?.id || ''); setDraft(campaignDraft(campaign)); setAudienceMode(campaign?.contactIds?.length ? 'contacts' : campaign?.tags?.length ? 'tags' : 'all'); setAudienceTags((campaign?.tags || []).join(', ')); setScheduledAt(''); setPreview(null); setDetail(campaign ? { campaign } : null); setTemplates([]); setTemplateAccount(''); setError(''); setSendMode('now'); setOpenRow('');
+    discardAction.current = null;
+    const nextDraft = campaignDraft(campaign), nextAudience = campaign?.contactIds?.length ? 'contacts' : campaign?.tags?.length ? 'tags' : 'all';
+    savedDraft.current = JSON.stringify({ draft: campaign?.id ? nextDraft : { ...blank(), channel: nextDraft.channel, campaignId: nextDraft.campaignId }, audienceMode: campaign?.id ? nextAudience : 'all' });
+    setEditingId(campaign?.id || ''); setDraft(nextDraft); setAudienceMode(nextAudience); setAudienceTags((campaign?.tags || []).join(', ')); setScheduledAt(''); setPreview(null); setDetail(campaign ? { campaign } : null); setTemplates([]); setTemplateAccount(''); setError(''); setSendMode('now'); setOpenRow(''); setConfirmationMode(''); setConfirmed(false); setTransactionalConfirmed(false); setPendingSend(''); setDiscardRevision(null);
   }
-  function startCampaign(channel: Channel) { openDraft(); setDraft({ ...blank(), channel }); setComposing(true); setOpenRow('to'); setChoosingChannel(false); }
+  function startCampaign(channel: Channel, campaignId = '') { openDraft(); const nextDraft = { ...blank(), channel, campaignId }; savedDraft.current = JSON.stringify({ draft: nextDraft, audienceMode: 'all' }); setDraft(nextDraft); setComposing(true); setOpenRow('to'); setChoosingChannel(false); }
   // createFor: a campaign page's Add menu asked for a new message in this campaign; open an email draft linked to it
   // once (its channel can still change under From), then tell the app.
-  useEffect(() => { if (!createFor) return; if (!readOnly && plannerCampaigns.some(campaign => campaign.id === createFor)) { startCampaign('email'); setDraft(previous => ({ ...previous, campaignId: createFor })); } onCreateHandled?.(); }, [createFor]);
+  useEffect(() => { if (!createFor) return; if (!readOnly && plannerCampaigns.some(campaign => campaign.id === createFor)) startCampaign('email', createFor); onCreateHandled?.(); }, [createFor]);
+  useEffect(() => {
+    if (!createIntent || createIntent.projectId !== projectId || readOnly || !channels.includes(createIntent.destination as Channel)) return;
+    const intentKey = projectId + ':' + createIntent.id;
+    if (consumedIntent.current === intentKey || createIntent.campaignId && !plannerCampaigns.some(campaign => campaign.id === createIntent.campaignId)) return;
+    consumedIntent.current = intentKey;
+    startCampaign(createIntent.destination as Channel, createIntent.campaignId);
+    onCreateHandled?.();
+  }, [createIntent, projectId, readOnly, plannerCampaigns]);
   function closeCampaign() { openDraft(); setComposing(false); }
+  const guardDirty = !readOnly && editable && (composing || !!editingId) && draftSnapshot !== savedDraft.current;
+  const guardRevision = JSON.stringify([projectId, editingId, draftSnapshot]);
+  function discardDraft() { if (!pending.current) closeCampaign(); }
+  function changeDraft(change: () => void) { if (pending.current) return; if (guardDirty) { discardAction.current = change; setDiscardRevision(guardRevision); } else change(); }
+  function requestCloseCampaign() { changeDraft(closeCampaign); }
+  useEffect(() => { reportGuard.current?.({ dirty: guardDirty, busy: pending.current, revision: guardRevision, discard: discardDraft }); }, [guardDirty, guardRevision, busy]);
+  useEffect(() => () => reportGuard.current?.(null), []);
   async function saveDraft(generation: number) {
     if (readOnly || !editable) throw new Error('Create or edit a draft before saving.');
     const body = campaignBody(draft, audienceMode), result = await requester.current(path + '/campaigns' + (editingId ? '/' + encodeURIComponent(editingId) : ''), editingId ? 'PATCH' : 'POST', body);
     if (generation !== version.current) return null;
+    savedDraft.current = JSON.stringify({ draft, audienceMode });
     acceptCampaign(result.campaign, generation); setEditingId(result.campaign.id); setNotice('Campaign draft saved. No messages have been sent.'); return result.campaign as Row;
   }
   async function save(event: React.FormEvent<HTMLFormElement>) { event.preventDefault(); await action('Saving draft', async generation => { await saveDraft(generation); }); }
@@ -314,15 +336,15 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   const checkThenSend = sendBlocked && !validPreview && !readOnly && editable && checks.sendBlockers.every(reason => reason === 'Check the audience') && !!status?.providers?.[draft.channel] && status?.publicCallbacks !== false;
   useEffect(() => { if (!pendingSend || busy) return; if (ready && checks.sendBlockers.length === 0) setConfirmationMode(pendingSend); setPendingSend(''); }, [pendingSend, busy, ready]);
   const sendReasons = checks.sendBlockers.length ? checks.sendBlockers : ['Check the audience again'];
-  const campaignList = <Card as="section" title="Campaigns" description={`Drafts stay private until you send or schedule them. ${status?.marketingAvailable ? 'Email campaigns can be transactional or marketing.' : 'Email campaigns are for transactional messages such as receipts and updates. Marketing email needs Amazon SES.'}`} actions={!readOnly && <Popover label="Choose a channel" triggerLabel="New campaign" triggerVariant="primary" placement="bottom-end" open={choosingChannel} onOpenChange={setChoosingChannel} disabled={!!busy}><Stack gap={1}>{channels.map(channel => <Button key={channel} variant="ghost" onClick={() => startCampaign(channel)}>{labels[channel]} campaign</Button>)}</Stack></Popover>}>
+  const campaignList = <Card as="section" title="Campaigns" description={`Drafts stay private until you send or schedule them. ${status?.marketingAvailable ? 'Email campaigns can be transactional or marketing.' : 'Email campaigns are for transactional messages such as receipts and updates. Marketing email needs Amazon SES.'}`} actions={!readOnly && (onCreateCampaign ? <Button variant="primary" disabled={!!busy} onClick={onCreateCampaign}>New campaign</Button> : <Popover label="Choose a channel" triggerLabel="New campaign" triggerVariant="primary" placement="bottom-end" open={choosingChannel} onOpenChange={setChoosingChannel} disabled={!!busy}><Stack gap={1}>{channels.map(channel => <Button key={channel} variant="ghost" onClick={() => startCampaign(channel)}>{labels[channel]} campaign</Button>)}</Stack></Popover>)}>
     <DataTable searchable={false} sortable={false} pagination={false} ariaLabel="Direct campaigns" rows={campaigns} rowKey={campaign => campaign.id} emptyState={<EmptyState title="No campaigns yet" description="Start with New campaign. You choose the channel, then fill in a short checklist before anything is sent."/>} columns={[{ key: 'name', header: 'Campaign', rowHeader: true, wrap: true, render: campaign => <Stack gap={0}><Text as="strong" weight="semibold">{campaign.name}</Text><Text as="small" tone="muted" truncate>{campaignSubtitle(campaign)}</Text></Stack> }, { key: 'status', header: 'Status', render: campaign => <CampaignStatus campaign={campaign}/> }, { key: 'results', header: 'Results', render: campaign => <CampaignResults campaign={campaign}/> }]} rowActionsLabel="Actions" rowActions={campaign => <Inline gap={2}><Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openCampaign(campaign)}>{campaign.status === 'draft' && !readOnly ? 'Edit draft' : 'View campaign'}</Button>{onOpenReplies && ['sms', 'whatsapp'].includes(campaign.channel) && <Button variant="secondary" size="sm" disabled={!!busy} onClick={() => openReplies(campaign)}>Open replies</Button>}</Inline>}/>
   </Card>;
   const campaignPage = <Stack gap={6}>
     <Stack gap={3}>
-      <Inline><Button variant="ghost" size="sm" disabled={!!busy} onClick={closeCampaign}>All campaigns</Button></Inline>
+      <Inline><Button variant="ghost" size="sm" disabled={!!busy} onClick={requestCloseCampaign}>All campaigns</Button></Inline>
       <Inline justify="between" align="center" gap={3}>
         <Stack gap={2}><Heading level={2}>{current ? current.name : `New ${labels[draft.channel]} campaign`}</Heading><Inline gap={3} align="center"><CampaignStatus campaign={current || { id: '', status: 'draft' }}/><Text tone="muted" size="sm">{toSummary} · {labels[draft.channel]}</Text></Inline></Stack>
-        {current && !readOnly && <Button variant="secondary" disabled={!!busy} onClick={() => { openDraft({ ...current, id: '', name: current.name + ' copy' }); setDetail(null); setComposing(true); }}>Duplicate as draft</Button>}
+        {current && !readOnly && <Button variant="secondary" disabled={!!busy} onClick={() => changeDraft(() => { openDraft({ ...current, id: '', name: current.name + ' copy' }); setDetail(null); setComposing(true); })}>Duplicate as draft</Button>}
       </Inline>
     </Stack>
     <Form ref={formRef} onSubmit={(_, event) => save(event)}><Stack as="fieldset" gap={4} disabled={!!busy || readOnly || !editable}>
@@ -456,6 +478,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
       </Stack></Form></Card>}
   </Stack>;
   return <Stack gap={6}>
+    <ConfirmDialog open={discardRevision !== null} onOpenChange={open => { if (!open) { discardAction.current = null; setDiscardRevision(null); } }} title="Discard unsaved campaign changes?" description="Your changes to this draft will be lost." confirmLabel="Discard changes" cancelLabel="Keep editing" danger onConfirm={() => { const revision = discardRevision, change = discardAction.current; discardAction.current = null; setDiscardRevision(null); if (revision === guardRevision && !pending.current) change?.(); }}/>
     {error && <Alert tone="danger" actions={error === emailProviderChoice ? integrationsAction : undefined}>{error}</Alert>}{notice && <StatusLine tone="success">{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
     {deliverabilityAlerts(status).map(alert => { const copy = deliverabilityCopy(alert); return <Alert key={alert.provider + ':' + alert.kind} tone="warning" title={copy.title}>{copy.body}{alert.expiresAt ? ` The provider lists it until ${new Date(alert.expiresAt).toLocaleString()}.` : ''}</Alert>; })}
     {isOperator && <>{status?.emailProvider === 'ses' && typeof status.sesWebhookUrl === 'string' && status.sesWebhookUrl && <Disclosure summary="Amazon SES feedback webhook"><Stack gap={2}><Field label="SNS subscription URL" description="Subscribe the SNS topic of your SES configuration set to this URL over HTTPS so bounces and complaints update your contacts."><Input readOnly value={status.sesWebhookUrl}/></Field><Inline><CopyButton value={status.sesWebhookUrl} label="Copy webhook URL" messages={{ copied: 'Webhook URL copied.' }}/></Inline></Stack></Disclosure>}</>}

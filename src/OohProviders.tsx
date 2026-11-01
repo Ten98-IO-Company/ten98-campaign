@@ -1,22 +1,59 @@
 import React, { useEffect, useRef, useState } from 'react';
 import AdSpendNotice from './AdSpendNotice';
 import { adSpendBlock, type AdSpendBlock } from './approval-status';
-import { Alert, Button, Card, Checkbox, DataTable, Disclosure, Field, Fieldset, FormActions, FormGrid, Heading, Inline, Input, Link, Option, ResourceCard, ReviewSummary, Select, Stack, StatusLine, Tabs, Text, Textarea } from '@ten98/ui';
+import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
+import { Alert, Button, Card, Checkbox, DataTable, Disclosure, Field, Fieldset, FormActions, FormGrid, Heading, Inline, Input, Link, Option, ResourceCard, ReviewSummary, Select, Stack, StatusLine, Tabs, Text, Textarea, useConfirmDialog } from '@ten98/ui';
 
 /** In workflow mode this is the OOH page: `bookings` is its Bookings tab, and Inventory is added once Broadsign is connected. */
-type Props = { projectId: string; role: string; isOperator: boolean; mode?: 'workflow' | 'connection'; bookings?: React.ReactNode; onOpenIntegrations?: () => void; onOpenApprovals?: () => void; onSpendReview?: () => void; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onInventory?: (items: any[]) => void; onChanged?: () => void | Promise<void> };
+type Props = { projectId: string; role: string; isOperator: boolean; mode?: 'workflow' | 'connection'; bookings?: React.ReactNode; createIntent?: CampaignCreationIntent; onCreateHandled?: () => void; onGuardChange?: (guard: CampaignEditorGuard | null) => void; onOpenIntegrations?: () => void; onOpenApprovals?: () => void; onSpendReview?: () => void; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onInventory?: (items: any[]) => void; onChanged?: () => void | Promise<void> };
 const statuses: Record<number, string> = { 1: 'Saved', 3: 'Processing', 4: 'Held', 5: 'Partially held', 9: 'Booked', 10: 'Submitted', 11: 'Live', 12: 'Cancelled', 14: 'Ended', 15: 'Cancelling' };
-export default function OohProviders({ projectId, role, isOperator, mode = 'workflow', bookings: bookingsView, onOpenIntegrations, onOpenApprovals, onSpendReview, request, onInventory, onChanged }: Props) {
+export default function OohProviders({ projectId, role, isOperator, mode = 'workflow', bookings: bookingsView, createIntent, onCreateHandled, onGuardChange, onOpenIntegrations, onOpenApprovals, onSpendReview, request, onInventory, onChanged }: Props) {
   const [status, setStatus] = useState<any>(null), [inventory, setInventory] = useState<any[]>([]), [bookings, setBookings] = useState<any[]>([]);
   const [selected, setSelected] = useState<number[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const [availability, setAvailability] = useState<Record<string, string>>({});
   const [refreshRequired, setRefreshRequired] = useState(false), refreshNeeded = useRef(false);
   const [spendBlock, setSpendBlock] = useState<AdSpendBlock | null>(null);
   const [view, setView] = useState('bookings');
+  const [draftDirty, setDraftDirty] = useState(false), [draftRevision, setDraftRevision] = useState(0);
+  const [confirm, confirmDialog] = useConfirmDialog();
   const inventoryCallback = useRef(onInventory); inventoryCallback.current = onInventory;
   const pendingKeys = useRef(new Map<string, string>()), active = useRef(true);
+  const proposalForm = useRef<HTMLFormElement | null>(null), pending = useRef(false), handledIntent = useRef<number | null>(null);
+  const guardCallback = useRef(onGuardChange); guardCallback.current = onGuardChange;
   const canWrite = ['owner', 'admin', 'editor'].includes(role), canMap = isOperator && ['owner', 'admin'].includes(role);
+  const tabChanging = useRef(false), currentProposal = useRef({ projectId, view, dirty: draftDirty, revision: draftRevision, canWrite });
+  currentProposal.current = { projectId, view, dirty: draftDirty, revision: draftRevision, canWrite };
   const path = `/projects/${encodeURIComponent(projectId)}/ooh`;
+  function markProposalDirty() { currentProposal.current.dirty = true; setDraftDirty(true); setDraftRevision(++currentProposal.current.revision); }
+  function discardProposal() {
+    if (pending.current || !active.current) return;
+    proposalForm.current?.reset(); setSelected([]); currentProposal.current.dirty = false; setDraftDirty(false); setDraftRevision(++currentProposal.current.revision);
+  }
+  async function changeView(next: string) {
+    const before = { ...currentProposal.current };
+    if (!active.current || pending.current || busy || tabChanging.current || next === before.view) return;
+    if (before.dirty && before.view === 'inventory') {
+      tabChanging.current = true;
+      let discard;
+      try { discard = await confirm({ title: 'Discard unsaved proposal?', description: 'Your proposal fields and screen selection will be lost.', confirmLabel: 'Discard changes', cancelLabel: 'Keep editing', danger: true }); }
+      finally { tabChanging.current = false; }
+      if (!discard) return;
+      const current = currentProposal.current;
+      if (!active.current || pending.current || current.projectId !== before.projectId || current.view !== before.view || current.revision !== before.revision || current.canWrite !== before.canWrite) { setNotice('Your provider proposal changed. Try switching tabs again.'); return; }
+      discardProposal();
+    }
+    setView(next);
+  }
+  useEffect(() => {
+    guardCallback.current?.({ dirty: mode === 'workflow' && draftDirty, busy, revision: `${projectId}:${draftRevision}`, discard: discardProposal });
+  }, [projectId, mode, draftDirty, draftRevision, busy]);
+  useEffect(() => () => { guardCallback.current?.(null); }, []);
+  useEffect(() => {
+    if (!createIntent || createIntent.projectId !== projectId || createIntent.destination !== 'broadsign' || createIntent.id === handledIntent.current || mode !== 'workflow' || !status || busy) return;
+    handledIntent.current = createIntent.id;
+    if (status.connection && canWrite) setView('inventory');
+    onCreateHandled?.();
+  }, [createIntent, projectId, mode, status, busy, canWrite, onCreateHandled]);
   async function write(target: string, body: unknown) {
     if (!active.current) throw new DOMException('The billboard view closed.', 'AbortError');
     if (refreshNeeded.current) throw new Error('Refresh the booking details before making further changes.');
@@ -42,21 +79,21 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
     });
   }
   useEffect(() => {
-    active.current = true; let current = true; setStatus(null); setInventory([]); setBookings([]); setSelected([]); setError(''); setNotice(''); setAvailability({});
+    active.current = true; let current = true; setStatus(null); setInventory([]); setBookings([]); setSelected([]); setError(''); setNotice(''); setAvailability({}); setDraftDirty(false);
     Promise.all([request(`${path}/status`), mode === 'connection' ? Promise.resolve({ inventory: [] }) : request(`${path}/inventory`), request(`${path}/bookings`)]).then(([connection, screens, saved]) => {
       if (current) { setStatus(connection); setInventory(screens.inventory); setBookings(saved.bookings); inventoryCallback.current?.(screens.inventory); }
     }).catch(err => { if (current) setError(err.message || 'The billboard connection could not be loaded.'); });
     return () => { current = false; active.current = false; };
   }, [path, request, mode]);
   async function action(run: () => Promise<void>) {
-    if (busy || !active.current) return; setBusy(true); setError(''); setNotice(''); setSpendBlock(null);
+    if (busy || pending.current || !active.current) return; pending.current = true; setBusy(true); setError(''); setNotice(''); setSpendBlock(null);
     try { await run(); } catch (err) {
       // A booking held back by ad spend approval explains itself; the review it opened updates the Approvals badge.
       const block = adSpendBlock(err);
       if (active.current && block) { setSpendBlock(block); if (block.review) onSpendReview?.(); }
       else if (active.current) setError((err as Error).message || 'The billboard action could not be completed.');
     }
-    finally { if (active.current) setBusy(false); }
+    finally { pending.current = false; if (active.current) setBusy(false); }
   }
   async function saveMapping(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const values = Object.fromEntries(new FormData(event.currentTarget));
@@ -70,7 +107,7 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
     event.preventDefault(); const form = event.currentTarget, values = Object.fromEntries(new FormData(form));
     await action(async () => {
       await write(`${path}/bookings`, { name: values.name, screenIds: selected, startDate: values.startDate, endDate: values.endDate, slotDuration: Number(values.slotDuration), price: Number(values.price), inventoryType: values.inventoryType });
-      form.reset(); setNotice('Saved the proposal and line item in Broadsign. Review availability before submitting a booking.');
+      form.reset(); setSelected([]); currentProposal.current.dirty = false; setDraftDirty(false); setDraftRevision(++currentProposal.current.revision); setNotice('Saved the proposal and line item in Broadsign. Review availability before submitting a booking.');
     });
   }
   async function submitBooking(event: React.FormEvent, booking: any) {
@@ -91,7 +128,7 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
     });
   }
   const inventoryTable = <DataTable ariaLabel="Approved Broadsign inventory" searchable={false} sortable={false} pagination={false} rows={inventory} rowKey={screen => String(screen.id)}
-    selectable={canWrite} selectedKeys={selected.map(String)} onSelectionChange={keys => { if (!busy) setSelected(inventory.filter(screen => keys.includes(String(screen.id))).map(screen => screen.id)); }} columns={[
+    selectable={canWrite} selectedKeys={selected.map(String)} onSelectionChange={keys => { if (!busy && !pending.current && canWrite) { setSelected(inventory.filter(screen => keys.includes(String(screen.id))).map(screen => screen.id)); markProposalDirty(); } }} columns={[
     { key: 'screen', header: 'Screen / face', render: screen => <Stack gap={1}><Text as="strong" weight="semibold">{screen.name}</Text><Text as="small" size="xs" tone="muted">{screen.id}</Text></Stack> },
     { key: 'location', header: 'Location', render: screen => <Stack gap={1}><Text as="span">{screen.location || 'Location not supplied'}</Text>{screen.latitude !== null && screen.longitude !== null && <Text as="small" size="xs" tone="muted">{screen.latitude}, {screen.longitude}</Text>}</Stack> },
     { key: 'resolution', header: 'Resolution', render: screen => screen.resolution || '—' }]}/>;
@@ -121,7 +158,7 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
     </ResourceCard>}
     {mode === 'workflow' && status?.connection && <>
       {!inventory.length && <Text tone="muted">Sync the approved inventory to load locations and start a provider proposal.</Text>}
-      {inventory.length > 0 && (canWrite ? <Stack as="form" gap={4} onSubmit={createDraft}>
+      {inventory.length > 0 && (canWrite ? <Stack as="form" ref={proposalForm} gap={4} onChangeCapture={markProposalDirty} onSubmit={createDraft}>
         {/* Dates and budget come first: they decide what the selected screens can be booked for. */}
         <Fieldset legend="Dates and budget" description="Creates a saved frequency proposal with one play per loop, all days, and full-day scheduling. The partner loads your creative in Broadsign." disabled={busy || !status.configured}>
           <FormGrid>
@@ -168,8 +205,8 @@ export default function OohProviders({ projectId, role, isOperator, mode = 'work
   // The provider status decides the page layout, so the bookings view waits for it and then mounts once.
   if (!status) return error ? <Stack gap={4}><Alert tone="danger">{error}</Alert>{bookingsView}</Stack> : <StatusLine busy>Loading OOH media…</StatusLine>;
   if (!status.connection) return <Stack gap={4}>
-    {canMap && <Inline gap={2} align="center"><Text tone="muted" size="sm">Connect this project’s Broadsign screens in Settings › Connections to plan screen bookings here.</Text>{onOpenIntegrations && <Button variant="ghost" size="sm" onClick={onOpenIntegrations}>Open Connections</Button>}</Inline>}
+    {canWrite && <Inline gap={2} align="center"><Text tone="muted" size="sm">{canMap ? 'Connect this project’s Broadsign screens in Settings › Connections to plan screen bookings here.' : 'Ask an administrator to connect this project’s Broadsign screens in Settings › Connections before creating a provider proposal.'}</Text>{onOpenIntegrations && <Button variant="ghost" size="sm" onClick={onOpenIntegrations}>Open Connections</Button>}</Inline>}
     {bookingsView}
   </Stack>;
-  return <Tabs label="OOH media" value={view} onValueChange={setView} items={[{ value: 'bookings', label: 'Bookings', content: bookingsView }, { value: 'inventory', label: 'Inventory', content: <Stack gap={4}>{body}</Stack> }]}/>;
+  return <>{confirmDialog}<Tabs label="OOH media" value={view} onValueChange={changeView} items={[{ value: 'bookings', label: 'Bookings', content: bookingsView }, { value: 'inventory', label: 'Inventory', content: <Stack gap={4}>{body}</Stack> }]}/></>;
 }
