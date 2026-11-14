@@ -1,22 +1,25 @@
 # The base image is pinned by digest; update the digest deliberately when moving to a newer Node 24 image.
-FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS build
+FROM node:24.22.1-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c AS build
 WORKDIR /app
-COPY package.json package-lock.json ./
+# Corepack installs the pnpm version named by package.json's packageManager field.
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable pnpm
+COPY package.json pnpm-lock.yaml ./
 COPY vendor ./vendor
 # No dependency needs an install script (only the optional macOS fsevents declares one), so none run.
-RUN npm ci --ignore-scripts
+RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY index.html tsconfig.json tsconfig.backend.json presentation-baseline.json vite.config.mjs ./
 COPY server ./server
 COPY src ./src
 COPY shared ./shared
 COPY public ./public
-# The architecture check in `npm run build` inventories every source root, so the build stage needs tests and scripts too.
+# The architecture check in `pnpm build` inventories every source root, so the build stage needs tests and scripts too.
 # Neither reaches the final image.
 COPY tests ./tests
 COPY scripts ./scripts
-RUN npm run build && npm prune --omit=dev
+RUN pnpm build && pnpm prune --prod --ignore-scripts
 
-FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53
+FROM node:24.22.1-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
 # Openship passes no build args, so the defaults are what ships there: APP_VERSION must equal package.json's version
 # (tests/image-labels.test.mjs fails CI otherwise) and APP_REVISION is overridden by `--build-arg` where one is available.
 ARG APP_VERSION=0.40.0

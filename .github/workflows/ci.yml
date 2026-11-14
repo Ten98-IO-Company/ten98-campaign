@@ -1,9 +1,10 @@
 name: Checks
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths-ignore: ["README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "docs/**"]
   pull_request:
+    branches: [main, dev]
     paths-ignore: ["README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "docs/**"]
   workflow_dispatch:
 permissions:
@@ -42,11 +43,14 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24.22.1"
-          cache: npm
-      - run: npm ci --prefer-offline --no-audit --no-fund
-      - run: npm run build
+      # Corepack installs the pnpm version named by package.json's packageManager field.
+      - run: corepack enable pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
       # The suite takes about 4 minutes; a stalled file fails with its name (per-test limit in package.json) well before this.
-      - run: npm test
+      - run: pnpm test
         timeout-minutes: 10
         env:
           # The import restore test runs pg_dump inside the service container, so client and server versions match.
