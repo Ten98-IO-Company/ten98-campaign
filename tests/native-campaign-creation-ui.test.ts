@@ -28,10 +28,12 @@ function view(Component: any, initial: Row) {
   };
   return instance;
 }
-async function component(name: string, additions: Row = {}) {
+async function component(name: string, additions: Row = {}): Promise<any> {
   const source = await readFile(new URL(`../src/${name}.tsx`, import.meta.url), 'utf8');
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace(/^export (default )?/gm, ''), name + '.tsx', { jsx: { runtime: 'classic' } });
-  const scope = { React, ...hooks, ...ui, ...offline, FormData: FormValues, adSpendBlock, AdSpendNotice: () => null, ...additions };
+  // The provider pages render the real shared frame.
+  const AdProviderFrame = name === 'AdProviderFrame' ? undefined : await component('AdProviderFrame');
+  const scope = { React, ...hooks, ...ui, ...offline, FormData: FormValues, adSpendBlock, AdSpendNotice: () => null, AdProviderFrame, ...additions };
   return new Function(...Object.keys(scope), code + `; return ${name};`)(...Object.values(scope));
 }
 const projectId = 'project / exact';
