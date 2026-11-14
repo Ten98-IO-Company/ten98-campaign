@@ -687,7 +687,7 @@ test('the actual action lock rejects double clicks and stale operation results d
 });
 
 test('SMS replies bind the selected conversation, block opted-out/viewer sends and reuse uncertain operation keys', async () => {
-  const handler = section('async function sendSms(', '  return <Stack gap={4}>'), calls = [], messages = [], notices = [], keys = { current: new Map() }, selected = { id: 'sms-thread', participantId: '+971501234567', sender: '+12025550123' };
+  const handler = section('async function sendSms(', '  return <ShortcutScope name="Inbox" activation="focus"><Stack gap={4}>'), calls = [], messages = [], notices = [], keys = { current: new Map() }, selected = { id: 'sms-thread', participantId: '+971501234567', sender: '+12025550123' };
   const context = { readOnly: false, selected, blocked: false, status: { configured: true }, message: 'Your order is ready', setError() {}, path: '/projects/a/sms-inbox', smsAction: async (_, run) => run(1), keys, crypto, requester: { current: async (...args) => { calls.push(args); return { sent: true, conversation: selected, message: { id: 'outgoing', message: 'Your order is ready', direction: 'outgoing' } }; } }, version: { current: 1 }, setMessage: value => messages.push(value), setSelected() {}, setDetail() {}, setRows() {}, setNotice: value => notices.push(value), merge };
   for (const changes of [{ readOnly: true }, { blocked: true }, { status: { configured: false } }, { message: '' }, { selected: null }]) await compile(handler, { ...context, ...changes })(event);
   assert.equal(calls.length, 0);
