@@ -2,11 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
+import { createRequire } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import postcss from 'postcss';
 import * as ui from '@ten98/ui';
+
+// The CSS parser is vite's own postcss dependency: Campaign's architecture declaration does not list postcss, and
+// pnpm does not hoist a dependency's dependencies to the root.
+const postcss = createRequire(import.meta.resolve('vite'))('postcss');
 
 const [boot, accountSource, html] = await Promise.all(['../public/theme.js', '../src/AccountSettings.tsx', '../index.html'].map(path => readFile(new URL(path, import.meta.url), 'utf8')));
 const key = 'ten98-campaign-theme';
