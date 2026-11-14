@@ -2,7 +2,7 @@ import React, { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useR
 import { createRoot } from 'react-dom/client';
 import { AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppStat as Stat, AppSelect } from '@ten98/ui/app';
 import { ActivityFeed, Avatar, Badge as UiBadge, Icon as UiIcon, BarList, Image, DataTable, type DataColumn, Grid, Meter, ProportionBar, SegmentedControl, Select as UiSelect, SelectableList, Skeleton, Stack, Text } from '@ten98/ui';
-import { AccountMenu, SettingsLayout, type SettingsNavItem, type NavLinkComponent, Alert, Card, EmptyState, PageHeader, Progress, SectionNav, ToastProvider, useToast, useFocusReturn, ConfirmDialog, useConfirmDialog, Dialog, Disclosure, FormGrid, Link, AppShell, AppStateScreen, AppTopbar, AuthErrorBoundary, AuthFrameProvider, Button, DangerZoneFlow, FirstUserSetupFlow, FormActions, type IconName, Inline, OidcProviderButtons, ProjectCreateFlow, SearchField, SidebarNav, type SidebarNavItem, SidebarStatus, SignInFlow, StatusLine, WorkspaceCreateFlow, WorkspaceOnboarding, WorkspaceProjectSwitcher } from '@ten98/ui';
+import { AccountMenu, SettingsLayout, type SettingsNavItem, type NavLinkComponent, Alert, Card, EmptyState, PageHeader, Progress, SectionNav, ToastProvider, useToast, useFocusReturn, ShortcutProvider, useCommand, saveFile, ConfirmDialog, useConfirmDialog, Dialog, Disclosure, FormGrid, Link, AppShell, AppStateScreen, AppTopbar, AuthErrorBoundary, AuthFrameProvider, Button, DangerZoneFlow, FirstUserSetupFlow, FormActions, type IconName, Inline, OidcProviderButtons, ProjectCreateFlow, SearchField, SidebarNav, type SidebarNavItem, SidebarStatus, SignInFlow, StatusLine, WorkspaceCreateFlow, WorkspaceOnboarding, WorkspaceProjectSwitcher } from '@ten98/ui';
 // Library sheets only: @ten98/ui owns the page base, tables, fields and the sign-in card.
 import '@ten98/ui/app-tokens.css';
 import '@ten98/ui/app.css';
@@ -422,10 +422,7 @@ function App() {
     if (!state?.projectId || !['Overview', 'Calendar'].includes(page) || !(page === 'Overview' || state.posts.some(post => Object.keys(post.accountOverrides || {}).length)) || remote.accounts || !remote.status?.zernio?.configured || !remote.status.zernio.mapped) return;
     void loadRemote('accounts', 'accounts');
   }, [state?.projectId, state?.posts, page, remote.accounts, remote.status?.zernio?.configured, remote.status?.zernio?.mapped]);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); searchRef.current?.focus(); } };
-    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  useCommand({ id: 'search.focus', label: 'Search this view', group: 'Navigation', keys: 'Mod+K', run: () => searchRef.current?.focus() });
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
@@ -554,7 +551,7 @@ function App() {
   function exportReport() {
     const rows = [['Campaign', 'Channel', 'Status', 'Currency', 'Budget', 'Spend', 'Impressions', 'Clicks', 'Conversions'], ...state!.campaigns.map(c => [c.name, c.channel, c.status, c.currency || 'AED', c.budget, c.spent, c.impressions, c.clicks, c.conversions])];
     const csv = rows.map(row => row.map(cell => { let v = String(cell ?? ''); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return '"' + v.replaceAll('"', '""') + '"'; }).join(',')).join('\r\n');
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' })); const a = document.createElement('a'); a.href = url; a.download = 'ten98-campaign-report.csv'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    saveFile('ten98-campaign-report.csv', csv, 'text/csv;charset=utf-8');
   }
   // Any member may leave; an owner only while another owner remains (the server refuses the last owner). The app then reloads its workspaces.
   async function leaveWorkspace() {
@@ -808,4 +805,4 @@ function Auth({ session, inviteToken = '', inviteEmail = '', onBackToInvitation,
 }
 
 // One auth frame for every signed-out, loading and error screen (@ten98/ui AuthFrameProvider, DS #157), outside the boundary.
-createRoot(document.getElementById('root')!).render(<AuthFrameProvider brand={<Brand product="Campaign"/>} aside={authStory} passwordPolicy={{ minLength: 12, maxLength: 128 }}><AuthErrorBoundary fallback={{ title: 'Page unavailable', message: 'This screen could not load. Reload the app to try again.', retryLabel: 'Reload app' }}><ToastProvider><App/></ToastProvider></AuthErrorBoundary></AuthFrameProvider>);
+createRoot(document.getElementById('root')!).render(<AuthFrameProvider brand={<Brand product="Campaign"/>} aside={authStory} passwordPolicy={{ minLength: 12, maxLength: 128 }}><AuthErrorBoundary fallback={{ title: 'Page unavailable', message: 'This screen could not load. Reload the app to try again.', retryLabel: 'Reload app' }}><ToastProvider><ShortcutProvider><App/></ShortcutProvider></ToastProvider></AuthErrorBoundary></AuthFrameProvider>);

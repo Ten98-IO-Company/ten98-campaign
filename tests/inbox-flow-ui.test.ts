@@ -25,7 +25,7 @@ function mount(name: string, globals: Record<string, unknown> = {}) {
   const useRef = (initial: any) => refs[refIndex++] ||= { current: initial };
   const useEffect = (callback: () => any, deps: any[]) => { const index = effectIndex++, previous = effects[index]; if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) effects[index] = { deps, callback, cleanup: previous?.cleanup }; };
   const window = { addEventListener() {}, removeEventListener() {}, setInterval: () => 1, clearInterval() {} };
-  const scope = { React, useState, useRef, useEffect, useLayoutEffect: (callback: () => void) => { callback(); }, WhatsAppTemplate: () => null, templateRestriction: () => '', validPostInstant: (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)), window, document: undefined, ...globals, ...ui, useFocusReturn: () => () => {} };
+  const scope = { React, useState, useRef, useEffect, useLayoutEffect: (callback: () => void) => { callback(); }, WhatsAppTemplate: () => null, templateRestriction: () => '', validPostInstant: (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)), window, document: undefined, ...ui, useFocusReturn: () => () => {}, ...globals };
   const Component = new Function(...Object.keys(scope), code + '; return ' + name + ';')(...Object.values(scope));
   return {
     render(props: any) { stateIndex = refIndex = effectIndex = 0; return Component(props); },
@@ -185,18 +185,40 @@ test('viewers cannot mark conversations done from the keyboard', async () => {
   assert.equal(calls.filter(([, method]) => method === 'PATCH').length, 0);
 });
 
-test('shortcuts ignore typing in fields, modified keys and open dialogs, and stop listening when removed', () => {
-  const listeners = new Map<string, (event: any) => void>(), removed: string[] = [];
-  const document = { addEventListener: (type: string, listener: any) => listeners.set(type, listener), removeEventListener: (type: string) => removed.push(type) };
-  const h = mount('InboxShortcuts', { document }), pressed: string[] = [];
-  h.render({ onKey: (key: string) => pressed.push(key) }); h.flush();
-  const press = (key: string, target: any = { closest: () => null }, extra = {}) => { const event = { key, target, defaultPrevented: false, prevented: false, preventDefault() { event.prevented = true; }, ...extra }; listeners.get('keydown')!(event); return event; };
-  assert.equal(press('j').prevented, true); press('k'); press('e'); press('r'); press('x');
-  press('j', { closest: (selector: string) => selector.includes('textarea') ? {} : null });
-  press('j', undefined, { metaKey: true }); press('k', undefined, { ctrlKey: true }); press('e', undefined, { altKey: true }); press('r', undefined, { isComposing: true });
-  assert.deepEqual(pressed, ['j', 'k', 'e', 'r']);
-  h.render({ onKey: (key: string) => pressed.push('latest:' + key) }); press('j'); assert.equal(pressed.at(-1), 'latest:j', 'The newest handler answers.');
-  h.unmount(); assert.deepEqual(removed, ['keydown']);
+test('inbox keys are shared-module commands that answer only with focus in the inbox, never while typing or with modifiers', async () => {
+  const registered: any[] = [], h = mount('InboxShortcuts', { useCommand: (command: any) => { registered.push(command); } }), pressed: string[] = [];
+  h.render({ onKey: (key: string) => pressed.push(key) });
+  assert.deepEqual(registered.map(({ id, keys, group }) => [id, keys, group]), [['inbox.next', 'J', 'Inbox'], ['inbox.previous', 'K', 'Inbox'], ['inbox.done', 'E', 'Inbox'], ['inbox.reply', 'R', 'Inbox']]);
+  registered.forEach(command => command.run()); assert.deepEqual(pressed, ['j', 'k', 'e', 'r']);
+  registered.length = 0; h.render({ onKey: (key: string) => pressed.push('latest:' + key) }); registered[0].run(); assert.equal(pressed.at(-1), 'latest:j', 'The newest handler answers.');
+
+  // The shared resolver, with these exact chords: the inbox scope must hold focus, and a field, a modifier or IME
+  // composition keeps the key.
+  const commands = registered.map(({ id, keys }) => ({ id, scope: 'inbox', chords: [ui.parseChord(keys)!], enabled: true }));
+  const event = (extra = {}) => ({ key: 'j', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...extra });
+  const resolve = (chord: string | undefined, focus = true, target: any = 'other') => chord && ui.resolveShortcut({ chord, scopes: [{ id: 'inbox', focus }], commands, target })?.command.id;
+  assert.equal(resolve(ui.chordFromEvent(event(), 'other')), 'inbox.next');
+  assert.equal(resolve('J', false), undefined, 'Focus outside the inbox leaves the key alone.');
+  assert.equal(resolve('J', true, 'text'), undefined, 'Typing in a field keeps the letter.');
+  for (const modifier of ['ctrlKey', 'altKey', 'metaKey']) assert.equal(resolve(ui.chordFromEvent(event({ [modifier]: true }), 'other')), undefined, modifier);
+  assert.equal(ui.chordFromEvent(event({ isComposing: true }), 'other'), undefined, 'Composed text never runs a command.');
+
+  // Both inbox pages put their commands inside a focus-activated scope.
+  const sms = mount('SmsInbox').render({ projectId: 'project-a', request: async () => ({ conversations: [], pagination: {} }), onDraftChange() {}, onSwitch: (change: () => unknown) => change() });
+  for (const page of [(await open()).tree, sms]) {
+    assert.equal(page.type, ui.ShortcutScope); assert.equal(page.props.activation, 'focus'); assert.equal(named(page, 'InboxShortcuts').length, 1);
+  }
+});
+
+test('Ctrl or Command with K focuses the view search from anywhere, and the report export saves through saveFile', async () => {
+  const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  assert.match(main, /useCommand\(\{ id: 'search\.focus', label: 'Search this view', group: 'Navigation', keys: 'Mod\+K', run: \(\) => searchRef\.current\?\.focus\(\) \}\);/);
+  assert.match(main, /<ShortcutProvider><App\/><\/ShortcutProvider>/);
+  assert.match(main, /saveFile\('ten98-campaign-report\.csv', csv, 'text\/csv;charset=utf-8'\);/);
+  assert.doesNotMatch(main, /addEventListener\('keydown'|createObjectURL/);
+  const commands = [{ id: 'search.focus', scope: '', chords: [ui.parseChord('Mod+K', 'other')!], enabled: true }];
+  for (const target of ['other', 'text', 'multiline'] as const) assert.equal(ui.resolveShortcut({ chord: 'Ctrl+K', scopes: [{ id: '', focus: false }], commands, target })?.command.id, 'search.focus', target);
+  assert.equal(ui.parseChord('Mod+K', 'apple'), 'Meta+K');
 });
 
 test('SMS replies answer j, k and r too', async () => {
