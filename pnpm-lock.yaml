@@ -12,8 +12,8 @@ importers:
         specifier: file:vendor/ten98-runtime-0.26.0.tgz
         version: file:vendor/ten98-runtime-0.26.0.tgz
       '@ten98/ui':
-        specifier: file:vendor/ten98-ui-0.29.0.tgz
-        version: file:vendor/ten98-ui-0.29.0.tgz(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        specifier: file:vendor/ten98-ui-0.37.0.tgz
+        version: file:vendor/ten98-ui-0.37.0.tgz(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@types/pg@8.15.6)(pg@8.23.0)
@@ -166,9 +166,9 @@ packages:
       better-auth:
         optional: true
 
-  '@ten98/ui@file:vendor/ten98-ui-0.29.0.tgz':
-    resolution: {integrity: sha512-Cd0Fz6EMhuk1P6tCL7tB4S48G8x7kmc7DCzT7NCw3qbnv2NV8XIwMXt+ktHjT5b84V8Xk6LzOfP4+VtWnkBHxw==, tarball: file:vendor/ten98-ui-0.29.0.tgz}
-    version: 0.29.0
+  '@ten98/ui@file:vendor/ten98-ui-0.37.0.tgz':
+    resolution: {integrity: sha512-/PzBw836fMKsstcX0kKT5++WivLfj2GLtO0xX7YU8+fc05eDmrljX3i9XJzfWqj65SWRkRSsAAy7T7s64SGMUQ==, tarball: file:vendor/ten98-ui-0.37.0.tgz}
+    version: 0.37.0
     engines: {node: '>=24.22.1 <25'}
     peerDependencies:
       react: ^18.3.0 || ^19.0.0
@@ -710,7 +710,7 @@ snapshots:
 
   '@ten98/runtime@file:vendor/ten98-runtime-0.26.0.tgz': {}
 
-  '@ten98/ui@file:vendor/ten98-ui-0.29.0.tgz(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+  '@ten98/ui@file:vendor/ten98-ui-0.37.0.tgz(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
       react: 19.2.8
       react-dom: 19.2.8(react@19.2.8)
