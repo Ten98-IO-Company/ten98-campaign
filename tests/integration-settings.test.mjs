@@ -29,6 +29,10 @@ test('Google Shopping is configured and connection-tested from OAuth values alon
   const { db } = await testDatabase(t), env = {}, manager = await createIntegrationSettings({ db, env, secret }), originalFetch = globalThis.fetch, calls = [];
   await manager.save('googleAdsNative', { clientId: 'oauth-client', clientSecret: 'oauth-secret', refreshToken: 'oauth-refresh' });
   assert.equal(provider(manager, 'googleAdsNative').configured, true, 'Google retired developer tokens; the card does not wait for one.');
+  // A token left from before the sunset still loads, and the next Google save clears it.
+  await manager.save('googleAdsNative', { clientId: 'oauth-client', developerToken: 'leftover-token' });
+  assert.equal(provider(manager, 'googleAdsNative').secretFields.developerToken?.configured ?? false, false, 'A saved developer token is not kept.');
+  assert.equal(env.GOOGLE_ADS_DEVELOPER_TOKEN, undefined);
   globalThis.fetch = async (target, options = {}) => {
     const url = String(target); calls.push({ url, headers: options.headers || {} });
     if (url.startsWith('https://oauth2.googleapis.com/')) return Response.json({ access_token: 'fixture-access', expires_in: 3600, token_type: 'Bearer' });

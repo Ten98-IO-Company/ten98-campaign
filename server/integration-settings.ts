@@ -136,6 +136,8 @@ export async function createIntegrationSettings({ db, env, secret }: { db: Datab
             if (secretFields.has(field) && typeof input === 'string' && !input.trim()) continue;
             values[field] = validate(field, input);
           }
+          // A Google developer token saved before Google retired them is cleared by the next Google Shopping save.
+          if (group === 'googleAdsNative') delete values.developerToken;
           const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, nonce); cipher.setAAD(Buffer.from(`integration-settings-v1:${group}`));
           const ciphertext = Buffer.concat([cipher.update(JSON.stringify(values), 'utf8'), cipher.final()]), updatedAt = new Date().toISOString();
           await tx.execute(sql`INSERT INTO integration_settings VALUES(${group},${nonce},${ciphertext},${cipher.getAuthTag()},${updatedAt}) ON CONFLICT(provider) DO UPDATE SET nonce=excluded.nonce,ciphertext=excluded.ciphertext,tag=excluded.tag,updated_at=excluded.updated_at`);
