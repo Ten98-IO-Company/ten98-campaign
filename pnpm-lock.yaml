@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@ten98/runtime':
-        specifier: file:vendor/ten98-runtime-0.26.0.tgz
-        version: file:vendor/ten98-runtime-0.26.0.tgz
+        specifier: file:vendor/ten98-runtime-0.27.1.tgz
+        version: file:vendor/ten98-runtime-0.27.1.tgz(drizzle-orm@0.45.2(@types/pg@8.15.6)(pg@8.23.0))(pg@8.23.0)
       '@ten98/ui':
         specifier: file:vendor/ten98-ui-0.37.0.tgz
         version: file:vendor/ten98-ui-0.37.0.tgz(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -156,14 +156,20 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@ten98/runtime@file:vendor/ten98-runtime-0.26.0.tgz':
-    resolution: {integrity: sha512-JY5SzKWznFr4lNpF/BPWUX3cUT2+UCye/IVcx/nnTfGcLLWk8LoC3AOR1nZdGjL4ltQIORxEann1MOaFbj4FuQ==, tarball: file:vendor/ten98-runtime-0.26.0.tgz}
-    version: 0.26.0
+  '@ten98/runtime@file:vendor/ten98-runtime-0.27.1.tgz':
+    resolution: {integrity: sha512-9egr50PJBqKCDFp3yvUVJsOIKQI7cBOFh1o4shzIcpS2LODJw1++aBnl3oskqWkB+YO/VVq5q19gwjb1sIDGsQ==, tarball: file:vendor/ten98-runtime-0.27.1.tgz}
+    version: 0.27.1
     engines: {node: '>=24.22.1 <25'}
     peerDependencies:
       better-auth: 1.7.7
+      drizzle-orm: 0.45.2
+      pg: 8.23.0
     peerDependenciesMeta:
       better-auth:
+        optional: true
+      drizzle-orm:
+        optional: true
+      pg:
         optional: true
 
   '@ten98/ui@file:vendor/ten98-ui-0.37.0.tgz':
@@ -708,7 +714,10 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@ten98/runtime@file:vendor/ten98-runtime-0.26.0.tgz': {}
+  '@ten98/runtime@file:vendor/ten98-runtime-0.27.1.tgz(drizzle-orm@0.45.2(@types/pg@8.15.6)(pg@8.23.0))(pg@8.23.0)':
+    optionalDependencies:
+      drizzle-orm: 0.45.2(@types/pg@8.15.6)(pg@8.23.0)
+      pg: 8.23.0
 
   '@ten98/ui@file:vendor/ten98-ui-0.37.0.tgz(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:

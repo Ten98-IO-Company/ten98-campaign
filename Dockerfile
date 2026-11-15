@@ -8,7 +8,7 @@ COPY package.json pnpm-lock.yaml ./
 COPY vendor ./vendor
 # No dependency needs an install script (only the optional macOS fsevents declares one), so none run.
 RUN pnpm install --frozen-lockfile --ignore-scripts
-COPY index.html tsconfig.json tsconfig.backend.json presentation-baseline.json vite.config.mjs ./
+COPY index.html tsconfig.json tsconfig.backend.json presentation-baseline.json raw-statements.json vite.config.mjs ./
 COPY server ./server
 COPY src ./src
 COPY shared ./shared
