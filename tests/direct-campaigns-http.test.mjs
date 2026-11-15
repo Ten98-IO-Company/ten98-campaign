@@ -120,6 +120,18 @@ test('consent and contact changes leave an Activity entry naming who made them, 
   } finally { await f.close(); }
 });
 
+test('adding a contact whose email already exists is refused and leaves the existing contact unchanged', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const first = await f.person({ name: 'Original Name', email: 'same@example.com', phone: '+12025550161' });
+    const response = await f.request(f.path + '/contacts', 'POST', { name: 'Someone Else', email: 'SAME@example.com' });
+    assert.equal(response.status, 409, JSON.stringify(response.data)); assert.match(response.data.error.message || response.data.error, /already exists/);
+    const stored = (await f.request(f.path + '/contacts')).data.contacts.find(contact => contact.id === first.id);
+    assert.equal(stored.name, 'Original Name', 'The existing contact is not renamed.');
+    assert.equal((await f.request(f.path + '/contacts/' + first.id, 'PATCH', { name: 'Renamed On Purpose' })).status, 200, 'Editing the contact itself still works.');
+  } finally { await f.close(); }
+});
+
 test('scheduling a campaign re-checks its preview on the queuing transaction, without a second connection', pg, async t => {
   // One pool connection: a preview read through the pool inside the queuing transaction would time out. The sending
   // worker is left out because its lease transaction deliberately works on other connections.
