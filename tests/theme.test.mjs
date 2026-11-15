@@ -9,6 +9,9 @@ import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import viteConfig from '../vite.config.mjs';
 import { themeStorageKey as key } from '../shared/theme.ts';
+import { withTestDisplayFormat } from './display-format.ts';
+// The shared exports with the test formatter, since AccountSettings is called outside a React render.
+const shell = withTestDisplayFormat(ui);
 
 // The CSS parser is vite's own postcss dependency: Campaign's architecture declaration does not list postcss, and
 // pnpm does not hoist a dependency's dependencies to the root.
@@ -29,10 +32,10 @@ function accountUi(initial = 'system', remembered = true) {
   const values = [], applied = []; let cursor = 0;
   const account = { user: { email: 'member@example.test', name: 'Member' }, localPassword: true, activeSessions: 1 };
   const appearance = { theme: initial, resolvedTheme: 'light', setTheme: async theme => { applied.push(theme); appearance.theme = theme; return remembered; } };
-  const Component = new Function('useEffect', 'useState', 'React', ...Object.keys(ui), code + '; return AccountSettings;')(() => {}, initialValue => {
+  const Component = new Function('useEffect', 'useState', 'React', ...Object.keys(shell), code + '; return AccountSettings;')(() => {}, initialValue => {
     const index = cursor++; if (!(index in values)) values[index] = typeof initialValue === 'function' ? initialValue() : initialValue;
     return [values[index], value => { values[index] = typeof value === 'function' ? value(values[index]) : value; }];
-  }, React, ...Object.values(ui));
+  }, React, ...Object.values(shell));
   const request = async (path, method) => { assert.equal(method, undefined, 'Appearance alone does not write the account'); assert.equal(path, '/account'); return account; };
   let tree;
   function paint() { cursor = 0; tree = Component({ request, appearance: { ...appearance }, onChanged() { assert.fail('Appearance does not change account data'); } }); return tree; }

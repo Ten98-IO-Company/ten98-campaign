@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as library from '@ten98/ui';
 import { testDisplayFormat as format } from './display-format.ts';
+import { displayLocale } from '../src/display-locale.ts';
 
 const source = await readFile(new URL('../src/ZernioQueues.tsx', import.meta.url), 'utf8');
 const section = (start, end) => { const from = source.indexOf(start), to = source.indexOf(end, from); assert.ok(from >= 0 && to > from); return stripTypeScriptTypes(source.slice(from, to)); };
@@ -100,7 +101,7 @@ test('queue row actions keep short visible labels, full accessible identities an
 test('upcoming slot previews read in the queue’s own time zone, not the viewer’s', async () => {
   const line = source.match(/^ {4}\{preview && <Alert[^\n]+$/m)?.[0]; assert.ok(line);
   const { code } = await transformWithOxc(`const render = preview => (${line.trim().slice(1, -1)});`, 'QueuePreview.tsx', { jsx: { runtime: 'classic' } });
-  const render = new Function('React', ...Object.keys(library), code + '; return render;')(React, ...Object.values(library));
+  const render = new Function('React', 'displayLocale', ...Object.keys(library), code + '; return render;')(React, displayLocale, ...Object.values(library));
   const slot = '2026-11-16T05:00:00Z', html = renderToStaticMarkup(render({ queue: { name: 'Gulf mornings', timezone: 'Asia/Dubai' }, slots: [slot] }));
   const inZone = library.createDisplayFormatter({ timeZone: 'Asia/Dubai' }).dateTime(slot), inUtc = library.createDisplayFormatter({ timeZone: 'UTC' }).dateTime(slot);
   assert.notEqual(inZone, inUtc); assert.ok(html.includes(`>${inZone}</li>`), html); assert.ok(!html.includes(inUtc));

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, DataTable, Field, FormGrid, Inline, Option, Select, Stack, StatusLine, Text, type DataColumn } from '@ten98/ui';
+import { Alert, Button, Card, DataTable, Field, FormGrid, Inline, Option, Select, Stack, StatusLine, Text, useDisplayFormat, type DataColumn } from '@ten98/ui';
 import { accountLabel } from './PostComposer';
 
 type Row = Record<string, any>;
@@ -7,6 +7,7 @@ type Request = (path: string) => Promise<any>;
 export default function AdCampaignDiscovery({ request }: { request: Request }) {
   const [accounts, setAccounts] = useState<Row[] | null>(null), [accountId, setAccountId] = useState(''), [advertisers, setAdvertisers] = useState<Row[] | null>(null), [adAccountId, setAdAccountId] = useState('');
   const [result, setResult] = useState<Row | null>(null), [busy, setBusy] = useState(''), [error, setError] = useState('');
+  const format = useDisplayFormat();
   const generation = useRef(0), mounted = useRef(true), requester = useRef(request), frame = useMemo(() => ({}), [accountId, adAccountId]), committed = useRef(frame);
   useLayoutEffect(() => { committed.current = frame; requester.current = request; }, [frame, request]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; generation.current++; }; }, []);
@@ -62,6 +63,6 @@ export default function AdCampaignDiscovery({ request }: { request: Request }) {
     <Field label="Meta advertiser"><Select name="adAccountId" autoComplete="off" value={adAccountId} disabled={!advertisers?.length} onChange={event => { if (!current()) return; const id = event.target.value; if (id && !advertisers?.some(row => row.id === id && row.selectable !== false)) return; withdraw(); setAdAccountId(id); }}><Option value="">{busy === 'advertisers' ? 'Loading advertisers…' : 'Choose an advertiser'}</Option>{advertisers?.map(row => <Option key={row.id} value={row.id} disabled={row.selectable === false}>{row.name || row.id} · {row.id}{row.selectable === false ? ' · Unavailable' : ''}</Option>)}</Select></Field></FormGrid>}
     {accountId && <Inline gap={2}><Button variant="secondary" disabled={busy === 'advertisers'} onClick={loadAdvertisers}>Refresh advertisers</Button><Button disabled={!adAccountId || !!busy} onClick={discover}>{busy === 'campaigns' ? 'Discovering campaigns…' : 'Discover campaigns'}</Button></Inline>}
     {advertisers && !advertisers.length && <StatusLine>No advertisers were returned for this connection.</StatusLine>}
-    {result && <><StatusLine>Connection {result.accountId} · Advertiser {result.adAccountId} · {result.campaigns.length} {result.campaigns.length === 1 ? 'campaign' : 'campaigns'} returned</StatusLine>{result.campaigns.length ? <DataTable ariaLabel="Discovered Meta campaigns" searchable={false} sortable={false} pagination={false} columns={columns} rows={result.campaigns} rowKey={row => row.platformCampaignId}/> : <StatusLine>No campaigns returned for this advertiser, including campaigns with no ads.</StatusLine>}</>}
+    {result && <><StatusLine>Connection {result.accountId} · Advertiser {result.adAccountId} · {format.count(result.campaigns.length, { one: 'campaign', other: 'campaigns' })} returned</StatusLine>{result.campaigns.length ? <DataTable ariaLabel="Discovered Meta campaigns" searchable={false} sortable={false} pagination={false} columns={columns} rows={result.campaigns} rowKey={row => row.platformCampaignId}/> : <StatusLine>No campaigns returned for this advertiser, including campaigns with no ads.</StatusLine>}</>}
   </Stack></Card>;
 }

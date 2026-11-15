@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Card, Checkbox, CodeBlock, createDisplayFormatter, DataTable, Field, FormActions, FormGrid, Heading, Inline, Input, Option, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
+import { displayLocale } from './display-locale.ts';
 
 export type BlogAccount = { id: string; platform: 'wordpress' | 'shopify'; name: string; isActive: boolean; needsReconnection: boolean };
 export type Blog = { id: string; platform: 'wordpress' | 'shopify'; title: string; handle: string | null };
@@ -29,7 +30,7 @@ function localSchedule(value: string, timezone: 'local' | 'utc' = 'local') {
 }
 // Publication times are entered in the browser's own time zone and labelled with it, so they are shown in that zone too.
 const localZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
-const publicationTime = (value: string) => { const zone = localZone(); return `${createDisplayFormatter({ timeZone: zone }).dateTime(value)} (${zone}, your local timezone) · UTC ${new Date(value).toISOString()}`; };
+const publicationTime = (value: string) => { const zone = localZone(); return `${createDisplayFormatter({ locale: displayLocale, timeZone: zone }).dateTime(value)} (${zone}, your local timezone) · UTC ${new Date(value).toISOString()}`; };
 function validatePublicationReceipt(value: any, account: BlogAccount, blog: Blog, article: Article, action: PublicationAction, publishDate?: string) {
   if (value?.accountId !== account.id || !readableBlog(value?.blog) || value.blog.id !== blog.id || value.blog.platform !== account.platform || !readableArticle(value?.article) || value.article.id !== article.id || value.article.blogId !== blog.id || value.article.platform !== account.platform || !(action === 'schedule' ? scheduledProof(value.article) && scheduleInstant(value.article.publishDate) === publishDate : action === 'publish' ? publicationAction(value.article) === 'unpublish' : unpublishedDraft(value.article)) || value?.operation?.status !== 'complete' || typeof value.operation.id !== 'string' || !value.operation.id) throw new Error('The publication receipt could not be verified. Check the same action before making another article change.');
 }

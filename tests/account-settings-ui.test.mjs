@@ -4,13 +4,16 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 
 // Evaluate Campaign's real AccountSettings adapter with controlled state and requests, then render the shared flows.
 const source = await readFile(new URL('../src/AccountSettings.tsx', import.meta.url), 'utf8');
 const body = source.replace(/^import .*?;\r?\n/gm, '').replace('export default function', 'function');
 const { code } = await transformWithOxc(body, 'AccountSettings.tsx', { jsx: { runtime: 'classic' } });
-const names = ['AccountProfileFlow', 'Alert', 'Button', 'Card', 'PasswordChangeFlow', 'Stack', 'StatusLine', 'Text'];
+// The shared exports with the test formatter, since the adapter is called outside a React render.
+const ui = withTestDisplayFormat(uiExports);
+const names = ['AccountProfileFlow', 'Alert', 'Button', 'Card', 'PasswordChangeFlow', 'Stack', 'StatusLine', 'Text', 'useDisplayFormat'];
 
 function view(account, request) {
   const state = [];

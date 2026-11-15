@@ -7,11 +7,12 @@ import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import * as shared from '../shared/offline-activations.ts';
 import { readText } from './read-text.ts';
+import { displayLocale } from '../src/display-locale.ts';
 
 type Row = Record<string, any>;
 const source = await readFile(new URL('../src/OfflineActivations.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, ''), 'OfflineActivations.tsx', { jsx: { runtime: 'classic' } });
-const library = { ...shared, ...ui } as unknown as Record<string, unknown>;
+const library = { ...shared, ...ui, displayLocale } as unknown as Record<string, unknown>;
 const module = new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink, leadBody, LeadCapture, rollUp, ResultsSummary, peopleChoices, patchBody, when };')(React, useEffect, useRef, useState, ...Object.values(library));
 const html = (props: Row) => renderToStaticMarkup(React.createElement(module.OfflineActivations, { projectId: 'p1', brand: 'Brand launch', campaigns: [], activations: [], request: async () => ({}), onChanged() {}, ...props }));
 const campaigns = [{ id: 'c1', name: 'Winter field push', currency: 'GBP' }, { id: 'c2', name: 'Spring sampling', currency: 'AED' }];
@@ -126,13 +127,13 @@ test('a same-day activation shows its date once and the end as a time; one over 
 });
 
 test('the When column wraps, so a two-day range fits a 375px-wide stacked row', () => {
-  // Browser locale and zone, as the app root's DisplayFormatProvider gives them; local times keep the same-day case on one day.
+  // The app's locale and the browser zone, as the app root's DisplayFormatProvider gives them; local times keep the same-day case on one day.
   const local = (day: number, hour: number) => new Date(2026, 9, day, hour).toISOString();
   const rows = [{ ...activation('Same day', local(3, 10)), endAt: local(3, 14) }, { ...activation('Two days', local(3, 10)), endAt: local(4, 14) }];
-  const markup = renderToStaticMarkup(React.createElement(ui.DisplayFormatProvider, null, React.createElement(module.OfflineActivations, { projectId: 'p1', brand: 'Brand launch', campaigns, activations: rows, request: async () => ({}), onChanged() {} })));
+  const markup = renderToStaticMarkup(React.createElement(ui.DisplayFormatProvider, { locale: displayLocale, children: React.createElement(module.OfflineActivations, { projectId: 'p1', brand: 'Brand launch', campaigns, activations: rows, request: async () => ({}), onChanged() {} }) }));
   const cells = [...markup.matchAll(/<td([^>]*data-label="When"[^>]*)>([^]*?)<\/td>/g)];
   assert.equal(cells.length, 2);
-  const format = ui.createDisplayFormatter(), clock = new Intl.DateTimeFormat(undefined, { timeStyle: 'short' });
+  const format = ui.createDisplayFormatter({ locale: displayLocale }), clock = new Intl.DateTimeFormat(displayLocale, { timeStyle: 'short' });
   assert.deepEqual(cells.map(([, , text]) => plain(readText(text, ''))), [
     plain(`${format.dateTime(rows[0].startAt)} – ${clock.format(new Date(rows[0].endAt))}`),
     plain(`${format.dateTime(rows[1].startAt)} – ${format.dateTime(rows[1].endAt)}`),

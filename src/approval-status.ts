@@ -1,8 +1,8 @@
 // The project approvals summary (GET /projects/:id/approvals/summary): read once per state load, no provider calls.
-import { createDisplayFormatter } from '@ten98/ui';
-// Not a component, so by default it formats with the browser's locale and time zone, as the app's DisplayFormatProvider
-// does; a caller (a test) may pass its own formatter.
-const browserFormat = createDisplayFormatter();
+import { appFormat, currencyDigits } from './display-locale.ts';
+// Not a component, so by default it formats as the app's DisplayFormatProvider does (en-US, the viewer's time zone); a
+// caller (a test) may pass its own formatter.
+const browserFormat = appFormat;
 export type ApprovalSummary = { requireApproval: boolean; pending: number; statuses: Record<string, string>; pendingAdSpend?: number };
 
 export const approvalLabels: Record<string, string> = { not_requested: 'Approval not requested', pending: 'Awaiting approval', approved: 'Approved', rejected: 'Changes requested', stale: 'Changed since approval', submitted: 'Submitted to provider' };
@@ -42,12 +42,11 @@ export const adSpendPlatformLabel = (platform: string) => adPlatforms[platform] 
 // Review amounts are minor units of the currency (cents for USD, fils for AED); null is a budget the server could not read.
 export function formatMinorUnits(amount: unknown, currency: unknown, format = browserFormat) {
   if (typeof amount !== 'number' || !Number.isSafeInteger(amount) || typeof currency !== 'string') return 'Not available';
-  try {
-    // Reads the currency's minor-unit digits to place the decimal point in the exact string; this formats nothing.
-    const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2;
-    const units = String(Math.abs(amount)).padStart(digits + 1, '0'), whole = digits ? units.slice(0, -digits) : units;
-    return format.currency(`${amount < 0 ? '-' : ''}${whole}${digits ? '.' + units.slice(-digits) : ''}`, currency);
-  } catch { return `${amount} minor units of ${currency}`; }
+  // The currency's minor-unit digits place the decimal point in the exact string; an unknown code has no known unit.
+  const digits = currencyDigits(currency);
+  if (digits === undefined) return `${amount} minor units of ${currency}`;
+  const units = String(Math.abs(amount)).padStart(digits + 1, '0'), whole = digits ? units.slice(0, -digits) : units;
+  return format.currency(`${amount < 0 ? '-' : ''}${whole}${digits ? '.' + units.slice(-digits) : ''}`, currency);
 }
 
 // A refused spend change, as a gated provider write reports it. For a required or mismatched approval the server has

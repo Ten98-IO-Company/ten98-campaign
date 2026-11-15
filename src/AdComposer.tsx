@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Checkbox, Disclosure, Field, Fieldset, Form, FormActions, FormGrid, Heading, Inline, Input, List, ListItem, LoadMore, MultiCombobox, Option, Select, Stack, StatusLine, Text, type ComboboxOption, useDisplayFormat } from '@ten98/ui';
 import { AppField } from '@ten98/ui/app';
+import { minorDigits } from './display-locale.ts';
 
 type Connection = { _id: string; platform: string; displayName?: string; username?: string; isActive?: boolean };
 type AdAccount = { id: string; name: string; currency?: string; selectable?: boolean; minimumDailyBudget?: number };
@@ -43,7 +44,7 @@ export default function AdComposer({ request, posts = [], initialDraft, readOnly
   // The pause timer runs the latest render's search, so it carries the current frame and scope checks.
   const interestTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined), latestInterestSearch = useRef(searchInterests); latestInterestSearch.current = searchInterests;
   // The currency's minor-unit digits set the budget input's step; this formats nothing for display.
-  const digits = currency && /^[A-Z]{3}$/.test(currency) ? new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2 : 2;
+  const digits = minorDigits(currency);
   const step = 10 ** -digits, minimum = Math.max(step, platform === 'pinterest' ? 5 : platform === 'tiktok' ? 20 : platform === 'openai' ? 1 : 0, budgetType === 'daily' ? Number(adAccount?.minimumDailyBudget) || 0 : 0);
   const draftValue = (name: string) => {
     if (!initialDraft || initialDraft.platform !== platform || initialDraft.format !== format) return '';

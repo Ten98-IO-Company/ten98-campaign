@@ -1,4 +1,5 @@
 import type { DisplayFormatter } from '@ten98/ui';
+import { minorDigits } from './display-locale.ts';
 
 // Google Ads reports money in micros: millionths of the account currency, as an integer or its digit string. Shifting
 // the decimal point in the digits keeps every amount exact; dividing by 1,000,000 would round through a float.
@@ -24,10 +25,6 @@ const wholeMicros = (micros: unknown) => {
   return /^-?\d+$/.test(text) ? text : null;
 };
 
-// The currency's minor-unit digits (2 for USD, 3 for KWD, 0 for JPY); 2 when the code is missing or unknown.
-export function minorDigits(currency: string | undefined) {
-  try { return new Intl.NumberFormat('en', { style: 'currency', currency: currency || '' }).resolvedOptions().maximumFractionDigits ?? 2; } catch { return 2; }
-}
 
 /** Whole micros rounded half-up (away from zero) to the currency's minor unit, in integer arithmetic. */
 export function roundMicrosToMinor(micros: unknown, currency: string | undefined): string | null {

@@ -51,7 +51,6 @@ export function assetUses(id: string, related: Related) {
 }
 
 const label = (value: string) => value ? value.charAt(0).toUpperCase() + value.slice(1).replaceAll('_', ' ') : '';
-const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
 const source = (asset: Row) => asset.source === 'google-drive' ? 'Drive' : asset.source === 'zernio' ? 'Uploaded' : asset.sample ? 'Sample' : 'Link';
 const sourceDetail = (asset: Row) => ({ Drive: 'Google Drive', Uploaded: 'Uploaded for publishing', Sample: 'Sample creative', Link: 'Linked file' })[source(asset)];
 const when = (format: DisplayFormatter, value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? format.dateTime(value) : '';
@@ -95,7 +94,7 @@ export default function AssetLibrary({ projectId, assets, visibleAssets, busy, c
       <SegmentedControl label="Layout" value={view} onValueChange={setView} options={[{ value: 'grid', label: 'Grid' }, { value: 'list', label: 'List' }]}/>
     </Inline>
     <Inline gap={2} align="center">
-      <Text tone="muted" size="sm">{plural(assets.length, 'asset')}</Text>
+      <Text tone="muted" size="sm">{format.count(assets.length, { one: 'asset', other: 'assets' })}</Text>
       <Button variant="secondary" icon={<Icon name="refresh" size={15}/>} disabled={busy || !canWrite || !drive?.configured || !drive?.mapped} onClick={onSync}>Update from Drive</Button>
       {onAddLink && <Button variant="secondary" onClick={onAddLink}>Add by link</Button>}{canUpload && <Button variant="primary" icon={<Icon name="arrow-up" size={15}/>} onClick={() => setUploadOpen(true)}>Upload</Button>}
     </Inline>
