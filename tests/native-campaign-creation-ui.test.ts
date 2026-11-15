@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import * as offline from '../shared/offline-activations.ts';
 import { adSpendBlock } from '../src/approval-status.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 type Row = Record<string, any>;
 const tick = () => new Promise(resolve => setImmediate(resolve));

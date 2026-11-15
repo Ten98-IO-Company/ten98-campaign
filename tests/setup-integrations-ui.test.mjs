@@ -4,7 +4,9 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 const sources = Object.fromEntries(await Promise.all(['GoogleCalendar', 'UnifiedInbox', 'IntegrationSettings'].map(async name => {
   const source = await readFile(new URL('../src/' + name + '.tsx', import.meta.url), 'utf8');

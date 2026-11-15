@@ -4,7 +4,9 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { testDisplayFormat, withTestDisplayFormat } from './display-format.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 const { ReviewSummary } = ui;
 
@@ -40,7 +42,7 @@ test('Calendar shared review renders exact plan changes and keeps current, stale
   let tree = render();
   const review = elements(tree).find(node => node.type === ReviewSummary), html = renderToStaticMarkup(review);
   assert.ok(review, 'The actual calendar review must use the installed shared component.');
-  for (const detail of ['t98-review-summary', 'Proposed changes', `Project: ${projectId}`, `Shared calendar: ${calendarId}`, '2 planned events to create or update; 1 obsolete app-managed plan events to delete.', 'Create · New campaign', 'Update · Updated campaign', 'First line\nExact proposed detail', 'Previous fields were not included in this preview.', 'Obsolete campaign', 'Event ID: delete-exact', '2029-12-01', '2029-12-04', '2030-01-01', '2030-01-04', '2030-02-01', '2030-02-03', 'Manually created and unrelated events are excluded.', 'Calendar events do not publish social posts.']) assert.ok(html.includes(detail), detail);
+  for (const detail of ['t98-review-summary', 'Proposed changes', `Project: ${projectId}`, `Shared calendar: ${calendarId}`, '2 planned events to create or update; 1 obsolete app-managed plan events to delete.', 'Create · New campaign', 'Update · Updated campaign', 'First line\nExact proposed detail', 'Previous fields were not included in this preview.', 'Obsolete campaign', 'Event ID: delete-exact', ...['2029-12-01', '2029-12-04', '2030-01-01', '2030-01-04', '2030-02-01', '2030-02-03'].map(testDisplayFormat.date), 'Manually created and unrelated events are excluded.', 'Calendar events do not publish social posts.']) assert.ok(html.includes(detail), detail);
   const publishLabel = 'Publish reviewed plan and delete listed obsolete events';
   await button(tree, publishLabel).props.onClick();
   await button(render(), publishLabel).props.onClick();

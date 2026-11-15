@@ -5,9 +5,12 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
+// The agenda is called outside a React render, so useDisplayFormat is replaced by the formatter the app root gives:
+// English here, in the browser time zone (TZ) at the time of each call.
+const ui = { ...uiExports, useDisplayFormat: () => uiExports.createDisplayFormatter({ locale: 'en' }) };
 
 const source = await readFile(new URL('../src/PublishingAgenda.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace('export default ', ''), 'PublishingAgenda.tsx', { jsx: { runtime: 'classic' } });
@@ -47,8 +50,9 @@ test('the real expanded schedules retain account captions, timezone instants, or
       ['post:post:first', 'Shared caption', '2026-11-01T05:30:00Z', 'Facebook · First account'],
       ['post:post:second', 'Second caption', '2026-11-01T10:30:00+04:00', 'Facebook · Second account'],
     ]);
-    assert.match(entries[0].when, /Nov 1, 01:30 AM EDT/);
-    assert.match(entries[1].when, /Nov 1, 01:30 AM EST/);
+    // Both read 1:30 AM New York time on the day the clocks go back; they are an hour apart as instants.
+    assert.match(entries[0].when, /^Nov 1, 2026, 1:30\sAM$/); assert.match(entries[1].when, /^Nov 1, 2026, 1:30\sAM$/);
+    assert.equal(entries[1].order - entries[0].order, 3600000);
     entries.forEach(entry => entry.actions.props.onClick());
     assert.ok(selected.every(item => item === post));
     assert.match(renderToStaticMarkup(Agenda(props)), /Second caption/);

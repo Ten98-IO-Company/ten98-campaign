@@ -5,10 +5,12 @@ import { readFile } from 'node:fs/promises';
 import React, { Suspense } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import * as app from '@ten98/ui/app';
 import { assetDeliveryIssue } from '../shared/social-posts.ts';
 import { readText } from './read-text.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 type Row = Record<string, any>;
 const library = ui as unknown as Record<string, any>;

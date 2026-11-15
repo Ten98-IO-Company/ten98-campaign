@@ -5,7 +5,9 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { testDisplayFormat, withTestDisplayFormat } from './display-format.ts';
+const ui = withTestDisplayFormat(uiExports);
 const { AudienceSummary } = ui;
 
 const source = await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8');
@@ -114,7 +116,7 @@ test('actual action lock prevents repeat sends and local progress polling never 
 
 test('actual contact import previews grant only explicit permissions and do not refresh records until imported', async () => {
   const handler = section('async function importContacts(', '  async function readCsv('), calls = [], results = [], people = [], notices = [];
-  const context = { importNotice: compile(helper('importNotice')), readOnly: false, action: async (_, run) => run(1), requester: { current: async (path, method, body) => { calls.push({ path, method, body }); return method === 'POST' ? { imported: 3, created: 2, updated: 1, skipped: 0, errors: [] } : { contacts: [{ id: 'saved' }] }; } }, path: '/projects/a/direct', csv: 'name,email,tags\nAlex,alex@example.com,customer|launch', importConsent: { email: true, sms: false, whatsapp: false }, importSource: 'Signup form 2026-10-18', version: { current: 1 }, setImportResult: value => results.push(value), setNotice: value => notices.push(value), setContacts: value => people.push(value) };
+  const context = { importNotice: compile(helper('importNotice')), format: testDisplayFormat, readOnly: false, action: async (_, run) => run(1), requester: { current: async (path, method, body) => { calls.push({ path, method, body }); return method === 'POST' ? { imported: 3, created: 2, updated: 1, skipped: 0, errors: [] } : { contacts: [{ id: 'saved' }] }; } }, path: '/projects/a/direct', csv: 'name,email,tags\nAlex,alex@example.com,customer|launch', importConsent: { email: true, sms: false, whatsapp: false }, importSource: 'Signup form 2026-10-18', version: { current: 1 }, setImportResult: value => results.push(value), setNotice: value => notices.push(value), setContacts: value => people.push(value) };
   const submit = compile(handler, context);
   await submit({ ...event, nativeEvent: { submitter: { getAttribute: () => 'preview' } } }); assert.equal(calls.length, 1); assert.equal(calls[0].body.dryRun, true); assert.deepEqual(calls[0].body.consents, context.importConsent); assert.equal(results[0].dryRun, true); assert.equal(people.length, 0);
   await submit({ ...event, nativeEvent: { submitter: { getAttribute: () => 'import' } } }); assert.equal(calls.length, 3); assert.equal(calls[1].body.dryRun, undefined); assert.deepEqual(people[0], [{ id: 'saved' }]); assert.match(notices.at(-1), /Processed 3 rows: 2 created, 1 merged/);
@@ -242,7 +244,7 @@ test('the test send is offered only on writable email and SMS drafts, behind a c
 
 test('provider deliverability alerts show as a warning that names the provider and does not claim recipients were suppressed', async () => {
   const emailProviderName = compile(helper('emailProviderName')), emailProviderConsole = compile(helper('emailProviderConsole')), deliverabilityAlerts = compile(helper('deliverabilityAlerts'));
-  const deliverabilityCopy = compile(helper('deliverabilityCopy'), { emailProviderName, emailProviderConsole });
+  const copy = compile(helper('deliverabilityCopy'), { emailProviderName, emailProviderConsole }), deliverabilityCopy = alert => copy(testDisplayFormat, alert);
   assert.equal(emailProviderName('cloudflare'), 'Cloudflare'); assert.equal(emailProviderName('ses'), 'Amazon SES');
   const status = { deliverabilityAlerts: [{ provider: 'cloudflare', kind: 'policy', channel: 'email', contacts: 2, firstSeenAt: 'x', lastSeenAt: 'y', expiresAt: null }, { provider: 'ses', kind: 'undetermined', contacts: 3, expiresAt: null }, { provider: 'cloudflare', kind: 'policy', contacts: 0, expiresAt: null }, { provider: 7 }, null] };
   assert.deepEqual(deliverabilityAlerts(status).map(row => [row.provider, row.kind, row.contacts]), [['cloudflare', 'policy', 2], ['ses', 'undetermined', 3]], 'Malformed or empty groups are not shown.');
@@ -253,7 +255,7 @@ test('provider deliverability alerts show as a warning that names the provider a
   assert.equal(undetermined.title, 'Amazon SES could not classify bounces for 3 contacts');
   assert.match(undetermined.body, /Check the bounce details in the Amazon SES console\./); assert.doesNotMatch(undetermined.body, /policy|not suppressed/);
   assert.equal(deliverabilityCopy({ provider: 'ses', kind: 'undetermined', contacts: 1 }).title, 'Amazon SES could not classify bounces for 1 contact');
-  assert.match(source, /\{deliverabilityAlerts\(status\)\.map\(alert => \{ const copy = deliverabilityCopy\(alert\); return <Alert key=\{alert\.provider \+ ':' \+ alert\.kind\} tone="warning" title=\{copy\.title\}>\{copy\.body\}/);
+  assert.match(source, /\{deliverabilityAlerts\(status\)\.map\(alert => \{ const copy = deliverabilityCopy\(format, alert\); return <Alert key=\{alert\.provider \+ ':' \+ alert\.kind\} tone="warning" title=\{copy\.title\}>\{copy\.body\}/);
 });
 
 // Renders the real @ten98/ui components for a JSX expression taken from the component source.
@@ -391,7 +393,7 @@ test('the Marketing email purpose is offered only while Amazon SES sends, with a
 // ten98-campaign#135 client points: the import notice counts every processed row, skipped ones included, with a correct
 // plural, and the preview says a merge updates details but keeps recorded permissions.
 test('the import notice counts every processed row and the preview explains what a merge keeps', () => {
-  const importNotice = compile(helper('importNotice'));
+  const notice = compile(helper('importNotice')), importNotice = result => notice(testDisplayFormat, result);
   assert.equal(importNotice({ imported: 4, created: 3, updated: 1, skipped: 2 }), 'Processed 6 rows: 3 created, 1 merged, 2 skipped. Check the contacts before sending.');
   assert.equal(importNotice({ created: 0, updated: 1, skipped: 0 }), 'Processed 1 row: 0 created, 1 merged, 0 skipped. Check the contacts before sending.');
   assert.equal(importNotice({}), 'Processed 0 rows: 0 created, 0 merged, 0 skipped. Check the contacts before sending.');
