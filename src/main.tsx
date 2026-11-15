@@ -218,7 +218,12 @@ function App() {
   function markEditorDirty(target: Element) {
     if (modalRef.current?.type === 'campaign-start') return;
     const scope = target.closest('form') || target.closest('section') || dialogRef.current;
-    if (scope && dialogRef.current?.contains(scope)) { dirtyScopes.current.set(scope, (dirtyScopes.current.get(scope) || 0) + 1); setDraftDirty(true); }
+    if (!scope || !dialogRef.current?.contains(scope)) return;
+    dirtyScopes.current.set(scope, (dirtyScopes.current.get(scope) || 0) + 1);
+    // The flag follows in a new task, after React has committed the field's own update: re-rendering the editor shell from
+    // this capture-phase handler dropped the first change of a controlled field, such as the post caption (#334). Guards
+    // read the scope map, a ref, which is already current; a scope cleared by closing the editor meanwhile stays clean.
+    setTimeout(() => { if (dirtyScopes.current.has(scope)) setDraftDirty(true); });
   }
   function editorSaved(scope: Element, revision = dirtyScopes.current.get(scope)) {
     if (dirtyScopes.current.get(scope) === revision) { dirtyScopes.current.delete(scope); setDraftDirty(dirtyScopes.current.size > 0); }

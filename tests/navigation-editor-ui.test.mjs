@@ -426,6 +426,24 @@ test('a failed obsolete Back read cannot rewind newer navigation or swallow the 
   assert.equal(ui.navigation.page, 'Campaigns'); assert.equal(new URL(ui.window.location.href).searchParams.get('view'), 'campaigns');
 });
 
+test('an edit marks the editor dirty after the input event, so the field keeps its first change (#334)', async () => {
+  // Setting the shell's dirty flag inside the capture-phase input handler re-rendered the editor mid-event and dropped the
+  // first change of a controlled field (the post caption). The scope map updates at once; the flag follows in a new task.
+  const ui = app(), caption = { closest: () => caption };
+  ui.modalRef.current = { type: 'post' };
+  ui.markEditorDirty(caption);
+  assert.equal(ui.dirtyScopes.current.has(caption), true, 'Guards read the scope map, which is current at once.');
+  assert.equal(ui.draftDirty, false, 'No shell re-render from inside the input event.');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(ui.draftDirty, true);
+  // An editor closed before the flag's task runs stays clean.
+  const later = app(), field = { closest: () => field };
+  later.modalRef.current = { type: 'post' };
+  later.markEditorDirty(field); later.dirtyScopes.current.clear();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(later.draftDirty, false);
+});
+
 test('Escape, closing, and project navigation preserve edits until explicit discard; saved scopes do not clear other forms', async () => {
   const ui = app(), first = { closest: () => first }, second = { closest: () => second };
   ui.modalRef.current = { type: 'campaign' }; ui.markEditorDirty(first); ui.markEditorDirty(second);
@@ -452,9 +470,9 @@ test('button-based edits are detected while preview and platform-tab buttons lea
   const ui = app(), values = [{ tagName: 'INPUT', name: 'url', type: 'url', value: 'https://example.com/a.jpg' }], form = { closest: () => form, isConnected: true, querySelectorAll: () => values };
   ui.modalRef.current = { type: 'post' }; ui.dialogRef.current.querySelectorAll = () => [form];
   const click = role => ({ currentTarget: ui.dialogRef.current, target: { closest: () => ({ type: 'button', getAttribute: () => role }) } });
-  ui.watchEditorButtons(click(null)); await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(ui.draftDirty, false);
-  ui.watchEditorButtons(click('tab')); values.push({ ...values[0], value: '' }); await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(ui.draftDirty, false);
-  ui.watchEditorButtons(click(null)); values.pop(); await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(ui.draftDirty, true);
+  ui.watchEditorButtons(click(null)); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(ui.draftDirty, false);
+  ui.watchEditorButtons(click('tab')); values.push({ ...values[0], value: '' }); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(ui.draftDirty, false);
+  ui.watchEditorButtons(click(null)); values.pop(); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(ui.draftDirty, true);
 });
 
 test('inbox drafts guard page exits without a modal and leave same-route and unrelated modal closes intact', async () => {
@@ -542,7 +560,7 @@ test('an ended session cancels an open discard prompt as Keep editing, so the ex
   ui.setModal({ type: 'campaign', item: { id: 'c' } }); ui.draftDirty = true; ui.closeEditor(); assert.equal(ui.discardPrompt, true);
   let exits = 0; const waiting = ui.leaveGuard.leave(() => { exits++; });
   ui.sessionExpired(); assert.equal(ui.discardPrompt, false);
-  assert.equal(await waiting, false, 'The waiting exit resolves as staying.'); await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(await waiting, false, 'The waiting exit resolves as staying.'); await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(exits, 0); assert.deepEqual(focused, [], 'The editor close never ran, so its opener is not refocused.'); assert.equal(ui.leaveGuard.pending, false);
 });
 
@@ -576,10 +594,10 @@ test('an ended session with an unsaved editor or inbox draft tells the sign-in s
 test('discarding editor changes returns focus to the control that opened the editor', async () => {
   const ui = app(), focused = []; ui.triggerRef.current = { isConnected: true, focus() { focused.push('trigger'); } };
   ui.setModal({ type: 'campaign', item: { id: 'c' } }); ui.draftDirty = true; ui.closeEditor(); assert.equal(ui.discardPrompt, true);
-  await ui.discardChanges(); assert.equal(ui.modalRef.current, null); await new Promise(resolve => setTimeout(resolve, 5));
+  await ui.discardChanges(); assert.equal(ui.modalRef.current, null); await new Promise(resolve => setTimeout(resolve, 20));
   assert.deepEqual(focused, ['trigger']);
   ui.triggerRef.current = { isConnected: false, focus() { focused.push('removed'); } }; ui.setModal({ type: 'placement', item: { id: 'p' } }); ui.closeEditor();
-  await new Promise(resolve => setTimeout(resolve, 5)); assert.deepEqual(focused, ['trigger'], 'A trigger that left the page is not focused.');
+  await new Promise(resolve => setTimeout(resolve, 20)); assert.deepEqual(focused, ['trigger'], 'A trigger that left the page is not focused.');
   assert.match(source, /useLayoutEffect\(\(\) => \{ triggerRef\.current = modal && document\.activeElement instanceof HTMLElement \? document\.activeElement : null; \}, \[!!modal\]\);/);
 });
 
