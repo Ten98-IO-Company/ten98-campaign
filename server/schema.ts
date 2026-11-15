@@ -375,6 +375,31 @@ export const directContactMessengerIdentities = pgTable('direct_contact_messenge
 }, t => [
   primaryKey({ columns: [t.project_id, t.account_id, t.participant_id] }),
 ]);
+// Retained consent history (0013, consent-history.ts): append-only events, and evidence text removed with its contact.
+export const directConsentEvents = pgTable('direct_consent_events', {
+  id: text('id').primaryKey(),
+  workspace_id: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  contact_id: text('contact_id').notNull(),
+  channel: text('channel').notNull(),
+  action: text('action').notNull(),
+  source: text('source').notNull(),
+  actor: text('actor').notNull(),
+  destination_hash: text('destination_hash').notNull(),
+  key_version: integer('key_version').notNull(),
+  created_at: text('created_at').notNull(),
+  seq: bigint('seq', { mode: 'number' }).generatedAlwaysAsIdentity(),
+}, t => [
+  index('direct_consent_events_contact').on(t.project_id, t.contact_id, t.created_at),
+  index('direct_consent_events_destination').on(t.project_id, t.destination_hash, t.created_at),
+]);
+export const directConsentEvidence = pgTable('direct_consent_evidence', {
+  event_id: text('event_id').primaryKey().references(() => directConsentEvents.id, { onDelete: 'cascade' }),
+  contact_id: text('contact_id').notNull().references(() => directContacts.id, { onDelete: 'cascade' }),
+  evidence: text('evidence').notNull(),
+}, t => [
+  index('direct_consent_evidence_contact').on(t.contact_id),
+]);
 export const directContactSuppressions = pgTable('direct_contact_suppressions', {
   project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   channel: text('channel').notNull(),

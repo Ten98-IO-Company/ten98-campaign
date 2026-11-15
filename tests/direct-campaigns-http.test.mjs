@@ -170,6 +170,7 @@ test('a consent change and its Activity entry are stored together: when the entr
   const f = await fixture(t), { pool } = f.app.database;
   try {
     const kept = await f.person({ email: 'atomic@example.com', phone: '+12025550181' }), draft = await f.draft({ contactIds: [kept.id] });
+    const events = async () => Number((await pool.query('SELECT count(*)::int AS n FROM direct_consent_events WHERE project_id = $1', [f.projectId])).rows[0].n), recorded = await events();
     const count = async () => Number((await pool.query('SELECT count(*)::int AS n FROM direct_contacts WHERE project_id = $1', [f.projectId])).rows[0].n), contacts = await count();
     await pool.query("CREATE FUNCTION refuse_activity() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'activity unavailable'; END $$ LANGUAGE plpgsql");
     await pool.query('CREATE TRIGGER refuse_activity BEFORE INSERT ON activity FOR EACH ROW EXECUTE FUNCTION refuse_activity()');
@@ -184,6 +185,7 @@ test('a consent change and its Activity entry are stored together: when the entr
     assert.ok(stored, 'The contact was not deleted.'); assert.equal(stored.consents.sms, true, 'SMS permission is unchanged.');
     assert.equal(stored.suppression?.email, undefined, 'The contact was not suppressed.');
     assert.equal(await count(), contacts, 'The import stored no contact.');
+    assert.equal(await events(), recorded, 'No consent history event outlives its refused change.');
     assert.equal((await f.request(f.path + '/campaigns/' + draft.id)).data.campaign.status, 'draft', 'The campaign was not cancelled.');
   } finally { await f.close(); }
 });
@@ -235,6 +237,74 @@ test('a contact of another project or another workspace cannot be chosen for a d
     assert.equal(await drafts(), before, 'No refused draft is stored.');
     assert.deepEqual((await f.request(f.path + '/campaigns/' + draft.id)).data.campaign.contactIds, [own.id, second.id], 'The stored contacts are unchanged.');
   } finally { await f.close(); }
+});
+
+test('the consent history keeps each permission change with its evidence, and after deletion keeps the events but not the evidence', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const kept = await f.person({ email: 'History@Example.com', phone: '+12025550201' });
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id, 'PATCH', { consents: { sms: false } })).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id + '/suppress', 'POST', { channel: 'email', reason: 'Asked to stop by phone' })).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id + '/suppress', 'POST', { channel: 'email', reason: 'Asked again' })).status, 200);
+    let response = await f.request(f.path + '/contacts/' + kept.id + '/history');
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    const steps = response.data.history.map(event => [event.channel, event.action, event.source, event.evidence ?? null]);
+    assert.deepEqual(steps, [
+      ['email', 'granted', 'manual', 'Customer request, recorded in CRM'], ['sms', 'granted', 'manual', 'Customer request, recorded in CRM'], ['whatsapp', 'granted', 'manual', 'Customer request, recorded in CRM'],
+      ['sms', 'withdrawn', 'manual', null],
+      ['email', 'suppressed', 'manual', 'Asked to stop by phone'], ['email', 'withdrawn', 'manual', null],
+    ], 'A second suppression adds nothing.');
+    assert.ok(response.data.history.every(event => /^user:/.test(event.actor) && event.at));
+    assert.equal(/[0-9a-f]{64}/.test(JSON.stringify(response.data)), false, 'No destination hash leaves the server.');
+    assert.equal((await f.request(f.path + '/contacts/import', 'POST', { csv: 'name,email\nListed,listed@example.com\n', consents: { email: true }, consentSource: 'Signup sheet' })).status, 200);
+    const listed = await f.request(f.path + '/contacts/history?email=listed@example.com');
+    assert.deepEqual(listed.data.history.map(event => [event.channel, event.action, event.source, event.evidence]), [['email', 'granted', 'csv_import', 'Signup sheet']]);
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id, 'DELETE')).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id + '/history')).status, 404, 'The contact is gone.');
+    response = await f.request(f.path + '/contacts/history?email=history@example.com');
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.data.history.map(event => [event.channel, event.action]), [['email', 'granted'], ['email', 'suppressed'], ['email', 'withdrawn'], ['email', 'contact_deleted']], 'Matched by the normalized address after deletion.');
+    assert.ok(response.data.history.every(event => event.evidence === null), 'Free-text evidence is removed with the contact.');
+    assert.deepEqual((await f.request(f.path + '/contacts/history?phone=%2B12025550201')).data.history.map(event => [event.channel, event.action]), [['sms', 'granted'], ['whatsapp', 'granted'], ['sms', 'withdrawn'], ['sms', 'contact_deleted']]);
+    assert.equal((await f.request(f.path + '/contacts/history')).status, 400);
+  } finally { await f.close(); }
+});
+
+test('the consent history is append-only, goes with its project, is read only in its own project, and is written with its change', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const own = await f.person({ email: 'scoped@example.com', phone: '+12025550202' });
+    const workspaceId = (await pool.query('SELECT workspace_id FROM projects WHERE id = $1', [f.projectId])).rows[0].workspace_id;
+    const second = (await f.request('/api/projects', 'POST', { name: 'Second brand', workspaceId })).data.project, otherPath = '/api/projects/' + second.id + '/direct';
+    assert.equal((await f.request(otherPath + '/contacts', 'POST', { email: 'scoped@example.com', consents: { email: true }, consentSource: 'Second brand form' })).status, 201);
+    // Reads never cross projects, even for the same address.
+    assert.equal((await f.request(otherPath + '/contacts/' + own.id + '/history')).status, 404);
+    assert.deepEqual((await f.request(otherPath + '/contacts/history?email=scoped@example.com')).data.history.map(event => event.evidence), ['Second brand form']);
+    assert.equal((await f.request(f.path + '/contacts/history?email=scoped@example.com')).data.history.some(event => event.evidence === 'Second brand form'), false);
+    // The database refuses changes to recorded events, whatever the caller.
+    for (const statement of ["UPDATE direct_consent_events SET action = 'granted'", 'DELETE FROM direct_consent_events', 'TRUNCATE direct_consent_events CASCADE'])
+      await assert.rejects(pool.query(statement), /append-only/, statement);
+    // Deleting a project takes its history with it (the cascade), and only its own.
+    await pool.query('DELETE FROM projects WHERE id = $1', [second.id]);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM direct_consent_events WHERE project_id = $1', [second.id])).rows[0].n, 0);
+    assert.ok((await pool.query('SELECT count(*)::int AS n FROM direct_consent_events WHERE project_id = $1', [f.projectId])).rows[0].n > 0);
+    // A change whose history event cannot be written is not stored either.
+    await pool.query("CREATE FUNCTION refuse_consent_event() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'history unavailable'; END $$ LANGUAGE plpgsql");
+    await pool.query('CREATE TRIGGER refuse_consent_event BEFORE INSERT ON direct_consent_events FOR EACH ROW EXECUTE FUNCTION refuse_consent_event()');
+    assert.ok((await f.request(f.path + '/contacts/' + own.id, 'PATCH', { consents: { email: false } })).status >= 500);
+    await pool.query('DROP TRIGGER refuse_consent_event ON direct_consent_events');
+    assert.equal((await f.request(f.path + '/contacts')).data.contacts.find(contact => contact.id === own.id).consents.email, true, 'Email permission is unchanged.');
+  } finally { await f.close(); }
+});
+
+test('no server code updates or deletes consent history rows', async () => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const directory = new URL('../server/', import.meta.url), found = [];
+  for (const name of (await readdir(directory, { recursive: true })).filter(name => /\.ts$/.test(name))) {
+    const source = await readFile(new URL(name.replace(/\\/g, '/'), directory), 'utf8');
+    if (/(UPDATE|DELETE\s+FROM|TRUNCATE)\s+direct_consent_events\b|\.(update|delete)\(\s*directConsentEvents\b/i.test(source)) found.push(name);
+  }
+  assert.deepEqual(found, []);
 });
 
 test('scheduling a campaign re-checks its preview on the queuing transaction, without a second connection', pg, async t => {

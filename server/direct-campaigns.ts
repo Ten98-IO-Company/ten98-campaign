@@ -5,6 +5,7 @@ import { directContacts } from './schema.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { activeSuppression, createContacts, lockContacts } from './contacts.ts';
+import { createConsentHistory, type ConsentEvent } from './consent-history.ts';
 import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions, emailProvider, requireEmailProvider } from './direct-providers.ts';
 import { SES_REGIONS, classifyEmailFeedback, readResponseText, verifySnsMessage } from '@ten98/runtime';
 
@@ -95,7 +96,7 @@ const atomic = <T>(executor: Executor, run: (tx: Transaction) => Promise<T>): Pr
 // Twilio's re-subscribe keywords (Advanced Opt-Out): a signed START, YES or UNSTOP, or its OptOutType.
 export const smsStarted = (form: URLSearchParams) => form.get('OptOutType') === 'START' || /^(START|UNSTOP|YES)$/i.test((form.get('Body') || '').trim());
 export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Database; env: any; appUrl: string; secret: string; store?: Store }) {
-  const contacts = createContacts({ db });
+  const contacts = createContacts({ db }), history = createConsentHistory({ db, secret });
   let smsInbox: any, attaching: Promise<void> | undefined;
   const campaignRows = async (projectId: string) => (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns WHERE project_id = ${projectId} ORDER BY seq DESC`))).map(row => row.data);
   const find = async (projectId: string, id: string, ex: Executor = db, lock = false) => {
@@ -302,15 +303,23 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       // contacts, naming the actor and a short contact reference, never the contact's name, address or number. Activity keeps
       // only the newest 50 entries, so it is not the lasting record; that is each contact's consent evidence.
       const actor = user.name || user.id, log = (tx: Executor, message: string) => createStore(tx).activity(project.id, message), ref = (contactId: string) => 'contact ' + contactId.slice(0, 8);
+      // Retained consent history: one event per channel whose permission changed, with the evidence entered for it.
+      const by = 'user:' + user.id, destinationOf = (record: any, channel: string) => (channel === 'email' || channel === 'emailMarketing' ? record?.email : record?.phone) || '';
+      const changes = (before: any, after: any, source: string): ConsentEvent[] => Object.keys(consentLabels).filter(channel => !!before?.consents?.[channel] !== !!after?.consents?.[channel]).map(channel => after.consents[channel]
+        ? { contactId: after.id, channel, action: 'granted', source, actor: by, destination: destinationOf(after, channel), evidence: after.consentEvidence?.[channel]?.source }
+        : { contactId: after.id, channel, action: 'withdrawn', source, actor: by, destination: destinationOf(before, channel) });
       const granted = (consents: any) => { const labels = Object.entries(consentLabels).filter(([channel]) => consents?.[channel] === true).map(([, label]) => label); return labels.length ? ` Permission recorded for ${labels.join(', ')}.` : ''; };
       const permissions = (before: any, after: any) => Object.entries(consentLabels).filter(([channel]) => !!before?.consents?.[channel] !== !!after?.consents?.[channel]).map(([channel, label]) => `${label} ${after?.consents?.[channel] ? 'on' : 'off'}`).join(', ');
       if (!id && method === 'GET') send(200, { contacts: await contacts.list(project.id) });
-      else if (!id && method === 'POST') { const contact = await contacts.save(project.id, body, undefined, { create: true, audit: async (tx, _previous, record) => { const changed = permissions(undefined, record); if (changed) await log(tx, `Permission recorded for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(201, { contact }); }
-      else if (id === 'import' && method === 'POST') { const result = await contacts.import(project.id, body, { audit: async (tx, imported) => { if (imported.imported) await log(tx, `Contacts imported from CSV by ${actor}: ${imported.created} created, ${imported.updated} updated, ${imported.skipped} skipped.${granted(body?.consents)}`); } }); send(200, result); }
+      // History by email or phone, normalized as contacts are; the hash is compared on the server and never returned.
+      else if (id === 'history' && !action && method === 'GET') { const target = contacts.destination(Object.fromEntries(['email', 'phone'].filter(key => url.searchParams.get(key)).map(key => [key, url.searchParams.get(key)]))), value = target.email || target.phone; if (!value) fail(400, 'DESTINATION_REQUIRED', 'Provide an email address or phone number.'); send(200, { history: await history.forDestination(project.id, value) }); }
+      else if (id && action === 'history' && method === 'GET') { if (!await contacts.get(project.id, id)) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { history: await history.forContact(project.id, id) }); }
+      else if (!id && method === 'POST') { const contact = await contacts.save(project.id, body, undefined, { create: true, audit: async (tx, _previous, record) => { await history.record(tx, project.id, changes(undefined, record, 'manual')); const changed = permissions(undefined, record); if (changed) await log(tx, `Permission recorded for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(201, { contact }); }
+      else if (id === 'import' && method === 'POST') { const result = await contacts.import(project.id, body, { audit: async (tx, imported, previous) => { await history.record(tx, project.id, imported.contacts.flatMap((record: any) => changes(previous.get(record.id), record, 'csv_import'))); if (imported.imported) await log(tx, `Contacts imported from CSV by ${actor}: ${imported.created} created, ${imported.updated} updated, ${imported.skipped} skipped.${granted(body?.consents)}`); } }); send(200, result); }
       else if (id === 'assess-dns' && method === 'POST') { const result = await contacts.assessDNS(project.id, body.ids, { assertAccess: context.assertIntegrationSettings }); await context.assertIntegrationSettings(); send(200, result); }
-      else if (id && !action && method === 'PATCH') { const contact = await contacts.save(project.id, body, id, { audit: async (tx, before, record) => { const changed = permissions(before, record); if (changed) await log(tx, `Permission changed for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(200, { contact }); }
-      else if (id && !action && method === 'DELETE') { if (!await contacts.remove(project.id, id, { audit: tx => log(tx, `Deleted ${ref(id)} by ${actor}. Its suppressions are kept.`) })) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { removed: true }); }
-      else if (id && action === 'suppress' && method === 'POST') { const contact = await contacts.suppress(project.id, id, body.channel, body.reason, { audit: tx => log(tx, `Suppressed ${ref(id)} for ${consentLabels[body.channel as keyof typeof consentLabels] || body.channel} by ${actor}.`) }); send(200, { contact }); }
+      else if (id && !action && method === 'PATCH') { const contact = await contacts.save(project.id, body, id, { audit: async (tx, before, record) => { await history.record(tx, project.id, changes(before, record, 'manual')); const changed = permissions(before, record); if (changed) await log(tx, `Permission changed for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(200, { contact }); }
+      else if (id && !action && method === 'DELETE') { if (!await contacts.remove(project.id, id, { audit: async (tx, record) => { await history.record(tx, project.id, (['email', 'sms'] as const).map(channel => ({ contactId: id, channel, action: 'contact_deleted', source: 'manual', actor: by, destination: destinationOf(record, channel) }))); await log(tx, `Deleted ${ref(id)} by ${actor}. Its suppressions are kept.`); } })) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { removed: true }); }
+      else if (id && action === 'suppress' && method === 'POST') { const contact = await contacts.suppress(project.id, id, body.channel, body.reason, { audit: async (tx, consentsBefore, record, reason) => { await history.record(tx, project.id, [{ contactId: id, channel: body.channel, action: 'suppressed', source: 'manual', actor: by, destination: destinationOf(record, body.channel), evidence: reason }, ...changes({ consents: consentsBefore, email: record.email, phone: record.phone }, record, 'manual')]); await log(tx, `Suppressed ${ref(id)} for ${consentLabels[body.channel as keyof typeof consentLabels] || body.channel} by ${actor}.`); } }); send(200, { contact }); }
       else return false;
       return true;
     }
