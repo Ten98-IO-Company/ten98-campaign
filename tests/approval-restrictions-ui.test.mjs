@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
+import { useTestDisplayFormat } from './display-format.ts';
 
 const app = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');
 const details = [{ platform: 'instagram', field: 'mediaItems', message: 'Instagram needs an image or video.' }, { platform: 'facebook', field: 'content', message: 'Caption is too long.', accountId: 'page-1' }];
@@ -19,7 +20,7 @@ function view(request, posts, selected = []) {
   const start = source.indexOf('export default function '), end = source.indexOf('  return <', start), state = [], initial = { 0: { requireApproval: true, posts }, 7: selected };
   const context = {
     useState(value) { const index = state.length; state.push(Object.hasOwn(initial, index) ? initial[index] : value); return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next; }]; },
-    useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {},
+    useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {}, useDisplayFormat: useTestDisplayFormat,
     ...Object.fromEntries(['approveBlocked', 'postName', 'reviewItem'].map(name => [name, new Function('return ' + stripTypeScriptTypes(source.match(new RegExp(`^const ${name} = (.+);$`, 'm'))[1]))()])),
   };
   const component = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(start, end).replace('export default ', '') + 'return { review, bulkReview };\n}')});`)(...Object.values(context));

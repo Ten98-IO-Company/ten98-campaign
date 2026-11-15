@@ -6,14 +6,14 @@ import { spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
-import { Button, Card, DangerZoneFlow, FormActions, Grid, Inline, Link, SegmentedControl, Stack, Text } from '@ten98/ui';
+import { Button, Card, DangerZoneFlow, FormActions, Grid, Inline, Link, SegmentedControl, Stack, Text, createDisplayFormatter } from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 
 const source = () => readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
 
 test('the shared API client rejects unreadable receipts without treating a potentially accepted write as a known failure', async () => {
-  const appSource = source(), start = appSource.indexOf('async function api('), end = appSource.indexOf('\nconst money =', start);
+  const appSource = source(), start = appSource.indexOf('async function api('), end = appSource.indexOf('\nconst numeric =', start);
   assert.ok(start > 0 && end > start);
   const client = response => runInNewContext(stripTypeScriptTypes(appSource.slice(start, end)) + '; api', { fetch: async () => response });
   for (const status of [200, 502]) await assert.rejects(client(new Response('<html>upstream error</html>', { status }))('/test', 'POST', { value: 1 }, 'action-key'), error => error.message === 'The server returned an unreadable response.' && error.status === undefined);
@@ -23,7 +23,7 @@ test('the shared API client rejects unreadable receipts without treating a poten
 });
 
 test('a 401 while signed in ends the session once, without a per-surface error, and sign-in failures stay form errors', async () => {
-  const appSource = source(), start = appSource.indexOf('async function api('), end = appSource.indexOf('\nconst money =', start);
+  const appSource = source(), start = appSource.indexOf('async function api('), end = appSource.indexOf('\nconst numeric =', start);
   const unauthorized = () => Response.json({ error: 'Sign in to continue.' }, { status: 401 });
   const client = handler => { const ended = []; return { ended, api: runInNewContext(stripTypeScriptTypes(appSource.slice(start, end)) + '; api', { fetch: async () => unauthorized(), DOMException, endSession: handler === undefined ? () => ended.push(1) : handler }) }; };
   const signedIn = client();
@@ -82,9 +82,10 @@ test('dashboard counts daily-campaign spend without adding daily budgets to tota
 
 test('campaign money and counts preserve fractional amounts and distinguish absent values from zero', () => {
   const appSource = source(), names = ['numeric', 'money', 'compact', 'budgetProgress'];
-  const declarations = names.map(name => appSource.match(new RegExp(`^const ${name} = .+;$`, 'm'))?.[0]);
+  // money and compact sit inside App, on the formatter useDisplayFormat gives it.
+  const declarations = names.map(name => appSource.match(new RegExp(`^(?:  )?const ${name} = .+;$`, 'm'))?.[0]);
   assert.ok(declarations.every(Boolean));
-  const { money, compact, budgetProgress } = runInNewContext(stripTypeScriptTypes(declarations.join('\n')) + '; ({money, compact, budgetProgress})');
+  const { money, compact, budgetProgress } = runInNewContext(stripTypeScriptTypes(declarations.join('\n')) + '; ({money, compact, budgetProgress})', { format: createDisplayFormatter({ locale: 'en' }) });
   assert.equal(money(0.01, 'USD'), '$0.01'); assert.equal(money(25.75, 'USD'), '$25.75'); assert.equal(money(25, 'USD'), '$25'); assert.equal(money(25.125, 'KWD').includes('25.125'), true);
   for (const missing of [undefined, null, NaN, Infinity, '0']) { assert.equal(money(missing), '—'); assert.equal(compact(missing), '—'); }
   assert.equal(money(0, 'USD'), '$0'); assert.equal(compact(0), '0');
@@ -156,8 +157,8 @@ test('post status filter is one labelled segmented control bound to the local fi
 });
 
 test('Overview campaign totals and channel counts use singular only for one campaign', async () => {
-  const appSource = source(), declaration = appSource.match(/^const plural = .+;$/m)?.[0]; assert.ok(declaration);
-  const plural = runInNewContext(stripTypeScriptTypes(declaration) + '; plural');
+  const appSource = source(), declaration = appSource.match(/^  const plural = .+;$/m)?.[0]; assert.ok(declaration);
+  const plural = runInNewContext(stripTypeScriptTypes(declaration) + '; plural', { format: createDisplayFormatter({ locale: 'en' }) });
   assert.match(appSource, /\{plural\(activeCampaigns, 'active campaign'\)\}/); assert.match(appSource, /formatCount=\{count => plural\(count, 'campaign'\)\}/);
   for (const count of [0, 1, 2]) {
     const word = count === 1 ? 'campaign' : 'campaigns';
@@ -181,15 +182,16 @@ test('local campaign results distinguish missing metrics from zero and never dis
 });
 
 test('calendar dates stay on their intended day while timestamps follow the browser timezone', () => {
-  const declaration = source().match(/^const date = .+;$/m)?.[0];
+  const declaration = source().match(/^  const date = .+;$/m)?.[0];
   assert.ok(declaration, 'Exercise the date formatter used by campaign and OOH cards.');
-  const script = `${declaration.replace('(value: string)', '(value)')}\nconsole.log(JSON.stringify([date('2026-10-18'), date('2026-10-18T00:00:00Z'), date('')]));`;
+  // The shared formatter in the browser time zone (TZ here), as the app root's DisplayFormatProvider gives it.
+  const script = `import { createDisplayFormatter } from '@ten98/ui'; const format = createDisplayFormatter({ locale: 'en-GB' });\n${declaration.replace('(value: string)', '(value)')}\nconsole.log(JSON.stringify([date('2026-10-18'), date('2026-10-18T00:00:00Z'), date('')]));`;
   const west = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, TZ: 'America/Los_Angeles' } });
   assert.equal(west.status, 0, west.stderr);
-  assert.deepEqual(JSON.parse(west.stdout.trim()), ['18 Oct', '17 Oct', 'Not set']);
+  assert.deepEqual(JSON.parse(west.stdout.trim()), ['18 Oct 2026', '17 Oct 2026', 'Not set']);
   const east = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, TZ: 'Asia/Dubai' } });
   assert.equal(east.status, 0, east.stderr);
-  assert.deepEqual(JSON.parse(east.stdout.trim()), ['18 Oct', '18 Oct', 'Not set']);
+  assert.deepEqual(JSON.parse(east.stdout.trim()), ['18 Oct 2026', '18 Oct 2026', 'Not set']);
 });
 
 test('upcoming posts exclude past and completed work and sort by instant without changing the source list', () => {

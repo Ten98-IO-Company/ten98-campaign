@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Checkbox, Disclosure, Field, Fieldset, Form, FormActions, FormGrid, Heading, Inline, Input, List, ListItem, LoadMore, MultiCombobox, Option, Select, Stack, StatusLine, Text, type ComboboxOption } from '@ten98/ui';
+import { Alert, Button, Checkbox, Disclosure, Field, Fieldset, Form, FormActions, FormGrid, Heading, Inline, Input, List, ListItem, LoadMore, MultiCombobox, Option, Select, Stack, StatusLine, Text, type ComboboxOption, useDisplayFormat } from '@ten98/ui';
 import { AppField } from '@ten98/ui/app';
 
 type Connection = { _id: string; platform: string; displayName?: string; username?: string; isActive?: boolean };
@@ -21,7 +21,8 @@ const interestDebounceMs = 400, interestMinQuery = 2, interestMaxQuery = 200;
 const readableLeadForm = (value: any): value is LeadForm => value && typeof value.id === 'string' && !!value.id && typeof value.name === 'string' && !!value.name && typeof value.version === 'string' && /^[a-f0-9]{64}$/.test(value.version) && typeof value.status === 'string' && typeof value.privacyPolicyUrl === 'string' && Array.isArray(value.questions);
 
 export default function AdComposer({ request, posts = [], initialDraft, readOnly = false, onCreated, onCancel }: Props) {
-  const requester = useRef(request); requester.current = request;
+  // `format` here is the ad format, so the shared display formatter is `numbers`.
+  const requester = useRef(request), numbers = useDisplayFormat(); requester.current = request;
   const [connections, setConnections] = useState<Connection[]>([]), [adAccounts, setAdAccounts] = useState<AdAccount[]>([]);
   const [accountId, setAccountId] = useState(''), [adAccountId, setAdAccountId] = useState(''), [format, setFormat] = useState('image'), [mode, setMode] = useState('create'), [goal, setGoal] = useState('traffic'), [cards, setCards] = useState(2);
   const [budgetType, setBudgetType] = useState('daily'), [bidding, setBidding] = useState('automatic'), [validation, setValidation] = useState('');
@@ -41,6 +42,7 @@ export default function AdComposer({ request, posts = [], initialDraft, readOnly
   const interestView = interestScope.current, searchView = interestSearchScope.current, selectedInterests = interestSelection.current === interestView ? interests : [], visibleInterests = interestResultView.current === searchView ? interestResults : null;
   // The pause timer runs the latest render's search, so it carries the current frame and scope checks.
   const interestTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined), latestInterestSearch = useRef(searchInterests); latestInterestSearch.current = searchInterests;
+  // The currency's minor-unit digits set the budget input's step; this formats nothing for display.
   const digits = currency && /^[A-Z]{3}$/.test(currency) ? new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2 : 2;
   const step = 10 ** -digits, minimum = Math.max(step, platform === 'pinterest' ? 5 : platform === 'tiktok' ? 20 : platform === 'openai' ? 1 : 0, budgetType === 'daily' ? Number(adAccount?.minimumDailyBudget) || 0 : 0);
   const draftValue = (name: string) => {
@@ -201,7 +203,7 @@ export default function AdComposer({ request, posts = [], initialDraft, readOnly
       if (isCurrent() && failure.name !== 'AbortError') setError(failure.message || 'The ad could not be created. Your entries are still here.');
     } finally { if (isCurrent()) setBusy(false); }
   }
-  const interestOptions: ComboboxOption[] = (visibleInterests || []).map(row => ({ value: row.id, label: row.name, description: [`ID: ${row.id}`, row.path?.length ? row.path.join(' / ') : '', row.audienceSize == null ? 'Reach unknown' : `Estimated audience: ${row.audienceSize.toLocaleString('en')}`].filter(Boolean).join(' · ') }));
+  const interestOptions: ComboboxOption[] = (visibleInterests || []).map(row => ({ value: row.id, label: row.name, description: [`ID: ${row.id}`, row.path?.length ? row.path.join(' / ') : '', row.audienceSize == null ? 'Reach unknown' : `Estimated audience: ${numbers.number(row.audienceSize)}`].filter(Boolean).join(' · ') }));
   return <Form onSubmit={(_, event) => submit(event)} onInput={() => setValidation('')}>
     <Text tone="muted">Ads and boosts start with their campaign paused. Review them before activation.</Text>
     <Stack as="fieldset" gap={4} disabled={readOnly || busy || loading}>

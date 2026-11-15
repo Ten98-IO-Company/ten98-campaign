@@ -4,8 +4,10 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 type Node = { type?: unknown; key?: unknown; props?: Record<string, any> } | null | undefined;
 

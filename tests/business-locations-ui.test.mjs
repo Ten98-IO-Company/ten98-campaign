@@ -5,8 +5,10 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as social from '../shared/social-posts.ts';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { DestinationPicker } from '@ten98/ui';
+const ui = withTestDisplayFormat(uiExports);
 
 const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .*;\r?\n/gm, '').replace('export default function PostComposer', 'function PostComposer').replace('export function PostVariantPreview', 'function PostVariantPreview').replace('export const accountLabel', 'const accountLabel'), 'BusinessLocations.tsx', { jsx: { runtime: 'classic' } });

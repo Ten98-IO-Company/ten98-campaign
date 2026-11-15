@@ -1,15 +1,15 @@
 import React, { useState } from 'react';
-import { Alert, Button, Card, DataTable, Field, FormActions, FormGrid, Heading, Input, MetricCard, MetricGrid, Stack, Text, TimeSeriesChart } from '@ten98/ui';
+import { Alert, Button, Card, DataTable, Field, FormActions, FormGrid, Heading, Input, MetricCard, MetricGrid, Stack, Text, TimeSeriesChart, useDisplayFormat } from '@ten98/ui';
 
 type Metrics = { impressions?: number | null; reach?: number | null; likes?: number | null; comments?: number | null; shares?: number | null; saves?: number | null; clicks?: number | null; views?: number | null; engagementRate?: number | null };
 type Dashboard = { totals: Metrics; followers?: { current?: number | null; gained?: number | null }; daily: { date: string; impressions?: number | null }[]; topPosts?: { postId: string; platform?: string; publishedAt?: string; metrics?: Metrics }[]; dataAsOf?: string | null };
 type Props = { request: (path: string, body?: any) => Promise<any>; connected: boolean };
 const numeric = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
-const number = (value: unknown, digits = 0) => numeric(value) ? new Intl.NumberFormat('en', { maximumFractionDigits: digits }).format(value) : '—';
 const inputDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 
 export default function SocialAnalytics({ request, connected }: Props) {
-  const [today] = useState(() => inputDate(new Date()));
+  const [today] = useState(() => inputDate(new Date())), format = useDisplayFormat();
+  const number = (value: unknown, digits = 0) => numeric(value) ? format.number(value, { maximumFractionDigits: digits }) : '—';
   const [from, setFrom] = useState(() => { const date = new Date(); date.setDate(date.getDate() - 29); return inputDate(date); });
   const [to, setTo] = useState(today), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [report, setReport] = useState<{ data: Dashboard; from: string; to: string } | null>(null);

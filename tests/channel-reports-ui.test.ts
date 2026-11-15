@@ -6,9 +6,11 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { hooks, nodes } from './hook-recorder.ts';
 import { readText } from './read-text.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 type Row = Record<string, any>;
 const source = (await readFile(new URL('../src/ChannelReports.tsx', import.meta.url), 'utf8')).replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, '');

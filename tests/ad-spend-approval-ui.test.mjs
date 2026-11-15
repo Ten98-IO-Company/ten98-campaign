@@ -5,14 +5,16 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as designSystem from '@ten98/ui';
+import * as designSystemExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { adSpendActionLabel, adSpendBlock, adSpendPlatformLabel, approvalBadge, formatMinorUnits, readableApprovalSummary } from '../src/approval-status.ts';
+const designSystem = withTestDisplayFormat(designSystemExports);
 
 // Client side of ad spend approval (council decision ten98-code-system#35, Q1). The components run with recorded request
 // boundaries and stubbed hooks; no provider or approval request leaves the test.
 const read = async file => (await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
-const ui = Object.entries(designSystem).filter(([name]) => /^[A-Z]|^useConfirmDialog$/.test(name));
+const ui = Object.entries(designSystem).filter(([name]) => /^[A-Z]|^useConfirmDialog$|^useDisplayFormat$/.test(name));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 // Every element in a tree, including elements passed through props such as `actions`; function components stay unrendered.
 const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : !React.isValidElement(node) ? [] : [node, ...Object.values(node.props).flatMap(value => Array.isArray(value) || React.isValidElement(value) ? nodes(value) : [])];
