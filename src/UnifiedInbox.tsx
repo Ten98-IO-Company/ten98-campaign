@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ShortcutScope, useCommand, Alert, AppliedFilters, Avatar, Blockquote, Button, Card, Checkbox, Combobox, ConfirmDialog, ContentPreview, ConversationThread, DescriptionList, DetailWorkspace, Disclosure, EmptyState, FeatureControls, Field, FieldList, Form, FormActions, FormGrid, Heading, Image, Inline, Input, Link, LoadMore, MediaPlayer, Option, Popover, ReviewConfirm, SegmentedControl, Select, SelectableList, Stack, StatusLine, Tabs, Text, Textarea, useFocusReturn } from '@ten98/ui';
+import { Alert, AppliedFilters, Avatar, Blockquote, Button, Card, Checkbox, Combobox, ConfirmDialog, ContentPreview, ConversationThread, DescriptionList, DetailWorkspace, Disclosure, EmptyState, FeatureControls, Field, FieldList, Form, FormActions, FormGrid, Heading, Image, Inline, Input, Link, LoadMore, MediaPlayer, Option, Popover, ReviewConfirm, SegmentedControl, Select, SelectableList, Stack, StatusLine, Tabs, Text, Textarea, useFocusReturn } from '@ten98/ui';
 import type { ConversationMessage } from '@ten98/ui';
 import WhatsAppTemplate, { templateRestriction } from './WhatsAppTemplate';
 import { validPostInstant } from '../shared/social-posts.ts';
@@ -90,7 +90,7 @@ function SmsInbox({ projectId, request, readOnly = false, initialSearch, onDraft
       setNotice('SMS reply accepted by Twilio. Delivery updates are shown separately.');
     });
   }
-  return <ShortcutScope name="Inbox" activation="focus"><Stack gap={4}>
+  return <Stack gap={4}>
     <InboxShortcuts onKey={shortcut}/>
     <Inline justify="between" align="center"><Stack gap={1}><Heading level={2} size="md">SMS replies</Heading><Text tone="muted">Receive and answer replies to SMS campaigns through the original Twilio sender.</Text></Stack><Button variant="secondary" disabled={!!busy} onClick={() => smsAction('Refreshing SMS replies', async generation => { const connection = await requester.current(path + '/status'); if (generation !== version.current) return; setStatus(connection); await smsList(generation); if (selected) await smsThread(selected, generation); })}>Refresh SMS replies</Button></Inline>
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}{busy && <StatusLine busy>{busy}…</StatusLine>}
@@ -103,7 +103,7 @@ function SmsInbox({ projectId, request, readOnly = false, initialSearch, onDraft
         <ConversationThread label="SMS message history" headingLevel={5} readOnly={readOnly} hasOlder={!!detail?.pagination?.hasMore} olderLoading={busy === 'Loading SMS conversation'} olderUnavailableReason={detail?.pagination?.nextCursor ? undefined : 'Twilio has older messages but supplied no earlier page.'} onLoadOlder={() => { if (detail?.pagination?.nextCursor) openSms(selected, detail.pagination.nextCursor); }} messages={[...(detail?.messages || [])].sort((a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0)).map((item: Row): ConversationMessage => ({ id: item.id, author: item.direction === 'outgoing' ? 'Your SMS sender' : conversation?.participantName || conversation?.participantId || 'Contact', time: when(item.createdAt), dateTime: item.createdAt, visibility: 'private', direction: item.direction === 'outgoing' ? 'outbound' : 'inbound', content: <Text preserveWhitespace>{item.message || 'Media message'}</Text>, attachments: item.attachments?.length ? <Stack gap={2}>{item.attachments.map((attachment: Row, index: number) => <Attachment key={index} item={attachment} downloadUrl={`/api${path}/media/${encodeURIComponent(item.id)}/${index}`}/>)}</Stack> : undefined, status: item.deliveryStatus || item.status || undefined }))}/>
         {!readOnly && <Form aria-label="SMS reply" busy={!!busy} onSubmit={(_, event) => sendSms(event)}><Stack as="fieldset" gap={3} disabled={blocked || !status?.configured}><Field label="SMS reply" count={{ value: message, max: 1600, measure: value => value.length }}><Textarea ref={replyField} required rows={3} maxLength={1600} value={message} onChange={event => setMessage(event.target.value)}/></Field><Text tone="muted">The reply uses this conversation’s original sender. Twilio may charge for multiple SMS segments; encoding affects the segment count.</Text><FormActions><Button variant="primary" type="submit">Send SMS reply</Button></FormActions></Stack></Form>}
       </Stack>}/>
-  </Stack></ShortcutScope>;
+  </Stack>;
 }
 
 // Team triage overlay (server/inbox.ts item-states): Campaign's own status, waiting time and assignee per conversation.
@@ -249,19 +249,18 @@ export default function UnifiedInbox(props: Props) {
 }
 function commentsWithDepth(rows: Row[], depth = 0): Row[] { return depth > 12 ? [] : rows.flatMap(row => [{ ...row, depth }, ...commentsWithDepth(Array.isArray(row.replies) ? row.replies : [], depth + 1)]); }
 type InboxKey = 'j' | 'k' | 'e' | 'r';
-const inboxCommands: { key: InboxKey; id: string; label: string }[] = [
-  { key: 'j', id: 'inbox.next', label: 'Open the next item' },
-  { key: 'k', id: 'inbox.previous', label: 'Open the previous item' },
-  { key: 'e', id: 'inbox.done', label: 'Mark the open item done' },
-  { key: 'r', id: 'inbox.reply', label: 'Move to the reply' },
-];
-// Front-style keys: j and k open the next and previous item, e marks it done and r moves to the reply. They are
-// registered with the shared shortcuts module inside the page's focus-activated "Inbox" scope, so, as single-character
-// keys (WCAG 2.1.4), they answer only while focus is in the inbox, never while typing in a field or inside a dialog.
-// The page owns any guard each key needs.
+// Front-style keys: j and k open the next and previous item, e marks it done and r moves to the reply. Keys typed into a
+// field or a dialog, composed text and modified keys are left alone; the page owns any guard each key needs.
 function InboxShortcuts({ onKey }: { onKey: (key: InboxKey) => void }) {
   const latest = useRef(onKey); latest.current = onKey;
-  for (const { key, id, label } of inboxCommands) useCommand({ id, label, group: 'Inbox', keys: key.toUpperCase(), run: () => latest.current(key) });
+  useEffect(() => {
+    const listen = (event: KeyboardEvent) => {
+      const target = event.target as Element | null;
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || !['j', 'k', 'e', 'r'].includes(event.key) || target?.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="dialog"], dialog')) return;
+      event.preventDefault(); latest.current(event.key as InboxKey);
+    };
+    document.addEventListener('keydown', listen); return () => document.removeEventListener('keydown', listen);
+  }, []);
   return null;
 }
 function privateMessageLimit(capabilities: Row, platform: string, attachmentUrl: string) {
@@ -802,7 +801,7 @@ function ZernioInbox({ projectId, request, readOnly = false, role, initialChanne
   if (status && (!connected || !accounts.length)) return <Stack gap={4}>{statusLines}<EmptyState icon="link" title="Connect social accounts" description={`Connect social accounts in Settings › Connections to see ${noun} here.`} action={integrationsAction}/></Stack>;
 
   // The page header is the h1 and names the page, so the inbox's own headings start at h2.
-  return <ShortcutScope name="Inbox" activation="focus"><Stack gap={4}>
+  return <Stack gap={4}>
     {(tab === 'messages' || tab === 'comments') && <InboxShortcuts onKey={shortcut}/>}
     <Inline justify="end"><Button variant="secondary" disabled={!!busy} onClick={loadAccounts}>Refresh connections</Button></Inline>
     {statusLines}
@@ -884,5 +883,5 @@ function ZernioInbox({ projectId, request, readOnly = false, role, initialChanne
       {loaded && !visibleRows.length && listEmpty}{loadMore}{publicReply}
     </>}
     <ConfirmDialog open={!!confirming} onOpenChange={open => { if (!open) setConfirming(null); }} danger={confirming?.kind !== 'hide'} title={confirming?.kind === 'review' ? 'Remove your public reply to this review?' : confirming?.kind === 'hide' ? 'Hide this public comment from other people?' : 'Delete this public comment?'} description={confirming?.kind === 'review' ? 'The review itself remains.' : confirming?.kind === 'hide' ? 'You can unhide it later from this thread.' : 'This cannot be undone.'} confirmLabel={confirming?.kind === 'review' ? 'Remove reply' : confirming?.kind === 'hide' ? 'Hide comment' : 'Delete comment'} onConfirm={() => confirming?.kind === 'review' ? deleteReviewReply(confirming.review) : confirming ? commentAction(confirming.kind, confirming.comment) : undefined}/>
-  </Stack></ShortcutScope>;
+  </Stack>;
 }

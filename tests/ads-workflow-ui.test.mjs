@@ -131,3 +131,14 @@ test('render and lazy-load failures show a reload action without exposing the or
   assert.match(html, /role="alert"/); assert.match(html, />Reload app</); assert.ok(html.includes(title)); assert.doesNotMatch(html, /Private request payload/);
   boundary.render().props.onRetry(); assert.equal(reloads, 1);
 });
+
+test('Ctrl or Command with K focuses the view search, also from a text field, and the report export saves through saveFile', async () => {
+  const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  assert.match(main, /useCommand\(\{ id: 'search\.focus', label: 'Search this view', group: 'Navigation', keys: 'Mod\+K', run: \(\) => searchRef\.current\?\.focus\(\) \}\);/);
+  assert.match(main, /saveFile\('ten98-campaign-report\.csv', csv, 'text\/csv;charset=utf-8'\);/);
+  assert.doesNotMatch(main, /window\.addEventListener\('keydown'|createObjectURL/);
+  // The shared resolver with this exact chord, at the application scope the provider adds.
+  const commands = [{ id: 'search.focus', scope: '', chords: [ui.parseChord('Mod+K', 'other')], enabled: true }];
+  for (const target of ['other', 'text', 'multiline', 'control']) assert.equal(ui.resolveShortcut({ chord: 'Ctrl+K', scopes: [{ id: '', focus: false }], commands, target })?.command.id, 'search.focus', target);
+  assert.equal(ui.parseChord('Mod+K', 'apple'), 'Meta+K');
+});
