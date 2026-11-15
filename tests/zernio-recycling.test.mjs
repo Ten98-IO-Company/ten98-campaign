@@ -184,3 +184,50 @@ test('uncertain source and recurring writes block each other until explicit oper
     } finally { await f.close(); }
   }
 });
+
+// Another project for the rows a test files under the wrong owner; the tables reference it.
+async function otherProject(f) {
+  const workspace = (await f.app.sql.get('SELECT workspace_id FROM projects WHERE id=?', f.projectId)).workspace_id;
+  await f.app.sql.run('INSERT INTO projects(id,workspace_id,name,color,zernio_profile_id,drive_folder_id) VALUES(?,?,?,?,?,?)', 'other-project', workspace, 'Other project', '#000000', 'other-profile', '');
+}
+
+test('a recycling review is kept once per exact plan, names its reviewer, and is found only through its own project, post and ID', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), sql = f.app.sql;
+  try {
+    await otherProject(f);
+    const first = await f.review(), review = first.data.review, count = async () => (await sql.all('SELECT id FROM post_recycling_reviews')).length; assert.equal(first.status, 200, JSON.stringify(first.data));
+    const stored = await sql.get('SELECT id, reviewed_by, reviewed_at FROM post_recycling_reviews'), user = (await sql.get('SELECT id FROM users')).id;
+    assert.deepEqual(Object.keys(review).sort(), ['configuration', 'fingerprint', 'id', 'reviewedAt', 'reviewedBy']); assert.deepEqual({ id: review.id, reviewedBy: review.reviewedBy, reviewedAt: review.reviewedAt }, { id: stored.id, reviewedBy: user, reviewedAt: stored.reviewed_at });
+    assert.deepEqual((await f.review()).data.review, review, 'Reviewing the same plan again returns its first record.'); assert.equal(await count(), 1);
+    assert.notEqual((await f.review({ ...config(), gap: 3 })).data.review.id, review.id); assert.equal(await count(), 2, 'A different plan is a different review.');
+    const apply = id => f.request(f.path + '/apply', 'POST', { reviewId: id });
+    assert.equal((await apply(randomUUID())).data.error.code, 'RECYCLING_REVIEW_NOT_FOUND');
+    for (const [column, foreign, own] of [['post_id', 'another-post', f.local.id], ['project_id', 'other-project', f.projectId]]) {
+      await sql.run(`UPDATE post_recycling_reviews SET ${column}=? WHERE id=?`, foreign, review.id);
+      const result = await apply(review.id); assert.equal(result.status, 404, column); assert.equal(result.data.error.code, 'RECYCLING_REVIEW_NOT_FOUND', column);
+      await sql.run(`UPDATE post_recycling_reviews SET ${column}=? WHERE id=?`, own, review.id);
+    }
+    assert.equal((await apply(review.id)).status, 200); assert.equal(f.writes().length, 1);
+  } finally { await f.close(); }
+});
+
+test('only an unresolved recycling or post-content change of the same project holds back a new plan', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), sql = f.app.sql;
+  try {
+    await otherProject(f);
+    const reviewed = await f.review(), apply = () => f.request(f.path + '/apply', 'POST', { reviewId: reviewed.data.review.id });
+    const seed = (status, path, project = f.projectId) => sql.run("INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, resource_key) VALUES (?, ?, ?, 'seeded', ?, ?, ?, 'seeded')", randomUUID(), project, randomUUID(), status, new Date().toISOString(), path);
+    for (const path of ['POST /integrations/recycling/posts/:id/apply', 'POST /integrations/recycling/posts/:id/stop', 'POST /integrations/social/update', 'POST /integrations/social/edit-published', 'POST /integrations/social/update-metadata']) {
+      for (const status of ['pending', 'uncertain']) {
+        await sql.run('DELETE FROM integration_operations'); await seed(status, path);
+        const blocked = await apply(); assert.equal(blocked.status, 409, status + ' ' + path); assert.equal(blocked.data.error.code, 'RECYCLING_PREVIOUS_OUTCOME_UNRESOLVED', status + ' ' + path);
+      }
+    }
+    assert.equal(f.writes().length, 0, 'A held-back plan is never sent.');
+    // None of these holds a plan back: a settled or reviewed receipt, another action, or another project's receipt.
+    await sql.run('DELETE FROM integration_operations');
+    for (const status of ['complete', 'failed', 'reviewed-applied', 'reviewed-not-applied']) await seed(status, 'POST /integrations/recycling/posts/:id/apply');
+    await seed('uncertain', 'POST /integrations/queues/:id/update'); await seed('uncertain', 'POST /integrations/recycling/posts/:id/apply', 'other-project'); await seed('pending', 'POST /integrations/social/update', 'other-project');
+    const applied = await apply(); assert.equal(applied.status, 200, JSON.stringify(applied.data)); assert.equal(applied.data.post.recycling.enabled, true); assert.equal(f.writes().length, 1);
+  } finally { await f.close(); }
+});

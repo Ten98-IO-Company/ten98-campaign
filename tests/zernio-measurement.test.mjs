@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { postgresSkip, testDatabase } from './postgres.mjs';
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
@@ -38,9 +39,9 @@ async function setup(t) {
     return state.detail || { platform, tag: structuredClone(rows.find(row => row.id === id)) };
   };
   let serial = 0;
-  async function request(action, { body, key = `measurement-${++serial}`, role = 'owner', method = body === undefined ? 'GET' : 'POST' } = {}) {
+  async function request(action, { body, key = `measurement-${++serial}`, role = 'owner', method = body === undefined ? 'GET' : 'POST', headers = { 'idempotency-key': key } } = {}) {
     let response;
-    const context = { db, project: { id: 'project-a', zernioProfileId: profileId }, role, req: { method, headers: { 'idempotency-key': key } }, url: new URL(`http://localhost/api/projects/project-a/integrations/measurement/${action}`), body: body || {}, send(status, data) { response = { status, data }; } };
+    const context = { db, project: { id: 'project-a', zernioProfileId: profileId }, role, req: { method, headers }, url: new URL(`http://localhost/api/projects/project-a/integrations/measurement/${action}`), body: body || {}, send(status, data) { response = { status, data }; } };
     try { const handled = await handleZernioMeasurement(context, api, profileId, context.url.pathname.split('/measurement/')[1]); return response || { handled }; }
     catch (error) { if (!(error instanceof IntegrationError)) throw error; return { status: error.status, data: { error: { code: error.code, message: error.message } } }; }
   }
@@ -161,4 +162,20 @@ test('rendered pixel controls preserve API versus website IDs, escape snippets a
   const reader = render('metaads', false); assert.match(reader, /Campaign pixel ID/); assert.match(reader, /Website tag ID/); assert.match(reader, /&lt;script&gt;/); assert.doesNotMatch(reader, /<script>/); assert.doesNotMatch(reader, /Create tracking tag|Rename tag/);
   assert.match(render('metaads', true), /Create tracking tag/); assert.match(render('metaads', true), /Rename tag/);
   const reddit = render('redditads', true); assert.match(reddit, /Reddit requires a pixel for every campaign goal/); assert.doesNotMatch(reddit, /Create tracking tag|Load conversion events|Check pixel diagnostics/);
+});
+
+test('only an unresolved pixel creation of the same project holds back another creation, and a creation without its key is refused', pg, async t => {
+  const { sql, calls, request } = await setup(t), body = { adAccountId: 'ad-a', name: 'New website pixel' }, posts = () => calls.filter(call => call.method === 'POST').length;
+  const seed = (status, path, project = 'project-a') => sql.run("INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, resource_key) VALUES (?, ?, ?, 'seeded', ?, ?, ?, 'seeded')", randomUUID(), project, randomUUID(), status, new Date().toISOString(), path);
+  for (const status of ['pending', 'uncertain']) {
+    await sql.run('DELETE FROM integration_operations'); await seed(status, 'POST /integrations/measurement/:id/tags/create');
+    const blocked = await request('metaads/tags/create', { body }); assert.equal(blocked.status, 409, status); assert.equal(blocked.data.error.code, 'OPERATION_UNCERTAIN', status);
+  }
+  assert.equal(posts(), 0, 'A held-back creation is never sent.');
+  // None of these holds a creation back: a settled or reviewed receipt, another action, or another project's receipt.
+  await sql.run('DELETE FROM integration_operations');
+  for (const status of ['complete', 'failed', 'reviewed-applied', 'reviewed-not-applied']) await seed(status, 'POST /integrations/measurement/:id/tags/create');
+  await seed('uncertain', 'POST /integrations/measurement/:id/tags/:id/update'); await seed('uncertain', 'POST /integrations/queues/create'); await seed('uncertain', 'POST /integrations/measurement/:id/tags/create', 'project-b');
+  const missing = await request('metaads/tags/create', { body, headers: {} }); assert.equal(missing.status, 400); assert.equal(missing.data.error.code, 'IDEMPOTENCY_KEY_REQUIRED'); assert.equal(posts(), 0);
+  const created = await request('metaads/tags/create', { body }); assert.equal(created.status, 200, JSON.stringify(created)); assert.equal(created.data.tag.name, body.name); assert.equal(posts(), 1);
 });

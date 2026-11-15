@@ -117,6 +117,25 @@ test('not-found and LinkedIn contentless imports remain explicit and provider ac
   } finally { await f.close(); }
 });
 
+test('saved references, removals and refreshes stay inside their own project, profile and connected account', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), sql = f.app.sql;
+  try {
+    const workspace = (await sql.get('SELECT workspace_id FROM projects WHERE id=?', f.projectId)).workspace_id, other = await f.app.store.create(f.projectId, 'campaigns', { name: 'Other launch', channel: 'social', status: 'draft' });
+    await sql.run('INSERT INTO projects(id,workspace_id,name,color,zernio_profile_id,drive_folder_id) VALUES(?,?,?,?,?,?)', 'other-project', workspace, 'Other project', '#000000', 'other-profile', '');
+    // Five rows that are not this account's saved video-one: the same post under another project, profile, account and native channel, and another post of this account.
+    const saved = (project, profile, account, native, post) => sql.run('INSERT INTO zernio_external_post_references (project_id, profile_id, account_id, native_account_id, platform_post_id, data, campaign_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', project, profile, account, native, post, JSON.stringify({ ...f.state.post, platformPostId: post }), other.id, '2030-01-01T00:00:00.000Z');
+    await saved('other-project', 'library-profile', 'account-youtube', 'native-youtube', 'video-one'); await saved(f.projectId, 'other-profile', 'account-youtube', 'native-youtube', 'video-one'); await saved(f.projectId, 'library-profile', 'account-linkedin', 'native-youtube', 'video-one');
+    await saved(f.projectId, 'library-profile', 'account-youtube', 'native-other', 'video-one'); await saved(f.projectId, 'library-profile', 'account-youtube', 'native-youtube', 'video-two');
+    const listed = async () => (await f.request(f.route('external-references'))).data.references;
+    assert.deepEqual((await listed()).map(row => row.platformPostId), ['video-two'], 'Only this project, profile, account and native channel are listed.');
+    assert.equal((await f.request(f.route('external-import'), { postId: 'video-one', campaignId: f.campaign.id })).status, 200); assert.deepEqual((await listed()).map(row => [row.platformPostId, row.campaignId]), [['video-two', other.id], ['video-one', f.campaign.id]], 'Newest first.');
+    const refreshed = await f.request(f.route('external-import'), { postId: 'video-one' }); assert.equal(refreshed.status, 200, JSON.stringify(refreshed.data)); assert.equal(refreshed.data.campaignId, f.campaign.id, 'A refresh keeps this account’s own campaign link, not another account’s.');
+    assert.equal((await f.request(f.route('external-remove'), { postId: 'video-one', confirmed: true })).status, 200);
+    const kept = [[f.projectId, 'library-profile', 'account-linkedin', 'native-youtube', 'video-one'], [f.projectId, 'library-profile', 'account-youtube', 'native-other', 'video-one'], [f.projectId, 'library-profile', 'account-youtube', 'native-youtube', 'video-two'], [f.projectId, 'other-profile', 'account-youtube', 'native-youtube', 'video-one'], ['other-project', 'library-profile', 'account-youtube', 'native-youtube', 'video-one']];
+    assert.deepEqual((await sql.all('SELECT project_id, profile_id, account_id, native_account_id, platform_post_id, campaign_id, updated_at FROM zernio_external_post_references')).map(row => Object.values(row).join(' ')).sort(), kept.map(key => [...key, other.id, '2030-01-01T00:00:00.000Z'].join(' ')).sort(), 'Removing a reference, and every import before it, leaves the other rows exactly as they were.');
+  } finally { await f.close(); }
+});
+
 test('refresh preserves campaign links beyond the newest 250 references unless reassignment is explicit', { skip: postgresSkip }, async t => {
   const f = await fixture(t);
   try {

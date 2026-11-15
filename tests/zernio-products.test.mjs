@@ -762,6 +762,16 @@ test('HTTP Shopify draft creation forces one priced variant, fresh store review,
       assert.deepEqual((await request(route() + '/create', { body, key })).data, result.data); assert.equal(writes().length, count + 1);
       assert.equal((await request(route() + '/create', { body: { ...body, price: '20' }, key })).data.error.code, 'IDEMPOTENCY_CONFLICT');
     }
+    // The provider transport observes the receipt synchronously: the native ID write starts right there, ahead of the mapping re-check that follows it.
+    {
+      freshStore(); const body = await review(), pool = app.database.pool, query = pool.query, order = [];
+      pool.query = function (...args) { order.push(typeof args[0] === 'string' ? args[0] : args[0]?.text || ''); return query.apply(this, args); };
+      // A real provider call takes event loop turns; without them the mapping check after the receipt would reuse the read made before the call and run no query at all.
+      providerHook = async call => { if (call.method === 'POST') { await new Promise(resolve => setTimeout(resolve, 20)); order.push('provider receipt'); } };
+      try { assert.equal((await request(route() + '/create', { body, key: 'product-create-receipt-order' })).status, 200); } finally { pool.query = query; providerHook = undefined; }
+      assert.match(order[order.indexOf('provider receipt') + 1], /^update "zernio_product_create_receipts" set "native_product_id"/, 'The native ID write is the first statement after the provider receipt.');
+      assert.deepEqual(await evidence('product-create-receipt-order'), { account_id: account._id, native_product_id: String(sequence) });
+    }
     // Parallel duplicates with one Idempotency-Key create one native product and share one sent outcome.
     freshStore(); const creates = () => calls.filter(call => call.method === 'POST' && call.url.pathname === '/api/v1/commerce/products').length;
     const parallelBody = await review(), parallelKey = 'product-create-parallel', createsBefore = creates();
