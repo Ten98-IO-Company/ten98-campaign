@@ -85,6 +85,8 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
   const statusBadge = (post: Row) => <Badge tone={statusTone(postStatus(post), approvalLabel(post))} dot>{statusText(post)}</Badge>;
   // Grid labels (time of day, weekday, month title) follow the grid's own locale="en"; the shared formatter has no such parts.
   const timeOnly = new Intl.DateTimeFormat('en', { timeZone: timezone, hour: '2-digit', minute: '2-digit' });
+  // Entry times name their zone (EDT, EST) as the header does, so two equal wall times on a clock change still read apart.
+  const entryTime = new Intl.DateTimeFormat('en', { timeZone: timezone, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
   // Grid and week days, keyed by the browser-local date that the agenda's times also use.
   const days = new Map<string, DayEntry[]>(), addDay = (day: string, entry: DayEntry) => days.set(day, [...(days.get(day) || []), entry]);
   const rangePosts = posts.filter(entry => new Date(entry.scheduledAt) >= start && new Date(entry.scheduledAt) < end);
@@ -94,7 +96,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
   const countPosts = (status: string) => new Set(rangePosts.filter(entry => postStatus(entry.post) === status).map(entry => entry.post.id)).size;
   const entries: (PublishingAgendaEntry & { order: number })[] = shownPosts.map(entry => ({
     id: `post:${entry.id}`, title: entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post)),
-    dateTime: entry.scheduledAt, when: format.dateTime(new Date(entry.scheduledAt)), order: Date.parse(entry.scheduledAt),
+    dateTime: entry.scheduledAt, when: entryTime.format(new Date(entry.scheduledAt)), order: Date.parse(entry.scheduledAt),
     status: statusBadge(entry.post),
     details: [destinations(entry), entry.accountId && (accounts.find(account => String(account._id || account.id) === entry.accountId)?.displayName || entry.accountId), campaignOf(entry.post)?.name].filter(Boolean).join(' · '),
     actions: <Button variant="secondary" size="sm" onClick={() => onSelect(entry.post)}>{canWrite ? 'Open post' : 'View post'}</Button>,
@@ -109,7 +111,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
     const date = new Date(activation.startAt);
     if (!(date < end && (Date.parse(activation.endAt) || date.getTime()) > start.getTime())) continue;
     const label = `Field activity · ${activation.name}`, status = activation.status ? capital(String(activation.status)) : 'Status unavailable', tone: Tone = activation.status === 'completed' ? 'success' : 'info';
-    entries.push({ id: `activation:${activation.id}`, title: label, dateTime: activation.startAt, when: format.dateTime(date), order: date.getTime(), status: <Badge tone={tone} dot>{status}</Badge>, details: [activation.location, campaignOf(activation)?.name].filter(Boolean).join(' · ') });
+    entries.push({ id: `activation:${activation.id}`, title: label, dateTime: activation.startAt, when: entryTime.format(date), order: date.getTime(), status: <Badge tone={tone} dot>{status}</Badge>, details: [activation.location, campaignOf(activation)?.name].filter(Boolean).join(' · ') });
     addDay(localDate(date < start ? start : date), { id: `activation:${activation.id}`, label: `${label} · ${status}`, time: timeOnly.format(date), snippet: label, status, tone, activation });
   }
   // The Google copy of an activation shown above, at the same start, is the same entry.
@@ -124,7 +126,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
     // The Google overlay toggle hides events without changing what was loaded.
     if (filters.googleHidden) { googleHidden++; continue; }
     entries.push({ id: `google:${event.id}`, title: `Google · ${event.summary}`, dateTime, order: date.getTime(),
-      when: allDay ? `${format.date(event.start.date)} – ${format.date(event.end.date)}` : format.dateTime(date),
+      when: allDay ? `${format.date(event.start.date)} – ${format.date(event.end.date)}` : entryTime.format(date),
       status: allDay ? 'All day · End date exclusive' : 'Google Calendar event', actions: googleEventActions?.(event),
     });
     // Google entries stay plain text in the grid: their actions live in the list and week views.

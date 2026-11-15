@@ -50,8 +50,9 @@ test('the real expanded schedules retain account captions, timezone instants, or
       ['post:post:first', 'Shared caption', '2026-11-01T05:30:00Z', 'Facebook · First account'],
       ['post:post:second', 'Second caption', '2026-11-01T10:30:00+04:00', 'Facebook · Second account'],
     ]);
-    // Both read 1:30 AM New York time on the day the clocks go back; they are an hour apart as instants.
-    assert.match(entries[0].when, /^Nov 1, 2026, 1:30\sAM$/); assert.match(entries[1].when, /^Nov 1, 2026, 1:30\sAM$/);
+    // Both are 1:30 AM New York time on the day the clocks go back: the zone name tells the two instants apart.
+    assert.match(entries[0].when, /Nov 1, 2026, 01:30\sAM EDT/);
+    assert.match(entries[1].when, /Nov 1, 2026, 01:30\sAM EST/);
     assert.equal(entries[1].order - entries[0].order, 3600000);
     entries.forEach(entry => entry.actions.props.onClick());
     assert.ok(selected.every(item => item === post));
