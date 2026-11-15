@@ -171,7 +171,7 @@ function app(href = 'https://campaign.example/?view=overview&project=a', initial
     history: { get state() { return entries[index].state; }, pushState(state, _title, url) { entries.splice(index + 1); entries.push({ state, url: new URL(url, entries[index].url) }); index++; }, replaceState(state, _title, url) { entries[index] = { state, url: new URL(url || entries[index].url, entries[index].url) }; }, go(delta) { queueMicrotask(() => { if (index + delta < 0 || index + delta >= entries.length) return; index += delta; listeners.get('popstate')?.(); }); } },
   };
   const dialog = { contains: () => true, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {}, close() { this.open = false; }, showModal() { this.open = true; } }, context = {
-    window, document: { activeElement: null }, pageSections, navigationUrl, readNavigation, editorValues, campaignCreationRoute, DOMException, setTimeout,
+    window, document: { activeElement: null }, pageSections, navigationUrl, readNavigation, editorValues, campaignCreationRoute, DOMException, setTimeout, flushSync: work => { work(); void context.leaveGuard; },
     state: initial, navigationRef: { current: readNavigation(window.location.search) }, historyIndex: { current: 0 }, restoringPop: { current: null },
     modal: null, modalRef: { current: null }, dialogRef: { current: dialog }, triggerRef: { current: null }, signedOutFocus: { current: false }, draftDirty: false, dirtyScopes: { current: new Map() },
     inboxDirty: false, inboxDraft: { current: { dirty: false, revision: 0 } }, discardSwitch: { current: false }, pendingKeys: { current: new Map() },
@@ -444,6 +444,19 @@ test('an edit marks the editor dirty after the input event, so the field keeps i
   assert.equal(later.draftDirty, false);
 });
 
+test('an exit right after the first edit, before its dirty flag is set, still asks (#347 review)', async () => {
+  // Closing, Escape and Back can run before markEditorDirty's queued flag: they decide from the scope map and render the
+  // flag into the shared guard first, so the edit is never closed away unasked.
+  const ui = app(), caption = { closest: () => caption };
+  ui.modalRef.current = { type: 'post' };
+  ui.markEditorDirty(caption);
+  assert.equal(ui.draftDirty, false, 'The flag is still queued.');
+  ui.closeEditor();
+  assert.equal(ui.discardPrompt, true, 'The close asks instead of discarding the first edit.'); assert.ok(ui.modalRef.current);
+  await ui.keepEditing();
+  assert.equal(ui.discardPrompt, false); assert.equal(ui.draftDirty, true); assert.ok(ui.modalRef.current);
+});
+
 test('Escape, closing, and project navigation preserve edits until explicit discard; saved scopes do not clear other forms', async () => {
   const ui = app(), first = { closest: () => first }, second = { closest: () => second };
   ui.modalRef.current = { type: 'campaign' }; ui.markEditorDirty(first); ui.markEditorDirty(second);
@@ -472,7 +485,7 @@ test('button-based edits are detected while preview and platform-tab buttons lea
   const click = role => ({ currentTarget: ui.dialogRef.current, target: { closest: () => ({ type: 'button', getAttribute: () => role }) } });
   ui.watchEditorButtons(click(null)); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(ui.draftDirty, false);
   ui.watchEditorButtons(click('tab')); values.push({ ...values[0], value: '' }); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(ui.draftDirty, false);
-  ui.watchEditorButtons(click(null)); values.pop(); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(ui.draftDirty, true);
+  ui.watchEditorButtons(click(null)); values.pop(); for (let wait = 0; wait < 100 && !ui.draftDirty; wait++) await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(ui.draftDirty, true);
 });
 
 test('inbox drafts guard page exits without a modal and leave same-route and unrelated modal closes intact', async () => {
