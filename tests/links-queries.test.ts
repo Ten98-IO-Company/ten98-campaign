@@ -113,7 +113,7 @@ test('two first reads of a project keep one settings row and one set of tokens',
     await gate.waiting(2); await gate.release();
     const [first, second] = await Promise.all(reads);
     assert.deepEqual([first.status, second.status], [200, 200]); assert.equal(first.data.settings.siteToken, second.data.settings.siteToken);
-    assert.equal((await f.rows("SELECT * FROM project_link_settings WHERE project_id = 'two'")).length, 1);
+    assert.deepEqual((await f.rows("SELECT website_origins::text AS stored FROM project_link_settings WHERE project_id = 'two'")).map(row => row.stored), ['[]'], 'One row, with the default origins stored as JSON text.');
   } finally { await f.close(); }
 });
 
@@ -129,7 +129,7 @@ test('a settings save waits for the row lock, so it cannot write back a stale sh
       await holder.query("UPDATE project_link_settings SET short_base_url = 'https://go.example.com' WHERE project_id = 'one'"); await holder.query('COMMIT');
       const saved = await save;
       assert.equal(saved.status, 200, saved.text); assert.equal(saved.data.settings.shortBaseUrl, 'https://go.example.com'); assert.deepEqual(saved.data.settings.allowedWebsiteOrigins, [origin.Origin]);
-      assert.deepEqual(await f.rows("SELECT short_base_url, website_origins FROM project_link_settings WHERE project_id = 'one'"), [{ short_base_url: 'https://go.example.com', website_origins: [origin.Origin] }]);
+      assert.deepEqual(await f.rows("SELECT short_base_url, website_origins::text AS stored FROM project_link_settings WHERE project_id = 'one'"), [{ short_base_url: 'https://go.example.com', stored: JSON.stringify([origin.Origin]) }], 'The origins are stored as the same JSON text as before.');
     } finally { await holder.query('ROLLBACK').catch(() => undefined); holder.release(); }
   } finally { await f.close(); }
 });

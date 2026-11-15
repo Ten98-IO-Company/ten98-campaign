@@ -94,6 +94,7 @@ export function createLinks({ db, appUrl }: { db: Database; appUrl: string }) {
   async function analytics(projectId: string, url: URL) {
     await cleanup(); const days = Number(url.searchParams.get('days') ?? 30);
     if (!Number.isInteger(days) || days < 1 || days > 365) fail(400, 'Choose a reporting period between 1 and 365 days.');
+    // An empty campaign ID reports every link of the project; a campaign ID narrows the links and their days to that campaign.
     const campaignId = await campaign(projectId, url.searchParams.get('campaignId') || ''), from = new Date(Date.now() - (days - 1) * 86400000).toISOString().slice(0, 10), linkRows = await db.select().from(campaignLinks).where(and(eq(campaignLinks.project_id, projectId), campaignId ? eq(campaignLinks.campaign_id, campaignId) : undefined)).orderBy(desc(campaignLinks.seq)), links = await Promise.all(linkRows.map(row => linkView(row, from)));
     const linkDays = await db.select({ day: campaignLinkDaily.day, clicks: sql<number>`SUM(${campaignLinkDaily.clicks})`, qrScans: sql<number>`SUM(${campaignLinkDaily.qr_scans})` }).from(campaignLinkDaily).innerJoin(campaignLinks, eq(campaignLinks.id, campaignLinkDaily.link_id)).where(and(eq(campaignLinks.project_id, projectId), gte(campaignLinkDaily.day, from), campaignId ? eq(campaignLinks.campaign_id, campaignId) : undefined)).groupBy(campaignLinkDaily.day);
     // Website events have no campaign identity; campaign-filtered reports include link traffic only.
