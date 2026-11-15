@@ -237,7 +237,7 @@ export async function createApp(options: AppOptions = {}) {
             await tx.execute(sql`UPDATE installation SET claimed = true WHERE id = 1`);
           });
           // The owner is signed in through Better Auth once the claim has committed.
-          await auth.signIn(req, res, mail, secret);
+          await auth.signInNewAccount(req, res, mail, secret);
           return send(201, { user: { id, name, email: mail, isOperator: true }, workspaceId });
         }
         if (path === '/api/auth/login' && req.method === 'POST') return send(200, { user: await auth.login(req, res, { email: email(body.email), password: loginPassword(body.password) }) });
@@ -264,7 +264,7 @@ export async function createApp(options: AppOptions = {}) {
         }
         if (path === '/api/auth/oidc/callback' && req.method === 'GET') return await auth.oidcCallback(req, res, url);
         const signedIn = await auth.user(req, res);
-        if (await handleInvitations({ req, url, body, user: signedIn, db, auth, config, send, workspaceAccess, signIn: (address: string, secret: string) => auth.signIn(req, res, address, secret) })) return;
+        if (await handleInvitations({ req, url, body, user: signedIn, db, auth, config, send, workspaceAccess, signIn: (address: string, secret: string) => auth.signInNewAccount(req, res, address, secret) })) return;
         const user = signedIn; if (!user) throw new HttpError(401, 'Sign in to continue.');
         if (path === '/api/account' && req.method === 'GET') return send(200, { user, ...await auth.account(user.id) });
         if (path === '/api/account' && req.method === 'PATCH') { if (Object.keys(body).some(key => key !== 'name')) bad('Only your display name can be changed here.'); await updateDisplayName(db, user.id, text(body.name, 'Name')); return send(200, { user: await auth.user(req, res) }); }

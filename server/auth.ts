@@ -162,9 +162,9 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   /**
    * Signs in with a password through the preset's signInWithPassword (verified outside any transaction, then again under
    * the account lock, where the session is created); null when the email or password is wrong. `allow` is the attempt's
-   * rate limit; setup and invitation acceptance sign in an account they just created, so theirs always allows.
+   * rate limit.
    */
-  async function signIn(req: IncomingMessage, res: ServerResponse, email: string, password: string, allow: SignInLimit = () => true): Promise<PublicUser | null> {
+  async function signIn(req: IncomingMessage, res: ServerResponse, email: string, password: string, allow: SignInLimit): Promise<PublicUser | null> {
     const response = await identity.signInWithPassword(db, { email, password, headers: headers(req) }, allow);
     if (response.status === 429) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
     if (response.status === 503) throw new HttpError(503, 'Sign-in is busy. Try again shortly.');
@@ -174,10 +174,12 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     if (signedIn.twoFactorRedirect) throw new HttpError(403, 'Two-factor sign-in is not available in Campaign yet.');
     const userId = signedIn.user?.id;
     if (!userId) return null;
-    forward(res, response);
-    // The account the new session belongs to.
+    // The account the new session belongs to, read before its cookie is sent: an account removed since the locked
+    // transaction committed gets neither a user nor a cookie.
     const row = (await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, userId)))[0];
-    return row ? publicUser({ ...row, isOperator: await isOperator(db, userId) }) : null;
+    if (!row) return null;
+    forward(res, response);
+    return publicUser({ ...row, isOperator: await isOperator(db, userId) });
   }
   /** Issues a session for an account the OIDC flow verified (after its transaction committed). */
   async function signInVerified(req: IncomingMessage, res: ServerResponse, userId: string): Promise<void> {
@@ -203,7 +205,9 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     return timingSafeEqual(Buffer.from(digest(value)), Buffer.from(stored)) ? token : '';
   }
   return {
-    user, limit, clientKey, signIn,
+    user, limit, clientKey,
+    /** Signs in an account that setup or invitation acceptance has just created and committed; no sign-in limit applies. */
+    signInNewAccount: (req: IncomingMessage, res: ServerResponse, email: string, password: string) => signIn(req, res, email, password, () => true),
     /** Whether the request carries a session cookie of this installation, current or retired, so an ended session can be reported once. */
     carriesSession: (req: IncomingMessage) => /^[A-Za-z0-9]+\./.test(sessionCookieValue(req)) || retiredCookies.some(name => Object.hasOwn(cookies(req), name)),
     /** A SQL condition that holds while the session this request resolved is live for `userId`, for guards that read it with other state in one statement. */

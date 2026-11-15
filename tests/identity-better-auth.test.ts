@@ -169,7 +169,7 @@ test('two accounts can never share an email that differs only in case, and migra
     await client.query("INSERT INTO users VALUES ('a', 'A', 'twin@example.test', NULL), ('b', 'B', 'Twin@example.test', NULL)");
     await assert.rejects(client.query(sources.find(source => source.version === '0013')!.sql), /same email address in different letter case/);
     assert.equal((await client.query("SELECT count(*)::int AS n FROM information_schema.columns WHERE table_schema = 'premove' AND table_name = 'users' AND column_name = 'password'")).rows[0].n, 1, 'Nothing changed.');
-  } finally { client.release(); }
+  } finally { client.release(true); }
 });
 
 test('AUTH_SECRET_FILE must name a file holding the secret; it never falls back to a generated one', async t => {
