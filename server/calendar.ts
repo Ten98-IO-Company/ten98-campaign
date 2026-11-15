@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, or, sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
 import type { Database } from './database.ts';
 import { googleToken, pathSegment, providerRequest, operation, IntegrationError, type OperationContext, type ProviderRecord } from './provider-core.ts';
+import { calendarConnections, calendarPlanGenerations, integrationOperations } from './schema.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
 import { ACTIVATION_TYPE_LABELS, type ActivationType } from '../shared/offline-activations.ts';
 
@@ -58,7 +59,7 @@ export async function calendarPlan(store: ProviderRecord, projectId: string, gen
   return plan;
 }
 async function planIntent(store: ProviderRecord, projectId: string, calendarId: string, native: ProviderRecord[] = [], db?: Database) {
-  const generations = new Map<string, number>((db ? (await db.execute(sql`SELECT collection,record_id,account_id,generation FROM calendar_plan_generations WHERE project_id=${projectId} AND calendar_id=${calendarId}`)).rows as ProviderRecord[] : []).map((row): [string, number] => [generationKey(row.collection, row.record_id, row.account_id), row.generation]));
+  const generations = new Map<string, number>((db ? await db.select({ collection: calendarPlanGenerations.collection, record_id: calendarPlanGenerations.record_id, account_id: calendarPlanGenerations.account_id, generation: calendarPlanGenerations.generation }).from(calendarPlanGenerations).where(and(eq(calendarPlanGenerations.project_id, projectId), eq(calendarPlanGenerations.calendar_id, calendarId))) : []).map((row): [string, number] => [generationKey(row.collection, row.record_id, row.account_id), row.generation]));
   const plan = await calendarPlan(store, projectId, generations), ids = new Set(plan.map(event => event.id));
   const copies = (await store.list(projectId, 'posts')).filter((row: ProviderRecord) => !row.sample).map((row: ProviderRecord) => ({ id: row.id, accounts: row.accounts, accountOverrides: row.accountOverrides, platformOverrides: row.platformOverrides })).sort((a: ProviderRecord, b: ProviderRecord) => a.id.localeCompare(b.id));
   const snapshot = snapshotOf([[...plan].sort((a, b) => a.id.localeCompare(b.id)), copies]);
@@ -78,7 +79,7 @@ export async function handleCalendar(context: OperationContext & { user: Provide
   if (!url.pathname.startsWith(`/api/projects/${project.id}/calendar/`)) return false;
   const path = url.pathname.split('/calendar/')[1], env = context.config?.env || process.env;
   const configured = Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY);
-  const mapped = async () => (await db.execute(sql`SELECT calendar_id FROM calendar_connections WHERE project_id=${project.id}`)).rows[0]?.calendar_id as string | undefined;
+  const mapped = async () => (await db.select({ calendar_id: calendarConnections.calendar_id }).from(calendarConnections).where(eq(calendarConnections.project_id, project.id)))[0]?.calendar_id;
   const mappedId = await mapped(), connection = mappedId ? { calendarId: mappedId } : undefined;
   try {
     if (path === 'status' && req.method === 'GET') { send(200, { configured, mapped: Boolean(connection), calendarId: connection?.calendarId || '' }); return true; }
@@ -86,12 +87,12 @@ export async function handleCalendar(context: OperationContext & { user: Provide
       if (!user.isOperator || !['owner', 'admin'].includes(role)) fail(403, 'Only an instance operator with workspace administration can map a calendar.');
       const calendarId = typeof body.calendarId === 'string' ? body.calendarId.trim() : '';
       if (calendarId && (calendarId.length > 500 || !/^[\w.@+%-]+$/.test(calendarId) || /^\.{1,2}$/.test(calendarId) || calendarId === 'primary')) fail(400, 'Use the ID of the calendar shared with your Google service account.');
-      if (!calendarId) await db.execute(sql`DELETE FROM calendar_connections WHERE project_id=${project.id}`);
+      if (!calendarId) await db.delete(calendarConnections).where(eq(calendarConnections.project_id, project.id));
       // The calendar lock serialises parallel mappings of one calendar, so the conflict check sees the other project.
       else await db.transaction(async tx => {
         await advisoryLock(tx, 'calendar-connection:' + calendarId);
-        if ((await tx.execute(sql`SELECT project_id FROM calendar_connections WHERE calendar_id=${calendarId} AND project_id<>${project.id}`)).rowCount) fail(409, 'This calendar is already mapped to another project.');
-        await tx.execute(sql`INSERT INTO calendar_connections VALUES (${project.id}, ${calendarId}) ON CONFLICT (project_id) DO UPDATE SET calendar_id=excluded.calendar_id`);
+        if ((await tx.select({ project_id: calendarConnections.project_id }).from(calendarConnections).where(and(eq(calendarConnections.calendar_id, calendarId), ne(calendarConnections.project_id, project.id)))).length) fail(409, 'This calendar is already mapped to another project.');
+        await tx.insert(calendarConnections).values({ project_id: project.id, calendar_id: calendarId }).onConflictDoUpdate({ target: calendarConnections.project_id, set: { calendar_id: calendarId } });
       });
       await store.activity(project.id, 'Google Calendar connection updated.'); send(200, { mapped: Boolean(calendarId), calendarId }); return true;
     }
@@ -103,7 +104,7 @@ export async function handleCalendar(context: OperationContext & { user: Provide
     const rememberGeneration = async (identity: ReturnType<typeof planIdentity>, retired = false) => {
       // Google keeps deleted IDs. Reserve the next one before DELETE, including an unconfirmed deletion.
       if (identity && !await currentMapping()) fail(409, 'The calendar mapping or project access changed. Refresh this project.');
-      if (identity) await db.execute(sql`INSERT INTO calendar_plan_generations VALUES (${project.id}, ${connection.calendarId}, ${identity.collection}, ${identity.recordId}, ${identity.accountId || ''}, ${identity.generation + (retired ? 1 : 0)}, ${identity.generation}) ON CONFLICT (project_id,calendar_id,collection,record_id,account_id) DO UPDATE SET generation=GREATEST(calendar_plan_generations.generation,excluded.generation),known_generation=GREATEST(calendar_plan_generations.known_generation,excluded.known_generation)`);
+      if (identity) await db.insert(calendarPlanGenerations).values({ project_id: project.id, calendar_id: connection.calendarId, collection: identity.collection, record_id: identity.recordId, account_id: identity.accountId || '', generation: identity.generation + (retired ? 1 : 0), known_generation: identity.generation }).onConflictDoUpdate({ target: [calendarPlanGenerations.project_id, calendarPlanGenerations.calendar_id, calendarPlanGenerations.collection, calendarPlanGenerations.record_id, calendarPlanGenerations.account_id], set: { generation: sql`GREATEST(${calendarPlanGenerations.generation}, excluded.generation)`, known_generation: sql`GREATEST(${calendarPlanGenerations.known_generation}, excluded.known_generation)` } });
     };
     const call = async (suffix = '', method = 'GET', payload?: ProviderRecord, etag?: string) => {
       if (!await currentMapping()) fail(409, 'The calendar mapping changed. Refresh this project.');
@@ -139,7 +140,7 @@ export async function handleCalendar(context: OperationContext & { user: Provide
       const native = await list(true), listed = new Set(native.map(event => event.id));
       const initial = await planIntent(store, project.id, connection.calendarId, native, db);
       for (const event of initial.plan.filter(event => !listed.has(event.id))) {
-        const identity = planIdentity(event, project.id), known = (await db.execute(sql`SELECT known_generation FROM calendar_plan_generations WHERE project_id=${project.id} AND calendar_id=${connection.calendarId} AND collection=${identity!.collection} AND record_id=${identity!.recordId} AND account_id=${identity!.accountId || ''}`)).rows[0] as ProviderRecord | undefined;
+        const identity = planIdentity(event, project.id), known = (await db.select({ known_generation: calendarPlanGenerations.known_generation }).from(calendarPlanGenerations).where(and(eq(calendarPlanGenerations.project_id, project.id), eq(calendarPlanGenerations.calendar_id, connection.calendarId), eq(calendarPlanGenerations.collection, identity!.collection), eq(calendarPlanGenerations.record_id, identity!.recordId), eq(calendarPlanGenerations.account_id, identity!.accountId || ''))))[0];
         if (!known || known.known_generation < identity!.generation) continue;
         let found;
         try { found = await call('/' + event.id); } catch (error: any) { if (![404, 410].includes(error.providerStatus)) throw error; found = { id: event.id, status: 'cancelled' }; }
@@ -156,7 +157,7 @@ export async function handleCalendar(context: OperationContext & { user: Provide
       const initial = await planIntent(store, project.id, connection.calendarId, [], db);
       const result = await operation({ ...context, body: { planFingerprint: body.planFingerprint || initial.fingerprint } }, async () => {
         const legacyHash = createHash('sha256').update(JSON.stringify({ body: {}, method: req.method, path: url.pathname })).digest('hex');
-        if ((await db.execute(sql`SELECT id FROM integration_operations WHERE project_id=${project.id} AND request_key<>${req.headers['idempotency-key'] as string} AND status IN ('pending','uncertain') AND (action_path='POST /calendar/sync' OR (action_path='' AND request_hash=${legacyHash}))`)).rowCount) fail(409, 'Review the earlier unconfirmed Calendar plan sync before publishing another plan.');
+        if ((await db.select({ id: integrationOperations.id }).from(integrationOperations).where(and(eq(integrationOperations.project_id, project.id), ne(integrationOperations.request_key, req.headers['idempotency-key'] as string), inArray(integrationOperations.status, ['pending', 'uncertain']), or(eq(integrationOperations.action_path, 'POST /calendar/sync'), and(eq(integrationOperations.action_path, ''), eq(integrationOperations.request_hash, legacyHash)))))).length) fail(409, 'Review the earlier unconfirmed Calendar plan sync before publishing another plan.');
         const native = await list(true), intent = await planIntent(store, project.id, connection.calendarId, native, db), { plan, snapshot, deletions, deletionSnapshot, fingerprint } = intent;
         if (initial.snapshot !== snapshot || body.planFingerprint !== undefined && body.planFingerprint !== fingerprint) fail(409, 'The campaign plan changed. Review it again before publishing.');
         if (deletions.length && body.planFingerprint === undefined) fail(409, 'Review the exact obsolete app-managed events before removing them from Google Calendar.');
