@@ -93,7 +93,8 @@ function readNavigation(search: string, pathname = '/'): Navigation {
   return { page, section: knownSection && requested ? requested : sections[0] || '', projectId: params.get('project') || '', ...(item ? { item } : {}), ...(knownPath && knownView && knownSection ? {} : { notFound: true }) };
 }
 function navigationUrl(next: Navigation, href: string) {
-  const url = new URL(href); url.searchParams.set('view', pageRoutes[next.page]);
+  // Campaign is served at the root, so leaving an unknown path through the app writes a good address.
+  const url = new URL(href); url.pathname = '/'; url.searchParams.set('view', pageRoutes[next.page]);
   if (next.section && next.section !== pageSections[next.page]?.[0]) url.searchParams.set('section', next.section); else url.searchParams.delete('section');
   if (next.projectId) url.searchParams.set('project', next.projectId); else url.searchParams.delete('project');
   if (next.item) url.searchParams.set('item', next.item); else url.searchParams.delete('item');

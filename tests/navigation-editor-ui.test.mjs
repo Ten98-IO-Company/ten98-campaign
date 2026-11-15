@@ -33,6 +33,9 @@ test('an unknown path or an unknown campaign in the address shows Page not found
   for (const pathname of ['/nonsense/path', '/overview', '/campaigns/c1']) assert.deepEqual(readNavigation('', pathname), { page: 'Overview', section: '', projectId: '', notFound: true }, pathname);
   assert.equal(readNavigation('?view=ads&project=a', '/nonsense').notFound, true);
   for (const pathname of ['/', '/index.html', undefined]) assert.equal(readNavigation('?view=ads', pathname).notFound, undefined, String(pathname));
+  // Leaving an unknown path through the app writes the root address, so a reload or Back does not show Page not found again.
+  const left = navigationUrl({ page: 'Overview', section: '', projectId: 'a' }, 'https://campaign.example/nonsense/path?view=overview&project=a');
+  assert.match(left, /^\/\?/); assert.equal(readNavigation(new URL(left, 'https://campaign.example').search, new URL(left, 'https://campaign.example').pathname).notFound, undefined);
   assert.match(source, /readNavigation\(window\.location\.search, window\.location\.pathname\)\)/, 'The first read of the address includes its path.');
   assert.match(source, /next = readNavigation\(window\.location\.search, window\.location\.pathname\)/, 'Back and forward read the path too.');
   // The same mechanism serves a campaign id that is not among the loaded campaigns; it never fires before the campaigns are known.
