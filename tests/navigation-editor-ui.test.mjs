@@ -197,8 +197,9 @@ test('all page URLs round-trip, preserve connection links, and reject sections f
   }
   assert.equal(readNavigation('?view=integrations').page, 'Integrations'); assert.equal(readNavigation('?view=settings').page, 'Settings');
   assert.equal(readNavigation('?view=assistant').page, 'Draft content');
-  assert.deepEqual(readNavigation('?view=ads&section=contacts'), { page: 'Ads manager', section: 'campaigns', projectId: '' });
-  assert.deepEqual(readNavigation('?view=unknown&section=shopping'), { page: 'Overview', section: '', projectId: '' });
+  assert.deepEqual(readNavigation('?view=ads&section=contacts'), { page: 'Ads manager', section: 'campaigns', projectId: '', notFound: true }, 'An unknown section is reported, not silently replaced.');
+  assert.deepEqual(readNavigation('?view=unknown&section=shopping'), { page: 'Overview', section: '', projectId: '', notFound: true }, 'An unknown view is reported, not silently shown as Home.');
+  for (const known of ['', '?view=overview', '?view=assistant', '?view=ads', '?view=ads&section=shopping', '?view=settings&section=profile', '?project=p1']) assert.equal(readNavigation(known).notFound, undefined, known);
   // A campaign page is Campaigns with ?item=; other pages ignore the parameter.
   const campaignPage = { page: 'Campaigns', section: '', projectId: 'a', item: 'c1' };
   assert.deepEqual(readNavigation(new URL(navigationUrl(campaignPage, 'https://campaign.example/'), 'https://campaign.example').search), campaignPage);
