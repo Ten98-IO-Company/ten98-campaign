@@ -47,7 +47,7 @@ test('HTTP publishing approvals, Drive delivery links and provider outcome revie
     const state = (await request('/api/state')).data, projectId = state.projectId, workspaceId = state.workspaces[0].id, project = `/api/projects/${projectId}`;
     assert.equal(state.user.isOperator, true);
     assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);
-    const passwordHash = (await app.sql.get("SELECT password FROM accounts WHERE user_id=? AND provider_id='credential'", state.user.id)).password;
+    const passwordHash = (await app.sql.get("SELECT password FROM account WHERE \"userId\"=? AND \"providerId\"='credential'", state.user.id)).password;
     async function member(name, role) {
       const userId = randomUUID(), email = `${name}@example.test`;
       await addUsers(app.sql, [{ id: userId, name: name, email: email, password: passwordHash }]);

@@ -11,14 +11,16 @@ const tables = Object.values(schema).map(table => getTableConfig(table));
 const migrationSql = async () => (await migrationSources()).map(migration => migration.sql).join('\n');
 
 test('every Drizzle table and column is created by the SQL migrations', async () => {
-  const sql = await migrationSql(), type = '(?:text|bigint|integer|boolean|json|bytea)\\b';
+  // Names may be quoted (Better Auth's camelCase columns and the "user" table, ten98-code-system#97).
+  const sql = await migrationSql(), type = '(?:text|bigint|integer|boolean|json|bytea|timestamptz)\\b', name = '"?(\\w+)"?';
   // Statements apply in order, so a table or column a later migration drops (or drops and recreates) is tracked.
   const created = new Map();
-  for (const [statement, table, body, added, addedColumn, altered, droppedColumn, dropped] of sql.matchAll(new RegExp(`^CREATE TABLE (\\w+) \\((.*)\\);$|^ALTER TABLE (\\w+) ADD COLUMN (\\w+) ${type}|^ALTER TABLE (\\w+) DROP COLUMN (\\w+);$|^DROP TABLE (\\w+);$`, 'gm'))) {
-    if (table) created.set(table, [...body.matchAll(new RegExp(`(?:^|, )(\\w+) ${type}`, 'g'))].map(match => match[1]));
+  for (const [statement, table, body, added, addedColumn, altered, droppedColumn, dropped, renamed, renamedTo] of sql.matchAll(new RegExp(`^CREATE TABLE ${name} \\((.*)\\);$|^ALTER TABLE ${name} ADD COLUMN ${name} ${type}|^ALTER TABLE ${name} DROP COLUMN ${name};$|^DROP TABLE ${name};$|^ALTER TABLE ${name} RENAME TO ${name};$`, 'gm'))) {
+    if (table) created.set(table, [...body.matchAll(new RegExp(`(?:^|, )${name} ${type}`, 'g'))].map(match => match[1]));
     else if (added) created.get(added).push(addedColumn);
     else if (altered) created.set(altered, created.get(altered).filter(column => column !== droppedColumn));
     else if (dropped) created.delete(dropped);
+    else if (renamed) { created.set(renamedTo, created.get(renamed)); created.delete(renamed); }
     else assert.fail(statement);
   }
   assert.equal(tables.length, 89);
@@ -75,7 +77,7 @@ test('migrations build exactly the Drizzle schema on PostgreSQL, once, and keep 
     assert.deepEqual((await pool.query('SELECT id, claimed FROM installation')).rows, [{ id: 1, claimed: false }]);
 
     const columns = (await pool.query(`SELECT table_name, column_name, data_type, is_nullable, column_default, is_identity, identity_generation FROM information_schema.columns WHERE table_schema = 'public' AND table_name <> 'schema_version' ORDER BY table_name, ordinal_position`)).rows;
-    const constraints = (await pool.query(`SELECT c.conrelid::regclass::text AS table_name, c.conname, c.contype, array(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(n, i) JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n ORDER BY k.i)::text[] AS columns, c.confrelid::regclass::text AS foreign_table, c.confdeltype FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = 'public' AND c.conrelid::regclass::text <> 'schema_version'`)).rows;
+    const constraints = (await pool.query(`SELECT btrim(c.conrelid::regclass::text, '"') AS table_name, c.conname, c.contype, array(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY k(n, i) JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n ORDER BY k.i)::text[] AS columns, btrim(c.confrelid::regclass::text, '"') AS foreign_table, c.confdeltype FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = 'public' AND c.conrelid::regclass::text <> 'schema_version'`)).rows;
     const indexes = (await pool.query(`SELECT tablename, indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname NOT IN (SELECT conname FROM pg_constraint)`)).rows;
     const onDelete = { a: 'no action', c: 'cascade', n: 'set null' };
     assert.equal(new Set(columns.map(row => row.table_name)).size, tables.length);

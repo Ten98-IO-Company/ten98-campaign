@@ -72,7 +72,7 @@ test('TikTok reads withhold stale results after identity and actual access chang
       f.setHook(async url => {
         if (!url.pathname.endsWith('/commercial-music')) return;
         if (change === 'identity') f.account.platformUserId = 'another-native-account';
-        if (change === 'session') await f.app.sql.run('DELETE FROM sessions');
+        if (change === 'session') await f.app.sql.run('DELETE FROM session');
         if (change === 'mapping') await f.app.sql.run("UPDATE projects SET zernio_profile_id='other'");
         if (change === 'credentials') assert.equal((await f.request('/api/settings/integrations/zernio', 'PUT', { fields: { apiKey: 'changed-synthetic-key' } })).status, 200);
         return { tracks: [f.track] };

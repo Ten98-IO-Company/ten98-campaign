@@ -1,24 +1,49 @@
--- Identity moves onto Better Auth through @ten98/runtime/auth (ten98-code-system#97). users keeps its name, ids and
--- references, and gains Better Auth's user fields. Each local password moves unchanged into a 'credential' account, so it
--- still verifies through the preset's legacy scrypt check and is rehashed on the next successful sign-in. Every existing
--- session and reset link ends here, which issue #97 accepts as a one-time re-sign-in. Times stay bigint epoch milliseconds.
--- Emails are unique ignoring case, as the preset's schema requires; an installation whose accounts already collide stops
--- here, before anything changes, so they can be merged first.
-DO $$ BEGIN IF EXISTS (SELECT 1 FROM users GROUP BY lower(email) HAVING count(*) > 1) THEN RAISE EXCEPTION 'Two or more accounts use the same email address in different letter case. Merge them before upgrading.'; END IF; END $$;
-CREATE UNIQUE INDEX users_email_lower_key ON users (lower(email));
-ALTER TABLE users ADD COLUMN email_verified boolean NOT NULL DEFAULT false;
-ALTER TABLE users ADD COLUMN image text;
-ALTER TABLE users ADD COLUMN two_factor_enabled boolean NOT NULL DEFAULT false;
-ALTER TABLE users ADD COLUMN created_at bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
-ALTER TABLE users ADD COLUMN updated_at bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
-CREATE TABLE accounts (id text PRIMARY KEY, account_id text NOT NULL, provider_id text NOT NULL, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, access_token text, refresh_token text, id_token text, access_token_expires_at bigint, refresh_token_expires_at bigint, scope text, password text, created_at bigint NOT NULL, updated_at bigint NOT NULL, CONSTRAINT accounts_provider_id_account_id_key UNIQUE (provider_id, account_id));
-CREATE INDEX accounts_user_id_idx ON accounts (user_id);
-INSERT INTO accounts (id, account_id, provider_id, user_id, password, created_at, updated_at) SELECT gen_random_uuid()::text, id, 'credential', id, password, created_at, created_at FROM users WHERE password IS NOT NULL;
-ALTER TABLE users DROP COLUMN password;
+-- Identity moves onto Better Auth through @ten98/runtime/auth (ten98-code-system#97), in the common schema the preset reads
+-- (code-system workspace-team.sql) and Better Auth's default model names: "user", account, session, verification and
+-- "twoFactor", with camelCase columns and timestamptz. users is renamed, so its ids and every foreign key that points at it
+-- are kept. Each local password moves unchanged into a 'credential' account, where the preset's legacy scrypt check accepts
+-- it and rehashes it once. Every existing session and pending reset link ends here (a one-time re-sign-in, #97). The
+-- migration ledger applies this file in one transaction, so the pre-check's refusal also undoes the rename before it.
+ALTER TABLE users RENAME TO "user";
+ALTER INDEX users_pkey RENAME TO user_pkey;
+ALTER TABLE "user" RENAME CONSTRAINT users_email_key TO user_email_key;
+-- Statements 1-3 are code-system's, verbatim (ten98-code-system#143, comment 6891409340).
+-- 1. Pre-check: stop, and never rewrite, when two users share an email ignoring case.
+DO $$
+DECLARE twins integer; listed text;
+BEGIN
+  SELECT count(*), string_agg(ids, ', ' ORDER BY first) FILTER (WHERE n <= 20)
+    INTO twins, listed
+    FROM (SELECT '[' || string_agg(id, ', ' ORDER BY id) || ']' AS ids, min(id) AS first, row_number() OVER (ORDER BY min(id)) AS n
+          FROM "user" GROUP BY lower(email) HAVING count(*) > 1) shared;
+  IF twins > 0 THEN
+    RAISE EXCEPTION 'user_email_lowercase: % email address(es) belong to more than one user when case is ignored (accounts: %); resolve them before this migration',
+      twins, listed || CASE WHEN twins > 20 THEN ', …' ELSE '' END;
+  END IF;
+END
+$$;
+-- 2. Store every email lower-case.
+UPDATE "user" SET email = lower(email) WHERE email <> lower(email);
+-- 3. Keep it that way.
+ALTER TABLE "user" ADD CONSTRAINT user_email_lowercase CHECK (email = lower(email));
+CREATE UNIQUE INDEX user_email_normalized_idx ON "user" (lower(email));
+ALTER TABLE "user" ADD COLUMN "emailVerified" boolean NOT NULL DEFAULT false;
+ALTER TABLE "user" ADD COLUMN image text;
+ALTER TABLE "user" ADD COLUMN "createdAt" timestamptz NOT NULL DEFAULT now();
+ALTER TABLE "user" ADD COLUMN "updatedAt" timestamptz NOT NULL DEFAULT now();
+ALTER TABLE "user" ADD COLUMN "twoFactorEnabled" boolean NOT NULL DEFAULT false;
+ALTER TABLE "user" ADD COLUMN closed_at timestamptz;
+-- An OIDC account's email was verified by its provider: Campaign provisioned one only for email_verified = true. Password
+-- accounts never proved their address, so they stay false; nothing in Campaign or the preset reads the flag today.
+UPDATE "user" SET "emailVerified" = true WHERE id IN (SELECT user_id FROM oidc_identities);
+CREATE TABLE account (id text PRIMARY KEY, "accountId" text NOT NULL, "providerId" text NOT NULL, "userId" text NOT NULL CONSTRAINT "account_userId_fkey" REFERENCES "user"(id) ON DELETE CASCADE, "accessToken" text, "refreshToken" text, "idToken" text, "accessTokenExpiresAt" timestamptz, "refreshTokenExpiresAt" timestamptz, scope text, password text, "createdAt" timestamptz NOT NULL DEFAULT now(), "updatedAt" timestamptz NOT NULL DEFAULT now(), CONSTRAINT "account_providerId_accountId_key" UNIQUE ("providerId", "accountId"));
+CREATE INDEX account_user_idx ON account ("userId");
+INSERT INTO account (id, "accountId", "providerId", "userId", password) SELECT gen_random_uuid()::text, id, 'credential', id, password FROM "user" WHERE password IS NOT NULL;
+ALTER TABLE "user" DROP COLUMN password;
 DROP TABLE sessions;
-CREATE TABLE sessions (id text PRIMARY KEY, token text NOT NULL CONSTRAINT sessions_token_key UNIQUE, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at bigint NOT NULL, ip_address text, user_agent text, created_at bigint NOT NULL, updated_at bigint NOT NULL);
-CREATE INDEX sessions_user_id_idx ON sessions (user_id);
+CREATE TABLE session (id text PRIMARY KEY, token text NOT NULL CONSTRAINT session_token_key UNIQUE, "userId" text NOT NULL CONSTRAINT "session_userId_fkey" REFERENCES "user"(id) ON DELETE CASCADE, "expiresAt" timestamptz NOT NULL, "ipAddress" text, "userAgent" text, "createdAt" timestamptz NOT NULL DEFAULT now(), "updatedAt" timestamptz NOT NULL DEFAULT now());
+CREATE INDEX session_user_idx ON session ("userId");
 DROP TABLE password_resets;
-CREATE TABLE verifications (id text PRIMARY KEY, identifier text NOT NULL, value text NOT NULL, expires_at bigint NOT NULL, created_at bigint NOT NULL, updated_at bigint NOT NULL);
-CREATE INDEX verifications_identifier_idx ON verifications (identifier);
-CREATE TABLE two_factors (id text PRIMARY KEY, user_id text NOT NULL CONSTRAINT two_factors_user_id_key UNIQUE REFERENCES users(id) ON DELETE CASCADE, secret text NOT NULL, backup_codes text NOT NULL, verified boolean NOT NULL DEFAULT true, failed_verification_count integer NOT NULL DEFAULT 0, locked_until bigint);
+CREATE TABLE verification (id text PRIMARY KEY, identifier text NOT NULL, value text NOT NULL, "expiresAt" timestamptz NOT NULL, "createdAt" timestamptz NOT NULL DEFAULT now(), "updatedAt" timestamptz NOT NULL DEFAULT now());
+CREATE INDEX verification_identifier_idx ON verification (identifier);
+CREATE TABLE "twoFactor" (id text PRIMARY KEY, "userId" text NOT NULL CONSTRAINT "twoFactor_userId_key" UNIQUE CONSTRAINT "twoFactor_userId_fkey" REFERENCES "user"(id) ON DELETE CASCADE, secret text NOT NULL, "backupCodes" text NOT NULL, verified boolean NOT NULL DEFAULT true, "failedVerificationCount" integer NOT NULL DEFAULT 0, "lockedUntil" timestamptz);

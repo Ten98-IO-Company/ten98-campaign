@@ -1,12 +1,10 @@
 import { sql } from 'drizzle-orm';
-import { bigint, boolean, check, customType, index, integer, json, pgTable, primaryKey, text, unique, uniqueIndex } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, customType, index, integer, json, pgTable, primaryKey, text, timestamp, unique, uniqueIndex } from 'drizzle-orm/pg-core';
 
 // Drizzle mirror of migrations/*.sql; tests/schema.test.mjs keeps the two in step. Property names
 // equal column names so selected rows keep the snake_case shape every module already reads, except in the Better Auth
 // models (users, accounts, sessions, verifications, twoFactors), whose property names are Better Auth's field names.
 const bytea = customType<{ data: Buffer; driverData: Buffer }>({ dataType: () => 'bytea' });
-// Better Auth reads and writes Date values; Campaign keeps every time as bigint epoch milliseconds.
-const epochMs = customType<{ data: Date; driverData: number }>({ dataType: () => 'bigint', toDriver: value => value.getTime(), fromDriver: value => new Date(Number(value)) });
 
 // Identity, tenancy and installation (database.ts, invitations.ts)
 export const installation = pgTable('installation', {
@@ -15,70 +13,74 @@ export const installation = pgTable('installation', {
 }, t => [
   check('installation_id_check', sql`${t.id} = 1`),
 ]);
-// Identity tables are Better Auth's (@ten98/runtime/auth, ten98-code-system#97), and only server/auth.ts writes them.
-// Passwords live in accounts (provider 'credential'); users keeps its name and ids.
-export const users = pgTable('users', {
+// Identity tables are Better Auth's (@ten98/runtime/auth, ten98-code-system#97) in the common schema the preset reads
+// (code-system workspace-team.sql): "user", account, session, verification. Only server/auth.ts and the preset write them.
+const at = (name: string) => timestamp(name, { withTimezone: true });
+export const users = pgTable('user', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
-  email: text('email').notNull().unique('users_email_key'),
-  emailVerified: boolean('email_verified').notNull().default(false),
+  email: text('email').notNull().unique('user_email_key'),
+  emailVerified: boolean('emailVerified').notNull().default(false),
   image: text('image'),
-  twoFactorEnabled: boolean('two_factor_enabled').notNull().default(false),
-  // Defaulted in SQL because accounts existed before these columns; Campaign and Better Auth always set them.
-  createdAt: epochMs('created_at').notNull().default(sql`(extract(epoch FROM clock_timestamp()) * 1000)::bigint`),
-  updatedAt: epochMs('updated_at').notNull().default(sql`(extract(epoch FROM clock_timestamp()) * 1000)::bigint`),
+  createdAt: at('createdAt').notNull().defaultNow(),
+  updatedAt: at('updatedAt').notNull().defaultNow(),
+  twoFactorEnabled: boolean('twoFactorEnabled').notNull().default(false),
+  closedAt: at('closed_at'),
 }, t => [
-  // As the preset's user_email_normalized_idx: no two accounts share an email that differs only in case.
-  uniqueIndex('users_email_lower_key').on(sql`lower(${t.email})`),
+  // The common schema's (code-system #143): emails are stored lower-case.
+  check('user_email_lowercase', sql`${t.email} = lower(${t.email})`),
+  // workspace-team.sql:9 exactly; the preset's assertEmailIndex checks for it at start-up.
+  uniqueIndex('user_email_normalized_idx').on(sql`lower(${t.email})`),
 ]);
-export const accounts = pgTable('accounts', {
+export const accounts = pgTable('account', {
   id: text('id').primaryKey(),
-  accountId: text('account_id').notNull(),
-  providerId: text('provider_id').notNull(),
-  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  accessToken: text('access_token'),
-  refreshToken: text('refresh_token'),
-  idToken: text('id_token'),
-  accessTokenExpiresAt: epochMs('access_token_expires_at'),
-  refreshTokenExpiresAt: epochMs('refresh_token_expires_at'),
+  accountId: text('accountId').notNull(),
+  providerId: text('providerId').notNull(),
+  userId: text('userId').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  accessToken: text('accessToken'),
+  refreshToken: text('refreshToken'),
+  idToken: text('idToken'),
+  accessTokenExpiresAt: at('accessTokenExpiresAt'),
+  refreshTokenExpiresAt: at('refreshTokenExpiresAt'),
   scope: text('scope'),
   password: text('password'),
-  createdAt: epochMs('created_at').notNull(),
-  updatedAt: epochMs('updated_at').notNull(),
+  createdAt: at('createdAt').notNull().defaultNow(),
+  updatedAt: at('updatedAt').notNull().defaultNow(),
 }, t => [
-  unique('accounts_provider_id_account_id_key').on(t.providerId, t.accountId),
-  index('accounts_user_id_idx').on(t.userId),
+  unique('account_providerId_accountId_key').on(t.providerId, t.accountId),
+  index('account_user_idx').on(t.userId),
 ]);
-export const sessions = pgTable('sessions', {
+export const sessions = pgTable('session', {
   id: text('id').primaryKey(),
-  token: text('token').notNull().unique('sessions_token_key'),
-  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  expiresAt: epochMs('expires_at').notNull(),
-  ipAddress: text('ip_address'),
-  userAgent: text('user_agent'),
-  createdAt: epochMs('created_at').notNull(),
-  updatedAt: epochMs('updated_at').notNull(),
+  token: text('token').notNull().unique('session_token_key'),
+  userId: text('userId').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  expiresAt: at('expiresAt').notNull(),
+  ipAddress: text('ipAddress'),
+  userAgent: text('userAgent'),
+  createdAt: at('createdAt').notNull().defaultNow(),
+  updatedAt: at('updatedAt').notNull().defaultNow(),
 }, t => [
-  index('sessions_user_id_idx').on(t.userId),
+  index('session_user_idx').on(t.userId),
 ]);
-export const verifications = pgTable('verifications', {
+export const verifications = pgTable('verification', {
   id: text('id').primaryKey(),
   identifier: text('identifier').notNull(),
   value: text('value').notNull(),
-  expiresAt: epochMs('expires_at').notNull(),
-  createdAt: epochMs('created_at').notNull(),
-  updatedAt: epochMs('updated_at').notNull(),
+  expiresAt: at('expiresAt').notNull(),
+  createdAt: at('createdAt').notNull().defaultNow(),
+  updatedAt: at('updatedAt').notNull().defaultNow(),
 }, t => [
-  index('verifications_identifier_idx').on(t.identifier),
+  index('verification_identifier_idx').on(t.identifier),
 ]);
-export const twoFactors = pgTable('two_factors', {
+// Better Auth's twoFactor model under its default name, as Discover has it.
+export const twoFactors = pgTable('twoFactor', {
   id: text('id').primaryKey(),
-  userId: text('user_id').notNull().unique('two_factors_user_id_key').references(() => users.id, { onDelete: 'cascade' }),
+  userId: text('userId').notNull().unique('twoFactor_userId_key').references(() => users.id, { onDelete: 'cascade' }),
   secret: text('secret').notNull(),
-  backupCodes: text('backup_codes').notNull(),
+  backupCodes: text('backupCodes').notNull(),
   verified: boolean('verified').notNull().default(true),
-  failedVerificationCount: integer('failed_verification_count').notNull().default(0),
-  lockedUntil: epochMs('locked_until'),
+  failedVerificationCount: integer('failedVerificationCount').notNull().default(0),
+  lockedUntil: at('lockedUntil'),
 });
 export const instanceOperators = pgTable('instance_operators', {
   user_id: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),

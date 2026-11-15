@@ -22,9 +22,9 @@ export type SeedAccounts = {
 /** `password` is a stored hash (from hashPassword, or any fixture text); with one, the user gets a Better Auth credential account. */
 export async function addUsers(db: Db, users: SeedUser[]): Promise<void> {
   for (const user of users) {
-    await exec(db, 'INSERT INTO users (id, name, email) VALUES ($1, $2, $3)', [user.id, user.name, user.email]);
+    await exec(db, 'INSERT INTO "user" (id, name, email) VALUES ($1, $2, $3)', [user.id, user.name, user.email]);
     // Each placeholder once: the tests' sql wrapper numbers `?` placeholders in order.
-    if (user.password) await exec(db, "INSERT INTO accounts (id, account_id, provider_id, user_id, password, created_at, updated_at) VALUES ($1, $2, 'credential', $3, $4, $5, $6)", ['credential-' + user.id, user.id, user.id, user.password, Date.now(), Date.now()]);
+    if (user.password) await exec(db, "INSERT INTO account (id, \"accountId\", \"providerId\", \"userId\", password) VALUES ($1, $2, 'credential', $3, $4)", ['credential-' + user.id, user.id, user.id, user.password]);
   }
 }
 export async function addWorkspaces(db: Db, workspaces: { id: string; name: string }[]): Promise<void> {

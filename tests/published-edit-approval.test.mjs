@@ -57,7 +57,7 @@ async function fixture(t, { admin = true } = {}) {
   const setup = await post('/api/auth/setup', { name: 'Fixture Owner', email: 'owner@example.test', password }); setup.data.projectId = await firstProject(app, setup); assert.equal(setup.status, 201); ownerCookie = setup.cookie;
   const state = (await request('/api/state')).data, projectId = state.projectId, project = `/api/projects/${projectId}`, workspaceId = state.workspaces[0].id;
   assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);
-  const passwordHash = (await app.sql.get("SELECT password FROM accounts WHERE user_id=? AND provider_id='credential'", state.user.id)).password;
+  const passwordHash = (await app.sql.get("SELECT password FROM account WHERE \"userId\"=? AND \"providerId\"='credential'", state.user.id)).password;
   async function member(name, role) {
     const userId = randomUUID(), email = `${name}@example.test`;
     await addUsers(app.sql, [{ id: userId, name: name, email: email, password: passwordHash }]);

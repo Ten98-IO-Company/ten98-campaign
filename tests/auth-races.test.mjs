@@ -31,22 +31,22 @@ test('an old-password login already verifying cannot create a session after a pa
   const res = response(), signingIn = auth.login(client, res, { email: 'fixture@example.test', password: oldPassword });
   await gate.waiting(1); const changing = reset(nextPassword); await gate.waiting(2); await gate.release();
   assert.equal((await signingIn).id, 'user-a'); await changing;
-  assert.equal(await count(db, 'sessions'), 0, 'The change ended the session the old password had just opened.');
+  assert.equal(await count(db, 'session'), 0, 'The change ended the session the old password had just opened.');
   assert.equal(await auth.user({ headers: { cookie: cookieOf(res) } }), null);
   // Change first: it holds the account lock while it writes the credential, so the old-password sign-in waits and is refused.
   gate = await blockWrites(pool, 'accounts');
   const changingAgain = reset('third fixture password 2026'); await gate.waiting(1);
   const late = response(), refused = auth.login(client, late, { email: 'fixture@example.test', password: nextPassword }).then(() => 'signed in', error => error.status);
   await gate.waiting(2); await gate.release(); await changingAgain;
-  assert.equal(await refused, 401); assert.equal(late.headers['Set-Cookie'], undefined); assert.equal(await count(db, 'sessions'), 0);
+  assert.equal(await refused, 401); assert.equal(late.headers['Set-Cookie'], undefined); assert.equal(await count(db, 'session'), 0);
   const current = response(), user = await auth.login(client, current, { email: 'fixture@example.test', password: 'third fixture password 2026' });
-  assert.equal(user.id, 'user-a'); assert.match([].concat(current.headers['Set-Cookie']).join('\n'), /^__Secure-ten98-campaign-[0-9a-f]{16}\.session_token=[^;]+; Max-Age=604800; Path=\/; HttpOnly; Secure; SameSite=Lax$/m); assert.equal(await count(db, 'sessions'), 1);
+  assert.equal(user.id, 'user-a'); assert.match([].concat(current.headers['Set-Cookie']).join('\n'), /^__Secure-ten98-campaign-[0-9a-f]{16}\.session_token=[^;]+; Max-Age=604800; Path=\/; HttpOnly; Secure; SameSite=Lax$/m); assert.equal(await count(db, 'session'), 1);
 });
 
 test('a password change cannot replace credentials or recreate a session revoked during password verification', pg, async t => {
   const { db, pool } = await testDatabase(t), oldPassword = 'existing fixture password 2026';
   await seedUser(db, 'user-a', 'fixture@example.test', await hashPassword(oldPassword));
-  const stored = async () => (await pool.query("SELECT password FROM accounts WHERE user_id = 'user-a' AND provider_id = 'credential'")).rows[0].password, oldHash = await stored();
+  const stored = async () => (await pool.query("SELECT password FROM account WHERE \"userId\" = 'user-a' AND \"providerId\" = 'credential'")).rows[0].password, oldHash = await stored();
   const auth = createAuth(db, raceConfig), signIn = async () => { const res = response(); await auth.login(client, res, { email: 'fixture@example.test', password: oldPassword }); return { headers: { cookie: cookieOf(res) }, socket: client.socket }; };
   const deviceA = await signIn(), deviceB = await signIn();
   // Device B signs out device A first; A's password change waits for the account lock and finds its session ended.
@@ -57,7 +57,7 @@ test('a password change cannot replace credentials or recreate a session revoked
   assert.equal(await revoking, 1);
   await assert.rejects(changing, error => error.status === 403 && /session ended/i.test(error.message));
   assert.equal(await stored(), oldHash, 'The credential is unchanged.');
-  assert.equal(await count(db, 'sessions'), 1, 'Only device B is still signed in.');
+  assert.equal(await count(db, 'session'), 1, 'Only device B is still signed in.');
   assert.equal(res.headers['Set-Cookie'], undefined, 'No session was recreated for device A.');
 });
 
@@ -156,11 +156,11 @@ test('OIDC invitation continuation is browser-bound, single-use and origin-fixed
   const expired = await oidc.start('?invite=' + invite); await db.$client.query('UPDATE oidc_flows SET expires_at = 0 WHERE state = $1', [digest(expired.state)]);
   const beforeExpiry = oidc.exchanges; await assert.rejects(oidc.callback(expired), error => error.status === 400); assert.equal(oidc.exchanges, beforeExpiry);
   const denied = await oidc.start('?invite=' + invite); oidc.claims = { iss: config.oidcIssuer, sub: 'new-unprovisioned-subject', email: 'outside@example.test', email_verified: true };
-  await assert.rejects(oidc.callback(denied), error => error.status === 403); assert.equal((await db.$client.query("SELECT * FROM users WHERE email = 'outside@example.test'")).rowCount, 0);
+  await assert.rejects(oidc.callback(denied), error => error.status === 403); assert.equal((await db.$client.query("SELECT * FROM \"user\" WHERE email = 'outside@example.test'")).rowCount, 0);
   assert.equal((await db.$client.query('SELECT * FROM oidc_return_targets WHERE state = $1', [digest(denied.state)])).rowCount, 0);
   const linking = await oidc.start('?invite=' + invite); oidc.claims = { iss: config.oidcIssuer, sub: 'unlinked-subject', email: 'local@example.test', email_verified: true };
   await assert.rejects(oidc.callback(linking), error => error.code === 'OIDC_ACCOUNT_EXISTS');
-  assert.equal((await db.$client.query("SELECT password FROM accounts WHERE user_id = 'local-user' AND provider_id = 'credential'")).rows[0].password, 'unchanged-local-hash');
+  assert.equal((await db.$client.query("SELECT password FROM account WHERE \"userId\" = 'local-user' AND \"providerId\" = 'credential'")).rows[0].password, 'unchanged-local-hash');
   assert.equal((await db.$client.query("SELECT * FROM oidc_identities WHERE subject = 'unlinked-subject'")).rowCount, 0);
 });
 
@@ -187,21 +187,21 @@ test('two first sign-ins for one new identity provision a single account', pg, a
   // Two waiters: one blocked inserting the account, the other on the identity lock (or, without it, on its own insert).
   await gate.waiting(2); await gate.release();
   assert.deepEqual(await Promise.all(sign), [302, 302]);
-  assert.equal((await db.$client.query("SELECT count(*) AS count FROM users WHERE email = 'parallel@example.test'")).rows[0].count, 1);
+  assert.equal((await db.$client.query("SELECT count(*) AS count FROM \"user\" WHERE email = 'parallel@example.test'")).rows[0].count, 1);
   assert.equal((await db.$client.query("SELECT count(*) AS count FROM oidc_identities WHERE subject = 'parallel-subject'")).rows[0].count, 1);
-  assert.equal(await count(db, 'sessions'), 2);
+  assert.equal(await count(db, 'session'), 2);
 });
 
 // An owner's workspace with one project and one invitation; returns the raw invitation token.
 async function seedInvitation(db, { token = 'I'.repeat(43), email = 'invitee@example.test', role = 'editor', expiresAt = Date.now() + 86400000, revokedAt = null } = {}) {
-  await db.$client.query("INSERT INTO users (id, name, email) VALUES ('inviter', 'Inviter', 'inviter@example.test') ON CONFLICT DO NOTHING");
+  await db.$client.query("INSERT INTO \"user\" (id, name, email) VALUES ('inviter', 'Inviter', 'inviter@example.test') ON CONFLICT DO NOTHING");
   await db.$client.query("INSERT INTO workspaces (id, name) VALUES ('team', 'Team') ON CONFLICT DO NOTHING");
   await db.$client.query("INSERT INTO memberships VALUES ('team', 'inviter', 'owner') ON CONFLICT DO NOTHING");
   await db.$client.query("INSERT INTO projects (id, workspace_id, name) VALUES ('team-project', 'team', 'Team project') ON CONFLICT DO NOTHING");
   await db.$client.query('INSERT INTO workspace_invitations (id, workspace_id, email, role, inviter_id, token_hash, created_at, expires_at, revoked_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)', ['invitation-' + token.slice(0, 4), 'team', email, role, 'inviter', createHash('sha256').update(token).digest('hex'), Date.now(), expiresAt, revokedAt]);
   return token;
 }
-const memberships = async (db, email) => (await db.$client.query('SELECT m.workspace_id AS "workspaceId", m.role FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = $1 ORDER BY m.workspace_id', [email])).rows;
+const memberships = async (db, email) => (await db.$client.query('SELECT m.workspace_id AS "workspaceId", m.role FROM memberships m JOIN "user" u ON u.id = m.user_id WHERE u.email = $1 ORDER BY m.workspace_id', [email])).rows;
 const accepted = async (db, token) => (await db.$client.query('SELECT accepted_at FROM workspace_invitations WHERE token_hash = $1', [createHash('sha256').update(token).digest('hex')])).rows[0].accepted_at;
 const invitedIdentity = (config, email, extra = {}) => ({ iss: config.oidcIssuer, sub: 'invited-subject', email, email_verified: true, ...extra });
 
@@ -212,8 +212,8 @@ test('a verified invited email outside the OIDC allowlist joins only the invitin
   assert.equal(signedIn.status, 302); assert.equal(signedIn.headers.Location, config.appUrl + '/', 'the accepted invitation is not handed back to the browser');
   assert.deepEqual(await memberships(db, 'invitee@example.test'), [{ workspaceId: 'team', role: 'editor' }], 'membership only, no personal workspace');
   assert.equal(await count(db, 'workspaces'), 1); assert.equal(await count(db, 'projects'), 1);
-  assert.ok(await accepted(db, token)); assert.equal(await count(db, 'sessions'), 1);
-  assert.equal((await db.$client.query("SELECT (SELECT a.password FROM accounts a WHERE a.user_id = u.id AND a.provider_id = 'credential') AS password FROM users u WHERE email = 'invitee@example.test'")).rows[0].password, null);
+  assert.ok(await accepted(db, token)); assert.equal(await count(db, 'session'), 1);
+  assert.equal((await db.$client.query("SELECT (SELECT a.password FROM account a WHERE a.\"userId\" = u.id AND a.\"providerId\" = 'credential') AS password FROM \"user\" u WHERE email = 'invitee@example.test'")).rows[0].password, null);
   // The invitation is single use: a second identity with the same email gets no account through it.
   oidc.claims = { ...invitedIdentity(config, 'invitee@example.test'), sub: 'second-subject' };
   await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_NOT_PROVISIONED');
@@ -230,7 +230,7 @@ test('an invitation for another email or an unverified email does not provision 
   await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_EMAIL_UNVERIFIED');
   oidc.claims = invitedIdentity(config, 'invitee@example.test', { email_verified: 'true' });
   await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.status === 403);
-  assert.equal(await count(db, 'users'), 1); assert.equal(await count(db, 'oidc_identities'), 0); assert.equal(await accepted(db, token), null);
+  assert.equal(await count(db, '"user"'), 1); assert.equal(await count(db, 'oidc_identities'), 0); assert.equal(await accepted(db, token), null);
 });
 
 test('an expired, revoked or no-longer-authorized invitation falls back to the OIDC allowlist', pg, async t => {
@@ -241,7 +241,7 @@ test('an expired, revoked or no-longer-authorized invitation falls back to the O
   await db.$client.query("UPDATE workspace_invitations SET inviter_id = 'admin-inviter' WHERE token_hash = $1", [createHash('sha256').update(demoted).digest('hex')]);
   oidc.claims = invitedIdentity(config, 'invitee@example.test');
   for (const token of [expired, revoked, demoted]) await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_NOT_PROVISIONED', token[0]);
-  assert.equal((await db.$client.query("SELECT * FROM users WHERE email = 'invitee@example.test'")).rowCount, 0);
+  assert.equal((await db.$client.query("SELECT * FROM \"user\" WHERE email = 'invitee@example.test'")).rowCount, 0);
   // An allowlisted email still gets its own workspace and resumes the (now unusable) invitation in the browser as before.
   oidc.claims = invitedIdentity(config, 'allowed@example.test'); await db.$client.query("UPDATE workspace_invitations SET email = 'allowed@example.test'");
   const fallback = await oidc.callback(await oidc.start('?invite=' + expired));
@@ -278,7 +278,7 @@ test('two parallel OIDC callbacks for one invitation provision one account and o
   const sign = flows.map(flow => oidc.callback(flow).then(res => res.status, error => error.status));
   await gate.waiting(2); await gate.release();
   assert.deepEqual(await Promise.all(sign), [302, 302]);
-  assert.equal((await db.$client.query("SELECT count(*) AS count FROM users WHERE email = 'invitee@example.test'")).rows[0].count, 1);
+  assert.equal((await db.$client.query("SELECT count(*) AS count FROM \"user\" WHERE email = 'invitee@example.test'")).rows[0].count, 1);
   assert.deepEqual(await memberships(db, 'invitee@example.test'), [{ workspaceId: 'team', role: 'editor' }]);
   assert.equal(await count(db, 'workspaces'), 1); assert.ok(await accepted(db, token));
 });

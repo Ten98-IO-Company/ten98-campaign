@@ -43,7 +43,7 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal(login.status, 200); ownerCookie = login.cookie;
     const provision = spawnSync(process.execPath, [fileURLToPath(new URL('../server/cli.ts', import.meta.url)), 'create-user'], { input: JSON.stringify({ name: 'Viewer', email: 'viewer@example.com', password: setup.password }), env: { ...process.env, DATABASE_URL: app.database.url }, encoding: 'utf8' });
     assert.equal(provision.status, 0, provision.stderr); assert.equal(provision.stdout.includes(setup.password), false);
-    const viewerId = (await app.sql.get('SELECT id FROM users WHERE email=?', 'viewer@example.com')).id;
+    const viewerId = (await app.sql.get('SELECT id FROM "user" WHERE email=?', 'viewer@example.com')).id;
     viewerCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'viewer@example.com', password: setup.password } })).cookie;
     assert.equal((await request('/api/session', { cookie: viewerCookie })).data.user.isOperator, false);
     assert.equal((await request(`/api/state?projectId=${projectId}`, { cookie: viewerCookie })).status, 404);
@@ -107,7 +107,7 @@ test('local auth, CSRF, workspace isolation, roles, validated CRUD and session e
     assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).location, origin + '/?auth_error=OIDC_SIGN_IN_FAILED');
     assert.equal((await app.sql.get('SELECT count(*) AS count FROM oidc_flows')).count, 0);
     assert.equal((await request('/api/auth/oidc/callback?state=test-state&code=x', { cookie: 'ten98_oidc=test-browser' })).location, origin + '/?auth_error=OIDC_SIGN_IN_FAILED');
-    await app.sql.run('UPDATE sessions SET expires_at=0');
+    await app.sql.run('UPDATE session SET "expiresAt" = to_timestamp(0)');
     assert.equal((await request('/api/state')).status, 401);
     for (let i = 0; i < 10; i++) await request('/api/auth/login', { method: 'POST', body: { email: 'absent@example.com', password: 'bad' } });
     assert.equal((await request('/api/auth/login', { method: 'POST', body: { email: 'absent@example.com', password: 'bad' } })).status, 429);

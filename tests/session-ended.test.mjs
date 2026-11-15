@@ -20,7 +20,7 @@ test('a stale session cookie is reported once as an ended session and cleared', 
   const setup = await request('/auth/setup', { body: { name: 'Owner', email: 'owner@example.test', password: 'session ended fixture password' } });
   const cookie = setup.setCookies.map(value => value.split(';')[0]).join('; ');
   assert.equal((await request('/session', { cookie })).data.sessionEnded, undefined, 'A valid session is not reported as ended.');
-  await app.sql.run('DELETE FROM sessions');
+  await app.sql.run('DELETE FROM session');
   const ended = await request('/session', { cookie });
   assert.equal(ended.status, 200); assert.equal(ended.data.user, null); assert.equal(ended.data.sessionEnded, true);
   assert.ok(ended.setCookies.some(value => /^ten98-campaign-[0-9a-f]{16}\.session_token=;.*Max-Age=0/.test(value)), 'The stale cookie is cleared so the notice shows once.');

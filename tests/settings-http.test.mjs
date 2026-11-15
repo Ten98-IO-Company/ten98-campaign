@@ -108,7 +108,7 @@ test('integration settings HTTP routes enforce operators, retain encrypted secre
     assert.equal(find(settings.data, 'zernio').source, 'environment');
     assert.equal(JSON.stringify(settings.data).includes(env.ZERNIO_API_KEY), false);
 
-    const passwordHash = (await sql.get("SELECT password FROM accounts WHERE user_id=? AND provider_id='credential'", state.user.id)).password, otherUserId = randomUUID();
+    const passwordHash = (await sql.get("SELECT password FROM account WHERE \"userId\"=? AND \"providerId\"='credential'", state.user.id)).password, otherUserId = randomUUID();
     await addUsers(sql, [{ id: otherUserId, name: 'Workspace owner', email: 'settings-owner@example.test', password: passwordHash }]);
     const otherCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'settings-owner@example.test', password: 'fixture settings password 2026' } })).cookie;
     const otherWorkspace = await request('/api/workspaces', { method: 'POST', body: { name: 'Separate workspace' }, cookie: otherCookie });

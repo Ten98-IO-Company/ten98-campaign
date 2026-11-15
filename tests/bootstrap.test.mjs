@@ -33,23 +33,23 @@ test('the first sign-up claims the installation as owner of its named workspace,
     assert.equal((await request('/session')).data.setupRequired, true);
     for (const workspaceName of [7, 'w'.repeat(121), 'line\u0001break']) assert.equal((await request('/auth/setup', { ...body, workspaceName })).status, 400);
     assert.equal((await request('/auth/setup', { ...body, password: 'too short' })).status, 400, 'The owner password policy still applies.');
-    assert.equal(await count(pool, 'users'), 0);
+    assert.equal(await count(pool, '"user"'), 0);
     const created = await request('/auth/setup', { ...body, workspaceName: '  Northwind marketing  ' });
     assert.equal(created.status, 201, JSON.stringify(created.data));
-    const workspaces = (await pool.query('SELECT id, name FROM workspaces')).rows, user = (await pool.query('SELECT id FROM users')).rows[0];
+    const workspaces = (await pool.query('SELECT id, name FROM workspaces')).rows, user = (await pool.query('SELECT id FROM "user"')).rows[0];
     assert.deepEqual(workspaces, [{ id: created.data.workspaceId, name: 'Northwind marketing' }]);
     assert.deepEqual((await pool.query('SELECT workspace_id, user_id, role FROM memberships')).rows, [{ workspace_id: created.data.workspaceId, user_id: user.id, role: 'owner' }]);
     assert.equal(created.data.user.isOperator, true); assert.equal(await count(pool, 'instance_operators'), 1);
     assert.equal(await count(pool, 'projects'), 0, 'The first project is the next onboarding step, not part of setup.');
     assert.equal(created.data.projectId, undefined);
-    assert.equal(await count(pool, 'sessions'), 1, 'The new owner is signed in.');
+    assert.equal(await count(pool, 'session'), 1, 'The new owner is signed in.');
     assert.equal(await claimed(pool), true);
     assert.equal((await request('/session')).data.setupRequired, false);
     const second = await request('/auth/setup', { ...body, email: 'second@example.test' });
     assert.equal(second.status, 409, 'Sign-up closes once the installation is claimed.');
     // Discover's wording (#265); the screen pairs it with Sign in instead.
     assert.equal(second.data.error, 'Setup is complete. Sign in with the owner account.');
-    assert.equal(await count(pool, 'users'), 1);
+    assert.equal(await count(pool, '"user"'), 1);
   } finally { await app.close(); await rm(dataDir, { recursive: true, force: true }); }
 });
 
@@ -88,7 +88,7 @@ test('failed claims roll back, and of two competing first sign-ups exactly one c
     assert.deepEqual(settled.map(result => result.status).sort(), [201, 409]);
     for (const table of ['users', 'instance_operators', 'workspaces', 'memberships', 'sessions']) assert.equal(await count(pool, table), 1);
     const winner = settled.find(result => result.status === 201).data;
-    assert.deepEqual((await pool.query('SELECT id, email FROM users')).rows, [{ id: winner.user.id, email: winner.user.email }]);
+    assert.deepEqual((await pool.query('SELECT id, email FROM "user"')).rows, [{ id: winner.user.id, email: winner.user.email }]);
     const audit = (await pool.query('SELECT user_id, action, source FROM instance_operator_audit')).rows;
     assert.deepEqual(audit, [{ user_id: winner.user.id, action: 'bootstrap', source: 'bootstrap' }]);
     assert.equal(await claimed(pool), true);
@@ -110,7 +110,7 @@ test('claimed installations preserve login, invent no operator history, and neve
     assert.equal((await request('/auth/login', { email: 'existing@example.test', password })).status, 200);
     assert.equal(await count(pool, 'instance_operator_audit'), 0, 'Upgrading an installation must not invent operator history.');
     assert.equal((await request('/auth/setup', { name: 'Uninvited', email: 'new@example.test', password })).status, 409);
-    await pool.query('DELETE FROM users'); await app.close(); app = undefined;
+    await pool.query('DELETE FROM "user"'); await app.close(); app = undefined;
     app = await createApp({ dataDir, env: {}, appUrl: origin, directScheduler: false, database: { pool, db } }); request = await start(app);
     assert.equal((await request('/session')).data.setupRequired, false);
     assert.equal((await request('/auth/setup', { name: 'Uninvited', email: 'new@example.test', password })).status, 409);

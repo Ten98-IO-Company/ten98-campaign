@@ -43,8 +43,8 @@ test('a reset link resets the password once, within the hour, and ends every ses
   const [mail] = await f.delivered(1), token = tokenOf(mail);
   assert.deepEqual(mail.to, ['owner@example.test']); assert.match(mail.subject, /Reset your ten98 Campaign password/); assert.ok(token, mail.text);
   // Expected to fail until runtime #131 (keyed-hash verification identifiers): Better Auth 1.7.7 stores the raw identifier.
-  assert.equal((await f.app.sql.get("SELECT count(*)::int AS n FROM verifications WHERE identifier LIKE 'reset-password:%'")).n, 1, 'The link is stored.');
-  assert.equal((await f.app.sql.get('SELECT count(*)::int AS n FROM verifications WHERE identifier = ?', 'reset-password:' + token)).n, 0, 'Only a keyed hash of the token is stored.');
+  assert.equal((await f.app.sql.get("SELECT count(*)::int AS n FROM verification WHERE identifier LIKE 'reset-password:%'")).n, 1, 'The link is stored.');
+  assert.equal((await f.app.sql.get('SELECT count(*)::int AS n FROM verification WHERE identifier = ?', 'reset-password:' + token)).n, 0, 'Only a keyed hash of the token is stored.');
 
   assert.equal((await f.request('/api/auth/reset-password', { method: 'POST', body: { token, newPassword: 'short' } })).status, 400, 'The password policy applies.');
   const reset = await f.request('/api/auth/reset-password', { method: 'POST', body: { token, newPassword: 'a brand new owner password' } });
@@ -56,7 +56,7 @@ test('a reset link resets the password once, within the hour, and ends every ses
 
   await f.request('/api/auth/request-password-reset', { method: 'POST', body: { email: 'owner@example.test' } });
   const expiring = tokenOf((await f.delivered(2))[1]);
-  await f.app.sql.run("UPDATE verifications SET expires_at = ? WHERE identifier LIKE 'reset-password:%'", Date.now() - 1);
+  await f.app.sql.run("UPDATE verification SET \"expiresAt\" = now() - interval '1 millisecond' WHERE identifier LIKE 'reset-password:%'");
   assert.equal((await f.request('/api/auth/reset-password', { method: 'POST', body: { token: expiring, newPassword: 'yet another owner password' } })).status, 400, 'An expired link is refused.');
 });
 
@@ -69,7 +69,7 @@ test('every address gets the same answer, a newer link replaces the older one, a
   const mails = await f.delivered(2);
   assert.deepEqual(mails.map(mail => mail.to[0]), ['owner@example.test', 'owner@example.test'], 'No mail goes to an address without an account.');
   assert.equal((await f.request('/api/auth/reset-password', { method: 'POST', body: { token: tokenOf(mails[0]), newPassword: 'a brand new owner password' } })).status, 400, 'The newer link replaced the older one.');
-  assert.equal((await f.app.sql.get("SELECT count(*)::int AS n FROM verifications WHERE identifier LIKE 'reset-password:%'")).n, 1);
+  assert.equal((await f.app.sql.get("SELECT count(*)::int AS n FROM verification WHERE identifier LIKE 'reset-password:%'")).n, 1);
   assert.equal((await f.request('/api/auth/request-password-reset', { method: 'POST', body: { email: 'owner@example.test' } })).status, 200);
   assert.equal((await f.request('/api/auth/request-password-reset', { method: 'POST', body: { email: 'owner@example.test' } })).status, 429, 'Three requests per address per window.');
   assert.equal((await f.request('/api/auth/reset-password', { method: 'POST', body: { token: 'not-a-token', newPassword: 'a brand new owner password' } })).status, 400);
@@ -80,7 +80,7 @@ test('without transactional email the request explains the alternative and sends
   assert.deepEqual((await f.request('/api/auth/password-reset-status')).data, { configured: false });
   const asked = await f.request('/api/auth/request-password-reset', { method: 'POST', body: { email: 'owner@example.test' } });
   assert.equal(asked.status, 503); assert.match(asked.data.error, /Ask your administrator/);
-  assert.equal(f.sent.length, 0); assert.equal((await f.app.sql.get("SELECT count(*)::int AS n FROM verifications WHERE identifier LIKE 'reset-password:%'")).n, 0);
+  assert.equal(f.sent.length, 0); assert.equal((await f.app.sql.get("SELECT count(*)::int AS n FROM verification WHERE identifier LIKE 'reset-password:%'")).n, 0);
 });
 
 // Review follow-ups on #287: a password changed in settings retires an outstanding link, and a failed send is logged
@@ -91,7 +91,7 @@ test('changing the password in settings retires an outstanding reset link', pg, 
   const token = tokenOf((await f.delivered(1))[0]);
   const changed = await f.request('/api/account/password', { method: 'POST', body: { currentPassword: 'original owner password', newPassword: 'a password chosen in settings' }, cookie: f.ownerCookie });
   assert.equal(changed.status, 200, JSON.stringify(changed.data));
-  assert.equal((await f.app.sql.get("SELECT count(*)::int AS n FROM verifications WHERE identifier LIKE 'reset-password:%'")).n, 0);
+  assert.equal((await f.app.sql.get("SELECT count(*)::int AS n FROM verification WHERE identifier LIKE 'reset-password:%'")).n, 0);
   assert.equal((await f.request('/api/auth/reset-password', { method: 'POST', body: { token, newPassword: 'a brand new owner password' } })).status, 400);
 });
 
@@ -104,6 +104,6 @@ test('a reset email that cannot be sent is logged without the address or the tok
   for (let tick = 0; tick < 50 && !logged.length; tick++) await new Promise(resolve => setTimeout(resolve, 20));
   console.error = originalError;
   assert.equal(logged.length, 1, logged.join('\n')); assert.match(logged[0], /^Password reset email was not sent:/);
-  const { identifier } = await f.app.sql.get("SELECT identifier FROM verifications WHERE identifier LIKE 'reset-password:%'");
+  const { identifier } = await f.app.sql.get("SELECT identifier FROM verification WHERE identifier LIKE 'reset-password:%'");
   assert.doesNotMatch(logged[0], /owner@example\.test/); assert.ok(!logged[0].includes(identifier.slice('reset-password:'.length)));
 });

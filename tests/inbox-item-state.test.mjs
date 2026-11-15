@@ -112,7 +112,7 @@ async function appFixture(t) {
   const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Owner', email: 'owner@example.test', password } }); setup.data.projectId = await firstProject(app, setup);
   assert.equal(setup.status, 201); const owner = setup.cookie, projectId = setup.data.projectId;
   assert.equal((await request(`/api/projects/${projectId}`, { method: 'PATCH', body: { zernioProfileId: 'inbox-profile' }, cookie: owner })).status, 200);
-  const { workspace_id: workspaceId } = await app.sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId), ownerId = (await app.sql.get("SELECT id FROM users WHERE email='owner@example.test'")).id, hash = (await app.sql.get("SELECT password FROM accounts WHERE user_id=? AND provider_id='credential'", ownerId)).password;
+  const { workspace_id: workspaceId } = await app.sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId), ownerId = (await app.sql.get("SELECT id FROM \"user\" WHERE email='owner@example.test'")).id, hash = (await app.sql.get("SELECT password FROM account WHERE \"userId\"=? AND \"providerId\"='credential'", ownerId)).password;
   const people = {};
   for (const [name, role] of [['editor', 'editor'], ['second', 'editor'], ['viewer', 'viewer'], ['outsider', null]]) {
     const userId = randomUUID(); await addUsers(app.sql, [{ id: userId, name: name, email: `${name}@example.test`, password: hash }]);
