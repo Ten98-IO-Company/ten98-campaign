@@ -20,7 +20,7 @@ async function seedUser(db, id, email, password) { await addUsers(db.$client, [{
 // path (CLI reset-password, or signing out other sessions) and holds the racing write at a table lock until both wait.
 const raceConfig = { sessionSecret: 'auth-race-fixture-session-secret-32-characters', authSecret: 'better-auth fixture secret of at least 32 characters', appUrl: 'https://campaign.example' };
 const client = { headers: {}, socket: { remoteAddress: '127.0.0.1' } };
-const cookieOf = res => [].concat(res.headers['Set-Cookie']).find(value => /^__Secure-ten98-[0-9a-f]{16}\.session_token=/.test(value)).split(';')[0];
+const cookieOf = res => [].concat(res.headers['Set-Cookie']).find(value => /^__Secure-ten98-campaign-[0-9a-f]{16}\.session_token=/.test(value)).split(';')[0];
 
 test('an old-password login already verifying cannot create a session after a password change', pg, async t => {
   const { db, pool } = await testDatabase(t), oldPassword = 'old fixture password 2026', nextPassword = 'new fixture password 2026';
@@ -40,7 +40,7 @@ test('an old-password login already verifying cannot create a session after a pa
   await gate.waiting(2); await gate.release(); await changingAgain;
   assert.equal(await refused, 401); assert.equal(late.headers['Set-Cookie'], undefined); assert.equal(await count(db, 'sessions'), 0);
   const current = response(), user = await auth.login(client, current, { email: 'fixture@example.test', password: 'third fixture password 2026' });
-  assert.equal(user.id, 'user-a'); assert.match([].concat(current.headers['Set-Cookie']).join('\n'), /^__Secure-ten98-[0-9a-f]{16}\.session_token=[^;]+; Max-Age=604800; Path=\/; HttpOnly; Secure; SameSite=Lax$/m); assert.equal(await count(db, 'sessions'), 1);
+  assert.equal(user.id, 'user-a'); assert.match([].concat(current.headers['Set-Cookie']).join('\n'), /^__Secure-ten98-campaign-[0-9a-f]{16}\.session_token=[^;]+; Max-Age=604800; Path=\/; HttpOnly; Secure; SameSite=Lax$/m); assert.equal(await count(db, 'sessions'), 1);
 });
 
 test('a password change cannot replace credentials or recreate a session revoked during password verification', pg, async t => {
@@ -287,7 +287,7 @@ test('a member without a personal workspace loads the app state and the invited 
   const origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir: await mkdtemp(join(tmpdir(), 'ten98-oidc-invite-')), appUrl: origin });
   const db = app.database.db, config = { ...oidcConfig(app.config.sessionSecret), authSecret: app.config.authSecret, appUrl: origin }, token = await seedInvitation(db);
   const oidc = oidcFixture(t, db, config); oidc.claims = invitedIdentity(config, 'invitee@example.test');
-  const signedIn = await oidc.callback(await oidc.start('?invite=' + token)), cookie = [].concat(signedIn.headers['Set-Cookie']).find(value => /^(__Secure-)?ten98-[0-9a-f]{16}\.session_token=/.test(value)).split(';')[0];
+  const signedIn = await oidc.callback(await oidc.start('?invite=' + token)), cookie = [].concat(signedIn.headers['Set-Cookie']).find(value => /^(__Secure-)?ten98-campaign-[0-9a-f]{16}\.session_token=/.test(value)).split(';')[0];
   await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); });
   const get = async path => { const result = await fetch(`http://127.0.0.1:${app.server.address().port}${path}`, { headers: { Cookie: cookie } }); return { status: result.status, data: await result.json() }; };
   const state = await get('/api/state');

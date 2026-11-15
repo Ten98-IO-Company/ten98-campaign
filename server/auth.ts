@@ -10,7 +10,7 @@ import { clientLimitKey, parseTrustedProxies, resolveClientAddress } from '@ten9
 import type { Database, Executor } from './database.ts';
 import { joinInvitation, lockInvitation } from './invitations.ts';
 import { advisoryLock } from './locks.ts';
-import { authDatabase, createCampaignAuth, retireResetLinks, signInWithPassword, type CampaignAuth } from './locked-auth.ts';
+import { authDatabase, createCampaignAuth, LockedAuthUserNotFoundError, retireResetLinks, signInWithPassword, type CampaignAuth } from './locked-auth.ts';
 import { accounts, instanceOperators, sessions, users, verifications } from './schema.ts';
 
 export { advisoryLock, lockUser, lockWorkspace } from './locks.ts';
@@ -50,8 +50,10 @@ export const sessionSecret = (dataDir: string, provided?: string) => storedSecre
  */
 export function authSecret(dataDir: string, env: { AUTH_SECRET?: string; AUTH_SECRET_FILE?: string } = {}): string {
   if (env.AUTH_SECRET && env.AUTH_SECRET_FILE) throw new Error('Set AUTH_SECRET or AUTH_SECRET_FILE, not both.');
-  const provided = env.AUTH_SECRET || (env.AUTH_SECRET_FILE ? readFileSync(env.AUTH_SECRET_FILE, 'utf8').trim() : undefined);
-  return storedSecret(dataDir, provided, 'auth-secret', 'AUTH_SECRET');
+  // A named file must hold the secret: falling back to a generated one would split the secret across replicas silently.
+  const fromFile = env.AUTH_SECRET_FILE ? readFileSync(env.AUTH_SECRET_FILE, 'utf8').trim() : undefined;
+  if (fromFile !== undefined && fromFile.length < 32) throw new Error('The file AUTH_SECRET_FILE names must hold at least 32 characters.');
+  return storedSecret(dataDir, env.AUTH_SECRET || fromFile, 'auth-secret', 'AUTH_SECRET');
 }
 declare const credentialBrand: unique symbol;
 /** A password hash that only hashPassword makes; account writes accept nothing else, so this module owns the hash format. */
@@ -110,12 +112,15 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   // Cookies are shared across ports; the configured origin is part of every cookie name so local instances can coexist.
   const origin = new URL(config.appUrl).origin, secure = origin.startsWith('https:'), scope = createHash('sha256').update(origin).digest('hex').slice(0, 16);
   const oidcName = 'ten98_oidc_' + scope, inviteName = 'ten98_oidc_invite_' + scope;
-  // Better Auth names the session cookie from this prefix (with __Secure- on https). The pre-Better Auth names are only
-  // recognised so a browser that still sends one is told its session ended and has the cookie cleared (#97 session reset).
-  const sessionCookie = `${secure ? '__Secure-' : ''}ten98-${scope}.session_token`, retiredCookies = ['ten98_session_' + scope, 'ten98_session'];
+  // Better Auth names the session cookie from this prefix (with __Secure- on https): the app and its origin, so neither
+  // another instance on this host nor another Ten98 app behind the same origin shares it. Campaign's own pre-Better Auth
+  // cookie is only recognised so a browser that still sends it is told its session ended and has it cleared (#97 session
+  // reset). The unscoped `ten98_session` is left alone: any instance on this host may have set it, and with the old
+  // sessions table gone this one can no longer tell whether it is its own.
+  const prefix = 'ten98-campaign-' + scope, sessionCookie = `${secure ? '__Secure-' : ''}${prefix}.session_token`, retiredCookies = ['ten98_session_' + scope];
   const identity = createCampaignAuth({
     database: authDatabase(db), transactionDatabase: authDatabase, appUrl: config.appUrl, secret: config.authSecret, appName: 'ten98 Campaign',
-    cookiePrefix: 'ten98-' + scope, legacyPasswords: true, sendResetPassword: message => { resetCapture.getStore()?.push(message); },
+    cookiePrefix: prefix, legacyPasswords: true, sendResetPassword: message => { resetCapture.getStore()?.push(message); },
   });
   function cookie(name: string, value: string, age: number, path = '/') {
     return `${name}=${value}; Path=${path}; HttpOnly; SameSite=Lax; Max-Age=${age}${secure ? '; Secure' : ''}`;
@@ -157,10 +162,16 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   /** Signs in with a password, verified first outside any transaction and then under the account lock; null when the email or password is wrong. */
   async function signIn(req: IncomingMessage, res: ServerResponse, email: string, password: string): Promise<PublicUser | null> {
     return await signInWithPassword(identity, db, email, password, async (auth, tx, userId) => {
+      // No account under the lock (removed, or its email changed since the pre-check): refuse before Better Auth reads one
+      // that commits a moment later without this lock.
+      if (!userId) return null;
       const response = await auth.api.signInEmail({ body: { email, password }, headers: headers(req), asResponse: true });
-      if (!response.ok || !userId) return null;
+      if (!response.ok) return null;
+      const signedIn = await response.clone().json() as { twoFactorRedirect?: boolean; user?: { id?: string } };
       // Campaign offers no two-factor enrolment yet (#285), so no account can reach Better Auth's second-factor challenge.
-      if ((await response.clone().json() as { twoFactorRedirect?: boolean }).twoFactorRedirect) throw new HttpError(403, 'Two-factor sign-in is not available in Campaign yet.');
+      if (signedIn.twoFactorRedirect) throw new HttpError(403, 'Two-factor sign-in is not available in Campaign yet.');
+      // The session must belong to the account this transaction locked; throwing rolls the session back.
+      if (signedIn.user?.id !== userId) throw new HttpError(401, 'Email or password is incorrect.');
       forward(res, response);
       const row = (await tx.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, userId)))[0];
       return publicUser({ ...row, isOperator: await isOperator(tx, userId) });
@@ -210,6 +221,8 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       if (!found || !await hasLocalPassword(db, found.id)) return null;
       const captured: ResetPasswordMessage[] = [];
       await resetCapture.run(captured, () => identity.withLockedAuth(db, found.id, async (auth, tx) => {
+        // Checked again under the lock: Better Auth would issue a link to an SSO-only account too.
+        if (!await hasLocalPassword(tx, found.id)) return;
         await retireResetLinks(tx, found.id);
         const response = await call(auth, '/request-password-reset', undefined, { email: found.email });
         if (!response.ok) throw new HttpError(500, 'The reset link could not be created.');
@@ -230,9 +243,11 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       const userId = link && link.expiresAt > new Date() ? link.userId : undefined;
       if (!userId) throw invalid();
       await identity.withLockedAuth(db, userId, async (auth, tx) => {
+        // Better Auth's reset creates a credential when there is none, so an SSO-only account must never reach it.
+        if (!await hasLocalPassword(tx, userId)) throw invalid();
         if (!(await call(auth, '/reset-password', undefined, { token, newPassword: password })).ok) throw invalid();
         await retireResetLinks(tx, userId);
-      });
+      }).catch(error => { throw error instanceof LockedAuthUserNotFoundError ? invalid() : error; });
     },
     revokeOtherSessions(req: IncomingMessage, userId: string): Promise<number> {
       return identity.withLockedAuth(db, userId, async auth => {

@@ -19,7 +19,7 @@ test('same-host instances keep session and OIDC cookies isolated, and an OIDC si
   const firstA = await signIn(authA, 'alice@example.test'), firstB = await signIn(authB, 'bob@example.test');
   const sessionCookie = res => setCookies(res).find(cookie => /\.session_token=/.test(cookie)), nameA = sessionCookie(firstA).split('=')[0], nameB = sessionCookie(firstB).split('=')[0];
   // Each installation names its session cookie from its own origin, and the cookie is HttpOnly and SameSite=Lax (Secure on https).
-  assert.notEqual(nameA, nameB); assert.match(nameA, /^ten98-[a-f0-9]{16}\.session_token$/); assert.equal(jar.size, 2);
+  assert.notEqual(nameA, nameB); assert.match(nameA, /^ten98-campaign-[a-f0-9]{16}\.session_token$/); assert.equal(jar.size, 2);
   assert.match(sessionCookie(firstA), /; HttpOnly; SameSite=Lax$/); assert.doesNotMatch(sessionCookie(firstA), /Secure/);
   assert.equal((await authA.user(request())).id, 'alice'); assert.equal((await authB.user(request())).id, 'bob');
   // Another installation's cookie is never accepted, under its own name or under this installation's.
@@ -32,6 +32,12 @@ test('same-host instances keep session and OIDC cookies isolated, and an OIDC si
   assert.equal(await authA.user(request()), null); assert.equal((await authB.user(request())).id, 'bob'); assert.equal(jar.has(nameB), true);
   const again = response(); await authA.login(request(), again, { email: 'alice@example.test', password }); absorb(again);
   assert.equal((await authA.user(request())).id, 'alice'); assert.equal((await authB.user(request())).id, 'bob');
+  // An unscoped pre-Better Auth cookie may belong to any instance on this host; this one can no longer validate it.
+  const foreignLegacy = randomBytes(32).toString('base64url'); jar.set('ten98_session', foreignLegacy);
+  const anotherLogin = response(); await authA.login(request(), anotherLogin, { email: 'alice@example.test', password }); absorb(anotherLogin);
+  const signoutAgain = response(); await authA.logout(request(), signoutAgain); absorb(signoutAgain);
+  assert.equal(jar.get('ten98_session'), foreignLegacy, 'An app must not clear a legacy cookie validated only by another database.');
+  const relogin = response(); await authA.login(request(), relogin, { email: 'alice@example.test', password }); absorb(relogin);
 
   let sequence = 0, exchanges = 0;
   const oidcClient = {

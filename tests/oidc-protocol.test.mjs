@@ -94,7 +94,7 @@ test('OIDC sign-in completes against an Authentik-shaped issuer with the real cl
   const signedIn = await callback(flow, idp.authorize(flow.location));
   assert.equal(signedIn.status, 302);
   assert.equal(signedIn.headers.Location, appUrl + '/');
-  assert.ok([].concat(signedIn.headers['Set-Cookie']).some(value => /^__Secure-ten98-[0-9a-f]{16}\.session_token=[A-Za-z0-9]{32}\.[A-Za-z0-9%+/=_-]+; /.test(value)));
+  assert.ok([].concat(signedIn.headers['Set-Cookie']).some(value => /^__Secure-ten98-campaign-[0-9a-f]{16}\.session_token=[A-Za-z0-9]{32}\.[A-Za-z0-9%+/=_-]+; /.test(value)));
   const identity = (await db.$client.query('SELECT i.issuer, i.subject, u.email FROM oidc_identities i JOIN users u ON u.id = i.user_id')).rows;
   assert.deepEqual(identity, [{ issuer: idp.issuer, subject: 'a1b2c3d4e5f6', email: 'allowed@example.test' }]);
 

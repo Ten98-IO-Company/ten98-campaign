@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes, scrypt } from 'node:crypto';
+import { existsSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TestContext } from 'node:test';
-import { postgresSkip, testApp } from './postgres.mjs';
+import { lockWaiters, postgresSkip, testApp } from './postgres.mjs';
+import { hashPassword } from '../server/auth.ts';
 import { addMemberships, addUsers } from './fixtures/accounts.ts';
 
 // Campaign identity on Better Auth (@ten98/runtime/auth, ten98-code-system#97): every path that creates or changes a
@@ -120,6 +122,61 @@ test('a session token is never stored as the raw cookie token', pg, async t => {
   assert.equal((await app.database.pool.query('SELECT count(*)::int AS n FROM sessions')).rows[0].n, 1);
   // Expected to fail until runtime #131 (keyed-hash session tokens): Better Auth 1.7.7 stores the token itself.
   assert.equal((await app.database.pool.query('SELECT count(*)::int AS n FROM sessions WHERE token = $1', [raw])).rows[0].n, 0, 'Only a keyed hash of the session token is stored.');
+});
+
+test('a sign-in whose account is gone by the time it holds the lock is refused before Better Auth looks the email up again', pg, async t => {
+  const { app, request, signIn } = await fixture(t), { pool } = app.database;
+  assert.equal((await request('/auth/setup', { body: { name: 'Owner', email: 'owner@example.test', password: 'owner identity fixture password' } })).status, 201);
+  await addUsers(pool, [{ id: 'leaving', name: 'Leaving', email: 'leaving@example.test', password: await hashPassword('leaving fixture password') }]);
+  // Hold the sign-in at the email lock, after its pre-check passed; remove the account; then let it take the lock.
+  const holder = await pool.connect();
+  try {
+    await holder.query('BEGIN'); await holder.query("SELECT pg_advisory_xact_lock(109859, hashtext('leaving@example.test'))");
+    const pending = signIn('leaving@example.test', 'leaving fixture password');
+    await lockWaiters(holder, 1);
+    await pool.query("DELETE FROM users WHERE id = 'leaving'");
+    await holder.query('COMMIT');
+    const refused = await pending;
+    assert.equal(refused.status, 401); assert.equal(refused.cookie, '');
+  } finally { holder.release(); }
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE user_id <> (SELECT id FROM users WHERE email = 'owner@example.test')")).rows[0].n, 0);
+});
+
+test('a sign-in never keeps a session for an account other than the one it locked', pg, async t => {
+  const { app, request, signIn } = await fixture(t), { pool } = app.database;
+  assert.equal((await request('/auth/setup', { body: { name: 'Owner', email: 'owner@example.test', password: 'owner identity fixture password' } })).status, 201);
+  // Two rows whose emails differ only in case: the lock takes the first by lower(email) (the mixed-case one, stored first),
+  // while Better Auth signs in the exact lower-case address. The mismatch must roll the session back.
+  const hash = await hashPassword('twin fixture password');
+  await addUsers(pool, [{ id: 'twin-mixed', name: 'Mixed', email: 'Twin@example.test', password: hash }, { id: 'twin-lower', name: 'Lower', email: 'twin@example.test', password: hash }]);
+  const result = await signIn('twin@example.test', 'twin fixture password');
+  assert.equal(result.status, 401); assert.equal(result.cookie, '');
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE user_id IN ('twin-mixed', 'twin-lower')")).rows[0].n, 0, 'The session Better Auth wrote was rolled back.');
+});
+
+test('AUTH_SECRET_FILE must name a file holding the secret; it never falls back to a generated one', async t => {
+  const { authSecret } = await import('../server/auth.ts');
+  const dir = await mkdtemp(join(tmpdir(), 'campaign-auth-secret-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = (name: string, value: string) => { const path = join(dir, name); writeFileSync(path, value); return path; };
+  assert.throws(() => authSecret(dir, { AUTH_SECRET_FILE: file('empty', '') }), /at least 32 characters/);
+  assert.throws(() => authSecret(dir, { AUTH_SECRET_FILE: file('short', 'too short\n') }), /at least 32 characters/);
+  assert.equal(existsSync(join(dir, 'auth-secret')), false, 'No secret was generated in DATA_DIR.');
+  assert.equal(authSecret(dir, { AUTH_SECRET_FILE: file('ok', 'a'.repeat(40) + '\n') }), 'a'.repeat(40));
+  assert.throws(() => authSecret(dir, { AUTH_SECRET: 'x'.repeat(40), AUTH_SECRET_FILE: file('both', 'b'.repeat(40)) }), /not both/);
+  const generated = authSecret(dir); assert.ok(generated.length >= 32); assert.equal(authSecret(dir), generated, 'The generated secret is kept.');
+});
+
+test('an SSO-only account never gains a password through a reset link', pg, async t => {
+  const { app } = await fixture(t), { pool } = app.database;
+  const { createAuth } = await import('../server/auth.ts');
+  await addUsers(pool, [{ id: 'sso-only', name: 'SSO', email: 'sso@example.test' }]);
+  const auth = createAuth(app.database.db, { appUrl: origin, sessionSecret: 'sso reset fixture session secret of 32+ chars', authSecret: 'sso reset fixture auth secret of 32+ characters', oidcIssuer: '', oidcClientId: '', oidcAllowedEmails: [] });
+  const req = { headers: {}, socket: { remoteAddress: '127.0.0.1' } } as never;
+  assert.equal(await auth.requestPasswordReset(req, 'sso@example.test'), null, 'No link is issued.');
+  // A link for the account that exists anyway (written before its password was removed, say) is refused under the lock.
+  await pool.query("INSERT INTO verifications (id, identifier, value, expires_at, created_at, updated_at) VALUES ('planted', 'reset-password:AAAAAAAAAAAAAAAAAAAAAAAA', 'sso-only', $1, $2, $2)", [Date.now() + 3600000, Date.now()]);
+  await assert.rejects(auth.resetPassword(req, 'AAAAAAAAAAAAAAAAAAAAAAAA', 'a new sso fixture password'), (error: { status?: number }) => error.status === 400);
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM accounts WHERE user_id = 'sso-only'")).rows[0].n, 0, 'No credential was created.');
 });
 
 test('the sign-in pre-check runs the legacy and the modern verifier once for unknown, legacy and modern accounts alike', async () => {
