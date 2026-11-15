@@ -62,38 +62,36 @@ test('YouTube metadata rejects unreviewed, invalid, unauthorized and changed acc
   assert.equal((await f.invoke({ title: 'A' })).status, 409); assert.deepEqual(f.writes, []);
 });
 
-test('YouTube metadata requires only the selected channel to stay active and still checks every copy scope', { skip: postgresSkip }, async t => {
-  for (const index of [0, 1]) for (const read of [1, 2, 3]) await t.test(`${index ? 'sibling' : 'selected'} inactive at read ${read}`, async t => {
-    const f = await fixture(t), before = structuredClone(f.saved);
-    f.onRead = count => { if (count === read) f.accounts[index].isActive = false; };
-    const result = await f.invoke({ title: 'Replacement title' });
-    assert.equal(result.status, index ? 200 : 409, JSON.stringify(result));
-    assert.equal(result.data.operation.status, index ? 'complete' : read === 3 ? 'uncertain' : 'failed');
-    assert.equal(f.writes.length, index || read === 3 ? 1 : 0); assert.deepEqual(f.saved, before);
-  });
-  for (const mismatch of ['profile', 'platform']) await t.test(`inactive sibling with wrong ${mismatch}`, async t => {
-    const f = await fixture(t); f.accounts[1].isActive = false;
-    if (mismatch === 'profile') f.accounts[1].profileId = 'outside-profile'; else f.accounts[1].platform = 'facebook';
-    const result = await f.invoke({ title: 'Replacement title' });
-    assert.equal(result.status, mismatch === 'profile' ? 403 : 502); assert.equal(f.writes.length, 0);
-  });
+// Each case below clones a database and starts the app, so each is its own top-level test with its own time budget.
+// As subtests of one parent they shared a single 120 s budget, which a loaded full-suite run could exceed.
+for (const index of [0, 1]) for (const read of [1, 2, 3]) test(`YouTube metadata requires only the selected channel to stay active: ${index ? 'sibling' : 'selected'} inactive at read ${read}`, { skip: postgresSkip }, async t => {
+  const f = await fixture(t), before = structuredClone(f.saved);
+  f.onRead = count => { if (count === read) f.accounts[index].isActive = false; };
+  const result = await f.invoke({ title: 'Replacement title' });
+  assert.equal(result.status, index ? 200 : 409, JSON.stringify(result));
+  assert.equal(result.data.operation.status, index ? 'complete' : read === 3 ? 'uncertain' : 'failed');
+  assert.equal(f.writes.length, index || read === 3 ? 1 : 0); assert.deepEqual(f.saved, before);
+});
+for (const mismatch of ['profile', 'platform']) test(`YouTube metadata still checks every copy scope: inactive sibling with wrong ${mismatch}`, { skip: postgresSkip }, async t => {
+  const f = await fixture(t); f.accounts[1].isActive = false;
+  if (mismatch === 'profile') f.accounts[1].profileId = 'outside-profile'; else f.accounts[1].platform = 'facebook';
+  const result = await f.invoke({ title: 'Replacement title' });
+  assert.equal(result.status, mismatch === 'profile' ? 403 : 502); assert.equal(f.writes.length, 0);
 });
 
-test('YouTube metadata malformed, scoped-away and lost receipts stay uncertain and cannot resend with old or new keys', { skip: postgresSkip }, async t => {
-  for (const receipt of [{ success: false, updatedFields: ['title'] }, { success: true }, { success: true, updatedFields: [] }, { success: true, updatedFields: ['title', 'tags'] }, { success: true, updatedFields: ['title', 'title'] }, { success: true, updatedFields: ['title'], accountId: 'channel-b' }, { success: true, updatedFields: ['title'], videoId: 'bbbbbbbbbbb' }, { success: true, updatedFields: ['title'], postId: 'foreign' }]) {
-    await t.test(JSON.stringify(receipt), async t => {
-      const f = await fixture(t), before = structuredClone(f.saved); f.receipt = () => receipt;
-      const first = await f.invoke({ title: 'A' }, 'metadata-bad-receipt'); assert.equal(first.data.operation.status, 'uncertain', JSON.stringify(first));
-      assert.equal((await f.invoke({ title: 'A' }, 'metadata-bad-receipt')).status, 409); assert.equal((await f.invoke({ title: 'B' })).status, 409); assert.equal(f.writes.length, 1); assert.deepEqual(f.saved, before);
-    });
-  }
-  for (const mode of ['loseReceipt', 'failReadback', 'remap', 'changed-video']) await t.test(mode, async t => {
-    const f = await fixture(t), before = structuredClone(f.saved); f[mode] = true;
-    if (mode === 'remap') f.onWrite = () => { f.mapping = 'new-profile'; };
-    if (mode === 'changed-video') f.onWrite = () => { f.remote.platforms[0].platformPostId = 'ccccccccccc'; };
-    const result = await f.invoke({ tags: ['replace'] }); assert.equal(result.data.operation.status, 'uncertain', JSON.stringify(result));
-    assert.equal((await f.invoke({ title: 'Another attempt' })).status, 409); assert.equal(f.writes.length, 1); assert.deepEqual(f.saved, before);
+for (const receipt of [{ success: false, updatedFields: ['title'] }, { success: true }, { success: true, updatedFields: [] }, { success: true, updatedFields: ['title', 'tags'] }, { success: true, updatedFields: ['title', 'title'] }, { success: true, updatedFields: ['title'], accountId: 'channel-b' }, { success: true, updatedFields: ['title'], videoId: 'bbbbbbbbbbb' }, { success: true, updatedFields: ['title'], postId: 'foreign' }]) {
+  test(`YouTube metadata malformed or scoped-away receipt stays uncertain and cannot resend with old or new keys: ${JSON.stringify(receipt)}`, { skip: postgresSkip }, async t => {
+    const f = await fixture(t), before = structuredClone(f.saved); f.receipt = () => receipt;
+    const first = await f.invoke({ title: 'A' }, 'metadata-bad-receipt'); assert.equal(first.data.operation.status, 'uncertain', JSON.stringify(first));
+    assert.equal((await f.invoke({ title: 'A' }, 'metadata-bad-receipt')).status, 409); assert.equal((await f.invoke({ title: 'B' })).status, 409); assert.equal(f.writes.length, 1); assert.deepEqual(f.saved, before);
   });
+}
+for (const mode of ['loseReceipt', 'failReadback', 'remap', 'changed-video']) test(`YouTube metadata lost receipt stays uncertain and cannot resend: ${mode}`, { skip: postgresSkip }, async t => {
+  const f = await fixture(t), before = structuredClone(f.saved); f[mode] = true;
+  if (mode === 'remap') f.onWrite = () => { f.mapping = 'new-profile'; };
+  if (mode === 'changed-video') f.onWrite = () => { f.remote.platforms[0].platformPostId = 'ccccccccccc'; };
+  const result = await f.invoke({ tags: ['replace'] }); assert.equal(result.data.operation.status, 'uncertain', JSON.stringify(result));
+  assert.equal((await f.invoke({ title: 'Another attempt' })).status, 409); assert.equal(f.writes.length, 1); assert.deepEqual(f.saved, before);
 });
 
 const management = await readFile(new URL('../src/PostManagement.tsx', import.meta.url), 'utf8');
