@@ -58,10 +58,11 @@ function requireWhatsAppTemplate(campaign: any) {
 }
 function exclusion(contact: any, channel: string, purpose = 'transactional') {
   if (!contact) return 'Contact no longer exists';
+  // Suppression first: a permanent one also withdraws consent, and the person opted out rather than never opting in.
+  const suppression = activeSuppression(contact, channel); if (suppression) return `Suppressed: ${suppression.reason}`;
   if (!contact.consents?.[channel]) return 'No recorded consent';
   // Marketing email needs its own permission on top of email consent (#137).
   if (channel === 'email' && purpose === 'marketing' && contact.consents?.emailMarketing !== true) return 'No recorded marketing permission';
-  const suppression = activeSuppression(contact, channel); if (suppression) return `Suppressed: ${suppression.reason}`;
   if (!(channel === 'email' ? contact.email : contact.phone)) return channel === 'email' ? 'No email address' : 'No E.164 phone number';
   if (channel === 'email' && contact.hygiene?.disposable) return 'Disposable email address';
   if (channel === 'email' && ['no_mx', 'null_mx', 'nxdomain'].includes(contact.hygiene?.dnsStatus)) return 'Email domain cannot receive mail';

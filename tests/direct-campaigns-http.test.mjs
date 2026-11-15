@@ -215,7 +215,7 @@ test('Cloudflare temporary suppressions expire without withdrawing consent, and 
     assert.equal((await contact(complaint.id)).consents.email, false, 'Permanent suppressions keep withdrawing consent.');
     assert.deepEqual((await status()).map(({ provider, kind, channel, contacts, expiresAt }) => ({ provider, kind, channel, contacts, expiresAt })), [{ provider: 'cloudflare', kind: 'policy', channel: 'email', contacts: 1, expiresAt: null }]);
     let preview = (await f.request(f.path + `/campaigns/${draft.id}/preview`, 'POST', {})).data.audience;
-    assert.deepEqual(preview.exclusions.map(row => [row.id, row.reason]).sort(), [[complaint.id, 'No recorded consent'], [soft.id, 'Suppressed: soft_bounce']].sort());
+    assert.deepEqual(preview.exclusions.map(row => [row.id, row.reason]).sort(), [[complaint.id, 'Suppressed: complaint'], [soft.id, 'Suppressed: soft_bounce']].sort());
     // An expiring Cloudflare hard bounce holds the contact only until its expiry: consent stays and the permanent ledger is untouched.
     const bounced = await contact(moved.id); assert.deepEqual([bounced.suppression.email.reason, bounced.suppression.email.expiresAt, bounced.consents.email], ['hard-bounce', later, true]);
     assert.equal((await pool.query(`SELECT count(*)::int AS n FROM direct_contact_suppressions WHERE reason = 'hard-bounce'`)).rows[0].n, 0);
