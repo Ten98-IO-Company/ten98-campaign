@@ -68,6 +68,7 @@ function exclusion(contact: any, channel: string, purpose = 'transactional') {
   if (channel === 'email' && ['no_mx', 'null_mx', 'nxdomain'].includes(contact.hygiene?.dnsStatus)) return 'Email domain cannot receive mail';
   return '';
 }
+const consentLabels = { email: 'email', sms: 'SMS', whatsapp: 'WhatsApp', emailMarketing: 'email marketing' };
 const credentialFields: Record<string, string[]> = { email: ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN', 'CLOUDFLARE_EMAIL_FROM_ADDRESS', 'CLOUDFLARE_EMAIL_FROM_NAME', 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS'], sms: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'TWILIO_MESSAGING_SERVICE_SID'], whatsapp: ['ZERNIO_API_KEY'] };
 // SES settings join the email fingerprint only once any is set, so campaigns scheduled before SES keep their hash.
 const sesFields = ['EMAIL_PROVIDER', 'AWS_SES_REGION', 'AWS_SES_ACCESS_KEY_ID', 'AWS_SES_SECRET_ACCESS_KEY', 'AWS_SES_FROM_ADDRESS', 'AWS_SES_FROM_NAME', 'AWS_SES_REPLY_TO_ADDRESS', 'AWS_SES_CONFIGURATION_SET'];
@@ -288,13 +289,17 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     if (kind === 'status' && method === 'GET') { let accounts: any[] = [], accountError: any; if (env.ZERNIO_API_KEY && project.zernioProfileId) { try { accounts = await scopedAccounts(zernioClient(env.ZERNIO_API_KEY, () => context.assertProjectMapping(project.zernioProfileId)), project.zernioProfileId); } catch (error: any) { accountError = error instanceof IntegrationError ? error.message : 'WhatsApp accounts could not be loaded.'; } } send(200, { providers: Object.fromEntries(channels.map(channel => [channel, ready(channel) && (channel !== 'whatsapp' || Boolean(project.zernioProfileId && !accountError))])), accounts: accounts.filter(account => account.platform === 'whatsapp').map(account => ({ id: account._id || account.id, name: account.displayName || account.username || 'WhatsApp Business' })), accountError, emailPolicy: marketingAvailable(env) ? 'transactional_and_marketing' : 'transactional_only', marketingAvailable: marketingAvailable(env), emailProvider: emailProvider(env), sesWebhookUrl: `${appUrl}/api/webhooks/ses/sns`, deliverabilityAlerts: await deliverabilityAlerts(project.id), callbackUrl: `${appUrl}/api/webhooks/twilio/inbound`, publicCallbacks: appUrl.startsWith('https://') }); return true; }
     if (kind === 'templates' && method === 'GET') { send(200, await listWhatsAppTemplates({ env: { ...env }, project, accountId: url.searchParams.get('accountId'), assertMapping: () => context.assertProjectMapping(project.zernioProfileId) })); return true; }
     if (kind === 'contacts') {
+      // Consent evidence: who changed a contact's permissions, suppressed, imported or deleted contacts. The entry names the
+      // actor and a short contact reference, never the contact's name, address or number.
+      const actor = user.name || user.id, log = (message: string) => createStore(db).activity(project.id, message), ref = (contactId: string) => 'contact ' + contactId.slice(0, 8);
+      const permissions = (before: any, after: any) => Object.entries(consentLabels).filter(([channel]) => !!before?.consents?.[channel] !== !!after?.consents?.[channel]).map(([channel, label]) => `${label} ${after?.consents?.[channel] ? 'on' : 'off'}`).join(', ');
       if (!id && method === 'GET') send(200, { contacts: await contacts.list(project.id) });
-      else if (!id && method === 'POST') send(201, { contact: await contacts.save(project.id, body) });
-      else if (id === 'import' && method === 'POST') send(200, await contacts.import(project.id, body));
+      else if (!id && method === 'POST') { const contact = await contacts.save(project.id, body), changed = permissions(undefined, contact); if (changed) await log(`Permission recorded for ${ref(contact.id)} by ${actor}: ${changed}.`); send(201, { contact }); }
+      else if (id === 'import' && method === 'POST') { const result = await contacts.import(project.id, body); if (!result.dryRun && result.imported) await log(`Contacts imported from CSV by ${actor}: ${result.created} created, ${result.updated} updated, ${result.skipped} skipped.`); send(200, result); }
       else if (id === 'assess-dns' && method === 'POST') { const result = await contacts.assessDNS(project.id, body.ids, { assertAccess: context.assertIntegrationSettings }); await context.assertIntegrationSettings(); send(200, result); }
-      else if (id && !action && method === 'PATCH') send(200, { contact: await contacts.save(project.id, body, id) });
-      else if (id && !action && method === 'DELETE') { if (!await contacts.remove(project.id, id)) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { removed: true }); }
-      else if (id && action === 'suppress' && method === 'POST') send(200, { contact: await contacts.suppress(project.id, id, body.channel, body.reason) });
+      else if (id && !action && method === 'PATCH') { const before = await contacts.get(project.id, id), contact = await contacts.save(project.id, body, id), changed = permissions(before, contact); if (changed) await log(`Permission changed for ${ref(contact.id)} by ${actor}: ${changed}.`); send(200, { contact }); }
+      else if (id && !action && method === 'DELETE') { if (!await contacts.remove(project.id, id)) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); await log(`Deleted ${ref(id)} by ${actor}. Its suppressions are kept.`); send(200, { removed: true }); }
+      else if (id && action === 'suppress' && method === 'POST') { const contact = await contacts.suppress(project.id, id, body.channel, body.reason); await log(`Suppressed ${ref(id)} for ${consentLabels[body.channel as keyof typeof consentLabels] || body.channel} by ${actor}.`); send(200, { contact }); }
       else return false;
       return true;
     }
@@ -364,6 +369,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     if (action === 'cancel') {
       // Cancel the stored campaign under its row lock rather than the copy read at the start of this request.
       Object.assign(campaign, await changeCampaign(project.id, id, latest => { latest.status = 'cancelled'; }));
+      await createStore(db).activity(project.id, `Direct campaign cancelled by ${user.name || user.id}.`);
       for (const delivery of await deliveries(id)) if (delivery.status === 'pending') await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; current.status = 'cancelled'; });
       if (campaign.channel === 'whatsapp' && campaign.providerId && campaign.providerStatus !== 'cancelled') {
         const assertMapping = async () => { await context.assertIntegrationSettings(); await guard(campaign, false); };
