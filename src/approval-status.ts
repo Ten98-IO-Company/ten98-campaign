@@ -1,7 +1,8 @@
 // The project approvals summary (GET /projects/:id/approvals/summary): read once per state load, no provider calls.
 import { createDisplayFormatter } from '@ten98/ui';
-// Not a component, so it formats with the browser's locale and time zone, as the app's DisplayFormatProvider does.
-const format = createDisplayFormatter();
+// Not a component, so by default it formats with the browser's locale and time zone, as the app's DisplayFormatProvider
+// does; a caller (a test) may pass its own formatter.
+const browserFormat = createDisplayFormatter();
 export type ApprovalSummary = { requireApproval: boolean; pending: number; statuses: Record<string, string>; pendingAdSpend?: number };
 
 export const approvalLabels: Record<string, string> = { not_requested: 'Approval not requested', pending: 'Awaiting approval', approved: 'Approved', rejected: 'Changes requested', stale: 'Changed since approval', submitted: 'Submitted to provider' };
@@ -12,7 +13,7 @@ export function readableApprovalSummary(value: any): value is ApprovalSummary {
 }
 
 // The sidebar Approvals badge: pending post reviews plus pending ad spend reviews, with a spoken description of both.
-export function approvalBadge(summary: ApprovalSummary | null | undefined) {
+export function approvalBadge(summary: ApprovalSummary | null | undefined, format = browserFormat) {
   const posts = summary?.pending || 0, spend = summary?.pendingAdSpend || 0;
   if (!posts && !spend) return null;
   const parts = [posts && format.count(posts, { one: 'post', other: 'posts' }), spend && format.count(spend, { one: 'ad spend change', other: 'ad spend changes' })].filter(Boolean);
@@ -39,7 +40,7 @@ export const adSpendActionLabel = (action: string) => adSpendActions[action] || 
 const adPlatforms: Record<string, string> = { facebook: 'Facebook', instagram: 'Instagram', google: 'Google Ads', microsoft: 'Microsoft Advertising', linkedin: 'LinkedIn', tiktok: 'TikTok', pinterest: 'Pinterest', twitter: 'X', reddit: 'Reddit', snapchat: 'Snapchat', openai: 'OpenAI', broadsign: 'Broadsign' };
 export const adSpendPlatformLabel = (platform: string) => adPlatforms[platform] || platform;
 // Review amounts are minor units of the currency (cents for USD, fils for AED); null is a budget the server could not read.
-export function formatMinorUnits(amount: unknown, currency: unknown) {
+export function formatMinorUnits(amount: unknown, currency: unknown, format = browserFormat) {
   if (typeof amount !== 'number' || !Number.isSafeInteger(amount) || typeof currency !== 'string') return 'Not available';
   try {
     // Reads the currency's minor-unit digits to place the decimal point in the exact string; this formats nothing.
