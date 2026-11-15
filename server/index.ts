@@ -16,6 +16,7 @@ import { createIntegrationSettings } from './integration-settings.ts';
 import { handleInvitations, revokeMemberInvitations } from './invitations.ts';
 import { readRequestJson } from './json-body.ts';
 import { emailConfigured, sendDirect } from './direct-providers.ts';
+import { configuredSessionSecret, deploymentConfig, listenAddress } from './config.ts';
 import { handleOperationRecovery } from './operation-recovery.ts';
 import { handleApprovals, assertPublishingApproval, assertProviderPostEdit, recordApprovedReschedule } from './approvals.ts';
 import { createWebhookService, WEBHOOK_MAX_BYTES } from './webhooks.ts';
@@ -143,21 +144,14 @@ async function readBody(req: IncomingMessage, maximum = 65536): Promise<Provider
 }
 
 export async function createApp(options: AppOptions = {}) {
-  const env = options.env || { ...process.env }, dataDir = resolve(options.dataDir || env.DATA_DIR || 'data');
-  const appUrl = (options.appUrl || env.APP_URL || 'http://127.0.0.1:3018').replace(/\/$/, '');
+  const env = options.env || { ...process.env }, settings = deploymentConfig(env, options), { dataDir, appUrl } = settings;
   const parsed = new URL(appUrl);
-  if (!['https:', 'http:'].includes(parsed.protocol) || parsed.origin !== appUrl || parsed.username || parsed.password || (parsed.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname))) throw new Error('APP_URL must be an HTTPS origin, or HTTP loopback for local use.');
-  if (env.OIDC_ISSUER && env.OIDC_CLIENT_ID) oidcEndpoint(env.OIDC_ISSUER, { issuer: true });
-  // DIRECT_SCHEDULER=off starts the app without sending due direct campaigns (for example to verify an upgrade before
-  // switching traffic). Unset or empty (as a copied `DIRECT_SCHEDULER=` line gives) means on; any other value than on/off
-  // refuses to start, so a typo cannot leave sending enabled.
-  const directScheduler = env.DIRECT_SCHEDULER || 'on';
-  if (!['on', 'off'].includes(directScheduler)) throw new Error('DIRECT_SCHEDULER must be on or off.');
+  if (settings.oidcIssuer && settings.oidcClientId) oidcEndpoint(settings.oidcIssuer, { issuer: true });
   // Install-wide: Broadsign bookings are approved in this currency (Integrations validates the same rule when saved).
   if (env.BROADSIGN_CURRENCY && !/^[A-Z]{3}$/.test(env.BROADSIGN_CURRENCY)) throw new Error('BROADSIGN_CURRENCY must be a three-letter ISO currency code, such as USD.');
-  const { pool, db } = options.database || getDatabase(env.DATABASE_URL), store = createStore(db);
+  const { pool, db } = options.database || getDatabase(settings.databaseUrl), store = createStore(db);
   await assertSchema(pool);
-  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean), trustedProxies: env.TRUSTED_PROXIES || '' };
+  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || configuredSessionSecret(env)), oidcIssuer: settings.oidcIssuer, oidcClientId: settings.oidcClientId, oidcClientSecret: settings.oidcClientSecret, oidcAllowedEmails: settings.oidcAllowedEmails, trustedProxies: settings.trustedProxies };
   config.oidcEnabled = Boolean(config.oidcIssuer && config.oidcClientId);
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
   const integrationSettings = await createIntegrationSettings({ db, env, secret: config.sessionSecret });
@@ -165,7 +159,7 @@ export async function createApp(options: AppOptions = {}) {
   const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts });
   await direct.attachSmsInbox(smsInbox);
   const links = createLinks({ db, appUrl });
-  const directTimer = options.directScheduler === false || directScheduler === 'off' ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
+  const directTimer = options.directScheduler === false || settings.directScheduler === 'off' ? undefined : setInterval(() => { direct.processPending().catch(() => console.error('Direct campaign processing deferred.')); }, 1000); directTimer?.unref();
   const webhooks = createWebhookService({ db, contacts: direct.contacts, env });
   // One drain at a time; close() waits for the one in flight before the pool ends.
   let draining: Promise<void> | undefined;
@@ -531,6 +525,7 @@ function rejectProviderFields(body: ProviderRecord, collection = ''): void {
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app = await createApp();
-  app.server.listen(Number(process.env.PORT || 3018), process.env.HOST || '127.0.0.1', () => console.log(`Campaign manager available at ${app.config.appUrl}`));
+  const { port, host } = listenAddress();
+  app.server.listen(port, host, () => console.log(`Campaign manager available at ${app.config.appUrl}`));
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, async () => { await app.close(); process.exit(0); });
 }

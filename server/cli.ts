@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { assertSchema, closeDatabase, getDatabase, migrate, type Database } from './database.ts';
 import { accountByEmail, hashPassword, hasAnyAccount, hasLocalPassword, insertAccount, setLocalPassword } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
+import { databaseUrl } from './config.ts';
 
 class CliError extends Error {}
 const usage = 'Usage: node server/cli.ts migrate, or pipe JSON account input to create-user, reset-password, or {email} to grant-operator or revoke-operator.';
@@ -41,19 +42,19 @@ async function account(command: string, db: Database) {
 const command = process.argv[2];
 try {
   if (command === 'migrate') {
-    if (!process.env.DATABASE_URL) throw new CliError('Set DATABASE_URL to the PostgreSQL connection string.');
+    if (!databaseUrl()) throw new CliError('Set DATABASE_URL to the PostgreSQL connection string.');
     const applied = await migrate();
     console.log(applied.length ? `Database migrations applied: ${applied.join(', ')}.` : 'Database migrations already applied; all checksums verified.');
   } else {
     if (!['create-user', 'grant-operator', 'revoke-operator', 'reset-password'].includes(command) || process.stdin.isTTY) throw new CliError(usage);
-    if (!process.env.DATABASE_URL) throw new CliError('Set DATABASE_URL to the PostgreSQL connection string.');
+    if (!databaseUrl()) throw new CliError('Set DATABASE_URL to the PostgreSQL connection string.');
     const { pool, db } = getDatabase();
     await assertSchema(pool);
     await account(command, db);
   }
 } catch (error: any) {
   // PostgreSQL driver errors can carry connection details, so only this command's own messages are printed.
-  console.error(error instanceof CliError || error?.code === 'SCHEMA_MISMATCH' ? error.message
+  console.error(error instanceof CliError || error?.code === 'SCHEMA_MISMATCH' || error?.code === 'CONFIG_INVALID' ? error.message
     : command === 'migrate' ? 'Migration failed and was rolled back. Check DATABASE_URL, database availability and permissions.'
     : 'Account command failed. Check DATABASE_URL, the database and the account details.');
   process.exitCode = 1;
