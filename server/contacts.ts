@@ -138,11 +138,13 @@ export function createContacts({ db }: { db: Database }) {
     for (const channel of channels) { const target = channel === 'email' ? record.email : record.phone, suppression = record.suppression[channel]; if (target && suppression && !suppression.expiresAt) await remember(ex, record.projectId, channel, hash(target), suppression.reason, suppression.at); }
     return record;
   }
-  async function save(projectId: string, body: any, id?: string) {
+  /** `create`: a new contact only; an existing contact with the same email or phone is refused instead of updated. */
+  async function save(projectId: string, body: any, id?: string, { create = false } = {}) {
     return db.transaction(async tx => {
       await lockContacts(tx, projectId);
       if (!object(body)) fail(400, 'Use the supported contact fields.');
       const previous = id ? await get(projectId, id, tx) ?? fail(404, 'Contact not found in this project.') : match(await byDestination(projectId, destination(body), tx), body);
+      if (create && previous) fail(409, 'A contact with this email address or phone number already exists. Open it from the list to change it.');
       return write(tx, projectId, await prepare(tx, projectId, body, previous), previous);
     });
   }
