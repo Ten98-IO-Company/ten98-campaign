@@ -181,6 +181,8 @@ function declaration(name) {
 // @ten98/ui's own useLeaveGuard, run outside React against the test window: hook slots persist across renders, callbacks keep
 // their identity while their dependencies hold, and an effect's cleanup runs before it re-runs, as after a React commit.
 const leaveGuardSource = readFileSync(new URL('../node_modules/@ten98/ui/dist/leave-guard.js', import.meta.url), 'utf8').replace(/^(?:'use client';|import .+;)\r?\n/gm, '').replace(/^export /gm, '');
+// trackHeldKeys is internal to @ten98/ui (not exported) and only records held keys for dialogs this harness never presses, so it is a no-op here.
+const trackHeldKeys = () => {};
 function leaveGuardRuntime(window) {
   const slots = []; let next = 0, effects = [];
   const changed = (before, deps) => !before || !deps || deps.some((value, index) => !Object.is(value, before[index]));
@@ -191,7 +193,7 @@ function leaveGuardRuntime(window) {
     const index = next++, before = slots[index];
     if (changed(before?.deps, deps)) { slots[index] = { deps, cleanup: before?.cleanup }; effects.push(() => { slots[index].cleanup?.(); slots[index].cleanup = run(); }); }
   };
-  const useLeaveGuard = new Function('useCallback', 'useEffect', 'useRef', 'useState', '_jsx', 'ConfirmDialog', 'window', leaveGuardSource + '; return useLeaveGuard;')(useCallback, useEffect, useRef, useState, jsx, ConfirmDialog, window);
+  const useLeaveGuard = new Function('useCallback', 'useEffect', 'useRef', 'useState', '_jsx', 'trackHeldKeys', 'ConfirmDialog', 'window', leaveGuardSource + '; return useLeaveGuard;')(useCallback, useEffect, useRef, useState, jsx, trackHeldKeys, ConfirmDialog, window);
   return dirty => { next = 0; effects = []; const guard = useLeaveGuard(dirty); for (const run of effects) run(); return guard; };
 }
 const leaveGuardDirty = new Function('draftDirty', 'modal', 'inboxDirty', 'campaignDirty', `return ${source.match(/^  const leaveGuard = useLeaveGuard\((.+)\);$/m)[1]};`);
