@@ -26,7 +26,7 @@ function page(states: unknown[] = []) {
   const refs: { current: unknown }[] = []; let stateIndex = 0, refIndex = 0;
   const useState = (initial: unknown) => { const index = stateIndex++; if (!(index in states)) states[index] = initial; return [states[index], (value: any) => { states[index] = typeof value === 'function' ? value(states[index]) : value; }]; };
   const useRef = (initial: unknown) => refs[refIndex++] ||= { current: initial };
-  const module = new Function('React', 'Suspense', 'useEffect', 'useRef', 'useState', 'AppBadge', 'Icon', 'assetDeliveryIssue', 'ui', `const {${Object.keys(library).filter(name => name !== 'Icon').join(',')}} = ui;` + code + '; return { AssetLibrary, uploadIssue, assetUses };')(React, Suspense, () => {}, useRef, useState, app.AppBadge, app.AppIcon, assetDeliveryIssue, library);
+  const module = new Function('React', 'Suspense', 'useEffect', 'useRef', 'useState', 'AppBadge', 'Icon', 'assetDeliveryIssue', 'ui', `const {${Object.keys(library).filter(name => name !== 'Icon').join(',')}} = ui;` + code + '; return { AssetLibrary, uploadIssue, assetUses, assetSize };')(React, Suspense, () => {}, useRef, useState, app.AppBadge, app.AppIcon, assetDeliveryIssue, library);
   return { ...module, states, render: (extra: Row = {}) => { stateIndex = 0; refIndex = 0; return module.AssetLibrary(props(extra)); } };
 }
 const assets = [
@@ -56,6 +56,12 @@ const buttons = (node: any, label: RegExp) => elements(node).filter(item => item
 const file = (name: string, type: string, size = 10) => ({ name, type, size }) as File;
 const drop = (files: File[], defaultPrevented = false) => { let prevented = false; return { event: { defaultPrevented, preventDefault() { prevented = true; }, dataTransfer: { files, types: ['Files'] } }, prevented: () => prevented }; };
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test('asset sizes use the shared file-size format, and an unknown or empty size leaves the Size row out', () => {
+  const { assetSize } = page(), format = library.createDisplayFormatter({ locale: 'en', timeZone: 'UTC' });
+  assert.deepEqual([100, 1023, 1536, 1024 * 1024, 1.5 * 1024 ** 3].map(size => assetSize(format, size)), ['100 B', '1,023 B', '1.5 KB', '1 MB', '1.5 GB']);
+  for (const size of [undefined, null, 0, -1, '2048', Number.NaN]) assert.equal(assetSize(format, size), '', String(size));
+});
 
 test('one toolbar holds the type filter, the view switch, Drive sync and the single Upload entry point', () => {
   const view = page(), tree = view.render(), html = text(tree);
