@@ -86,7 +86,8 @@ export async function testApp(t, options = {}, poolOptions = {}) {
  * Waits until `count` sessions in this database wait on a lock. Poll on the connection that holds the lock: the writers it
  * blocks may hold every other pool connection, so a pool query could wait for one that never frees.
  */
-export async function lockWaiters(client, count, timeout = 5000) {
+// The 30 s default only delays a genuine failure; under a loaded test run, requests can take several seconds to reach a lock.
+export async function lockWaiters(client, count, timeout = 30000) {
   for (const deadline = Date.now() + timeout; ;) {
     // Statistics views are snapshotted per transaction, so clear the snapshot to see waiters that arrived since the last poll.
     await client.query('SELECT pg_stat_clear_snapshot()');
@@ -107,7 +108,7 @@ export async function blockWrites(pool, table) {
   let released = false;
   const release = async () => { if (released) return; released = true; try { await client.query('COMMIT'); } finally { client.release(); } };
   return {
-    async waiting(count, timeout = 5000) {
+    async waiting(count, timeout = 30000) {
       try { await lockWaiters(client, count, timeout); } catch (error) { await release(); throw error; }
     },
     release,

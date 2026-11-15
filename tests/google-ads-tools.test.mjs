@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { stripTypeScriptTypes } from 'node:module';
+import { testDisplayFormat as format } from './display-format.ts';
+import { decimalToMicros, formatMicros, microsToDecimal, roundMicrosToMinor } from '../src/google-micros.ts';
 import { firstProject } from './first-project.ts';
 
 test('Google Ads tools use real HTTP routes, selected customer scope, durable keyword mutations, planner, negatives, targeting and bidding', { skip: postgresSkip }, async t => {
@@ -148,12 +150,28 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
 test('actual Google UI formats match types, micros and stale selection guards without treating strings as whole currency', async () => {
   const source = await readFile(new URL('../src/GoogleAdsTools.tsx', import.meta.url), 'utf8');
   const compile = (code, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
-  const matching = compile(source.match(/const matching = (.+);/)[1], {}), amount = compile(source.match(/const amount = (.+);/)[1], { number: value => String(value) });
+  const matching = compile(source.match(/const matching = (.+);/)[1], {});
   assert.deepEqual(matching('[campaign software]'), { text: 'campaign software', matchType: 'exact' }); assert.deepEqual(matching('"campaign software"'), { text: 'campaign software', matchType: 'phrase' });
-  assert.equal(amount('1500000', 'USD'), '1.5 USD'); assert.equal(amount(null), '—');
-  const formatNumber = compile(source.match(/const number = (.+);/)[1], {}), formatAmount = compile(source.match(/const amount = (.+);/)[1], { number: formatNumber });
-  assert.equal(formatAmount('1000', 'KWD'), '0.001 KWD'); assert.equal(formatAmount('1230000', 'USD'), '1.23 USD'); assert.equal(formatAmount('1000000', 'JPY'), '1 JPY');
-  assert.equal(formatAmount(null, 'KWD'), '—'); assert.equal(formatAmount('1500000'), '1.5 ');
+  const amount = (micros, currency) => formatMicros(micros, currency, format), money = compile(source.match(/const money = (.+);/)[1], { decimalToMicros, formatMicros });
+  // Reported metrics round to minor units; settings (bids, budgets) keep every micro.
+  for (const metric of ['lowTopOfPageBidMicros', 'highTopOfPageBidMicros', 'averageCpcMicros']) assert.ok(source.includes(`formatMicros(row.metrics.${metric}, currency, format, { round: 'minor' })`), metric);
+  assert.ok(source.includes("header: 'Spend', render: (row: any) => formatMicros(row.costMicros, currency, format, { round: 'minor' })"), 'Search-term spend rounds to minor units.');
+  assert.ok(source.includes("money(row.metrics?.cost, currency, format, { round: 'minor' })") && source.includes('Current target: {money(bidding.bidSpec.bidAmount, currency, format)}'), 'Keyword cost rounds; the bid target stays exact.');
+  const metric = (micros, currency) => formatMicros(micros, currency, format, { round: 'minor' });
+  assert.equal(metric('12345678', 'USD'), '$12.35'); assert.equal(metric('12345000', 'USD'), '$12.35', 'Half-up at the cent.'); assert.equal(metric('12344999', 'USD'), '$12.34');
+  assert.equal(metric('1500', 'KWD'), 'KWD\u00a00.002'); assert.equal(metric('1499', 'KWD'), 'KWD\u00a00.001'); assert.equal(metric('1500000', 'JPY'), '¥2'); assert.equal(metric('12000000', 'USD'), '$12.00');
+  assert.equal(metric('-12345000', 'USD'), '-$12.35'); assert.equal(metric('9007199254740993', 'USD'), '$9,007,199,254.74', 'Rounding stays in integers beyond float precision.'); assert.equal(metric(null, 'USD'), '—');
+  assert.deepEqual([['9007199254745000', 'USD'], ['4999', 'USD'], ['5000', 'USD'], ['1234567', undefined]].map(([micros, code]) => roundMicrosToMinor(micros, code)), ['9007199254750000', '0', '10000', '1230000']);
+  assert.deepEqual(['12.345678', 12.5, '-0.5', '0.0000001', '1e3', ''].map(decimalToMicros), ['12345678', '12500000', '-500000', null, null, null], 'Strings must be exact to the micro.');
+  assert.deepEqual([0.1 + 0.2, 12.3456789, 1e-7, NaN, Infinity].map(decimalToMicros), ['300000', '12345679', '0', null, null], 'A number is already a float and is fixed to six decimals.');
+  assert.equal(amount('1500000', 'USD'), '$1.50'); assert.equal(amount('1000', 'KWD'), 'KWD\u00a00.001'); assert.equal(amount('1230000', 'USD'), '$1.23'); assert.equal(amount('1000000', 'JPY'), '¥1');
+  assert.equal(amount('1234567', 'USD'), '$1.234567', 'Micros stay exact rather than rounding to cents.'); assert.equal(amount('9007199254740993', 'USD'), '$9,007,199,254.740993');
+  assert.equal(amount(null, 'KWD'), '—'); assert.equal(amount('not micros', 'USD'), '—'); assert.equal(amount('1500000', undefined), '1.5 ');
+  assert.equal(money('0.000123', 'USD', format), '$0.000123'); assert.equal(money(12.5, 'EUR', format), '€12.50'); assert.equal(money(null, 'USD', format), '—');
+  assert.equal(money('12.345', 'USD', format, { round: 'minor' }), '$12.35', 'A reported decimal rounds half-up on its digits.'); assert.equal(money(12.345, 'USD', format, { round: 'minor' }), '$12.35');
+  // A reported number keeps showing its value whatever float noise or exponent it carries.
+  assert.deepEqual([0.1 + 0.2, 12.3456789, 1e-7, NaN].map(value => money(value, 'USD', format, { round: 'minor' })), ['$0.30', '$12.35', '$0.00', '—']);
+  assert.deepEqual(['0', '1', '-1500000', '12000000', 1500000, 1.5, '1e6', ''].map(microsToDecimal), ['0', '0.000001', '-1.5', '12', '1.5', null, null, null]);
   const writeSource = source.slice(source.indexOf('async function write('), source.indexOf('  const readKeywords'));
   const active = { current: true }, calls = []; let finish;
   const write = compile(writeSource, { active, requester: { current: (...args) => { calls.push(args); return new Promise(resolve => { finish = resolve; }); } }, base: { accountId: 'account-one', adAccountId: 'customer-one' } });

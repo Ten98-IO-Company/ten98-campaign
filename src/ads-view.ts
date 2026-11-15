@@ -1,5 +1,10 @@
 // Display helpers for the Ads manager campaign list and ad detail. Pure: no React, no requests.
+import type { DisplayFormatter } from '@ten98/ui';
+import { appFormat } from './display-locale.ts';
 type Row = Record<string, any>;
+// Not a component, so by default it formats as the app's DisplayFormatProvider does (en-US, the viewer's time zone); a
+// caller (a test) may pass its own formatter.
+const browserFormat = appFormat;
 const present = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 
 // Ported from zernio-dev/ads-dashboard@4386edd lib/date-range.ts (MIT); 'default' keeps the provider's own window.
@@ -79,16 +84,15 @@ export function campaignFigure(row: Row, key: string): number | undefined {
 }
 export const campaignSortValue = (row: Row, key: string) => campaignFigure(row, key) ?? Number.NEGATIVE_INFINITY;
 
-// Ported from zernio-dev/ads-dashboard@4386edd lib/format.ts (MIT).
-const amount = (value: number, currency?: string) => { const digits = Math.abs(value) >= 100 ? 0 : 2; try { return new Intl.NumberFormat('en-US', currency ? { style: 'currency', currency, minimumFractionDigits: digits, maximumFractionDigits: digits } : { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value); } catch { return new Intl.NumberFormat('en-US', { maximumFractionDigits: digits }).format(value) + ' ' + currency; } };
-const compactCount = (value: number) => new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+// Rounding rule ported from zernio-dev/ads-dashboard@4386edd lib/format.ts (MIT): whole units from 100, cents below.
+const amount = (format: DisplayFormatter, value: number, currency?: string) => currency ? format.currency(value, currency, { wholeUnits: Math.abs(value) >= 100 }) : format.number(value, { maximumFractionDigits: Math.abs(value) >= 100 ? 0 : 2 });
 
 // Ported from zernio-dev/ads-dashboard@4386edd components/dashboard/ad-detail-sheet.tsx AdMetricsGrid (MIT); only reported metrics.
-export function adMetricCells(metrics: Row | undefined, currency: string | undefined, hidden = false) {
-  const m = metrics || {}, money = (value: number) => hidden ? hiddenAmount : amount(value, currency);
-  const cells: [string, unknown, (value: number) => string][] = [['Spend', m.spend, money], ['Impressions', m.impressions, compactCount], ['Clicks', m.clicks, compactCount], ['CTR', m.ctr, value => `${value.toFixed(2)}%`], ['CPC', m.cpc, money], ['CPM', m.cpm, money], ['Conversions', m.conversions, compactCount], ['ROAS', m.roas, value => `${value.toFixed(2)}×`]];
+export function adMetricCells(metrics: Row | undefined, currency: string | undefined, hidden = false, format = browserFormat) {
+  const m = metrics || {}, money = (value: number) => hidden ? hiddenAmount : amount(format, value, currency), compactCount = (value: number) => format.compact(value);
+  const cells: [string, unknown, (value: number) => string][] = [['Spend', m.spend, money], ['Impressions', m.impressions, compactCount], ['Clicks', m.clicks, compactCount], ['CTR', m.ctr, value => `${format.number(value, { maximumFractionDigits: 2 })}%`], ['CPC', m.cpc, money], ['CPM', m.cpm, money], ['Conversions', m.conversions, compactCount], ['ROAS', m.roas, value => `${format.number(value, { maximumFractionDigits: 2 })}×`]];
   if (present(m.videoPlayActions)) cells.push(['Video plays', m.videoPlayActions, compactCount], ['25% watched', m.videoP25WatchedActions, compactCount], ['50% watched', m.videoP50WatchedActions, compactCount], ['100% watched', m.videoP100WatchedActions, compactCount]);
-  return cells.filter(([, value]) => present(value)).map(([label, value, format]) => ({ label, value: format(value as number) }));
+  return cells.filter(([, value]) => present(value)).map(([label, value, show]) => ({ label, value: show(value as number) }));
 }
 
 // Ported from zernio-dev/ads-dashboard@4386edd components/dashboard/ad-detail-sheet.tsx CreativePane (MIT); only https URLs without credentials.

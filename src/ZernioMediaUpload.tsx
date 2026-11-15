@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Card, Disclosure, FileField, FormActions, Inline, Progress, StatusLine, Stack, Text } from '@ten98/ui';
+import { Alert, Button, Card, createDisplayFormatter, Disclosure, FileField, FormActions, Inline, Progress, StatusLine, Stack, Text, useDisplayFormat } from '@ten98/ui';
+import { displayLocale } from './display-locale.ts';
 
 type Format = { contentType: string; extensions: string[]; kind: 'image' | 'video' | 'document' };
 type Options = { maxSize: number; formats: Format[]; asset?: { id: string; name?: string; url?: string }; assetVersion?: string; attempts?: Attempt[] };
@@ -11,7 +12,7 @@ const labels: Record<string, string> = { preparing: 'Preparing upload', awaiting
 export function mediaFileMetadata(file: Pick<File, 'name' | 'type' | 'size'>, options: Options) {
   const filename = file.name;
   if (!filename.trim() || filename.length > 255 || /[\u0000-\u001f\u007f/\\]/.test(filename) || ['.', '..'].includes(filename)) throw new Error('Choose a file with a plain filename of up to 255 characters.');
-  if (!Number.isSafeInteger(file.size) || file.size < 1 || file.size > options.maxSize) throw new Error(`Choose a non-empty file no larger than ${(options.maxSize / 1_000_000_000).toLocaleString()} GB.`);
+  if (!Number.isSafeInteger(file.size) || file.size < 1 || file.size > options.maxSize) throw new Error(`Choose a non-empty file no larger than ${createDisplayFormatter({ locale: displayLocale }).number(options.maxSize / 1_000_000_000)} GB.`);
   const matches = options.formats.filter(format => format.extensions.some(extension => filename.toLowerCase().endsWith('.' + extension.replace(/^\./, '').toLowerCase())));
   const format = file.type ? matches.find(item => item.contentType === file.type.toLowerCase()) : matches[0];
   if (!format) throw new Error('The filename and file type must match a supported image, video or PDF format.');
@@ -19,6 +20,7 @@ export function mediaFileMetadata(file: Pick<File, 'name' | 'type' | 'size'>, op
 }
 
 export default function ZernioMediaUpload({ projectId, configured, disabled = false, assetId, request, onSaved }: Props) {
+  const format = useDisplayFormat();
   const path = `/projects/${encodeURIComponent(projectId)}/integrations/media/uploads`;
   const [options, setOptions] = useState<Options | null>(null), [file, setFile] = useState<File | null>(null), [attempt, setAttempt] = useState<Attempt | null>(null);
   const [busy, setBusy] = useState(''), [progress, setProgress] = useState<number | null>(null), [error, setError] = useState(''), [notice, setNotice] = useState(''), [refresh, setRefresh] = useState(0);
@@ -122,8 +124,8 @@ export default function ZernioMediaUpload({ projectId, configured, disabled = fa
       {!!options?.attempts?.filter(item => !['completed', 'cancelled', 'expired'].includes(item.status)).length && !knownAttempt.current && <Disclosure summary="Resume an earlier upload"><Stack as="ul" gap={2}>{options.attempts.filter(item => !['completed', 'cancelled', 'expired'].includes(item.status)).map(item => <Inline as="li" key={item.id}><Text as="span">{item.filename} · {labels[item.status] || 'Check status'}</Text><Button variant="secondary" size="sm" disabled={disabled || Boolean(busy)} onClick={() => act('check', async () => { accept(await request(path + '/' + encodeURIComponent(item.id)), item.id); })}>Review upload</Button></Inline>)}</Stack></Disclosure>}
       {options?.asset && <Text>Replacing the delivery file for <Text as="strong">{options.asset.name || options.asset.id}</Text>. Its original link, tags and description are retained; approval resets to pending.</Text>}
       <Inline><Button variant="secondary" disabled={Boolean(busy)} onClick={() => setRefresh(value => value + 1)}>Reload upload settings</Button></Inline>
-      {options && <><FileField label={`Delivery file · up to ${(options.maxSize / 1_000_000_000).toLocaleString()} GB`} accept={options.formats.flatMap(format => format.extensions.map(extension => '.' + extension.replace(/^\./, ''))).join(',')} disabled={disabled || !canChoose} onFiles={files => choose(files[0] || null)}/>{file && <Text tone="muted" size="sm">{file.name} · {file.size.toLocaleString()} bytes</Text>}</>}
-      {attempt && <StatusLine>{labels[attempt.status]}{attempt.expiresAt ? ` · Temporary file expires ${new Date(attempt.expiresAt).toLocaleString()}` : ''}</StatusLine>}
+      {options && <><FileField label={`Delivery file · up to ${format.number(options.maxSize / 1_000_000_000)} GB`} accept={options.formats.flatMap(format => format.extensions.map(extension => '.' + extension.replace(/^\./, ''))).join(',')} disabled={disabled || !canChoose} onFiles={files => choose(files[0] || null)}/>{file && <Text tone="muted" size="sm">{file.name} · {format.count(file.size, { one: 'byte', other: 'bytes' })}</Text>}</>}
+      {attempt && <StatusLine>{labels[attempt.status]}{attempt.expiresAt ? ` · Temporary file expires ${format.dateTime(attempt.expiresAt)}` : ''}</StatusLine>}
       {['upload', 'retry'].includes(busy) && <Stack gap={1}><Progress value={progress ?? undefined} label="File transfer progress"/><Text tone="muted" size="sm">{progress === 100 ? 'File sent; waiting for the server to confirm receipt.' : progress === null ? 'Transferring file…' : `${progress}% transferred`}</Text></Stack>}
       <FormActions>
         {!attempt && <Button variant="secondary" disabled={disabled || Boolean(busy) || !file || !options} onClick={upload}>{knownAttempt.current ? 'Retry upload preparation' : 'Upload file'}</Button>}

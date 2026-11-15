@@ -5,10 +5,12 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { AppField } from '@ten98/ui/app';
-import * as designSystem from '@ten98/ui';
+import * as designSystemExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { transformWithOxc } from 'vite';
 import * as adsView from '../src/ads-view.ts';
 import { adSpendBlock } from '../src/approval-status.ts';
+const designSystem = withTestDisplayFormat(designSystemExports);
 
 const composer = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8'), details = await readFile(new URL('../src/AdDetails.tsx', import.meta.url), 'utf8'), analytics = await readFile(new URL('../src/SocialAnalytics.tsx', import.meta.url), 'utf8');
 const javascript = value => stripTypeScriptTypes(value);
@@ -607,7 +609,7 @@ async function discoveryUi(respond) {
   const memo = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) hooks[index] = { value: run(), dependencies }; return hooks[index].value; };
   const effect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = async (...args) => { assert.equal(args.length, 1, 'Discovery only makes reads.'); const path = args[0]; calls.push(path); if (respond) { const result = await respond(path); if (result !== undefined) return result; } if (path === 'accounts') return { accounts: [{ _id: 'meta/a', platform: 'metaads', isActive: true }, { _id: 'meta/b', platform: 'facebook', isActive: true }, { _id: 'google', platform: 'googleads', isActive: true }] }; if (path.startsWith('ads/accounts?')) return { accounts: [{ id: 'act_123', name: 'Scoped advertiser', selectable: true }, { id: 'act_456', name: 'Second advertiser', selectable: true }] }; const query = new URL(path, 'https://example.test').searchParams; return discoveryResult(query.get('accountId'), query.get('adAccountId')); };
-  const names = ['Alert', 'Button', 'Card', 'DataTable', 'Field', 'FormGrid', 'Inline', 'Option', 'Select', 'Stack', 'StatusLine', 'Text'];
+  const names = ['Alert', 'Button', 'Card', 'DataTable', 'Field', 'FormGrid', 'Inline', 'Option', 'Select', 'Stack', 'StatusLine', 'Text', 'useDisplayFormat'];
   const Component = new Function('React', 'accountLabel', 'useState', 'useRef', 'useMemo', 'useEffect', 'useLayoutEffect', ...names, discoveryCode + ';return AdCampaignDiscovery;')(React, row => 'Connection ' + row._id, state, ref, memo, effect, effect, ...names.map(name => designSystem[name]));
   const nodes = node => !React.isValidElement(node) ? [] : [node, ...[node.props.actions, node.props.children].flatMap(value => React.Children.toArray(value)).flatMap(nodes)];
   function paint() { if (unmounted) return; for (let pass = 0; dirty; pass++) { assert.ok(pass < 25); dirty = false; cursor = 0; tree = Component({ request }); while (queued.length) queued.shift()(); } }

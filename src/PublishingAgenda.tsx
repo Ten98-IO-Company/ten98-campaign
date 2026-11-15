@@ -1,6 +1,6 @@
 import type { KeyboardEvent, ReactNode } from 'react';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
-import { type AppliedFilter, AppliedFilters, Badge, badgePalettes, Button, CalendarMonth, type CalendarEntry, Card, Field, Heading, Icon, Inline, Input, PublishingAgenda, type PublishingAgendaEntry, SegmentedControl, Select, Stack, Switch, Text, type Tone } from '@ten98/ui';
+import { type AppliedFilter, AppliedFilters, Badge, badgePalettes, Button, CalendarMonth, type CalendarEntry, Card, Field, Heading, Icon, Inline, Input, PublishingAgenda, type PublishingAgendaEntry, SegmentedControl, Select, Stack, Switch, Text, type Tone, useDisplayFormat } from '@ten98/ui';
 
 type Row = { id: string; [key: string]: any };
 type ScheduledPost = { id: string; post: Row; accountId?: string; platform?: string; content: string; scheduledAt: string };
@@ -71,18 +71,22 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
   const placed = new Set(scheduled.map(entry => entry.post.id));
   const posts: ScheduledPost[] = [...scheduled, ...records.filter(post => !placed.has(post.id) && Number.isFinite(Date.parse(post.publishedAt))).map(post => ({ id: post.id, post, platform: post.platforms?.[0] || '', content: post.content || '', scheduledAt: post.publishedAt }))];
   const monthStart = new Date(month.getFullYear(), month.getMonth(), 1), monthEnd = new Date(month.getFullYear(), month.getMonth() + 1, 1);
+  // Names the browser zone that the agenda's times use; this reads the zone, it formats nothing.
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   // Days before today offer no creation: a post cannot be planned in the past.
   const now = new Date(), today = localDate(now);
   const week = weekStart && /^\d{4}-\d{2}-\d{2}$/.test(weekStart) ? dayDate(weekStart) : mondayOf(monthStart <= now && now < monthEnd ? now : monthStart);
   // Entries, counts and filters cover the shown range: the week in week view, otherwise the month.
   const start = view === 'week' ? week : monthStart, end = view === 'week' ? addDays(week, 7) : monthEnd;
-  const format = new Intl.DateTimeFormat('en', { timeZone: timezone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
+  const format = useDisplayFormat();
   const approvalLabel = (post: Row) => postApprovals ? postApprovals[post.id] || 'Approval not requested' : undefined;
   const statusText = (post: Row) => (post.status ? capital(postStatus(post)!) : 'Status unavailable') + (postApprovals ? ' · ' + approvalLabel(post) : '');
   const campaignOf = (post: Row) => post.campaignId ? campaigns.find(campaign => String(campaign.id) === String(post.campaignId)) : undefined;
   const statusBadge = (post: Row) => <Badge tone={statusTone(postStatus(post), approvalLabel(post))} dot>{statusText(post)}</Badge>;
+  // Grid labels (time of day, weekday, month title) follow the grid's own locale="en"; the shared formatter has no such parts.
   const timeOnly = new Intl.DateTimeFormat('en', { timeZone: timezone, hour: '2-digit', minute: '2-digit' });
+  // Entry times name their zone (EDT, EST) as the header does, so two equal wall times on a clock change still read apart.
+  const entryTime = new Intl.DateTimeFormat('en', { timeZone: timezone, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' });
   // Grid and week days, keyed by the browser-local date that the agenda's times also use.
   const days = new Map<string, DayEntry[]>(), addDay = (day: string, entry: DayEntry) => days.set(day, [...(days.get(day) || []), entry]);
   const rangePosts = posts.filter(entry => new Date(entry.scheduledAt) >= start && new Date(entry.scheduledAt) < end);
@@ -92,7 +96,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
   const countPosts = (status: string) => new Set(rangePosts.filter(entry => postStatus(entry.post) === status).map(entry => entry.post.id)).size;
   const entries: (PublishingAgendaEntry & { order: number })[] = shownPosts.map(entry => ({
     id: `post:${entry.id}`, title: entry.content || (entry.accountId ? 'Selected account post' : postLabel(entry.post)),
-    dateTime: entry.scheduledAt, when: format.format(new Date(entry.scheduledAt)), order: Date.parse(entry.scheduledAt),
+    dateTime: entry.scheduledAt, when: entryTime.format(new Date(entry.scheduledAt)), order: Date.parse(entry.scheduledAt),
     status: statusBadge(entry.post),
     details: [destinations(entry), entry.accountId && (accounts.find(account => String(account._id || account.id) === entry.accountId)?.displayName || entry.accountId), campaignOf(entry.post)?.name].filter(Boolean).join(' · '),
     actions: <Button variant="secondary" size="sm" onClick={() => onSelect(entry.post)}>{canWrite ? 'Open post' : 'View post'}</Button>,
@@ -107,7 +111,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
     const date = new Date(activation.startAt);
     if (!(date < end && (Date.parse(activation.endAt) || date.getTime()) > start.getTime())) continue;
     const label = `Field activity · ${activation.name}`, status = activation.status ? capital(String(activation.status)) : 'Status unavailable', tone: Tone = activation.status === 'completed' ? 'success' : 'info';
-    entries.push({ id: `activation:${activation.id}`, title: label, dateTime: activation.startAt, when: format.format(date), order: date.getTime(), status: <Badge tone={tone} dot>{status}</Badge>, details: [activation.location, campaignOf(activation)?.name].filter(Boolean).join(' · ') });
+    entries.push({ id: `activation:${activation.id}`, title: label, dateTime: activation.startAt, when: entryTime.format(date), order: date.getTime(), status: <Badge tone={tone} dot>{status}</Badge>, details: [activation.location, campaignOf(activation)?.name].filter(Boolean).join(' · ') });
     addDay(localDate(date < start ? start : date), { id: `activation:${activation.id}`, label: `${label} · ${status}`, time: timeOnly.format(date), snippet: label, status, tone, activation });
   }
   // The Google copy of an activation shown above, at the same start, is the same entry.
@@ -122,7 +126,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
     // The Google overlay toggle hides events without changing what was loaded.
     if (filters.googleHidden) { googleHidden++; continue; }
     entries.push({ id: `google:${event.id}`, title: `Google · ${event.summary}`, dateTime, order: date.getTime(),
-      when: allDay ? `${event.start.date} – ${event.end.date}` : format.format(date),
+      when: allDay ? `${format.date(event.start.date)} – ${format.date(event.end.date)}` : entryTime.format(date),
       status: allDay ? 'All day · End date exclusive' : 'Google Calendar event', actions: googleEventActions?.(event),
     });
     // Google entries stay plain text in the grid: their actions live in the list and week views.
@@ -166,6 +170,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
     </Inline>}
   </Stack>;
 
+  // Week and month labels (and the month title below) match the grid's locale="en" weekday and month names.
   const fullDate = new Intl.DateTimeFormat('en', { dateStyle: 'full' }), weekday = new Intl.DateTimeFormat('en', { weekday: 'short' }), short = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
   const weekDays = Array.from({ length: 7 }, (_, index) => localDate(addDays(week, index))), lastDay = addDays(week, 6);
   const range = week.getFullYear() === lastDay.getFullYear() ? `${short.format(week)} – ${short.format(lastDay)}, ${lastDay.getFullYear()}` : `${short.format(week)}, ${week.getFullYear()} – ${short.format(lastDay)}, ${lastDay.getFullYear()}`;
@@ -197,7 +202,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
     {weekEmpty && <Text size="sm" tone="muted">No posts this week.</Text>}
     <Stack gap={2}>{weekDays.map(day => {
       const items = days.get(day) || [], date = dayDate(day), name = fullDate.format(date);
-      return <Stack key={day} role="group" gap={1} tabIndex={0} aria-label={`${name}${day === today ? ', today' : ''}, ${items.length ? `${items.length} ${items.length === 1 ? 'entry' : 'entries'}` : 'no entries'}`} onKeyDown={event => { if (event.target === event.currentTarget) createKey(day, event); }}>
+      return <Stack key={day} role="group" gap={1} tabIndex={0} aria-label={`${name}${day === today ? ', today' : ''}, ${items.length ? format.count(items.length, { one: 'entry', other: 'entries' }) : 'no entries'}`} onKeyDown={event => { if (event.target === event.currentTarget) createKey(day, event); }}>
         <Inline gap={2} align="center"><Text as="span" size="sm" weight="semibold" tone={day < today ? 'muted' : 'default'}>{weekday.format(date)} {date.getDate()}</Text>{day === today && <Badge tone="accent">Today</Badge>}</Inline>
         {items.length > 0 ? <Stack gap={1}>{items.map(weekEntry)}</Stack> : weekEmpty && creatable(day) && <Inline><Button variant="ghost" size="sm" icon={<Icon name="plus" size={14}/>} aria-label={`Add a post on ${name}`} onClick={() => onCreateDay!(day)}>Add a post</Button></Inline>}
       </Stack>;

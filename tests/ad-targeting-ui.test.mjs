@@ -4,9 +4,12 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { AppField } from '@ten98/ui/app';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { Checkbox } from '@ten98/ui';
 import { transformWithOxc } from 'vite';
+import { minorDigits } from '../src/display-locale.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 // Exercise the complete composer with its actual JSX, fields and mocked request boundary.
 const source = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8');
@@ -25,7 +28,7 @@ async function browser(respond = async () => ({ results: [interest()] })) {
   const ref = initial => { const index = cursor++; return hooks[index] ||= { current: initial }; };
   const effect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = async (...args) => { calls.push(args); if (args[0] === 'accounts') return { accounts }; if (args[0].startsWith('ads/accounts?')) return { accounts: advertisers }; return respond(...args); };
-  const scope = { ...ui, AppField, React, useState: state, useRef: ref, useEffect: effect, FormData: class { constructor(form) { return Object.entries(form); } } };
+  const scope = { ...ui, AppField, minorDigits, React, useState: state, useRef: ref, useEffect: effect, FormData: class { constructor(form) { return Object.entries(form); } } };
   const Component = new Function(...Object.keys(scope), code + '; return AdComposer;')(...Object.values(scope));
   function paint() { if (unmounted) return; for (let pass = 0; dirty; pass++) { assert.ok(pass < 25, 'Rendering settles.'); dirty = false; cursor = 0; tree = Component({ request, onCreated() { created++; }, onCancel() {}, ...props }); while (queued.length) queued.shift()(); } }
   // React may call the component for a same-value update, then retain the previous committed JSX.

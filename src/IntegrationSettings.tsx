@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
-import { Alert, Badge, Button, Card, Checkbox, ConfirmDialog, Disclosure, EmbedHost, Field, FormActions, Grid, Heading, Inline, Input, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, ConfirmDialog, Disclosure, EmbedHost, Field, FormActions, Grid, Heading, Inline, Input, Select, Stack, StatusLine, Text, Textarea, useDisplayFormat } from '@ten98/ui';
 import { loadGoogleMaps } from './OohMap';
 import ZernioWebhooks from './ZernioWebhooks';
 
@@ -28,6 +28,7 @@ const definitions: Record<string, { label: string; description: string; note?: s
 const sourceLabel = (source: string) => ({ saved: 'Saved in this app', environment: 'Deployment settings', mixed: 'App + deployment settings', unconfigured: 'Not configured', disabled: 'Disabled in this app' }[source] || source);
 
 export default function IntegrationSettings({ project, isOperator, canManageProject, request, onChanged, sections, extraCards, mode = 'connections', onOpenKeys }: Props) {
+  const format = useDisplayFormat();
   const [providers, setProviders] = useState<Provider[]>([]), [drafts, setDrafts] = useState<Record<string, Record<string, string | null>>>({}), [results, setResults] = useState<Record<string, Result>>({});
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [loaded, setLoaded] = useState(false), [mapsReload, setMapsReload] = useState(false), [confirming, setConfirming] = useState<Provider>();
   const [mapping, setMapping] = useState({ zernioProfileId: project.zernioProfileId || '', driveFolderId: project.driveFolderId || '', calendarId: '' }), [calendarLoaded, setCalendarLoaded] = useState(false);
@@ -140,7 +141,7 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
     const edits = drafts[provider.id] || {}, changed = dirty(provider), testButton = <Button variant="secondary" loading={busy === provider.id} disabled={Boolean(busy) || !provider.configured || changed || (provider.id === 'googleMaps' && mapsReload)} onClick={() => test(provider)}>Test connection</Button>;
     const instructions = <Disclosure summary="Setup instructions"><Text>{definition.help}</Text></Disclosure>;
     return <Disclosure summary="Connection settings"><Stack gap={3}>
-      <Text size="sm" tone="muted">{sourceLabel(provider.source)}{provider.updatedAt && ` · Updated ${new Date(provider.updatedAt).toLocaleString()}`}</Text>
+      <Text size="sm" tone="muted">{sourceLabel(provider.source)}{provider.updatedAt && ` · Updated ${format.dateTime(provider.updatedAt)}`}</Text>
       {definition.note && <Text tone="muted">{definition.note}</Text>}
       {!definition.fields.length ? <>{instructions}<FormActions>{testButton}</FormActions>{changed && <Text size="sm" tone="muted">Save the shared Google credentials before testing.</Text>}</> : <Stack as="form" gap={3} onSubmit={event => save(provider, event)}><Stack as="fieldset" gap={3} disabled={Boolean(busy)}>
         {definition.fields.map(field => {
@@ -174,7 +175,7 @@ export default function IntegrationSettings({ project, isOperator, canManageProj
         const provider = providers.find(item => item.id === id), result = results[id], status = provider && <Badge tone={provider.configured ? 'success' : 'neutral'}>{provider.configured ? 'Set up' : 'Not set up'}</Badge>;
         if (keys) return provider && card(id, provider.label || definition.label, definition.description, status, <>
           {credentials(provider, definition)}
-          {result && <Alert tone={result.ok ? 'success' : 'warning'} title={resultTitle(result.status)}>{result.message}{result.checkedAt && <Text size="xs" tone="muted">Checked {new Date(result.checkedAt).toLocaleString()}</Text>}</Alert>}
+          {result && <Alert tone={result.ok ? 'success' : 'warning'} title={resultTitle(result.status)}>{result.message}{result.checkedAt && <Text size="xs" tone="muted">Checked {format.dateTime(result.checkedAt)}</Text>}</Alert>}
         </>);
         // One line per tool; this project's links and actions open under Manage.
         const manage = <>{adapters[id]}{sections?.[id]}</>;

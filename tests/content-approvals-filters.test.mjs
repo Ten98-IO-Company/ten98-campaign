@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
+import { useTestDisplayFormat } from './display-format.ts';
 
 const source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');
 // Evaluate the component body up to its markup with chosen state: 0 queue, 4 view (default "All" here), 7 selection, 10 sort, 11 platform.
@@ -9,7 +10,7 @@ function view(posts, state = {}) {
   const start = source.indexOf('export default function '), end = source.indexOf('  return <', start), values = [], initial = { 0: { requireApproval: true, posts }, 4: 'all', ...state };
   const context = {
     useState(value) { const index = values.length; values.push(Object.hasOwn(initial, index) ? initial[index] : value); return [values[index], () => {}]; },
-    useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {},
+    useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {}, useDisplayFormat: useTestDisplayFormat,
     ...Object.fromEntries(['approveBlocked', 'postName', 'reviewItem'].map(name => [name, new Function('return ' + stripTypeScriptTypes(source.match(new RegExp(`^const ${name} = (.+);$`, 'm'))[1]))()])),
   };
   return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(start, end).replace('export default ', '') + 'return { posts, counts, actionable, chosen };\n}')});`)(...Object.values(context))({ projectId: 'project', role: 'owner', request: async () => ({}) });

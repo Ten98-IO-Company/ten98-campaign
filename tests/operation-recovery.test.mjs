@@ -140,7 +140,7 @@ test('campaign copy recovery preserves only its own bounded reported reference a
     const [{ default: React }, { renderToStaticMarkup }, { transformWithOxc }] = await Promise.all([import('react'), import('react-dom/server'), import('vite')]);
     const source = readFileSync(new URL('../src/OperationRecovery.tsx', import.meta.url), 'utf8').replace(/^import .+;\r?\n/gm, '').replace('export default function ', 'function ');
     const { code } = await transformWithOxc(source, 'OperationRecoveryCheck.tsx', { jsx: { runtime: 'classic' } }); let stateIndex = 0;
-    const ui = Object.entries(await import('@ten98/ui')).filter(([name]) => /^[A-Z]/.test(name));
+    const ui = Object.entries(await import('@ten98/ui')).filter(([name]) => /^[A-Z]|^useDisplayFormat$/.test(name));
     const Component = new Function('React', 'useState', 'useRef', 'useEffect', ...ui.map(([name]) => name), code + ';return OperationRecovery;')(React, initial => [stateIndex++ === 0 ? [receipt] : initial, () => assert.fail('Rendering does not update state')], value => ({ current: value }), () => {}, ...ui.map(([, value]) => value));
     const html = renderToStaticMarkup(React.createElement(Component, { projectId: project.id, role: 'owner', isOperator: true, request: () => assert.fail('Rendering does not contact a provider') }));
     assert.match(html, /Provider-reported copied campaign ID: copy-&lt;img=bad&gt;/); assert.match(html, /Recorded verification: Not verified/); assert.match(html, /Check the network’s own tool before recording the final review/); assert.doesNotMatch(html, /<img|<a\s|PRIVATE_/);

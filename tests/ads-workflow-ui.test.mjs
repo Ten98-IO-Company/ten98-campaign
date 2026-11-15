@@ -4,9 +4,11 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { AuthErrorBoundary, Option, Select } from '@ten98/ui';
 import { transformWithOxc } from 'vite';
+const ui = withTestDisplayFormat(uiExports);
 
 test('campaign rows open the matching native advertising view and manual records open their campaign page', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), start = source.indexOf('function openCampaign('), end = source.indexOf('  const campaignTable', start);
@@ -119,8 +121,8 @@ test('Demand Gen exposes target CPC while Performance Max retains conversion-onl
 test('render and lazy-load failures show a reload action without exposing the original error', async () => {
   const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
   // The AuthFrameProvider sits outside the boundary (DS #157), so the fallback takes Campaign's brand from it.
-  const mount = source.match(/render\(<AuthFrameProvider brand=\{<Brand product="Campaign"\/>\} aside=\{authStory\} passwordPolicy=\{\{ minLength: 12, maxLength: 128 \}\}><AuthErrorBoundary fallback=\{\{ title: '([^']+)', message: '([^']+)', retryLabel: '([^']+)' \}\}><ToastProvider><App\/><\/ToastProvider><\/AuthErrorBoundary><\/AuthFrameProvider>\)/);
-  assert.ok(mount, 'The app root is wrapped by the auth frame and the shared boundary with Campaign copy.');
+  const mount = source.match(/render\(<AuthFrameProvider brand=\{<Brand product="Campaign"\/>\} aside=\{authStory\} passwordPolicy=\{\{ minLength: 12, maxLength: 128 \}\}><AuthErrorBoundary fallback=\{\{ title: '([^']+)', message: '([^']+)', retryLabel: '([^']+)' \}\}><ToastProvider><DisplayFormatProvider locale=\{displayLocale\}><ShortcutProvider><App\/><\/ShortcutProvider><\/DisplayFormatProvider><\/ToastProvider><\/AuthErrorBoundary><\/AuthFrameProvider>\)/);
+  assert.ok(mount, 'The app root is wrapped by the auth frame, the shared boundary with Campaign copy and one display-format provider.');
   const [, title, message, retryLabel] = mount;
   assert.equal(retryLabel, 'Reload app'); assert.doesNotMatch(source, /class AppBoundary /);
   let reloads = 0;
@@ -130,4 +132,15 @@ test('render and lazy-load failures show a reload action without exposing the or
   const html = renderToStaticMarkup(boundary.render());
   assert.match(html, /role="alert"/); assert.match(html, />Reload app</); assert.ok(html.includes(title)); assert.doesNotMatch(html, /Private request payload/);
   boundary.render().props.onRetry(); assert.equal(reloads, 1);
+});
+
+test('Ctrl or Command with K focuses the view search, also from a text field, and the report export saves through saveFile', async () => {
+  const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
+  assert.match(main, /useCommand\(\{ id: 'search\.focus', label: 'Search this view', group: 'Navigation', keys: 'Mod\+K', run: \(\) => searchRef\.current\?\.focus\(\) \}\);/);
+  assert.match(main, /saveFile\('ten98-campaign-report\.csv', csv, 'text\/csv;charset=utf-8'\);/);
+  assert.doesNotMatch(main, /window\.addEventListener\('keydown'|createObjectURL/);
+  // The shared resolver with this exact chord, at the application scope the provider adds.
+  const commands = [{ id: 'search.focus', scope: '', chords: [ui.parseChord('Mod+K', 'other')], enabled: true }];
+  for (const target of ['other', 'text', 'multiline', 'control']) assert.equal(ui.resolveShortcut({ chord: 'Ctrl+K', scopes: [{ id: '', focus: false }], commands, target })?.command.id, 'search.focus', target);
+  assert.equal(ui.parseChord('Mod+K', 'apple'), 'Meta+K');
 });

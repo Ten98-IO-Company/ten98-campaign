@@ -6,8 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { oidcEndpoint, workspaceRoles as roles, mayManageWorkspaceMember } from '@ten98/runtime';
 import { assertSchema, closeDatabase, createStore, collections, getDatabase, type Connection, type Executor, type Store } from './database.ts';
-import { createAuth, sessionSecret, hashPassword, HttpError, lockWorkspace, memberRole, publicUser, type AuthConfig, type PublicUser } from './auth.ts';
+import { createAuth, sessionSecret, hashPassword, HttpError, insertAccount, lockWorkspace, memberRole, publicUser, updateDisplayName, type AuthConfig, type PublicUser } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
+import { users } from './schema.ts';
 import { seedSample } from './seed.ts';
 import { handleIntegration } from './integrations.ts';
 import { IntegrationError, mediaUrl, type ProviderRecord, type OperationContext } from './provider-core.ts';
@@ -223,7 +224,7 @@ export async function createApp(options: AppOptions = {}) {
           // The installation row lock makes setup single use under parallel requests.
           await db.transaction(async tx => {
             if ((await first<{ claimed: boolean }>(tx.execute(sql`SELECT claimed FROM installation WHERE id = 1 FOR UPDATE`)))?.claimed) throw new HttpError(409, 'Setup is complete. Sign in with the owner account.');
-            await tx.execute(sql`INSERT INTO users VALUES (${id}, ${name}, ${mail}, ${hash})`);
+            await insertAccount(tx, { id, name, email: mail, passwordHash: hash });
             await setInstanceOperator(tx, id, true, 'bootstrap');
             await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspaceId}, ${workspace})`); await tx.execute(sql`INSERT INTO memberships VALUES (${workspaceId}, ${id}, 'owner')`);
             await tx.execute(sql`UPDATE installation SET claimed = true WHERE id = 1`);
@@ -263,7 +264,7 @@ export async function createApp(options: AppOptions = {}) {
         if (await handleInvitations({ req, url, body, user: signedIn, db, auth, config, send, workspaceAccess, establish: (id: string, tx: Executor) => auth.establish(res, id, req, tx) })) return;
         const user = signedIn; if (!user) throw new HttpError(401, 'Sign in to continue.');
         if (path === '/api/account' && req.method === 'GET') return send(200, { user, ...await auth.account(user.id) });
-        if (path === '/api/account' && req.method === 'PATCH') { if (Object.keys(body).some(key => key !== 'name')) bad('Only your display name can be changed here.'); await db.execute(sql`UPDATE users SET name = ${text(body.name, 'Name')} WHERE id = ${user.id}`); return send(200, { user: await auth.user(req, res) }); }
+        if (path === '/api/account' && req.method === 'PATCH') { if (Object.keys(body).some(key => key !== 'name')) bad('Only your display name can be changed here.'); await updateDisplayName(db, user.id, text(body.name, 'Name')); return send(200, { user: await auth.user(req, res) }); }
         if (path === '/api/account/password' && req.method === 'POST') { if (Object.keys(body).some(key => !['currentPassword', 'newPassword'].includes(key))) bad('Use the password fields.'); await auth.changePassword(req, res, user.id, loginPassword(body.currentPassword), password(body.newPassword)); return send(200, { changed: true }); }
         if (path === '/api/account/sessions/revoke' && req.method === 'POST') return send(200, { revoked: await auth.revokeOtherSessions(req, user.id) });
         const settingsRoute = path.match(/^\/api\/settings\/integrations(?:\/([A-Za-z]+)(?:\/(test))?)?$/);
@@ -312,7 +313,7 @@ export async function createApp(options: AppOptions = {}) {
           // Any member may leave by removing their own membership; the last-owner rule below still applies.
           const role = await workspaceAccess(memberRoute[1], user.id), leaving = req.method === 'DELETE' && memberRoute[2] === user.id;
           if (!leaving && !['owner', 'admin'].includes(role)) throw new HttpError(403, 'Only workspace administrators can manage team members.');
-          if (req.method === 'GET' && !memberRoute[2]) return send(200, { members: (await db.execute(sql`SELECT u.id,u.id AS "userId",u.name,u.email,m.role FROM users u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=${memberRoute[1]} ORDER BY u.name COLLATE "C", u.id`)).rows });
+          if (req.method === 'GET' && !memberRoute[2]) return send(200, { members: (await db.execute(sql`SELECT u.id,u.id AS "userId",u.name,u.email,m.role FROM ${users} u JOIN memberships m ON m.user_id=u.id WHERE m.workspace_id=${memberRoute[1]} ORDER BY u.name COLLATE "C", u.id`)).rows });
           if (!memberRoute[2] || req.method === 'GET') throw new HttpError(404, 'Team route not found.');
           const requested = req.method === 'DELETE' ? null : choice(body.role, roles, 'Role');
           // The workspace row lock serialises team changes, so parallel demotions cannot remove the last owner;
@@ -364,7 +365,7 @@ export async function createApp(options: AppOptions = {}) {
           // administrator-only team route.
           if (projectRoute[2] === 'assignees' && req.method === 'GET') {
             if (!['owner', 'admin', 'editor'].includes(role)) throw new HttpError(403, 'Editing permission is required to assign work.');
-            return send(200, { members: (await db.execute(sql`SELECT u.id,u.name,m.role FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.workspace_id=${project.workspaceId} AND m.role IN ('owner','admin','editor') ORDER BY u.name COLLATE "C", u.id`)).rows });
+            return send(200, { members: (await db.execute(sql`SELECT u.id,u.name,m.role FROM memberships m JOIN ${users} u ON u.id=m.user_id WHERE m.workspace_id=${project.workspaceId} AND m.role IN ('owner','admin','editor') ORDER BY u.name COLLATE "C", u.id`)).rows });
           }
           if (projectRoute[2] === 'maps/config' && req.method === 'GET') return send(200, { configured: Boolean(env.GOOGLE_MAPS_BROWSER_API_KEY), browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY || '', mapId: env.GOOGLE_MAPS_MAP_ID || '' });
           const requestRevision = integrationSettings.revision;
@@ -373,7 +374,7 @@ export async function createApp(options: AppOptions = {}) {
           // Errors keep their precedence: session ended, then project unavailable, then role changed, then credentials.
           type CurrentAccess = { session: boolean; role: string | null; zernio_profile_id: string | null; drive_folder_id: string | null; project: string | null };
           const readAccess = async (executor: Executor): Promise<CurrentAccess> => {
-            const current = (await first<CurrentAccess>(executor.execute(sql`SELECT EXISTS (SELECT 1 FROM sessions WHERE token = ${auth.sessionKey(req)} AND expires_at > ${Date.now()} AND user_id = ${user.id}) AS session,
+            const current = (await first<CurrentAccess>(executor.execute(sql`SELECT ${auth.liveSession(req, user.id)} AS session,
               (SELECT m.role FROM memberships m WHERE m.workspace_id = p.workspace_id AND m.user_id = ${user.id}) AS role, p.id AS project, p.zernio_profile_id, p.drive_folder_id
               FROM (SELECT 1) one LEFT JOIN projects p ON p.id = ${project.id}`)))!;
             if (!current.session) throw new HttpError(403, 'Your sign-in session ended. Sign in again.');

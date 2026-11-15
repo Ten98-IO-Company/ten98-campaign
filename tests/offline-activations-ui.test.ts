@@ -6,12 +6,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import * as shared from '../shared/offline-activations.ts';
+import { readText } from './read-text.ts';
+import { displayLocale } from '../src/display-locale.ts';
 
 type Row = Record<string, any>;
 const source = await readFile(new URL('../src/OfflineActivations.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, ''), 'OfflineActivations.tsx', { jsx: { runtime: 'classic' } });
-const library = { ...shared, ...ui } as unknown as Record<string, unknown>;
-const module = new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink, leadBody, LeadCapture, rollUp, ResultsSummary, peopleChoices, patchBody };')(React, useEffect, useRef, useState, ...Object.values(library));
+const library = { ...shared, ...ui, displayLocale } as unknown as Record<string, unknown>;
+const module = new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(library), code + '; return { OfflineActivations, activationBody, draftFrom, blankDraft, trackingDestination, TrackingLink, leadBody, LeadCapture, rollUp, ResultsSummary, peopleChoices, patchBody, when };')(React, useEffect, useRef, useState, ...Object.values(library));
 const html = (props: Row) => renderToStaticMarkup(React.createElement(module.OfflineActivations, { projectId: 'p1', brand: 'Brand launch', campaigns: [], activations: [], request: async () => ({}), onChanged() {}, ...props }));
 const campaigns = [{ id: 'c1', name: 'Winter field push', currency: 'GBP' }, { id: 'c2', name: 'Spring sampling', currency: 'AED' }];
 const activation = (id: string, startAt: string, extra: Row = {}) => ({ id, name: id, type: 'roadshow', campaignId: 'c1', status: 'planned', startAt, endAt: new Date(Date.parse(startAt) + 8 * 3600000).toISOString(), location: 'City Centre Mall', budget: 1200, spent: 300, reached: 0, materials: [], teamIds: [], ...extra });
@@ -108,6 +110,36 @@ test('the promo code pattern compiles as browsers compile it and accepts what th
   const browser = new RegExp(`^(?:${pattern})$`, 'v'), server = /^[A-Za-z0-9_-]+$/; // The server check in server/index.ts.
   for (const code of ['MALL10', 'moe_20-off', '-', '_', 'MOE 20%!', 'has spaces in it', 'café', 'a/b', 'x\\y']) assert.equal(browser.test(code), server.test(code), code);
   assert.ok(browser.test(''), 'The promo code is optional.');
+});
+
+// Intl puts a narrow no-break space before AM/PM; compare with plain spaces.
+const plain = (text: string) => text.replace(/\s/g, ' ');
+
+test('a same-day activation shows its date once and the end as a time; one over several days shows both in full', () => {
+  // Pinned to English, so the expected text holds on any machine; the zone decides which calendar day a time is on.
+  const zoned = (timeZone: string) => [ui.createDisplayFormatter({ locale: 'en', timeZone }), new Intl.DateTimeFormat('en', { timeStyle: 'short', timeZone })] as const;
+  const range = (startAt: string, endAt: string, timeZone = 'UTC') => { const [format, clock] = zoned(timeZone); return plain(module.when(format, { startAt, endAt }, clock)); };
+  assert.equal(range('2026-10-03T10:00:00Z', '2026-10-03T14:00:00Z'), 'Oct 3, 2026, 10:00 AM – 2:00 PM');
+  assert.equal(range('2026-10-03T10:00:00Z', '2026-10-04T14:00:00Z'), 'Oct 3, 2026, 10:00 AM – Oct 4, 2026, 2:00 PM');
+  assert.equal(range('2026-10-03T18:00:00Z', '2026-10-03T22:00:00Z'), 'Oct 3, 2026, 6:00 PM – 10:00 PM');
+  assert.equal(range('2026-10-03T18:00:00Z', '2026-10-03T22:00:00Z', 'Asia/Dubai'), 'Oct 3, 2026, 10:00 PM – Oct 4, 2026, 2:00 AM', 'Same day in UTC, two days in Dubai.');
+  assert.equal(range('', '2026-10-03T14:00:00Z'), 'Not scheduled');
+});
+
+test('the When column wraps, so a two-day range fits a 375px-wide stacked row', () => {
+  // The app's locale and the browser zone, as the app root's DisplayFormatProvider gives them; local times keep the same-day case on one day.
+  const local = (day: number, hour: number) => new Date(2026, 9, day, hour).toISOString();
+  const rows = [{ ...activation('Same day', local(3, 10)), endAt: local(3, 14) }, { ...activation('Two days', local(3, 10)), endAt: local(4, 14) }];
+  const markup = renderToStaticMarkup(React.createElement(ui.DisplayFormatProvider, { locale: displayLocale, children: React.createElement(module.OfflineActivations, { projectId: 'p1', brand: 'Brand launch', campaigns, activations: rows, request: async () => ({}), onChanged() {} }) }));
+  const cells = [...markup.matchAll(/<td([^>]*data-label="When"[^>]*)>([^]*?)<\/td>/g)];
+  assert.equal(cells.length, 2);
+  const format = ui.createDisplayFormatter({ locale: displayLocale }), clock = new Intl.DateTimeFormat(displayLocale, { timeStyle: 'short' });
+  assert.deepEqual(cells.map(([, , text]) => plain(readText(text, ''))), [
+    plain(`${format.dateTime(rows[0].startAt)} – ${clock.format(new Date(rows[0].endAt))}`),
+    plain(`${format.dateTime(rows[1].startAt)} – ${format.dateTime(rows[1].endAt)}`),
+  ]);
+  // Table cells keep one line unless they opt in to wrapping; the stacked row is the phone's full width minus padding.
+  for (const [, attributes] of cells) assert.match(attributes, /t98-table-cell--wrap/);
 });
 
 test('the page is built from @ten98/ui only', () => {

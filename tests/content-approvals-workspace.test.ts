@@ -4,10 +4,12 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { reviewKeyAction } from '../src/review-keys.ts';
 import { adSpendActionLabel, adSpendPlatformLabel, formatMinorUnits } from '../src/approval-status.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 // Issue #125: Approvals is a review workspace. A list of waiting posts and spend changes sits beside the open review,
 // requesting changes needs a comment, and an edited post shows what changed since its review. The actual component runs

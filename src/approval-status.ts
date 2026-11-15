@@ -1,4 +1,8 @@
 // The project approvals summary (GET /projects/:id/approvals/summary): read once per state load, no provider calls.
+import { appFormat, currencyDigits } from './display-locale.ts';
+// Not a component, so by default it formats as the app's DisplayFormatProvider does (en-US, the viewer's time zone); a
+// caller (a test) may pass its own formatter.
+const browserFormat = appFormat;
 export type ApprovalSummary = { requireApproval: boolean; pending: number; statuses: Record<string, string>; pendingAdSpend?: number };
 
 export const approvalLabels: Record<string, string> = { not_requested: 'Approval not requested', pending: 'Awaiting approval', approved: 'Approved', rejected: 'Changes requested', stale: 'Changed since approval', submitted: 'Submitted to provider' };
@@ -9,10 +13,10 @@ export function readableApprovalSummary(value: any): value is ApprovalSummary {
 }
 
 // The sidebar Approvals badge: pending post reviews plus pending ad spend reviews, with a spoken description of both.
-export function approvalBadge(summary: ApprovalSummary | null | undefined) {
+export function approvalBadge(summary: ApprovalSummary | null | undefined, format = browserFormat) {
   const posts = summary?.pending || 0, spend = summary?.pendingAdSpend || 0;
   if (!posts && !spend) return null;
-  const parts = [posts && `${posts} post${posts === 1 ? '' : 's'}`, spend && `${spend} ad spend change${spend === 1 ? '' : 's'}`].filter(Boolean);
+  const parts = [posts && format.count(posts, { one: 'post', other: 'posts' }), spend && format.count(spend, { one: 'ad spend change', other: 'ad spend changes' })].filter(Boolean);
   return { count: posts + spend, label: `${parts.join(' and ')} awaiting review` };
 }
 
@@ -36,12 +40,13 @@ export const adSpendActionLabel = (action: string) => adSpendActions[action] || 
 const adPlatforms: Record<string, string> = { facebook: 'Facebook', instagram: 'Instagram', google: 'Google Ads', microsoft: 'Microsoft Advertising', linkedin: 'LinkedIn', tiktok: 'TikTok', pinterest: 'Pinterest', twitter: 'X', reddit: 'Reddit', snapchat: 'Snapchat', openai: 'OpenAI', broadsign: 'Broadsign' };
 export const adSpendPlatformLabel = (platform: string) => adPlatforms[platform] || platform;
 // Review amounts are minor units of the currency (cents for USD, fils for AED); null is a budget the server could not read.
-export function formatMinorUnits(amount: unknown, currency: unknown) {
+export function formatMinorUnits(amount: unknown, currency: unknown, format = browserFormat) {
   if (typeof amount !== 'number' || !Number.isSafeInteger(amount) || typeof currency !== 'string') return 'Not available';
-  try {
-    const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2;
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount / 10 ** digits);
-  } catch { return `${amount} minor units of ${currency}`; }
+  // The currency's minor-unit digits place the decimal point in the exact string; an unknown code has no known unit.
+  const digits = currencyDigits(currency);
+  if (digits === undefined) return `${amount} minor units of ${currency}`;
+  const units = String(Math.abs(amount)).padStart(digits + 1, '0'), whole = digits ? units.slice(0, -digits) : units;
+  return format.currency(`${amount < 0 ? '-' : ''}${whole}${digits ? '.' + units.slice(-digits) : ''}`, currency);
 }
 
 // A refused spend change, as a gated provider write reports it. For a required or mismatched approval the server has

@@ -5,9 +5,11 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 type Row = { id: string; [key: string]: any };
 type Node = { type?: unknown; props?: Record<string, any> } | null | undefined;

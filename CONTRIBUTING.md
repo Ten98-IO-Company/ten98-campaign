@@ -6,7 +6,7 @@ Setup, checks, the test database and the container check are in the wiki's [Deve
 
 ## Pull requests
 
-Branch from `dev` and open your pull request into `dev`; `main` receives tested releases promoted from `dev`. Run `npm run build` and `npm test` before opening it. Describe what changed, why, and how you verified it.
+Branch from `dev` and open your pull request into `dev`; `main` receives tested releases promoted from `dev`. Install with `pnpm install` (pnpm 11.19.0, as `packageManager` in `package.json` declares; `corepack enable pnpm` provides it), then run `pnpm build` and `pnpm test` before opening it. Describe what changed, why, and how you verified it.
 
 ## Campaign rules
 

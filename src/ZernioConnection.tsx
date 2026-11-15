@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Card, Field, FormActions, InlineCode, Input, Link, List, ListItem, Option, OptionGroup, Select, Stack, StatusLine, Text } from '@ten98/ui';
+import { Alert, Button, Card, Field, FormActions, InlineCode, Input, Link, List, ListItem, Option, OptionGroup, Select, Stack, StatusLine, Text, useDisplayFormat } from '@ten98/ui';
 
 type Props = { projectId: string; canManage: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onConnected: () => void; onCancel: () => void };
 const social = [['instagram', 'Instagram'], ['facebook', 'Facebook'], ['linkedin', 'LinkedIn'], ['twitter', 'X'], ['tiktok', 'TikTok'], ['youtube', 'YouTube'], ['threads', 'Threads'], ['pinterest', 'Pinterest'], ['reddit', 'Reddit'], ['googlebusiness', 'Google Business Profile'], ['whatsapp', 'WhatsApp'], ['discord', 'Discord'], ['slack', 'Slack']];
@@ -13,6 +13,7 @@ const settings: Record<string, { label: string; fields: [string, string, string]
 };
 
 export default function ZernioConnection({ projectId, canManage, request, onConnected, onCancel }: Props) {
+  const format = useDisplayFormat();
   const [choice, setChoice] = useState('social:instagram'), [mode, setMode] = useState('code'), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [authUrl, setAuthUrl] = useState('');
   const [telegram, setTelegram] = useState<any>(null), [accounts, setAccounts] = useState<any[]>([]), [accountError, setAccountError] = useState(''), [accountRetry, setAccountRetry] = useState(0);
   const [authorizationRevision, setAuthorizationRevision] = useState(0), latestAuthorization = useRef(0);
@@ -90,7 +91,7 @@ export default function ZernioConnection({ projectId, canManage, request, onConn
       </>}
     </Stack>
     {error && <Alert tone="danger">{error}</Alert>}{notice && <StatusLine>{notice}</StatusLine>}
-    {telegram && <Card as="section" headingLevel={3} title="Telegram access code"><Stack gap={3}><Text>Send <InlineCode>{telegram.code}</InlineCode> to <Text as="strong" weight="semibold">@{telegram.botUsername}</Text>. Expires {new Date(telegram.expiresAt).toLocaleString()}.</Text><List ordered>{telegram.instructions.map((line: string, index: number) => <ListItem key={index}>{line}</ListItem>)}</List><FormActions><Button variant="secondary" disabled={busy || !canManage} onClick={checkCode}>Check Telegram connection</Button></FormActions></Stack></Card>}
+    {telegram && <Card as="section" headingLevel={3} title="Telegram access code"><Stack gap={3}><Text>Send <InlineCode>{telegram.code}</InlineCode> to <Text as="strong" weight="semibold">@{telegram.botUsername}</Text>. Expires {format.dateTime(telegram.expiresAt)}.</Text><List ordered>{telegram.instructions.map((line: string, index: number) => <ListItem key={index}>{line}</ListItem>)}</List><FormActions><Button variant="secondary" disabled={busy || !canManage} onClick={checkCode}>Check Telegram connection</Button></FormActions></Stack></Card>}
     {authUrl && <Link variant="standalone" href={authUrl} target="_blank" rel="noopener noreferrer">Continue with provider</Link>}
     <FormActions><Button variant="secondary" onClick={onCancel}>Cancel</Button><Button variant="primary" type="submit" disabled={busy || !canManage}>{busy ? 'Checking connection…' : config ? platform === 'telegram' && mode === 'code' ? 'Generate access code' : 'Connect and verify' : 'Get authorization link'}</Button></FormActions>
   </Stack>;

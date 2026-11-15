@@ -5,9 +5,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import * as shared from '../shared/offline-activations.ts';
+import * as displayLocaleModule from '../src/display-locale.ts';
 import { hooks, nodes } from './hook-recorder.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 type Row = Record<string, any>;
 const strip = (text: string) => text.replace(/^import .+;\r?\n/gm, '').replace(/^export (default )?/gm, '');
@@ -17,7 +20,7 @@ const library: Record<string, unknown> = { ...ui, useFocusReturn: () => () => {}
 const campaigns = [{ id: 'c1', name: 'Autumn launch', currency: 'AED' }, { id: 'c2', name: 'Spring sampling', currency: 'AED', startDate: '2026-10-26', endDate: '2026-11-30' }];
 const request = () => new Promise(() => {});
 
-const offlineCode = await compile('OfflineActivations.tsx'), offlineLibrary = { ...shared, ...library, useConfirmDialog: () => [async () => false, null] };
+const offlineCode = await compile('OfflineActivations.tsx'), offlineLibrary = { ...shared, ...library, ...displayLocaleModule, useConfirmDialog: () => [async () => false, null] };
 function mountOffline(props: Row) {
   const h = hooks(), { OfflineActivations } = new Function('React', 'useEffect', 'useRef', 'useState', ...Object.keys(offlineLibrary), offlineCode + '; return { OfflineActivations };')(React, h.useEffect, h.useRef, h.useState, ...Object.values(offlineLibrary));
   const all = { projectId: 'p1', brand: 'Brand', campaigns, activations: [], request, onChanged() {}, ...props };

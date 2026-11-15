@@ -5,14 +5,16 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as designSystem from '@ten98/ui';
+import * as designSystemExports from '@ten98/ui';
+import { testDisplayFormat, withTestDisplayFormat } from './display-format.ts';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
-import { adSpendActionLabel, adSpendBlock, adSpendPlatformLabel, approvalBadge, formatMinorUnits, readableApprovalSummary } from '../src/approval-status.ts';
+import { adSpendActionLabel, adSpendBlock, adSpendPlatformLabel, approvalBadge as approvalBadgeFor, formatMinorUnits, readableApprovalSummary } from '../src/approval-status.ts';
+const designSystem = withTestDisplayFormat(designSystemExports);
 
 // Client side of ad spend approval (council decision ten98-code-system#35, Q1). The components run with recorded request
 // boundaries and stubbed hooks; no provider or approval request leaves the test.
 const read = async file => (await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
-const ui = Object.entries(designSystem).filter(([name]) => /^[A-Z]|^useConfirmDialog$/.test(name));
+const ui = Object.entries(designSystem).filter(([name]) => /^[A-Z]|^useConfirmDialog$|^useDisplayFormat$/.test(name));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 // Every element in a tree, including elements passed through props such as `actions`; function components stay unrendered.
 const nodes = node => Array.isArray(node) ? node.flatMap(nodes) : !React.isValidElement(node) ? [] : [node, ...Object.values(node.props).flatMap(value => Array.isArray(value) || React.isValidElement(value) ? nodes(value) : [])];
@@ -75,7 +77,8 @@ test('an ad spend review shows the current and requested amounts and decides thr
   const page = () => nodes(approvalsModule({ 0: { requireApproval: true, requireAdApproval: true, posts: [] }, 4: 'all', 5: { 'spend:spend-review': 'Within plan' }, 13: { reviews: [review()] } }).ContentApprovals({ projectId: 'project-one', role: 'owner', request, onChanged: async () => { changed.push(true); } })).find(node => node.type.name === 'SpendReview');
   const markup = html(card(review()));
   assert.match(markup, /Raise ad set budget · Facebook/); assert.match(markup, /Ad set spend-set/);
-  assert.equal(formatMinorUnits(2000, 'AED'), new Intl.NumberFormat(undefined, { style: 'currency', currency: 'AED' }).format(20));
+  // Pinned to the English test formatter, so the expected text holds on any machine locale.
+  assert.equal(formatMinorUnits(2000, 'AED', testDisplayFormat), 'AED' + String.fromCharCode(160) + '20.00'); assert.equal(formatMinorUnits(5, 'USD', testDisplayFormat), '$0.05');
   assert.match(markup, new RegExp(`scope="row">Budget</th><td>[^]*?${formatMinorUnits(2000, 'AED').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^]*?</td><td>[^]*?${formatMinorUnits(2500, 'AED').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'Current spend sits beside the requested amount.');
   assert.match(markup, /does not start delivery on its own/); assert.doesNotMatch(markup, /scope="row">Delivery</);
   assert.match(markup, /Requested by Casey Editor/); assert.match(markup, /Awaiting review/);
@@ -144,6 +147,8 @@ test('a held-back spend change explains the review the server opened and links t
 
 test('the Approvals badge counts pending ad spend reviews beside pending posts', () => {
   const summary = (pending, pendingAdSpend) => ({ requireApproval: true, pending, statuses: {}, ...(pendingAdSpend === undefined ? {} : { pendingAdSpend }) });
+  // Pinned to the English test formatter, so the expected text holds on any machine locale.
+  const approvalBadge = (value) => approvalBadgeFor(value, testDisplayFormat);
   assert.equal(approvalBadge(summary(0, 0)), null); assert.equal(approvalBadge(null), null);
   assert.deepEqual(approvalBadge(summary(2, 0)), { count: 2, label: '2 posts awaiting review' });
   assert.deepEqual(approvalBadge(summary(0, 1)), { count: 1, label: '1 ad spend change awaiting review' });

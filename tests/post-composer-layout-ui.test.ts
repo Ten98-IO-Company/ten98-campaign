@@ -5,8 +5,10 @@ import { stripTypeScriptTypes as stripTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import * as social from '../shared/social-posts.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 // Evaluate Campaign's real PostComposer with React's hooks mocked by call order, as the other composer tests do.
 const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');

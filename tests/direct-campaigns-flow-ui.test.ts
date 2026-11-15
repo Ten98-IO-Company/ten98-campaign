@@ -5,7 +5,9 @@ import { readFile } from 'node:fs/promises';
 import React, { useEffect, useRef, useState } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { testDisplayFormat, withTestDisplayFormat } from './display-format.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 type Row = Record<string, any>;
 const source = await readFile(new URL('../src/DirectCampaigns.tsx', import.meta.url), 'utf8');
@@ -22,7 +24,7 @@ const module = new Function('React', 'useEffect', 'useRef', 'useState', 'WhatsAp
 const draft = (changes: Row = {}) => ({ name: 'Autumn notice', channel: 'email', emailPurpose: 'transactional', subject: 'Your receipt', text: 'Thanks {{name}}', html: '', accountId: '', templateName: '', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [], ...changes });
 const person = (id: string, changes: Row = {}) => ({ id, name: id, email: `${id}@example.com`, phone: '+971501234567', tags: ['customer'], consents: { email: true, sms: true, whatsapp: true, emailMarketing: false }, ...changes });
 const status = (changes: Row = {}) => ({ providers: { email: true, sms: true, whatsapp: true }, emailProvider: 'ses', marketingAvailable: true, publicCallbacks: true, accounts: [{ id: 'wa1', name: 'Brand WhatsApp' }], ...changes });
-const checks = (changes: Row = {}) => module.campaignChecks({ draft: draft(), audienceMode: 'all', status: status(), selectedTemplate: null, estimate: { total: 3, eligible: 2 }, validPreview: { previewToken: 't', audience: { total: 3, eligible: 2, excluded: 1 } }, current: { id: 'c1', status: 'draft' }, sendMode: 'now', scheduledAt: '', readOnly: false, isOperator: false, ...changes });
+const checks = (changes: Row = {}) => module.campaignChecks({ draft: draft(), audienceMode: 'all', status: status(), selectedTemplate: null, estimate: { total: 3, eligible: 2 }, validPreview: { previewToken: 't', audience: { total: 3, eligible: 2, excluded: 1 } }, current: { id: 'c1', status: 'draft' }, sendMode: 'now', scheduledAt: '', readOnly: false, isOperator: false, format: testDisplayFormat, ...changes });
 
 test('the local audience estimate mirrors the server exclusions, scope and active suppressions', () => {
   const contacts = [person('a'), person('b', { consents: { email: false } }), person('c', { tags: ['lead'] }), person('d', { suppression: { email: { reason: 'Bounced' } } }), person('e', { suppression: { email: { reason: 'Held', expiresAt: '2000-01-01T00:00:00Z' } } }), person('f', { email: '' }), person('g', { hygiene: { disposable: true } }), person('h', { hygiene: { dnsStatus: 'nxdomain' } })];

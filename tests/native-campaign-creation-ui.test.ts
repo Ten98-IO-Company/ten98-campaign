@@ -3,9 +3,13 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import * as offline from '../shared/offline-activations.ts';
 import { adSpendBlock } from '../src/approval-status.ts';
+import * as googleMicros from '../src/google-micros.ts';
+import * as displayLocaleModule from '../src/display-locale.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 type Row = Record<string, any>;
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -28,10 +32,12 @@ function view(Component: any, initial: Row) {
   };
   return instance;
 }
-async function component(name: string, additions: Row = {}) {
+async function component(name: string, additions: Row = {}): Promise<any> {
   const source = await readFile(new URL(`../src/${name}.tsx`, import.meta.url), 'utf8');
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace(/^export (default )?/gm, ''), name + '.tsx', { jsx: { runtime: 'classic' } });
-  const scope = { React, ...hooks, ...ui, ...offline, FormData: FormValues, adSpendBlock, AdSpendNotice: () => null, ...additions };
+  // The provider pages render the real shared frame.
+  const AdProviderFrame = name === 'AdProviderFrame' ? undefined : await component('AdProviderFrame');
+  const scope = { React, ...hooks, ...ui, ...offline, ...googleMicros, ...displayLocaleModule, FormData: FormValues, adSpendBlock, AdSpendNotice: () => null, AdProviderFrame, ...additions };
   return new Function(...Object.keys(scope), code + `; return ${name};`)(...Object.values(scope));
 }
 const projectId = 'project / exact';

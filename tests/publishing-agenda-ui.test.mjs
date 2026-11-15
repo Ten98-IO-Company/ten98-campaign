@@ -5,9 +5,12 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
 import { PLATFORM_RULES } from '../shared/social-posts.ts';
 import { postScheduleEntries } from '../shared/post-schedule.ts';
+// The agenda is called outside a React render, so useDisplayFormat is replaced by the formatter the app root gives:
+// English here, in the browser time zone (TZ) at the time of each call.
+const ui = { ...uiExports, useDisplayFormat: () => uiExports.createDisplayFormatter({ locale: 'en' }) };
 
 const source = await readFile(new URL('../src/PublishingAgenda.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .+;\r?\n/gm, '').replace('export default ', ''), 'PublishingAgenda.tsx', { jsx: { runtime: 'classic' } });
@@ -47,8 +50,10 @@ test('the real expanded schedules retain account captions, timezone instants, or
       ['post:post:first', 'Shared caption', '2026-11-01T05:30:00Z', 'Facebook · First account'],
       ['post:post:second', 'Second caption', '2026-11-01T10:30:00+04:00', 'Facebook · Second account'],
     ]);
-    assert.match(entries[0].when, /Nov 1, 01:30 AM EDT/);
-    assert.match(entries[1].when, /Nov 1, 01:30 AM EST/);
+    // Both are 1:30 AM New York time on the day the clocks go back: the zone name tells the two instants apart.
+    assert.match(entries[0].when, /Nov 1, 2026, 01:30\sAM EDT/);
+    assert.match(entries[1].when, /Nov 1, 2026, 01:30\sAM EST/);
+    assert.equal(entries[1].order - entries[0].order, 3600000);
     entries.forEach(entry => entry.actions.props.onClick());
     assert.ok(selected.every(item => item === post));
     assert.match(renderToStaticMarkup(Agenda(props)), /Second caption/);
@@ -61,7 +66,7 @@ test('verified Google copies stay deduplicated while cross-month all-day and unr
   const events = [copy, { ...copy, id: 'manual', managed: false }, { id: 'all-day', summary: 'Carry over', start: { date: '2026-09-30' }, end: { date: '2026-10-02' } }, { id: 'expired', summary: 'Ends before month', start: { date: '2026-09-29' }, end: { date: '2026-10-01' } }, { id: 'next-month', summary: 'Later', start: { date: '2026-11-01' }, end: { date: '2026-11-02' } }];
   const component = Agenda({ posts, googleEvents: overlay(events, posts, 'project'), month: new Date(2026, 9, 1), canWrite: false, postLabel, onSelect() {} }), shared = find(component, ofType(PublishingAgenda));
   assert.deepEqual(shared.props.entries.map(entry => entry.id), ['google:all-day', 'post:post', 'google:manual']);
-  assert.equal(shared.props.entries[0].when, '2026-09-30 – 2026-10-02');
+  assert.equal(shared.props.entries[0].when, 'Sep 30, 2026 – Oct 2, 2026', 'All-day dates are calendar days in every time zone.');
   assert.equal(shared.props.entries[0].status, 'All day · End date exclusive');
   assert.equal(shared.props.entries[0].actions, undefined);
   assert.equal(shared.props.onSelect, undefined, 'Google records must not become dead selection buttons.');
