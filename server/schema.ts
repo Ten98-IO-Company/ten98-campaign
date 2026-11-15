@@ -395,11 +395,18 @@ export const directConsentEvents = pgTable('direct_consent_events', {
 ]);
 export const directConsentEvidence = pgTable('direct_consent_evidence', {
   event_id: text('event_id').primaryKey().references(() => directConsentEvents.id, { onDelete: 'cascade' }),
+  workspace_id: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   contact_id: text('contact_id').notNull().references(() => directContacts.id, { onDelete: 'cascade' }),
   evidence: text('evidence').notNull(),
 }, t => [
   index('direct_consent_evidence_contact').on(t.contact_id),
 ]);
+export const directConsentLookupLimits = pgTable('direct_consent_lookup_limits', {
+  key: text('key').primaryKey(),
+  count: integer('count').notNull(),
+  expires_at: bigint('expires_at', { mode: 'number' }).notNull(),
+});
 export const directContactSuppressions = pgTable('direct_contact_suppressions', {
   project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
   channel: text('channel').notNull(),
