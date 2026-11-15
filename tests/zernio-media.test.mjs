@@ -8,6 +8,7 @@ import { createApp } from '../server/index.ts';
 import { MEDIA_DELIVERY_FIELDS } from '../server/zernio-media.ts';
 import { postgresSkip, singleConnection, testDatabase } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { addUsers } from './fixtures/accounts.ts';
 
 const appUrl = 'https://hosted-media.example.test', profileId = 'media-profile', storageHost = 'a'.repeat(32) + '.r2.cloudflarestorage.com';
 const until = async check => { for (let i = 0; i < 1000; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); } assert.fail('Synthetic upload did not reach the expected state'); };
@@ -252,7 +253,7 @@ test('parallel duplicate preparation, transfer and completion mint one grant, se
     const readHeld = new Promise(resolve => { heldRead = resolve; }), readReleased = new Promise(resolve => { releaseRead = resolve; });
     pool.query = async function (...args) {
       const result = await query.apply(this, args), text = typeof args[0] === 'string' ? args[0] : args[0]?.text || '';
-      if (holdRead && text.startsWith('SELECT data FROM zernio_media_uploads WHERE id=')) { holdRead = false; heldRead(); await readReleased; }
+      if (holdRead && text.startsWith('select "data" from "zernio_media_uploads" where ("zernio_media_uploads"."id" =')) { holdRead = false; heldRead(); await readReleased; }
       return result;
     };
     let duplicate;
@@ -273,4 +274,102 @@ test('parallel duplicate preparation, transfer and completion mint one grant, se
     assert.equal((await f.app.sql.get("SELECT count(*) AS count FROM integration_operations WHERE status='complete'")).count, 1, 'Exactly one completion receipt records the save.'); assert.equal((await f.app.sql.get('SELECT count(*) AS count FROM integration_operations')).count, 1);
     assert.equal((await f.app.sql.get('SELECT count(*) AS count FROM activity WHERE project_id=? AND message=?', f.projectId, 'Hosted delivery asset saved for review.')).count, 1); assert.equal(presigns(), 1); assert.equal(transfers(), 1);
   } finally { await f.close(); }
+});
+
+// Direct rows keep the next two tests to the statements they check: attempts seeded for one project, user and profile.
+const seedAttempt = (f, owner, id, status, createdAt = new Date().toISOString(), assetId = '', scope = {}) => f.app.sql.run('INSERT INTO zernio_media_uploads (id, project_id, user_id, profile_id, asset_id, data) VALUES (?, ?, ?, ?, ?, ?)', id, scope.projectId ?? f.projectId, owner, scope.profileId ?? profileId, assetId, JSON.stringify({ id, projectId: f.projectId, status, createdAt }));
+
+test('an upload is read and listed only inside its own project, user and Zernio profile, newest first and twenty at most', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), sql = f.app.sql;
+  try {
+    const attempt = (await f.prepare()).data.attempt, user = (await sql.get('SELECT id FROM users')).id, workspace = (await sql.get('SELECT workspace_id FROM projects WHERE id=?', f.projectId)).workspace_id;
+    await addUsers(sql, [{ id: 'other-user', name: 'Other user', email: 'other-user@example.test' }]);
+    await sql.run('INSERT INTO projects(id,workspace_id,name,color,zernio_profile_id,drive_folder_id) VALUES(?,?,?,?,?,?)', 'other-project', workspace, 'Other project', '#000000', 'other-profile', '');
+    assert.equal((await f.request(f.base + '/' + attempt.id)).status, 200); assert.deepEqual((await f.options()).data.attempts.map(row => row.id), [attempt.id]);
+    for (const [column, foreign, own] of [['user_id', 'other-user', user], ['profile_id', 'other-profile', profileId], ['project_id', 'other-project', f.projectId]]) {
+      await sql.run(`UPDATE zernio_media_uploads SET ${column}=? WHERE id=?`, foreign, attempt.id);
+      const read = await f.request(f.base + '/' + attempt.id); assert.equal(read.status, 404, column); assert.equal(read.data.error.code, 'MEDIA_UPLOAD_NOT_FOUND', column);
+      assert.deepEqual((await f.options()).data.attempts, [], column + ' keeps another owner’s attempt out of the list.');
+      assert.equal((await f.prepare({ attemptId: attempt.id })).status, 404, column + ': a repeated attempt ID is never answered with another owner’s upload.');
+      await sql.run(`UPDATE zernio_media_uploads SET ${column}=? WHERE id=?`, own, attempt.id);
+    }
+    // Twenty-four finished attempts (listing a finished one changes nothing), three of them for a replacement target.
+    const asset = await f.app.store.create(f.projectId, 'assets', { name: 'Listed asset', kind: 'image' }), forAsset = [3, 10, 17], ids = Array.from({ length: 24 }, () => randomUUID());
+    for (const [index, id] of ids.entries()) await seedAttempt(f, user, id, 'cancelled', undefined, forAsset.includes(index) ? asset.id : '');
+    assert.deepEqual((await f.options()).data.attempts.map(row => row.id), ids.filter((_, index) => !forAsset.includes(index)).reverse().slice(0, 20), 'Newest first, and the list stops at twenty.');
+    assert.deepEqual((await f.options(asset.id)).data.attempts.map(row => row.id), forAsset.map(index => ids[index]).reverse(), 'A replacement target lists only its own attempts.');
+  } finally { await f.close(); }
+});
+
+test('twenty open uploads in the last hour stop a new one, while finished, older and other people’s uploads do not count', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), sql = f.app.sql;
+  try {
+    const user = (await sql.get('SELECT id FROM users')).id, older = new Date(Date.now() - 2 * 3600000).toISOString();
+    await addUsers(sql, [{ id: 'other-user', name: 'Other user', email: 'other-user@example.test' }]);
+    for (let index = 0; index < 19; index++) await seedAttempt(f, user, randomUUID(), 'awaiting_upload');
+    for (const status of ['completed', 'cancelled']) for (let index = 0; index < 3; index++) await seedAttempt(f, user, randomUUID(), status);
+    for (let index = 0; index < 3; index++) await seedAttempt(f, user, randomUUID(), 'awaiting_upload', older);
+    for (let index = 0; index < 3; index++) await seedAttempt(f, 'other-user', randomUUID(), 'awaiting_upload');
+    for (let index = 0; index < 3; index++) await seedAttempt(f, user, randomUUID(), 'awaiting_upload', undefined, '', { profileId: 'other-profile' });
+    const twentieth = await f.prepare(); assert.equal(twentieth.status, 200, JSON.stringify(twentieth.data));
+    const refused = await f.prepare(); assert.equal(refused.status, 429); assert.equal(refused.data.error.code, 'MEDIA_UPLOAD_LIMIT'); assert.equal(f.state.counter, 1, 'A refused upload never reaches the provider.');
+    assert.equal((await f.action(twentieth.data.attempt, 'cancel')).data.attempt.status, 'cancelled'); assert.equal((await f.prepare()).status, 200, 'Cancelling an open upload frees its place.');
+  } finally { await f.close(); }
+});
+
+test('completing an upload takes its attempt row and its replacement asset row before it decides anything', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), pool = f.app.database.pool; let held;
+  // A transaction of its own: it takes the row lock, lets the test change the row, and commits after the completion has waited.
+  const hold = async (lock, change, id) => { const client = await pool.connect(); await client.query('BEGIN'); await client.query(lock, [id]); held = { change: () => client.query(change, [id]), commit: async () => { held = undefined; try { await client.query('COMMIT'); } finally { client.release(); } } }; };
+  // The completion has reached a row lock once a backend of this test's database is waiting on one.
+  const waiting = async () => { for (let index = 0; index < 400; index++) { if (Number((await f.app.sql.get("SELECT count(*) AS count FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")).count) > 0) return; await new Promise(resolve => setTimeout(resolve, 25)); } assert.fail('The completion never waited for a row lock.'); };
+  try {
+    // Cancelled while the completion waits: the completion sees the cancellation and saves no asset.
+    let attempt = (await f.prepare()).data.attempt; attempt = (await f.put(attempt)).data.attempt; assert.equal(attempt.status, 'uploaded');
+    await hold('SELECT id FROM zernio_media_uploads WHERE id=$1 FOR UPDATE', `UPDATE zernio_media_uploads SET data=(data::jsonb || '{"status":"cancelled"}'::jsonb)::json WHERE id=$1`, attempt.id);
+    let completing = f.action(attempt, 'recover'); await waiting(); await held.change(); await held.commit();
+    let result = await completing; assert.equal(result.status, 200, JSON.stringify(result.data)); assert.equal(result.data.attempt.status, 'cancelled'); assert.equal((await f.app.store.list(f.projectId, 'assets')).length, 0, 'A cancellation that won the attempt row leaves no asset behind.');
+    // Replacement target edited while the completion waits: the reviewed version no longer matches, so nothing is written.
+    const original = await f.app.store.create(f.projectId, 'assets', { name: 'Reviewed original', kind: 'image', approval: 'approved' }), snapshot = (await f.options(original.id)).data;
+    attempt = (await f.prepare({ assetId: original.id, assetVersion: snapshot.assetVersion })).data.attempt; attempt = (await f.put(attempt)).data.attempt;
+    await hold('SELECT id FROM records WHERE id=$1 FOR UPDATE', `UPDATE records SET data=(data::jsonb || '{"description":"Edited while locked"}'::jsonb)::json WHERE id=$1`, original.id);
+    completing = f.action(attempt, 'recover'); await waiting(); await held.change(); await held.commit();
+    result = await completing; assert.equal(result.status, 409, JSON.stringify(result.data)); assert.equal(result.data.error.code, 'MEDIA_ASSET_CHANGED');
+    const stored = await f.app.store.get(f.projectId, 'assets', original.id); assert.equal(stored.description, 'Edited while locked'); assert.equal(stored.deliveryAttemptId, undefined, 'The edit survives and no delivery was written over it.');
+  } finally { await held?.commit(); await f.close(); }
+});
+
+// The text of the statement a query runs, from the string or the config object the pool is called with.
+const statementText = args => typeof args[0] === 'string' ? args[0] : args[0]?.text || '';
+
+test('a request that found its attempt ID missing but lost the race to store it answers as a repeat of the stored attempt', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), pool = f.app.database.pool, query = pool.query, attemptId = randomUUID(); let holding = true, probed, release;
+  const probeHeld = new Promise(resolve => { probed = resolve; }), released = new Promise(resolve => { release = resolve; });
+  // The first existence probe for this ID finds nothing; its answer is held until another request has stored the attempt.
+  pool.query = async function (...args) {
+    const result = await query.apply(this, args);
+    if (holding && statementText(args).startsWith('select "id" from "zernio_media_uploads"') && args[1]?.[0] === attemptId) { holding = false; probed(); await released; }
+    return result;
+  };
+  try {
+    const second = f.prepare({ attemptId }, 'race-key-two'); await probeHeld;
+    const first = await f.prepare({ attemptId }, 'race-key-one'); assert.equal(first.status, 200, JSON.stringify(first.data)); release();
+    const raced = await second; assert.equal(raced.status, 200, JSON.stringify(raced.data)); assert.equal(raced.data.attempt.id, attemptId); assert.equal(raced.data.attempt.status, 'awaiting_upload');
+    assert.equal(f.state.counter, 1, 'Only the request that stored the attempt reaches the provider.'); assert.equal((await f.app.sql.get('SELECT count(*) AS count FROM zernio_media_uploads WHERE id=?', attemptId)).count, 1);
+  } finally { release(); pool.query = query; await f.close(); }
+});
+
+test('a write to an upload follows its owner: an attempt reassigned between the read and the write is left as it was', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), pool = f.app.database.pool, query = pool.query, sql = f.app.sql;
+  try {
+    await addUsers(sql, [{ id: 'other-user', name: 'Other user', email: 'other-user@example.test' }]);
+    const attempt = (await f.prepare()).data.attempt; let reassigned = false;
+    pool.query = async function (...args) {
+      if (!reassigned && statementText(args).startsWith('update "zernio_media_uploads" set "data"')) { reassigned = true; await query.call(this, 'UPDATE zernio_media_uploads SET user_id=$1 WHERE id=$2', ['other-user', attempt.id]); }
+      return query.apply(this, args);
+    };
+    let cancelled; try { cancelled = await f.action(attempt, 'cancel'); } finally { pool.query = query; }
+    assert.ok(reassigned, 'The cancellation wrote the attempt.'); assert.equal(cancelled.status, 404, JSON.stringify(cancelled.data)); assert.equal(cancelled.data.error.code, 'MEDIA_UPLOAD_NOT_FOUND');
+    assert.equal((await sql.get('SELECT data FROM zernio_media_uploads WHERE id=?', attempt.id)).data.status, 'awaiting_upload', 'The write did not reach an attempt that is no longer this user’s.');
+  } finally { pool.query = query; await f.close(); }
 });

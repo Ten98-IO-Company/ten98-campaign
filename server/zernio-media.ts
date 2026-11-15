@@ -1,10 +1,11 @@
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 import { createHash } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { and, count, desc, eq, gt, notInArray, sql } from 'drizzle-orm';
 import { reportObject as object, IntegrationError, operation , fail } from './provider-core.ts';
 import { createStore } from './database.ts';
 import type { Executor } from './database.ts';
 import { advisoryLock } from './auth.ts';
+import { records as recordsTable, zernioMediaUploads } from './schema.ts';
 
 export const MEDIA_UPLOAD_MAX_BYTES = 5_000_000_000;
 export const MEDIA_UPLOAD_TIMEOUT = 30 * 60 * 1000;
@@ -46,11 +47,22 @@ export async function handleZernioMedia(context: OperationContext & { body: any;
   if (!['owner', 'admin', 'editor'].includes(role)) fail(403, 'MEDIA_UPLOAD_PERMISSION_REQUIRED', 'Editing permission is required to manage hosted uploads.');
   const check = async (executor: Executor = db) => { try { await context.assertProjectMapping?.(profileId, executor); } catch (error: any) { fail(error.status || 409, 'MEDIA_SCOPE_CHANGED', 'Project access, provider mapping or integration settings changed. Refresh before continuing.'); } };
   await check(); for (const [id, grant] of grants) if (Date.parse(grant.uploadExpiresAt) <= Date.now()) grants.delete(id);
-  const get = async (id: any, executor: Executor = db, lock = false) => { const row = (await executor.execute(sql`SELECT data FROM zernio_media_uploads WHERE id=${id} AND project_id=${project.id} AND user_id=${user.id} AND profile_id=${profileId}${lock ? sql` FOR UPDATE` : sql``}`)).rows[0] as ProviderRecord | undefined; if (!row) fail(404, 'MEDIA_UPLOAD_NOT_FOUND', 'This upload was not found in the current project and sign-in.'); return row.data; };
+  // An attempt belongs to one project, user and Zernio profile; its status lives inside the stored JSON document.
+  const mine = and(eq(zernioMediaUploads.project_id, project.id), eq(zernioMediaUploads.user_id, user.id), eq(zernioMediaUploads.profile_id, profileId)), attemptStatus = sql`${zernioMediaUploads.data}->>'status'`;
+  const get = async (id: any, executor: Executor = db, lock = false) => {
+    const selected = executor.select({ data: zernioMediaUploads.data }).from(zernioMediaUploads).where(and(eq(zernioMediaUploads.id, id), mine));
+    const [row] = await (lock ? selected.for('update') : selected);
+    if (!row) fail(404, 'MEDIA_UPLOAD_NOT_FOUND', 'This upload was not found in the current project and sign-in.');
+    return row.data as ProviderRecord;
+  };
   // Completed and cancelled are terminal. The conditional write stops a concurrent cancel, transfer or completion from
   // overwriting one; the stored terminal attempt is returned instead.
   // `from` makes the write conditional on the status that was read, so a decision made on a stale read changes nothing.
-  const save = async (attempt: any, executor: Executor = db, from?: string) => { attempt.updatedAt = new Date().toISOString(); const saved = await executor.execute(sql`UPDATE zernio_media_uploads SET data=${JSON.stringify(attempt)} WHERE id=${attempt.id} AND project_id=${project.id} AND user_id=${user.id} AND profile_id=${profileId} AND data->>'status' NOT IN ('completed','cancelled')${from ? sql` AND data->>'status' = ${from}` : sql``}`); return saved.rowCount ? attempt : get(attempt.id, executor); };
+  const save = async (attempt: any, executor: Executor = db, from?: string) => {
+    attempt.updatedAt = new Date().toISOString();
+    const saved = await executor.update(zernioMediaUploads).set({ data: attempt }).where(and(eq(zernioMediaUploads.id, attempt.id), mine, notInArray(attemptStatus, ['completed', 'cancelled']), from ? eq(attemptStatus, from) : undefined));
+    return saved.rowCount ? attempt : get(attempt.id, executor);
+  };
   const view = async (attempt: any, records = store) => {
     const result = Object.fromEntries(['id', 'projectId', 'status', 'filename', 'contentType', 'size', 'publicUrl', 'uploadExpiresAt', 'uploadedAt', 'expiresAt', 'createdAt', 'updatedAt', 'assetId', 'receivedBytes', 'errorCode', 'storageMayContainFile'].filter(key => attempt[key] !== undefined).map(key => [key, attempt[key]]));
     if (attempt.status === 'completed') { const asset = await records.get(project.id, 'assets', attempt.assetId); if (asset) { result.asset = asset; if (asset.deliveryAttemptId !== attempt.id) result.deliveryChanged = true; } else result.savedAssetMissing = true; }
@@ -92,7 +104,7 @@ export async function handleZernioMedia(context: OperationContext & { body: any;
     const assetId = url.searchParams.get('assetId') || '', asset = assetId ? await store.get(project.id, 'assets', assetId) : null;
     if (assetId && (!asset || asset.sample)) fail(404, 'MEDIA_ASSET_NOT_FOUND', 'Choose an existing, nonsample asset in this project.');
     const attempts = [];
-    for (const row of (await db.execute(sql`SELECT data FROM zernio_media_uploads WHERE project_id=${project.id} AND user_id=${user.id} AND profile_id=${profileId} AND asset_id=${assetId} ORDER BY seq DESC LIMIT 20`)).rows as ProviderRecord[]) attempts.push(await view(await current(row.data)));
+    for (const row of await db.select({ data: zernioMediaUploads.data }).from(zernioMediaUploads).where(and(mine, eq(zernioMediaUploads.asset_id, assetId))).orderBy(desc(zernioMediaUploads.seq)).limit(20)) attempts.push(await view(await current(row.data as ProviderRecord)));
     await check();
     send(200, { maxSize: MEDIA_UPLOAD_MAX_BYTES, maxFilenameLength: 255, formats, attempts, ...(asset ? { asset, assetVersion: version(asset) } : {}) }); return true;
   }
@@ -103,17 +115,18 @@ export async function handleZernioMedia(context: OperationContext & { body: any;
     if (Boolean(body.assetId) !== Boolean(body.assetVersion)) fail(400, 'MEDIA_ASSET_REVIEW_REQUIRED', 'Review the current replacement asset before uploading.');
     const input = { filename: body.filename, contentType: body.contentType, kind: format.kind, size: body.size, targetAssetId: body.assetId || '', assetVersion: body.assetVersion || '' }, inputHash = version(input);
     const existing = async () => { const attempt = await get(body.attemptId); if (attempt.inputHash !== inputHash) fail(409, 'MEDIA_ATTEMPT_CONFLICT', 'This upload ID belongs to a different file or asset review.'); send(200, { attempt: await view(await current(attempt)) }); return true; };
-    if ((await db.execute(sql`SELECT 1 FROM zernio_media_uploads WHERE id=${body.attemptId}`)).rowCount) return existing();
+    // Any project's attempt with this ID counts here; existing() answers one that is not this user's as not found.
+    if ((await db.select({ id: zernioMediaUploads.id }).from(zernioMediaUploads).where(eq(zernioMediaUploads.id, body.attemptId))).length) return existing();
     const now = new Date().toISOString(), attempt = { id: body.attemptId, projectId: project.id, ...input, inputHash, status: 'preparing', createdAt: now, updatedAt: now };
     let prepared: any = null;
     await exclusive(attempt.id, async () => {
       const inserted = await db.transaction(async tx => {
         // Serialises this user's new attempts so parallel requests cannot pass the open-upload limit together.
         await advisoryLock(tx, 'media-uploads:' + JSON.stringify([project.id, user.id, profileId]));
-        const open = (await tx.execute(sql`SELECT count(*) AS count FROM zernio_media_uploads WHERE project_id=${project.id} AND user_id=${user.id} AND profile_id=${profileId} AND data->>'status' NOT IN ('completed','cancelled') AND data->>'createdAt' > ${new Date(Date.now() - 3600000).toISOString()}`)).rows[0] as ProviderRecord;
+        const [open] = await tx.select({ count: count() }).from(zernioMediaUploads).where(and(mine, notInArray(attemptStatus, ['completed', 'cancelled']), gt(sql`${zernioMediaUploads.data}->>'createdAt'`, new Date(Date.now() - 3600000).toISOString())));
         if (open.count >= 20) fail(429, 'MEDIA_UPLOAD_LIMIT', 'Finish or cancel existing uploads before preparing more files.');
         await check(tx); await checkedAsset(attempt, createStore(tx));
-        return (await tx.execute(sql`INSERT INTO zernio_media_uploads (id, project_id, user_id, profile_id, asset_id, data) VALUES (${attempt.id}, ${project.id}, ${user.id}, ${profileId}, ${attempt.targetAssetId}, ${JSON.stringify(attempt)}) ON CONFLICT (id) DO NOTHING`)).rowCount;
+        return (await tx.insert(zernioMediaUploads).values({ id: attempt.id, project_id: project.id, user_id: user.id, profile_id: profileId, asset_id: attempt.targetAssetId, data: attempt }).onConflictDoNothing({ target: zernioMediaUploads.id })).rowCount;
       });
       if (inserted) prepared = await prepare(attempt);
     });
@@ -169,7 +182,7 @@ export async function handleZernioMedia(context: OperationContext & { body: any;
       // The attempt row lock makes a concurrent cancel wait for this completion; the asset row lock keeps the reviewed
       // asset version from changing between its check and the delivery update.
       await check(tx); const fresh = await get(attempt.id, tx, true); if (fresh.status === 'cancelled') return { attempt: await view(fresh, records) }; if (fresh.status === 'completed') return { attempt: await view(fresh, records) };
-      if (fresh.targetAssetId) await tx.execute(sql`SELECT id FROM records WHERE id=${fresh.targetAssetId} AND project_id=${project.id} FOR UPDATE`);
+      if (fresh.targetAssetId) await tx.select({ id: recordsTable.id }).from(recordsTable).where(and(eq(recordsTable.id, fresh.targetAssetId), eq(recordsTable.project_id, project.id))).for('update');
       const previous = await checkedAsset(fresh, records), delivery = { deliveryUrl: fresh.publicUrl, deliverySource: 'zernio', deliveryUploadedAt: fresh.uploadedAt, deliveryExpiresAt: fresh.expiresAt, deliveryKey: fresh.key, deliveryAttemptId: fresh.id, deliverySize: fresh.size, deliveryMimeType: canonicalMime(fresh.contentType), deliveryKind: fresh.kind, deliveryFilename: fresh.filename, approval: 'pending' };
       const asset = previous ? await records.update(project.id, 'assets', previous.id, delivery) : await records.create(project.id, 'assets', { name: fresh.filename.slice(0, 250), url: fresh.publicUrl, source: 'zernio', kind: fresh.kind, mimeType: canonicalMime(fresh.contentType), size: fresh.size, filename: fresh.filename, tags: [], ...delivery });
       attempt = await save({ ...fresh, status: 'completed', assetId: asset!.id, errorCode: undefined }, tx); grants.delete(attempt.id); await records.activity(project.id, 'Hosted delivery asset saved for review.'); return { attempt: await view(attempt, records) };

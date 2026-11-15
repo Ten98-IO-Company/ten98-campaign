@@ -110,33 +110,5 @@
   "server/zernio-leads.ts": {
     "count": 6,
     "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4)."
-  },
-  "server/zernio-measurement.ts": {
-    "count": 1,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4)."
-  },
-  "server/zernio-media.ts": {
-    "count": 7,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); its FOR UPDATE row locks and advisory locks must keep their order in the typed version."
-  },
-  "server/zernio-products.ts": {
-    "count": 2,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4)."
-  },
-  "server/zernio-publishing.ts": {
-    "count": 4,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4)."
-  },
-  "server/zernio-queues.ts": {
-    "count": 1,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4)."
-  },
-  "server/zernio-recycling.ts": {
-    "count": 5,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4)."
-  },
-  "server/zernio-whatsapp-templates.ts": {
-    "count": 3,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4)."
   }
 }

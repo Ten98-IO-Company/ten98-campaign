@@ -173,6 +173,24 @@ test('shared WABA locks cover different projects and permission revocation is re
   } finally { release?.(); }
 });
 
+test('operator authority is read for the exact user, and a template is managed only by the project and profile that own that business account template', pg, async t => {
+  const { sql, request, read } = await setup(t);
+  await addUsers(sql, [{ id: 'operator-b', name: 'Other operator', email: 'operator-b@example.test' }]); await grantOperators(sql, ['operator-b']);
+  assert.equal((await read('1001', { operator: true })).canReviewShared, true);
+  await sql.run('DELETE FROM instance_operators WHERE user_id=?', 'operator-a');
+  assert.equal((await read('1001', { operator: true })).canReviewShared, false, 'Another operator on the instance does not make this user one.');
+  const owner = (waba, template, project, profile) => sql.run('INSERT INTO zernio_whatsapp_template_ownership (waba_id, template_id, project_id, profile_id) VALUES (?,?,?,?)', waba, template, project, profile), managed = async id => (await read(id)).managedHere;
+  await owner(wabaId, '1002', 'project-a', profileId); await owner('99999', '1001', 'project-a', profileId);
+  assert.equal(await managed('1002'), true); assert.equal(await managed('1001'), false, 'Another template’s owner and another business account’s owner do not manage this template.');
+  await owner(wabaId, '1001', 'project-b', profileId); assert.equal(await managed('1001'), false);
+  await sql.run('UPDATE zernio_whatsapp_template_ownership SET project_id=?, profile_id=? WHERE waba_id=? AND template_id=?', 'project-a', 'profile-b', wabaId, '1001'); assert.equal(await managed('1001'), false);
+  await sql.run('UPDATE zernio_whatsapp_template_ownership SET profile_id=? WHERE waba_id=? AND template_id=?', profileId, wabaId, '1001'); assert.equal(await managed('1001'), true);
+  // A template this project and profile already own is not stored twice when its creation is confirmed.
+  await owner(wabaId, '2001', 'project-a', profileId);
+  const created = await request('templates/create', { body: createBody() }); assert.equal(created.status, 200, JSON.stringify(created.data)); assert.equal(created.data.template.id, '2001'); assert.equal(created.data.template.managedHere, true);
+  assert.equal((await sql.all('SELECT template_id FROM zernio_whatsapp_template_ownership WHERE template_id=?', '2001')).length, 1);
+});
+
 test('typed content leaves one canonical provider payload and rejects invalid examples and unsafe button URLs', () => {
   const valid = form(); valid.headerFormat = 'image'; valid.headerMediaUrl = 'https://example.com/header.jpg'; const components = templateComponents(valid); assert.deepEqual(components[0].example.header_handle, ['https://example.com/header.jpg']); assert.equal(components[1].example.body_text[0][0], 'ORDER-123');
   for (const patch of [{ bodyText: 'Missing {{2}}' }, { headerFormat: 'text', headerText: '{{1}} and {{2}}' }, { footerText: '{{1}}' }, { buttons: [{ ...valid.buttons[0], url: 'https://{{1}}.example.com/x' }] }, { buttons: [{ ...valid.buttons[0], type: 'flow' }] }, { buttons: [{ ...valid.buttons[0], type: 'phone_number', phoneNumber: '123' }] }]) assert.throws(() => templateComponents({ ...valid, ...patch }), IntegrationError);

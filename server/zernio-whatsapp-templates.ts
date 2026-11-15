@@ -1,7 +1,8 @@
-import { sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { OperationContext, ZernioApi, ProviderRecord } from './provider-core.ts';
 import { createHash } from 'node:crypto';
 import { fail, reportObject as object, IntegrationError, claimFence, operation, releaseFence, scopedAccounts, requireAccount } from './provider-core.ts';
+import { instanceOperators, zernioWhatsappTemplateOwnership } from './schema.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const text = (value: any, max: any, empty = false) => typeof value === 'string' && value.length <= max && (empty || value.trim().length > 0) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
@@ -143,8 +144,8 @@ export async function handleZernioWhatsAppTemplates(context: OperationContext & 
   const accountId = mutation ? body.accountId : requestUrl.searchParams.get('accountId'), account = requireAccount(accounts, accountId);
   if (account.platform !== 'whatsapp') fail(422, 'WHATSAPP_ACCOUNT_REQUIRED', 'Choose a connected WhatsApp account.');
   const wabaId = numeric(account.metadata?.wabaId) ? account.metadata.wabaId : null;
-  const isAdmin = ['owner', 'admin'].includes(role), isOperator = async () => Boolean(context.user?.isOperator && (await db.execute(sql`SELECT 1 FROM instance_operators WHERE user_id = ${context.user.id}`)).rowCount);
-  const ownership = async (templateId: any) => (await db.execute(sql`SELECT project_id, profile_id FROM zernio_whatsapp_template_ownership WHERE waba_id = ${wabaId} AND template_id = ${templateId}`)).rows[0] as ProviderRecord | undefined;
+  const isAdmin = ['owner', 'admin'].includes(role), isOperator = async () => Boolean(context.user?.isOperator && (await db.select({ user_id: instanceOperators.user_id }).from(instanceOperators).where(eq(instanceOperators.user_id, context.user.id))).length);
+  const ownership = async (templateId: any) => (await db.select({ project_id: zernioWhatsappTemplateOwnership.project_id, profile_id: zernioWhatsappTemplateOwnership.profile_id }).from(zernioWhatsappTemplateOwnership).where(and(eq(zernioWhatsappTemplateOwnership.waba_id, wabaId), eq(zernioWhatsappTemplateOwnership.template_id, templateId))))[0];
   const decorate = async (template: any) => { const owner = await ownership(template.id); return { ...template, managedHere: owner?.project_id === project.id && owner.profile_id === profileId, canReviewShared: isAdmin && await isOperator(), wabaId }; };
   async function freshAccount() {
     await assertAccess(); const fresh = requireAccount(await scopedAccounts(api, profileId), accountId);
@@ -229,7 +230,7 @@ export async function handleZernioWhatsAppTemplates(context: OperationContext & 
         if (!object(saved) || !numeric(saved.id) || templateId && saved.id !== templateId || saved.name !== (current?.name || payload.name) || saved.language !== (current?.language || payload.language) || !text(saved.status, 100) || saved.category !== undefined && saved.category !== (current?.category || payload.category) || !templateId && before.some((template: any) => template.id === saved.id)) unavailable();
         if (!templateId) {
           const owned = await ownership(saved.id); if (owned && (owned.project_id !== project.id || owned.profile_id !== profileId)) fail(502, 'TEMPLATE_OWNERSHIP_CONFLICT', 'This template already has a different project owner.');
-          await db.execute(sql`INSERT INTO zernio_whatsapp_template_ownership (waba_id, template_id, project_id, profile_id) VALUES (${wabaId}, ${saved.id}, ${project.id}, ${profileId}) ON CONFLICT DO NOTHING`);
+          await db.insert(zernioWhatsappTemplateOwnership).values({ waba_id: wabaId, template_id: saved.id, project_id: project.id, profile_id: profileId }).onConflictDoNothing();
         }
         await freshAccount(); const fresh = await detail(api, accountId, saved.id);
         if (fresh.name !== saved.name || fresh.language !== saved.language || fresh.category !== (current?.category || payload.category) || components && canonical(semantic(fresh.components)) !== canonical(semantic(components)) || payload.message_send_ttl_seconds !== undefined && payload.message_send_ttl_seconds !== -1 && fresh.ttlSeconds !== payload.message_send_ttl_seconds) unavailable();

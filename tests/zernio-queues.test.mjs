@@ -295,3 +295,22 @@ test('parallel queue toggles send one provider request and an unconfirmed toggle
     assert.equal(f.writes().length, before + 2, 'The unconfirmed toggle was sent once and blocks further queue changes until reviewed.');
   } finally { await f.close(); }
 });
+
+test('only an unresolved queue change of the same project holds back another queue change', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), sql = f.app.sql, projectId = f.project.slice('/projects/'.length);
+  try {
+    const workspace = (await sql.get('SELECT workspace_id FROM projects WHERE id=?', projectId)).workspace_id;
+    await sql.run('INSERT INTO projects(id,workspace_id,name,color,zernio_profile_id,drive_folder_id) VALUES(?,?,?,?,?,?)', 'other-project', workspace, 'Other project', '#000000', 'other-profile', '');
+    const seed = (status, path, project = projectId) => sql.run("INSERT INTO integration_operations (id, project_id, request_key, request_hash, status, created_at, action_path, resource_key) VALUES (?, ?, ?, 'seeded', ?, ?, ?, 'seeded')", randomUUID(), project, randomUUID(), status, new Date().toISOString(), path);
+    for (const [status, path] of [['pending', 'POST /integrations/queues/create'], ['uncertain', 'POST /integrations/queues/:id/update'], ['uncertain', 'POST /integrations/queues/:id/status'], ['pending', 'POST /integrations/queues/:id/delete']]) {
+      await sql.run('DELETE FROM integration_operations'); await seed(status, path);
+      const blocked = await f.create('Held back'); assert.equal(blocked.status, 409, status + ' ' + path); assert.equal(blocked.data.error.code, 'QUEUE_PREVIOUS_OUTCOME_UNRESOLVED', status + ' ' + path);
+    }
+    assert.equal(f.writes().length, 0, 'A held-back change is never sent.');
+    // None of these holds a change back: a settled or reviewed receipt, another action, or another project's receipt.
+    await sql.run('DELETE FROM integration_operations');
+    for (const status of ['complete', 'failed', 'reviewed-applied', 'reviewed-not-applied']) await seed(status, 'POST /integrations/queues/create');
+    await seed('uncertain', 'POST /integrations/recycling/posts/:id/apply'); await seed('uncertain', 'POST /integrations/queues/create', 'other-project'); await seed('pending', 'POST /integrations/queues/:id/status', 'other-project');
+    const created = await f.create('Allowed'); assert.equal(created.status, 200, JSON.stringify(created.data)); assert.equal(created.data.queue.name, 'Allowed'); assert.equal(f.writes().length, 1);
+  } finally { await f.close(); }
+});

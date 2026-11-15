@@ -1,7 +1,8 @@
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 import { createHash } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { fail, reportObject as object, IntegrationError, operation, claimFence, releaseFence, scopedAccounts, requireAccount, mediaUrl } from './provider-core.ts';
+import { zernioExternalPostReferences } from './schema.ts';
 
 const token = (value: any) => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
 const text = (value: any) => value == null || typeof value === 'string' && value.length <= 20000;
@@ -185,10 +186,12 @@ async function libraryAccount(api: ZernioApi, profileId: any, accountId: any, ac
   if (account.platformUserId != null && !token(account.platformUserId)) libraryInvalid();
   return account;
 }
+// The saved external post references of one connected account: the same project, profile, account and native account ID.
+const accountReferences = (context: OperationContext & { body: any }, profileId: any, account: any) => and(eq(zernioExternalPostReferences.project_id, context.project.id), eq(zernioExternalPostReferences.profile_id, profileId), eq(zernioExternalPostReferences.account_id, account._id), eq(zernioExternalPostReferences.native_account_id, account.platformUserId || ''));
 async function references(context: OperationContext & { body: any }, profileId: any, account: any) {
   // ponytail: show the newest 250 local references per account; paginate this separate local index when projects outgrow it. Provider history is already paginated.
-  const rows = (await context.db.execute(sql`SELECT data, campaign_id, updated_at FROM zernio_external_post_references WHERE project_id=${context.project.id} AND profile_id=${profileId} AND account_id=${account._id} AND native_account_id=${account.platformUserId || ''} ORDER BY updated_at DESC, platform_post_id LIMIT 250`)).rows as ProviderRecord[];
-  return Promise.all(rows.map(async row => ({ ...row.data, campaignId: row.campaign_id || '', campaignName: row.campaign_id ? (await context.store.get(context.project.id, 'campaigns', row.campaign_id))?.name || '' : '', importedAt: row.updated_at })));
+  const rows = await context.db.select({ data: zernioExternalPostReferences.data, campaign_id: zernioExternalPostReferences.campaign_id, updated_at: zernioExternalPostReferences.updated_at }).from(zernioExternalPostReferences).where(accountReferences(context, profileId, account)).orderBy(desc(zernioExternalPostReferences.updated_at), asc(zernioExternalPostReferences.platform_post_id)).limit(250);
+  return Promise.all(rows.map(async row => ({ ...row.data as ProviderRecord, campaignId: row.campaign_id || '', campaignName: row.campaign_id ? (await context.store.get(context.project.id, 'campaigns', row.campaign_id))?.name || '' : '', importedAt: row.updated_at })));
 }
 async function postLibrary(context: OperationContext & { body: any }, api: ZernioApi, profileId: any, match: any) {
   let accountId; try { accountId = decodeURIComponent(match[1]); } catch { fail(400, 'INVALID_ACCOUNT', 'Choose a valid connected account.'); }
@@ -219,7 +222,7 @@ async function postLibrary(context: OperationContext & { body: any }, api: Zerni
   if (!object(body) || Object.keys(body).some(key => !(task === 'external-remove' ? ['postId', 'confirmed'] : ['postId', 'url', 'campaignId']).includes(key))) fail(400, 'INVALID_POST_LIBRARY_FIELDS', 'Use only the post URL or ID and campaign shown in this form.');
   if (task === 'external-remove') {
     if (!token(body.postId) || body.confirmed !== true) fail(400, 'POST_REFERENCE_CONFIRMATION_REQUIRED', 'Confirm removal of this local post reference.');
-    const outcome = await operation(context, async () => { await context.assertProjectMapping?.(profileId); await context.db.execute(sql`DELETE FROM zernio_external_post_references WHERE project_id=${context.project.id} AND profile_id=${profileId} AND account_id=${account._id} AND native_account_id=${account.platformUserId || ''} AND platform_post_id=${body.postId}`); return { removed: true, platformPostId: body.postId }; }, ['external-post', accountId, body.postId]); context.send(outcome.status, outcome.data); return true;
+    const outcome = await operation(context, async () => { await context.assertProjectMapping?.(profileId); await context.db.delete(zernioExternalPostReferences).where(and(accountReferences(context, profileId, account), eq(zernioExternalPostReferences.platform_post_id, body.postId))); return { removed: true, platformPostId: body.postId }; }, ['external-post', accountId, body.postId]); context.send(outcome.status, outcome.data); return true;
   }
   const postUrl = typeof body.url === 'string' ? body.url.trim() : body.url;
   if (Boolean(postUrl) === Boolean(body.postId) || body.postId !== undefined && !token(body.postId) || body.url !== undefined && (typeof body.url !== 'string' || body.url.length > 8192)) fail(400, 'POST_LOCATOR_REQUIRED', 'Provide one post URL or native platform post ID.');
@@ -239,9 +242,10 @@ async function postLibrary(context: OperationContext & { body: any }, api: Zerni
       let savedCampaignId = campaignId;
       if (post) {
         const nativeAccountId = account.platformUserId || '';
-        if (!Object.hasOwn(body, 'campaignId')) savedCampaignId = ((await context.db.execute(sql`SELECT campaign_id FROM zernio_external_post_references WHERE project_id=${context.project.id} AND profile_id=${profileId} AND account_id=${account._id} AND native_account_id=${nativeAccountId} AND platform_post_id=${post.platformPostId}`)).rows[0] as ProviderRecord | undefined)?.campaign_id || '';
+        if (!Object.hasOwn(body, 'campaignId')) savedCampaignId = (await context.db.select({ campaign_id: zernioExternalPostReferences.campaign_id }).from(zernioExternalPostReferences).where(and(accountReferences(context, profileId, account), eq(zernioExternalPostReferences.platform_post_id, post.platformPostId))))[0]?.campaign_id || '';
         if (savedCampaignId && !await context.store.get(context.project.id, 'campaigns', savedCampaignId)) fail(409, 'CAMPAIGN_CHANGED', 'The campaign was removed while importing. Review the provider outcome and import again without that campaign.', true);
-        await context.db.execute(sql`INSERT INTO zernio_external_post_references (project_id, profile_id, account_id, native_account_id, platform_post_id, data, campaign_id, updated_at) VALUES (${context.project.id}, ${profileId}, ${account._id}, ${nativeAccountId}, ${post.platformPostId}, ${JSON.stringify(post)}, ${savedCampaignId || null}, ${new Date().toISOString()}) ON CONFLICT (project_id, profile_id, account_id, native_account_id, platform_post_id) DO UPDATE SET data=excluded.data, campaign_id=excluded.campaign_id, updated_at=excluded.updated_at`);
+        const reference = { data: post, campaign_id: savedCampaignId || null, updated_at: new Date().toISOString() };
+        await context.db.insert(zernioExternalPostReferences).values({ project_id: context.project.id, profile_id: profileId, account_id: account._id, native_account_id: nativeAccountId, platform_post_id: post.platformPostId, ...reference }).onConflictDoUpdate({ target: [zernioExternalPostReferences.project_id, zernioExternalPostReferences.profile_id, zernioExternalPostReferences.account_id, zernioExternalPostReferences.native_account_id, zernioExternalPostReferences.platform_post_id], set: reference });
         await context.store.activity(context.project.id, 'Imported a published platform post as an external campaign reference.');
       }
       return { ...envelope, found: response.found, post, campaignId: savedCampaignId, synced: { postsFound: response.synced.postsFound, postsSynced: response.synced.postsSynced, skipped: response.synced.skipped === true }, imported: Boolean(post) };

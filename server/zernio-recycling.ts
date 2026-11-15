@@ -1,7 +1,8 @@
 import type { OperationContext, ZernioApi, ProviderRecord } from './provider-core.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { and, eq, inArray, like, ne, or } from 'drizzle-orm';
 import { fail, reportObject as object, IntegrationError, operation, scopedAccounts, scopedPost, remotePostModel, remoteRestrictionPayload, validateRemotePayload, providerPostValidation, savePostSnapshot, validProviderInstant, targetConfiguration } from './provider-core.ts';
+import { integrationOperations, postRecyclingReviews, projectApprovalPolicy } from './schema.ts';
 
 const validId = (value: any) => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
 const reference = (value: any) => String(value?._id || value);
@@ -73,7 +74,7 @@ async function checkPlan(context: OperationContext & { body: any }, api: ZernioA
   if (read.unavailable) fail(422, 'RECYCLING_UNAVAILABLE', read.unavailable);
   if (!read.snapshot.recycling.enabled && Date.parse(config.startDate) <= Date.now()) fail(400, 'RECYCLING_START_PASSED', 'Choose a future start before enabling a new cycle.');
   if (config.expireDate && Date.parse(config.expireDate) <= Date.now() || config.expireCount != null && config.expireCount <= (read.snapshot.recycling.recycleCount || 0)) fail(400, 'RECYCLING_ALREADY_EXPIRED', 'Choose an end and copy limit that leave at least one future copy.');
-  const requiresApproval = (await context.db.execute(sql`SELECT require_approval FROM project_approval_policy WHERE project_id=${context.project.id}`)).rows[0]?.require_approval;
+  const [policy] = await context.db.select({ require_approval: projectApprovalPolicy.require_approval }).from(projectApprovalPolicy).where(eq(projectApprovalPolicy.project_id, context.project.id)), requiresApproval = policy?.require_approval;
   if (read.snapshot.assets.some((row: any) => row.missing || requiresApproval && row.approval !== 'approved')) fail(409, 'RECYCLING_ASSET_APPROVAL_REQUIRED', 'Every referenced creative must exist and have current approval before enabling automatic copies.');
   const assets = read.snapshot.assets;
   for (const content of config.contentVariations.length ? config.contentVariations : [read.payload.content]) {
@@ -87,7 +88,8 @@ async function checkPlan(context: OperationContext & { body: any }, api: ZernioA
   }
 }
 async function unresolved(context: OperationContext & { body: any }) {
-  if ((await context.db.execute(sql`SELECT id FROM integration_operations WHERE project_id=${context.project.id} AND request_key<>${context.req.headers['idempotency-key'] as string} AND status IN ('pending','uncertain') AND (action_path LIKE 'POST /integrations/recycling/%' OR action_path IN ('POST /integrations/social/update','POST /integrations/social/edit-published','POST /integrations/social/update-metadata'))`)).rowCount) fail(409, 'RECYCLING_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous recycling or post-content change before applying another plan. This new change has not been sent.');
+  const pending = await context.db.select({ id: integrationOperations.id }).from(integrationOperations).where(and(eq(integrationOperations.project_id, context.project.id), ne(integrationOperations.request_key, context.req.headers['idempotency-key'] as string), inArray(integrationOperations.status, ['pending', 'uncertain']), or(like(integrationOperations.action_path, 'POST /integrations/recycling/%'), inArray(integrationOperations.action_path, ['POST /integrations/social/update', 'POST /integrations/social/edit-published', 'POST /integrations/social/update-metadata']))));
+  if (pending.length) fail(409, 'RECYCLING_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous recycling or post-content change before applying another plan. This new change has not been sent.');
 }
 function reviewedConfiguration(config: any) {
   if (!config.enabled) fail(400, 'RECYCLING_STOP_REQUIRED', 'Use Stop recycling to disable a cycle.');
@@ -114,8 +116,8 @@ export async function handleZernioRecycling(context: OperationContext & { body: 
     await checkPlan(context, api, profileId, read, config);
     const fresh = await readPost(context, api, profileId, postId, true); expected(read.version, fresh.version); await context.assertProviderPostEdit?.();
     const reviewFingerprint = fingerprint([fresh.snapshot, config]), reviewedAt = new Date().toISOString();
-    await db.execute(sql`INSERT INTO post_recycling_reviews (id, project_id, post_id, fingerprint, snapshot, configuration, reviewed_by, reviewed_at) VALUES (${randomUUID()}, ${project.id}, ${postId}, ${reviewFingerprint}, ${canonical(fresh.snapshot)}, ${canonical(config)}, ${context.user.id}, ${reviewedAt}) ON CONFLICT (project_id, post_id, fingerprint) DO NOTHING`);
-    const review = (await db.execute(sql`SELECT id, reviewed_by AS "reviewedBy", reviewed_at AS "reviewedAt" FROM post_recycling_reviews WHERE project_id=${project.id} AND post_id=${postId} AND fingerprint=${reviewFingerprint}`)).rows[0];
+    await db.insert(postRecyclingReviews).values({ id: randomUUID(), project_id: project.id, post_id: postId, fingerprint: reviewFingerprint, snapshot: canonical(fresh.snapshot), configuration: canonical(config), reviewed_by: context.user.id, reviewed_at: reviewedAt }).onConflictDoNothing({ target: [postRecyclingReviews.project_id, postRecyclingReviews.post_id, postRecyclingReviews.fingerprint] });
+    const [review] = await db.select({ id: postRecyclingReviews.id, reviewedBy: postRecyclingReviews.reviewed_by, reviewedAt: postRecyclingReviews.reviewed_at }).from(postRecyclingReviews).where(and(eq(postRecyclingReviews.project_id, project.id), eq(postRecyclingReviews.post_id, postId), eq(postRecyclingReviews.fingerprint, reviewFingerprint)));
     await store.activity(project.id, 'Reviewed an automatic post recycling plan.'); send(200, { review: { ...review, configuration: config, fingerprint: fresh.version }, post: publicPost(fresh) }); return true;
   }
   fields(body, command === 'apply' ? ['reviewId'] : ['expectedFingerprint', 'confirmStop']);
@@ -124,7 +126,7 @@ export async function handleZernioRecycling(context: OperationContext & { body: 
     await unresolved(context);
     const read = await readPost(context, api, profileId, postId, command === 'apply'); let config: any;
     if (command === 'apply') {
-      const review = (await db.execute(sql`SELECT * FROM post_recycling_reviews WHERE project_id=${project.id} AND post_id=${postId} AND id=${body.reviewId}`)).rows[0] as ProviderRecord | undefined; if (!review) fail(404, 'RECYCLING_REVIEW_NOT_FOUND', 'Review this post’s complete recycling plan first.');
+      const [review] = await db.select({ snapshot: postRecyclingReviews.snapshot, configuration: postRecyclingReviews.configuration }).from(postRecyclingReviews).where(and(eq(postRecyclingReviews.project_id, project.id), eq(postRecyclingReviews.post_id, postId), eq(postRecyclingReviews.id, body.reviewId))); if (!review) fail(404, 'RECYCLING_REVIEW_NOT_FOUND', 'Review this post’s complete recycling plan first.');
       expected(fingerprint(JSON.parse(review.snapshot)), read.version); config = reviewedConfiguration(configuration(JSON.parse(review.configuration)));
       await checkPlan(context, api, profileId, read, config);
       const fresh = await readPost(context, api, profileId, postId, true); expected(read.version, fresh.version);
