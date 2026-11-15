@@ -107,5 +107,3 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
     </>}
   </AdProviderFrame>;
 }
-
-// Connection mode sits inside the Integrations provider card, which already names the provider.

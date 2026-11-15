@@ -17,7 +17,6 @@ const reportColumns = (currency: string, digits: number): DataColumn<any>[] => [
   { key: 'spend', header: 'Spend', numeric: true, render: row => <>{number(row.metrics.costMicros == null ? undefined : Number(row.metrics.costMicros) / 1000000, digits)} {currency}</> },
   { key: 'conversions', header: 'Conversions', numeric: true, render: row => number(row.metrics.conversions) },
 ];
-// Connection mode sits inside the Integrations provider card, which already names the provider.
 export default function NativeGoogleAds({ projectId, canWrite, isOperator, canManageProject, request, onChanged, mode = 'workflow', onOpenIntegrations, onOpenApprovals, onCreateCampaign, createIntent, onCreateHandled, onGuardChange }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/native-google-ads`, active = useRef(true), currentPath = useRef(path); currentPath.current = path;
   const [status, setStatus] = useState<any>(null), [error, setError] = useState(''), [busy, setBusy] = useState(false), [refresh, setRefresh] = useState(0), [confirming, setConfirming] = useState(false);
