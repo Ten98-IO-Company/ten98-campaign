@@ -12,6 +12,8 @@ const groups: Record<string, Record<string, string>> = {
   openrouter: { apiKey: 'OPENROUTER_API_KEY', model: 'OPENROUTER_MODEL', maxTokens: 'OPENROUTER_MAX_TOKENS', maxSteps: 'OPENROUTER_MAX_STEPS' },
   google: { serviceAccountEmail: 'GOOGLE_SERVICE_ACCOUNT_EMAIL', privateKey: 'GOOGLE_PRIVATE_KEY' },
   googleMaps: { browserApiKey: 'GOOGLE_MAPS_BROWSER_API_KEY', mapId: 'GOOGLE_MAPS_MAP_ID' },
+  // developerToken is retired by Google (see native-google-ads.ts) and no longer asked for or used; it stays accepted so
+  // settings saved with it still load, since a stored field outside its group fails decryption.
   googleAdsNative: { clientId: 'GOOGLE_ADS_CLIENT_ID', clientSecret: 'GOOGLE_ADS_CLIENT_SECRET', refreshToken: 'GOOGLE_ADS_REFRESH_TOKEN', developerToken: 'GOOGLE_ADS_DEVELOPER_TOKEN', loginCustomerId: 'GOOGLE_ADS_LOGIN_CUSTOMER_ID' },
   microsoftAds: { clientId: 'MICROSOFT_ADS_CLIENT_ID', clientSecret: 'MICROSOFT_ADS_CLIENT_SECRET', refreshToken: 'MICROSOFT_ADS_REFRESH_TOKEN', developerToken: 'MICROSOFT_ADS_DEVELOPER_TOKEN' },
   broadsign: { apiKey: 'BROADSIGN_API_KEY', environment: 'BROADSIGN_ENVIRONMENT', domainId: 'BROADSIGN_DOMAIN_ID', currency: 'BROADSIGN_CURRENCY' },

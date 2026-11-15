@@ -16,7 +16,7 @@ import { grantOperators } from './fixtures/accounts.ts';
 import { testDisplayFormat as format } from './display-format.ts';
 import { formatMicros } from '../src/google-micros.ts';
 
-const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_ADS_CLIENT_SECRET: 'fixture-client-secret', GOOGLE_ADS_REFRESH_TOKEN: 'fixture-refresh-token', GOOGLE_ADS_DEVELOPER_TOKEN: 'fixture-developer-token', GOOGLE_ADS_LOGIN_CUSTOMER_ID: '9999999999' };
+const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_ADS_CLIENT_SECRET: 'fixture-client-secret', GOOGLE_ADS_REFRESH_TOKEN: 'fixture-refresh-token', GOOGLE_ADS_LOGIN_CUSTOMER_ID: '9999999999' };
 
 test('native Google Shopping uses an atomic paused resource graph, customer mapping, validation, report cursors and durable unconfirmed outcomes over HTTP', { skip: postgresSkip }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ten98-native-google-')), origin = 'http://127.0.0.1:3000';
@@ -28,7 +28,7 @@ test('native Google Shopping uses an atomic paused resource graph, customer mapp
   globalThis.fetch = async (target, options = {}) => {
     const url = new URL(target); if (url.hostname === '127.0.0.1') return originalFetch(target, options);
     if (url.origin === 'https://oauth2.googleapis.com') { const form = new URLSearchParams(options.body); assert.equal(form.get('grant_type'), 'refresh_token'); assert.equal(form.get('client_secret'), env.GOOGLE_ADS_CLIENT_SECRET); assert.equal(form.get('refresh_token'), env.GOOGLE_ADS_REFRESH_TOKEN); return new Response(JSON.stringify({ access_token: 'fixture-access-token', token_type: 'Bearer', expires_in: 3600 })); }
-    assert.equal(url.origin, 'https://googleads.googleapis.com'); assert.equal(options.headers.Authorization, 'Bearer fixture-access-token'); assert.equal(options.headers['developer-token'], env.GOOGLE_ADS_DEVELOPER_TOKEN); assert.equal(options.headers['login-customer-id'], env.GOOGLE_ADS_LOGIN_CUSTOMER_ID);
+    assert.equal(url.origin, 'https://googleads.googleapis.com'); assert.equal(options.headers.Authorization, 'Bearer fixture-access-token'); assert.equal(Object.hasOwn(options.headers, 'developer-token'), false, 'Google retired developer tokens; none is sent.'); assert.equal(options.headers['login-customer-id'], env.GOOGLE_ADS_LOGIN_CUSTOMER_ID);
     const payload = options.body ? JSON.parse(options.body) : undefined; calls.push({ url, payload }); let result;
     if (url.pathname === '/v25/customers:listAccessibleCustomers') result = { resourceNames: [`customers/${customerId}`] };
     else if (url.pathname === `/v25/customers/${customerId}/googleAds:search`) {
