@@ -15,6 +15,8 @@ const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.is
 const text = node => Array.isArray(node) ? node.map(text).join('') : React.isValidElement(node) ? text(node.props.children) : node == null || typeof node === 'boolean' ? '' : String(node);
 const button = (tree, label) => { const found = elements(tree).find(node => [ui.Button, 'button'].includes(node.type) && text(node.props.children) === label); assert.ok(found, label); return found; };
 const card = (tree, id) => { const found = elements(tree).find(node => node.props?.id === 'integration-' + id); assert.ok(found, id); return found; };
+// Components run as plain functions here, so the formatter hook returns the no-provider formatter directly.
+const hookless = { ...ui, useDisplayFormat: () => ui.createDisplayFormatter({ locale: 'en', timeZone: 'UTC' }) };
 const settle = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
@@ -33,7 +35,7 @@ function mount(sourceName, name = sourceName) {
     if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) effects[index] = { deps, callback, cleanup: previous?.cleanup };
   };
   const window = { addEventListener() {}, removeEventListener() {}, setInterval: () => 1, clearInterval() {}, confirm: () => true, location: { origin: 'https://campaign.example.test' } };
-  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'loadGoogleMaps', 'ZernioWebhooks', 'window', ...Object.keys(ui), sources[sourceName] + '; return ' + name + ';')(React, useEffect, useRef, useState, () => { throw new Error('Maps must not load.'); }, () => null, window, ...Object.values(ui));
+  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'loadGoogleMaps', 'ZernioWebhooks', 'window', ...Object.keys(ui), sources[sourceName] + '; return ' + name + ';')(React, useEffect, useRef, useState, () => { throw new Error('Maps must not load.'); }, () => null, window, ...Object.values(hookless));
   return {
     updates,
     render(props) { stateIndex = refIndex = effectIndex = 0; return Component(props); },
