@@ -11,6 +11,23 @@ const routes = source.slice(source.indexOf('const pageRoutes:'), source.indexOf(
 const { readNavigation, navigationUrl, editorValues, pageRoutes, pageSections, areas, areaOf, areaTab } = new Function(stripTypeScriptTypes(routes) + '; return {readNavigation, navigationUrl, editorValues, pageRoutes, pageSections, areas, areaOf, areaTab};')();
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('Page not found clears through Go to Home, the sidebar entry of its fallback page, and keeps its address on reload', async () => {
+  // An unknown view falls back to Home with notFound set: "Go to Home" (setPage('Overview')) is the same page, yet must leave it.
+  let ui = app('https://campaign.example/?view=unknown&project=a');
+  assert.equal(ui.navigationRef.current.notFound, true);
+  await ui.reload('a', undefined, 'replace');
+  assert.equal(ui.navigationRef.current.notFound, true, 'A reload keeps the not-found state.'); assert.match(ui.window.location.search, /view=unknown/, 'A reload keeps the unknown address, so a refresh shows the same page.');
+  ui.setPage('Overview');
+  assert.equal(ui.navigationRef.current.notFound, undefined, 'Go to Home leaves Page not found.'); assert.match(ui.window.location.search, /view=overview/);
+  // An unknown section of a known page: choosing that page's first section in the sidebar also leaves it.
+  ui = app('https://campaign.example/?view=ads&section=contacts&project=a');
+  assert.deepEqual([ui.navigationRef.current.page, ui.navigationRef.current.section, ui.navigationRef.current.notFound], ['Ads manager', 'campaigns', true]);
+  ui.setPage('Ads manager');
+  assert.equal(ui.navigationRef.current.notFound, undefined); assert.match(ui.window.location.search, /view=ads/); assert.doesNotMatch(ui.window.location.search, /section=contacts/);
+  // A known address with nothing to clear stays a no-op, as before.
+  const calls = ui.calls.length; ui.setPage('Ads manager'); assert.equal(ui.calls.length, calls);
+});
+
 test('outcome checks preserve the original key without creating a first send and editor wrappers forward the check', async () => {
   const pendingKeys = { current: new Map() }, calls = []; let mode = 'lost';
   const invoke = new Function('state', 'activeProject', 'pendingKeys', 'crypto', 'api', 'endpoint', 'DOMException', `return (${stripTypeScriptTypes(declaration('integrate'))});`)(
@@ -197,8 +214,9 @@ test('all page URLs round-trip, preserve connection links, and reject sections f
   }
   assert.equal(readNavigation('?view=integrations').page, 'Integrations'); assert.equal(readNavigation('?view=settings').page, 'Settings');
   assert.equal(readNavigation('?view=assistant').page, 'Draft content');
-  assert.deepEqual(readNavigation('?view=ads&section=contacts'), { page: 'Ads manager', section: 'campaigns', projectId: '' });
-  assert.deepEqual(readNavigation('?view=unknown&section=shopping'), { page: 'Overview', section: '', projectId: '' });
+  assert.deepEqual(readNavigation('?view=ads&section=contacts'), { page: 'Ads manager', section: 'campaigns', projectId: '', notFound: true }, 'An unknown section is reported, not silently replaced.');
+  assert.deepEqual(readNavigation('?view=unknown&section=shopping'), { page: 'Overview', section: '', projectId: '', notFound: true }, 'An unknown view is reported, not silently shown as Home.');
+  for (const known of ['', '?view=overview', '?view=assistant', '?view=ads', '?view=ads&section=shopping', '?view=settings&section=profile', '?project=p1']) assert.equal(readNavigation(known).notFound, undefined, known);
   // A campaign page is Campaigns with ?item=; other pages ignore the parameter.
   const campaignPage = { page: 'Campaigns', section: '', projectId: 'a', item: 'c1' };
   assert.deepEqual(readNavigation(new URL(navigationUrl(campaignPage, 'https://campaign.example/'), 'https://campaign.example').search), campaignPage);
