@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, useDisplayFormat, type DataColumn, type DisplayFormatter } from '@ten98/ui';
 import { adSpendBlock, type AdSpendBlock } from './approval-status';
-import { formatMicros } from './google-micros';
+import { formatMicros, minorDigits } from './google-micros';
 import AdProviderFrame from './AdProviderFrame';
 import AdSpendNotice from './AdSpendNotice';
 import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
@@ -15,7 +15,7 @@ const reportColumns = (currency: string, format: DisplayFormatter): DataColumn<a
   { key: 'budget', header: 'Budget', numeric: true, render: row => <Stack gap={1}><Text as="span" numeric>{formatMicros(row.budgetPeriod === 'CUSTOM_PERIOD' ? row.totalBudgetMicros : row.dailyBudgetMicros, currency, format)}</Text><Text as="small" size="xs" tone="muted">{row.budgetPeriod === 'DAILY' ? 'Per day' : row.budgetPeriod === 'CUSTOM_PERIOD' ? 'Campaign total' : 'Period unknown'}</Text></Stack> },
   { key: 'impressions', header: 'Impressions', numeric: true, render: row => number(row.metrics.impressions, format) },
   { key: 'clicks', header: 'Clicks', numeric: true, render: row => number(row.metrics.clicks, format) },
-  { key: 'spend', header: 'Spend', numeric: true, render: row => formatMicros(row.metrics.costMicros, currency, format) },
+  { key: 'spend', header: 'Spend', numeric: true, render: row => formatMicros(row.metrics.costMicros, currency, format, { round: 'minor' }) },
   { key: 'conversions', header: 'Conversions', numeric: true, render: row => number(row.metrics.conversions, format) },
 ];
 export default function NativeGoogleAds({ projectId, canWrite, isOperator, canManageProject, request, onChanged, mode = 'workflow', onOpenIntegrations, onOpenApprovals, onCreateCampaign, createIntent, onCreateHandled, onGuardChange }: Props) {
@@ -95,8 +95,8 @@ function ShoppingAccount({ projectId, path, customerId, canWrite, request, onCha
   async function loadProductBid(row: any) { await act(async () => { const result = await request(path + '/campaign/cpc?campaignId=' + encodeURIComponent(row.id)); if (active.current) setProductBids(previous => ({ ...previous, [row.id]: result })); }); }
   async function saveProductBid(row: any, maxCpc: number) { await act(async () => { const result = await write({ campaignId: row.id, maxCpc, confirmChange: true }, 'campaign/cpc'); if (active.current) { setProductBids(previous => ({ ...previous, [row.id]: result })); setNotice('Product bid confirmed by Google.'); } }); }
   const selectedCampaign = report?.campaigns.find((item: any) => item.id === managedId);
-  // The currency's minor-unit digits set the budget and bid input steps; amounts are displayed by formatMicros.
-  const currency = account?.currencyCode || '', digits = currency ? new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2 : 2;
+  // The currency's minor-unit digits set the budget and bid input steps.
+  const currency = account?.currencyCode || '', digits = minorDigits(currency);
   return <Stack gap={3}>{error && <Alert tone="danger">{error}</Alert>}{spendBlock && <AdSpendNotice block={spendBlock} onOpenApprovals={onOpenApprovals}/>}{notice && <StatusLine>{notice}</StatusLine>}{busy && <StatusLine busy>Updating Google Shopping…</StatusLine>}
     {account ? <Text>{account.name} · {customerId} · {currency}{account.testAccount ? ' · Google test account' : ''}</Text> : <Inline><Button variant="secondary" disabled={busy} onClick={() => setRefresh(value => value + 1)}>Reload advertising account</Button></Inline>}
     {canWrite && account && <Disclosure summary="Create paused Standard Shopping campaign" open={creation.open} onOpenChange={open => { if (open && onCreateCampaign) onCreateCampaign(); else setCreation(previous => ({ ...previous, open })); }}><Stack gap={3}><Text tone="muted">Use a linked Merchant Center account with approved products. This creates a paused campaign for every product in the feed, using the maximum CPC below.</Text>

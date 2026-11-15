@@ -166,11 +166,14 @@ test('Shopping report budgets and spend retain the mapped currency precision', a
   const { code } = await transformWithOxc(source.slice(start, end), 'ShoppingReport.tsx', { jsx: { runtime: 'classic' } });
   const columns = new Function('React', ...Object.keys(ui), 'number', 'formatMicros', code + '; return reportColumns;')(React, ...Object.values(ui), number, formatMicros);
   const render = (report, currency) => React.createElement(ui.DataTable, { searchable: false, sortable: false, pagination: false, ariaLabel: 'Campaigns', rows: report.campaigns, rowKey: row => row.id, columns: columns(currency, format) });
-  for (const [currency, micros, expected] of [['KWD', '1000', 'KWD\u00a00.001'], ['USD', '1230000', '$1.23'], ['JPY', '1000000', '¥1'], ['USD', '1234567', '$1.234567']]) {
+  for (const [currency, micros, expected] of [['KWD', '1000', 'KWD\u00a00.001'], ['USD', '1230000', '$1.23'], ['JPY', '1000000', '¥1']]) {
     for (const budgetPeriod of ['DAILY', 'CUSTOM_PERIOD']) {
       const row = { id: '123', name: 'Precision fixture', channel: 'SHOPPING', status: 'PAUSED', budgetPeriod, dailyBudgetMicros: micros, totalBudgetMicros: micros, metrics: { costMicros: micros } };
       const text = readText(renderToStaticMarkup(render({ campaigns: [row] }, currency)), '');
       assert.equal(text.split(expected).length - 1, 2, 'Both the budget and spend must retain ' + expected);
     }
   }
+  // The budget is a setting and keeps every micro; reported spend reads in the currency's minor units.
+  const text = readText(renderToStaticMarkup(render({ campaigns: [{ id: '123', name: 'Precision fixture', channel: 'SHOPPING', status: 'PAUSED', budgetPeriod: 'DAILY', dailyBudgetMicros: '1234567', metrics: { costMicros: '12345678' } }] }, 'USD')), '');
+  assert.ok(text.includes('$1.234567') && text.includes('$12.35') && !text.includes('12.345678'), text);
 });
