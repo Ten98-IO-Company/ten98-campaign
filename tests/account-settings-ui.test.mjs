@@ -18,7 +18,9 @@ function view(account, request) {
   const useState = value => { const slot = index++; if (!(slot in state)) state[slot] = typeof value === 'function' ? value() : value; return [state[slot], next => { state[slot] = typeof next === 'function' ? next(state[slot]) : next; }]; };
   const document = { documentElement: { dataset: {} } };
   const AccountSettings = new Function('React', 'useState', 'useEffect', 'document', 'localStorage', ...names, code + '; return AccountSettings;')(React, useState, () => {}, document, {}, ...names.map(name => ui[name]));
-  const render = () => { index = 0; return AccountSettings({ request, onChanged() {} }); };
+  // The shell's useTheme state; appearance itself is covered by tests/theme.test.mjs.
+  const appearance = { theme: 'system', resolvedTheme: 'light', setTheme: async () => true };
+  const render = () => { index = 0; return AccountSettings({ request, onChanged() {}, appearance }); };
   render(); state[0] = account;
   return render;
 }
