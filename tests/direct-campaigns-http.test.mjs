@@ -211,6 +211,23 @@ test('Activity records a consent or contact change only when one happened, and n
   } finally { await f.close(); }
 });
 
+test('a contact that exists in another project cannot be chosen for a draft', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const workspaceId = (await pool.query('SELECT workspace_id FROM projects WHERE id = $1', [f.projectId])).rows[0].workspace_id;
+    const created = await f.request('/api/projects', 'POST', { name: 'Second brand', workspaceId }); assert.equal(created.status, 201, JSON.stringify(created.data));
+    const otherPath = '/api/projects/' + created.data.project.id + '/direct';
+    const theirs = await f.request(otherPath + '/contacts', 'POST', { name: 'Other Brand Contact', email: 'other-brand@example.com', consents: { sms: true }, consentSource: 'Signup sheet' });
+    assert.equal(theirs.status, 201, JSON.stringify(theirs.data));
+    const own = await f.person({ email: 'own-brand@example.com', phone: '+12025550191' });
+    let response = await f.request(f.path + '/campaigns', 'POST', { name: 'Notice', channel: 'sms', text: 'Hello', contactIds: [theirs.data.contact.id] });
+    assert.equal(response.status, 400, JSON.stringify(response.data)); assert.equal(response.data.error.code, 'CONTACT_NOT_FOUND');
+    const draft = await f.draft({ contactIds: [own.id] });
+    response = await f.request(f.path + '/campaigns/' + draft.id, 'PATCH', { contactIds: [own.id, theirs.data.contact.id] });
+    assert.equal(response.status, 400, JSON.stringify(response.data)); assert.equal(response.data.error.code, 'CONTACT_NOT_FOUND');
+  } finally { await f.close(); }
+});
+
 test('scheduling a campaign re-checks its preview on the queuing transaction, without a second connection', pg, async t => {
   // One pool connection: a preview read through the pool inside the queuing transaction would time out. The sending
   // worker is left out because its lease transaction deliberately works on other connections.
