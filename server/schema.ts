@@ -27,7 +27,10 @@ export const users = pgTable('users', {
   // Defaulted in SQL because accounts existed before these columns; Campaign and Better Auth always set them.
   createdAt: epochMs('created_at').notNull().default(sql`(extract(epoch FROM clock_timestamp()) * 1000)::bigint`),
   updatedAt: epochMs('updated_at').notNull().default(sql`(extract(epoch FROM clock_timestamp()) * 1000)::bigint`),
-});
+}, t => [
+  // As the preset's user_email_normalized_idx: no two accounts share an email that differs only in case.
+  uniqueIndex('users_email_lower_key').on(sql`lower(${t.email})`),
+]);
 export const accounts = pgTable('accounts', {
   id: text('id').primaryKey(),
   accountId: text('account_id').notNull(),

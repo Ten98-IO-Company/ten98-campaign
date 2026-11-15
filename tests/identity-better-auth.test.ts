@@ -145,13 +145,31 @@ test('a sign-in whose account is gone by the time it holds the lock is refused b
 test('a sign-in never keeps a session for an account other than the one it locked', pg, async t => {
   const { app, request, signIn } = await fixture(t), { pool } = app.database;
   assert.equal((await request('/auth/setup', { body: { name: 'Owner', email: 'owner@example.test', password: 'owner identity fixture password' } })).status, 201);
-  // Two rows whose emails differ only in case: the lock takes the first by lower(email) (the mixed-case one, stored first),
-  // while Better Auth signs in the exact lower-case address. The mismatch must roll the session back.
+  // The schema refuses two emails that differ only in case (users_email_lower_key), so this fixture drops that index in its
+  // own database to reach the case the identity check guards: the lock takes the first row by lower(email) (the mixed-case
+  // one, stored first) while Better Auth signs in the exact lower-case address. The mismatch must roll the session back.
+  await pool.query('DROP INDEX users_email_lower_key');
   const hash = await hashPassword('twin fixture password');
   await addUsers(pool, [{ id: 'twin-mixed', name: 'Mixed', email: 'Twin@example.test', password: hash }, { id: 'twin-lower', name: 'Lower', email: 'twin@example.test', password: hash }]);
   const result = await signIn('twin@example.test', 'twin fixture password');
   assert.equal(result.status, 401); assert.equal(result.cookie, '');
   assert.equal((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE user_id IN ('twin-mixed', 'twin-lower')")).rows[0].n, 0, 'The session Better Auth wrote was rolled back.');
+});
+
+test('two accounts can never share an email that differs only in case, and migration 0013 refuses an installation where they do', pg, async t => {
+  const { app } = await fixture(t), { pool } = app.database;
+  await addUsers(pool, [{ id: 'case-lower', name: 'Lower', email: 'case@example.test' }]);
+  await assert.rejects(addUsers(pool, [{ id: 'case-upper', name: 'Upper', email: 'Case@Example.test' }]), (error: { code?: string; constraint?: string }) => error.code === '23505' && error.constraint === 'users_email_lower_key');
+  // An installation from before the move that already has such accounts stops at 0013, before anything changes.
+  const { migrationSources } = await import('../server/database.ts'), client = await pool.connect();
+  try {
+    await client.query('CREATE SCHEMA premove; SET search_path TO premove');
+    const sources = await migrationSources();
+    for (const source of sources.filter(source => source.version < '0013')) await client.query(source.sql);
+    await client.query("INSERT INTO users VALUES ('a', 'A', 'twin@example.test', NULL), ('b', 'B', 'Twin@example.test', NULL)");
+    await assert.rejects(client.query(sources.find(source => source.version === '0013')!.sql), /same email address in different letter case/);
+    assert.equal((await client.query("SELECT count(*)::int AS n FROM information_schema.columns WHERE table_schema = 'premove' AND table_name = 'users' AND column_name = 'password'")).rows[0].n, 1, 'Nothing changed.');
+  } finally { client.release(); }
 });
 
 test('AUTH_SECRET_FILE must name a file holding the secret; it never falls back to a generated one', async t => {
