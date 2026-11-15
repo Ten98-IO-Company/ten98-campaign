@@ -97,8 +97,8 @@ test('actual send handler requires explicit confirmation, carries the review tok
 test('actual loader preserves independent contact/campaign results and ignores responses from a previous project', async () => {
   const handler = section('async function load(', '  useEffect(() =>');
   const states = {}, version = { current: 1 };
-  const context = { version, path: '/projects/a/direct', requester: { current: async path => { if (path.endsWith('/status')) throw new Error('Provider down'); return path.endsWith('/contacts') ? { contacts: [{ id: 'contact' }] } : { campaigns: [{ id: 'campaign' }] }; } }, setStatus: value => { states.status = value; }, setContacts: value => { states.contacts = value; }, setCampaigns: value => { states.campaigns = value; } };
-  await assert.rejects(compile(handler, context)(1), /Provider down/); assert.deepEqual(states.contacts, [{ id: 'contact' }]); assert.deepEqual(states.campaigns, [{ id: 'campaign' }]);
+  const context = { version, path: '/projects/a/direct', requester: { current: async path => { if (path.endsWith('/status')) throw new Error('Provider down'); return path.endsWith('/contacts') ? { contacts: [{ id: 'contact' }] } : { campaigns: [{ id: 'campaign' }] }; } }, setStatus: value => { states.status = value; }, setContacts: value => { states.contacts = value; }, setContactsLoaded: value => { states.contactsLoaded = value; }, setCampaigns: value => { states.campaigns = value; } };
+  await assert.rejects(compile(handler, context)(1), /Provider down/); assert.deepEqual(states.contacts, [{ id: 'contact' }]); assert.deepEqual(states.campaigns, [{ id: 'campaign' }]); assert.equal(states.contactsLoaded, true, 'Deleted chosen contacts are named only after a loaded list.');
   const snapshot = structuredClone(states); version.current = 2; await compile(handler, context)(1); assert.deepEqual(states, snapshot);
 });
 

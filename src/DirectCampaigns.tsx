@@ -40,6 +40,15 @@ function campaignBody(draft: Draft, audienceMode: string) {
 }
 const when = (format: DisplayFormatter, value?: string) => value && Number.isFinite(Date.parse(value)) ? format.dateTime(value) : 'Not scheduled';
 const contactName = (contact: any = {}) => contact.name || contact.email || contact.phone || contact.id || 'Contact';
+// Chosen contacts deleted since stay listed, so they can be unticked: the server refuses a draft naming one. They are
+// known to be deleted only once the contact list has loaded.
+export function contactChoices(contacts: Row[], draft: Pick<Draft, 'contactIds' | 'channel'>, loaded: boolean) {
+  const known = new Set(contacts.map(person => person.id));
+  return [
+    ...contacts.map(person => ({ value: person.id, label: contactName(person), description: `${person.email || person.phone || ''}${!person.consents?.[draft.channel] ? ' · No channel permission' : person.suppression?.[draft.channel] ? ' · Suppressed' : ''}` })),
+    ...(loaded ? draft.contactIds.filter(id => !known.has(id)).map(id => ({ value: id, label: 'Deleted contact', description: 'No longer in Contacts. Untick it to save this message.' })) : []),
+  ];
+}
 const statusLabel = (value?: string) => ({ draft: 'Draft', scheduled: 'Scheduled', sending: 'Sending', completed: 'Completed', cancelled: 'Cancelled', attention: 'Needs attention', accepted: 'Accepted for sending', delivered: 'Delivered', failed: 'Failed', suppressed: 'Suppressed', pending: 'Queued', queued: 'Queued for sending', sent: 'Sent by provider', uncertain: 'Outcome needs review' }[value || ''] || value || 'Not reported');
 const deliveryStatus = (value?: string): OperationStatus => ({ pending: 'pending', sending: 'pending', queued: 'pending', accepted: 'accepted', sent: 'accepted', delivered: 'delivered', read: 'observed', failed: 'error', undelivered: 'error', suppressed: 'suppressed', cancelled: 'skipped', skipped: 'skipped', uncertain: 'unknown' } as Record<string, OperationStatus>)[value || ''] || 'unknown';
 // SMS tests go to one contact with recorded SMS permission (the server checks again); email tests go only to the signed-in user.
@@ -124,7 +133,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   requester.current = request;
   const format = useDisplayFormat();
   const consumedIntent = useRef(''), savedDraft = useRef(''), reportGuard = useRef(onGuardChange), discardAction = useRef<(() => void) | null>(null); reportGuard.current = onGuardChange;
-  const [status, setStatus] = useState<any>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [contacts, setContacts] = useState<Row[]>([]);
+  const [status, setStatus] = useState<any>(null), [campaigns, setCampaigns] = useState<Row[]>([]), [contacts, setContacts] = useState<Row[]>([]), [contactsLoaded, setContactsLoaded] = useState(false);
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [editingId, setEditingId] = useState(''), [draft, setDraft] = useState<Draft>(blank), [audienceMode, setAudienceMode] = useState('all');
   const [detail, setDetail] = useState<any>(null), [preview, setPreview] = useState<{ signature: string; result: any } | null>(null), [templates, setTemplates] = useState<any[]>([]), [templateAccount, setTemplateAccount] = useState('');
   // Review and send: the primary button checks the audience itself, then opens the same final confirmation.
@@ -144,6 +153,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
   const testable = !readOnly && current?.status === 'draft' && (current.channel === 'email' || current.channel === 'sms');
   const retryCancellation = current?.status === 'cancelled' && current.channel === 'whatsapp' && !!current.providerId && current.providerStatus !== 'cancelled' && !!current.lastError;
   const validPreview = preview?.signature === signature ? preview.result : null, ready = !readOnly && editable && !!current && !!validPreview?.previewToken && validPreview?.audience?.eligible > 0 && validPreview.audience.eligible <= 500 && !!status?.providers?.[draft.channel] && status?.publicCallbacks === true;
+  const choices = contactChoices(contacts, draft, contactsLoaded);
   const visibleContacts = contacts.filter(item => !search || [item.name, item.email, item.phone, item.company, ...(item.tags || []), ...(item.identities || []).map((identity: Row) => identity.participantId)].some(value => String(value || '').toLowerCase().includes(search.toLowerCase())));
   const selectedTemplate = templateAccount === draft.accountId ? templates.find(item => item.name === draft.templateName && (item.language || item.languageCode) === draft.templateLanguage) : null;
 
@@ -153,11 +163,11 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
     const failures = [];
     if (results[0].status === 'fulfilled') setStatus(results[0].value); else { setStatus(null); failures.push('Connection status: ' + (results[0].reason.message || 'unavailable')); }
     if (results[1].status === 'fulfilled' && Array.isArray(results[1].value.campaigns)) setCampaigns(results[1].value.campaigns); else failures.push('Campaign list could not be refreshed.');
-    if (results[2].status === 'fulfilled' && Array.isArray(results[2].value.contacts)) setContacts(results[2].value.contacts); else failures.push('Contact list could not be refreshed.');
+    if (results[2].status === 'fulfilled' && Array.isArray(results[2].value.contacts)) { setContacts(results[2].value.contacts); setContactsLoaded(true); } else failures.push('Contact list could not be refreshed.');
     if (failures.length) throw new Error(failures.join(' '));
   }
   useEffect(() => {
-    const generation = ++version.current; pending.current = false; setBusy('Loading'); setError(''); setNotice(''); setStatus(null); setCampaigns([]); setContacts([]); setEditingId(''); setDraft(blank()); setAudienceMode('all'); setAudienceTags(''); setDetail(null); setPreview(null); setTemplates([]); setTemplateAccount(''); setContactEditId(''); setContact(contactBlank()); setCsv(''); setImportConsent({ email: false, sms: false, whatsapp: false, emailMarketing: false }); setImportSource(''); setImportResult(null); setSuppression(null); setSearch(''); setScheduledAt(''); setComposing(false);
+    const generation = ++version.current; pending.current = false; setBusy('Loading'); setError(''); setNotice(''); setStatus(null); setCampaigns([]); setContacts([]); setContactsLoaded(false); setEditingId(''); setDraft(blank()); setAudienceMode('all'); setAudienceTags(''); setDetail(null); setPreview(null); setTemplates([]); setTemplateAccount(''); setContactEditId(''); setContact(contactBlank()); setCsv(''); setImportConsent({ email: false, sms: false, whatsapp: false, emailMarketing: false }); setImportSource(''); setImportResult(null); setSuppression(null); setSearch(''); setScheduledAt(''); setComposing(false);
     load(generation).catch(failure => { if (generation === version.current) setError(failure.message); }).finally(() => { if (generation === version.current) setBusy(''); });
     return () => { version.current++; };
   }, [projectId]);
@@ -357,7 +367,7 @@ export default function DirectCampaigns({ projectId, request, readOnly = false, 
           <Fieldset legend="Audience" description="The audience check excludes contacts without channel permission, missing or invalid addresses, and suppressions. Permission and suppression are checked again when sending.">
             <Field label="Recipients"><Select value={audienceMode} onChange={event => setAudienceMode(event.target.value)}><Option value="all">All eligible contacts in this project</Option><Option value="tags">Contacts matching tags</Option><Option value="contacts">Choose contacts</Option></Select></Field>
             {audienceMode === 'tags' && <Field label="Audience tags" required><Input required value={audienceTags} onChange={event => { setAudienceTags(event.target.value); setDraft({ ...draft, tags: split(event.target.value) }); }} placeholder="customers, event-attendees"/></Field>}
-            {audienceMode === 'contacts' && (contacts.length ? <CheckboxGroup legend="Contacts to message" maxHeight="md" value={draft.contactIds} onValueChange={contactIds => setDraft({ ...draft, contactIds })} options={contacts.map(person => ({ value: person.id, label: contactName(person), description: `${person.email || person.phone || ''}${!person.consents?.[draft.channel] ? ' · No channel permission' : person.suppression?.[draft.channel] ? ' · Suppressed' : ''}` }))}/> : <Text tone="muted">Add contacts in Contacts first.</Text>)}
+            {audienceMode === 'contacts' && (choices.length ? <CheckboxGroup legend="Contacts to message" maxHeight="md" value={draft.contactIds} onValueChange={contactIds => setDraft({ ...draft, contactIds })} options={choices}/> : <Text tone="muted">Add contacts in Contacts first.</Text>)}
           </Fieldset>
           <Text tone="muted" size="sm">{validPreview ? `Checked: ${validPreview.audience?.eligible ?? 0} eligible of ${validPreview.audience?.total ?? 0}.` : `About ${estimate.eligible} of ${plural(format, estimate.total, 'contact')} look eligible. Check the audience for the exact count.`}</Text>
         </ChecklistRow>
