@@ -52,6 +52,17 @@ export const lockUser = (tx: Executor, userId: string) => first<{ id: string; pa
 /** Per-workspace mutex for membership, ownership and invitation changes; returns false when the workspace is gone. */
 export const lockWorkspace = async (tx: Executor, workspaceId: string) => Boolean((await tx.execute(sql`SELECT id FROM workspaces WHERE id = ${workspaceId} FOR UPDATE`)).rowCount);
 export const memberRole = async (executor: Executor, workspaceId: string, userId: string) => (await first<{ role: string }>(executor.execute(sql`SELECT role FROM memberships WHERE workspace_id = ${workspaceId} AND user_id = ${userId}`)))?.role;
+// Account storage is reached only through this module, so the move to the shared identity preset (ten98-code-system#97)
+// changes one file. A null password hash is an SSO-only account.
+export const insertAccount = (tx: Executor, account: { id: string; name: string; email: string; passwordHash: string | null }) => tx.execute(sql`INSERT INTO users VALUES (${account.id}, ${account.name}, ${account.email}, ${account.passwordHash})`);
+export const hasLocalPassword = async (executor: Executor, userId: string) => Boolean((await first<{ password: string | null }>(executor.execute(sql`SELECT password FROM users WHERE id = ${userId}`)))?.password);
+/** Host recovery: under the user lock, replaces the local password, retires any reset link and ends every session. */
+export async function setLocalPassword(tx: Executor, userId: string, passwordHash: string): Promise<void> {
+  await lockUser(tx, userId);
+  await tx.execute(sql`UPDATE users SET password = ${passwordHash} WHERE id = ${userId}`);
+  await tx.execute(sql`DELETE FROM password_resets WHERE user_id = ${userId}`);
+  await tx.execute(sql`DELETE FROM sessions WHERE user_id = ${userId}`);
+}
 
 type OpenIdClient = typeof import('openid-client');
 // The OIDC client loader is injectable so tests can exercise the real flow without an identity provider.
@@ -77,6 +88,8 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     return first<UserRow>(executor.execute(sql`SELECT u.id, u.name, u.email, s.expires_at AS "expiresAt", EXISTS (SELECT 1 FROM instance_operators o WHERE o.user_id = u.id) AS "isOperator" FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ${digest(token)} AND s.expires_at > ${Date.now()}`));
   }
   function sessionToken(req: IncomingMessage): string | undefined { const values = cookies(req); return Object.hasOwn(values, sessionName) ? values[sessionName] : values.ten98_session; }
+  /** The stored key of this request's session cookie, or '' when it carries none. */
+  function sessionKey(req: IncomingMessage): string { const token = sessionToken(req); return token && /^[\w-]{43}$/.test(token) ? digest(token) : ''; }
   // Callers that check credentials pass their transaction so the check and the new session commit together.
   async function establish(res: ServerResponse, userId: string, req?: IncomingMessage, executor: Executor = db) {
     const legacy = req && cookies(req).ten98_session;
@@ -115,9 +128,9 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     return timingSafeEqual(Buffer.from(digest(value)), Buffer.from(stored)) ? token : '';
   }
   return {
-    user, establish, limit, clientKey,
-    /** The stored key of this request's session cookie, or '' when it carries none, for guards that join on sessions. */
-    sessionKey(req: IncomingMessage): string { const token = sessionToken(req); return token && /^[\w-]{43}$/.test(token) ? digest(token) : ''; },
+    user, establish, limit, clientKey, sessionKey,
+    /** A SQL condition that holds while this request's session is live for `userId`, for guards that read it with other state in one statement. */
+    liveSession: (req: IncomingMessage, userId: string) => sql`EXISTS (SELECT 1 FROM sessions WHERE token = ${sessionKey(req)} AND expires_at > ${Date.now()} AND user_id = ${userId})`,
     async account(userId: string) {
       const row = await first<{ password: string | null; sessions: number }>(db.execute(sql`SELECT password, (SELECT count(*) FROM sessions WHERE user_id = ${userId} AND expires_at > ${Date.now()}) AS sessions FROM users WHERE id = ${userId}`));
       return { localPassword: Boolean(row?.password), activeSessions: row?.sessions ?? 0 };
@@ -261,7 +274,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
           await advisoryLock(tx, 'email:' + email);
           if ((await tx.execute(sql`SELECT id FROM users WHERE email = ${email}`)).rowCount) throw new HttpError(403, 'This email already has an account. Automatic identity linking is disabled.', 'OIDC_ACCOUNT_EXISTS');
           const id = randomUUID(), workspace = randomUUID();
-          await tx.execute(sql`INSERT INTO users VALUES (${id}, ${typeof claims.name === 'string' ? claims.name.slice(0, 120) : email}, ${email}, NULL)`);
+          await insertAccount(tx, { id, name: typeof claims.name === 'string' ? claims.name.slice(0, 120) : email, email, passwordHash: null });
           await tx.execute(sql`INSERT INTO oidc_identities VALUES (${claims.iss}, ${claims.sub}, ${id})`);
           if (invited) { await joinInvitation(tx, invited, id); joined = true; return establish(res, id, req, tx); }
           await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspace}, 'My workspace')`);
