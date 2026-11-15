@@ -113,6 +113,25 @@ test('staff capture leads at an activation with explicit per-channel consent, an
   assert.equal((await request(leads, 'POST', { email: 'still-fine@example.test', consents: { email: true } }, editor.cookie)).status, 201, 'Each staff member has their own allowance.');
 });
 
+test('a capture that adds a phone records the SMS consent ticked with it, and cannot swap a known number', { skip: postgresSkip }, async t => {
+  const { request, owner, project, member } = await start(t);
+  const campaignId = (await request(project + '/campaigns', 'POST', { name: 'Consent follow-up', channel: 'offline' }, owner)).body.record.id;
+  const activation = (await request(project + '/activations', 'POST', stop(campaignId), owner)).body.record, leads = `${project}/activations/${activation.id}/leads`;
+  const editor = await member('editor', 'Erin');
+  const find = async () => (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.email === 'sam@example.test');
+  assert.equal((await request(leads, 'POST', { email: 'sam@example.test', consents: { email: true } }, editor.cookie)).status, 201);
+  // The same person, met again, gives a phone and ticks SMS: one submission records it, with evidence (#335).
+  let response = await request(leads, 'POST', { email: 'sam@example.test', phone: '+447700900155', consents: { sms: true } }, editor.cookie);
+  assert.equal(response.status, 201, JSON.stringify(response.body)); assert.deepEqual(response.body.recorded, ['sms']);
+  let contact = await find();
+  assert.equal(contact.phone, '+447700900155'); assert.equal(contact.consents.sms, true, 'The SMS consent the response reported is stored.'); assert.ok(contact.consentEvidence.sms?.source);
+  // A different number for a known contact is refused in the field, so no consent can move to it from here.
+  response = await request(leads, 'POST', { email: 'sam@example.test', phone: '+447700900156', consents: { sms: true } }, editor.cookie);
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  contact = await find();
+  assert.equal(contact.phone, '+447700900155'); assert.equal(contact.consents.sms, true);
+});
+
 test('activation results count leads by tag and link visits and scans, and the calendar plan shows activations as timed events', { skip: postgresSkip }, async t => {
   const { app, request, owner, project } = await start(t);
   const campaignId = (await request(project + '/campaigns', 'POST', { name: 'Winter field push', channel: 'offline' }, owner)).body.record.id;
