@@ -11,8 +11,9 @@ CREATE INDEX direct_consent_events_contact ON direct_consent_events (project_id,
 CREATE INDEX direct_consent_events_destination ON direct_consent_events (project_id, destination_hash, created_at);
 CREATE TABLE direct_consent_evidence (event_id text PRIMARY KEY REFERENCES direct_consent_events(id) ON DELETE CASCADE, workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE, contact_id text NOT NULL REFERENCES direct_contacts(id) ON DELETE CASCADE, evidence text NOT NULL);
 CREATE INDEX direct_consent_evidence_contact ON direct_consent_evidence (contact_id);
--- Lookups of an address's history, counted per member and project (it answers "has this address ever been here").
-CREATE TABLE direct_consent_lookup_limits (key text PRIMARY KEY, count integer NOT NULL, expires_at bigint NOT NULL);
+-- Lookups of an address's history, limited per member and project (it answers "has this address ever been here"):
+-- one cell-rate limiter timestamp per key (server/consent-history.ts).
+CREATE TABLE direct_consent_lookup_limits (key text PRIMARY KEY, allowed_at bigint NOT NULL);
 
 -- Events are never updated or deleted, except by the cascade that deletes their project or workspace: inside that
 -- cascade's referential trigger the parent row is already gone, which is never true for a direct DELETE or one issued

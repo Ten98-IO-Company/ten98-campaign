@@ -404,8 +404,7 @@ export const directConsentEvidence = pgTable('direct_consent_evidence', {
 ]);
 export const directConsentLookupLimits = pgTable('direct_consent_lookup_limits', {
   key: text('key').primaryKey(),
-  count: integer('count').notNull(),
-  expires_at: bigint('expires_at', { mode: 'number' }).notNull(),
+  allowed_at: bigint('allowed_at', { mode: 'number' }).notNull(),
 });
 export const directContactSuppressions = pgTable('direct_contact_suppressions', {
   project_id: text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),

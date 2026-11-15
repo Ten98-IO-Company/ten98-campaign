@@ -51,7 +51,7 @@ async function fixture(t, poolOptions) {
   const base = `http://127.0.0.1:${app.server.address().port}`;
   async function request(path, method = 'GET', body, override = {}) {
     const response = await fetch(base + path, { method, headers: { Origin: origin, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(cookie ? { Cookie: cookie } : {}), ...override.headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    const content = await response.text(); return { status: response.status, data: response.headers.get('content-type')?.includes('json') ? JSON.parse(content) : content, cookie: response.headers.get('set-cookie')?.split(';')[0] };
+    const content = await response.text(); return { status: response.status, headers: response.headers, data: response.headers.get('content-type')?.includes('json') ? JSON.parse(content) : content, cookie: response.headers.get('set-cookie')?.split(';')[0] };
   }
   const setup = await request('/api/auth/setup', 'POST', { name: 'QA owner', email: 'direct-owner@example.test', password: 'fixture-passphrase-long-enough' }); setup.data.projectId = await firstProject(app, setup); assert.equal(setup.status, 201); cookie = setup.cookie;
   const projectId = setup.data.projectId, path = `/api/projects/${projectId}/direct`;
@@ -314,9 +314,13 @@ test('the consent history is append-only, goes with its project or workspace, is
     await pool.query('DROP TRIGGER refuse_consent_event ON direct_consent_events');
     assert.equal((await f.request(f.path + '/contacts')).data.contacts.find(contact => contact.id === own.id).consents.email, true, 'Email permission is unchanged.');
     // Address lookups are counted per member and project.
-    await pool.query('UPDATE direct_consent_lookup_limits SET count = 60');
+    // The bucket is empty once allowed_at is a full burst ahead; the answer says when the next lookup is allowed.
+    await pool.query('UPDATE direct_consent_lookup_limits SET allowed_at = $1', [Date.now() + 60 * 60_000 + 30_000]);
     const limited = await f.request(f.path + '/contacts/history?email=scoped@example.com');
     assert.equal(limited.status, 429); assert.equal(limited.data.error.code, 'CONSENT_LOOKUP_LIMIT');
+    assert.ok(Number(limited.headers.get('retry-after')) >= 80 && Number(limited.headers.get('retry-after')) <= 91, 'Retry-After: ' + limited.headers.get('retry-after'));
+    await pool.query('UPDATE direct_consent_lookup_limits SET allowed_at = $1', [Date.now() + 59 * 60_000]);
+    assert.equal((await f.request(f.path + '/contacts/history?email=scoped@example.com')).status, 200, 'One lookup is allowed again after one interval.');
     assert.equal((await f.request(f.path + '/contacts/' + own.id + '/history')).status, 200, 'A contact\'s own history is not limited.');
   } finally { await f.close(); }
 });

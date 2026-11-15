@@ -1,7 +1,7 @@
 import { createHmac, hkdfSync, randomUUID } from 'node:crypto';
-import { and, asc, eq, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, lt, sql } from 'drizzle-orm';
 import type { Database, Executor } from './database.ts';
-import { fail } from './provider-core.ts';
+import { IntegrationError } from './provider-core.ts';
 import { directConsentEvents, directConsentEvidence, directConsentLookupLimits, projects } from './schema.ts';
 
 /**
@@ -21,7 +21,8 @@ import { directConsentEvents, directConsentEvidence, directConsentLookupLimits, 
 export const consentKeyLabel = 'ten98-campaign:consent-address:v1', consentKeyVersion = 1;
 export type ConsentAction = 'granted' | 'withdrawn' | 'suppressed' | 'suppression_ended' | 'contact_deleted';
 export type ConsentEvent = { contactId: string; channel: string; action: ConsentAction; source: string; actor: string; destination: string; evidence?: string };
-const lookupLimit = 60, lookupWindow = 3_600_000;
+// 60 lookups at once, refilled at one a minute.
+const lookupBurst = 60, lookupInterval = 60_000;
 
 export function createConsentHistory({ db, secret }: { db: Database; secret: string }) {
   const key = Buffer.from(hkdfSync('sha256', secret, '', consentKeyLabel, 32));
@@ -43,13 +44,19 @@ export function createConsentHistory({ db, secret }: { db: Database; secret: str
   const columns = { id: directConsentEvents.id, contactId: directConsentEvents.contact_id, channel: directConsentEvents.channel, action: directConsentEvents.action, source: directConsentEvents.source, actor: directConsentEvents.actor, at: directConsentEvents.created_at, evidence: directConsentEvidence.evidence };
   const read = (where: ReturnType<typeof and>, ex: Executor) => ex.select(columns).from(directConsentEvents).leftJoin(directConsentEvidence, eq(directConsentEvidence.event_id, directConsentEvents.id)).where(where).orderBy(asc(directConsentEvents.seq));
 
-  // One conditional upsert per lookup, so parallel requests cannot all pass a separate read.
+  // Cell-rate limiter (GCRA): `allowed_at` is when the key's bucket would be full again. A lookup is allowed while it lies
+  // less than the burst ahead of now, and moves it one interval on. One conditional upsert, so parallel lookups cannot all
+  // pass a separate read. App-local stopgap: it moves to the runtime's shared limiter when that ships (the minor after
+  // @ten98/runtime 0.29.0).
   async function countLookup(projectId: string, userId: string) {
-    const now = Date.now(), limits = directConsentLookupLimits;
-    await db.delete(limits).where(lte(limits.expires_at, now));
-    const counted = await db.insert(limits).values({ key: `${projectId}:${userId}`, count: 1, expires_at: now + lookupWindow })
-      .onConflictDoUpdate({ target: limits.key, set: { count: sql`${limits.count} + 1` }, setWhere: sql`${limits.count} < ${lookupLimit}` }).returning({ count: limits.count });
-    if (!counted.length) fail(429, 'CONSENT_LOOKUP_LIMIT', 'Too many address lookups. Try again in an hour.');
+    const now = Date.now(), limits = directConsentLookupLimits, key = `${projectId}:${userId}`, tolerance = (lookupBurst - 1) * lookupInterval;
+    await db.delete(limits).where(lt(limits.allowed_at, now));
+    const allowed = await db.insert(limits).values({ key, allowed_at: now + lookupInterval })
+      .onConflictDoUpdate({ target: limits.key, set: { allowed_at: sql`GREATEST(${limits.allowed_at}, ${now}) + ${lookupInterval}` }, setWhere: sql`GREATEST(${limits.allowed_at}, ${now}) - ${now} <= ${tolerance}` }).returning({ key: limits.key });
+    if (allowed.length) return;
+    const [row] = await db.select({ at: limits.allowed_at }).from(limits).where(eq(limits.key, key));
+    const error = new IntegrationError(429, 'CONSENT_LOOKUP_LIMIT', 'Too many address lookups. Try again shortly.');
+    error.retryAfter = Math.max(1, Math.ceil(((row?.at ?? now) - now - tolerance) / 1000)); throw error;
   }
 
   return {
