@@ -24,6 +24,17 @@ export type ConsentEvent = { contactId: string; channel: string; action: Consent
 // Up to 60 lookups at once, refilled at one a minute (so up to 119 in the first hour, then 60 an hour).
 const lookupBurst = 60, lookupInterval = 60_000;
 
+// PostgreSQL takes at most 65,535 bound values per statement; an event binds 11 (evidence 5), so write in batches.
+const batchSize = 1000;
+
+/** Database errors carry the failed query's bound values (address hashes, evidence); report them without those. */
+async function quietly<T>(work: () => Promise<T>, message: string): Promise<T> {
+  try { return await work(); } catch (error: any) {
+    if (error?.status) throw error;
+    throw Object.assign(new Error(message), { code: error?.cause?.code ?? error?.code });
+  }
+}
+
 export function createConsentHistory({ db, secret }: { db: Database; secret: string }) {
   const key = Buffer.from(hkdfSync('sha256', secret, '', consentKeyLabel, 32));
   const addressHash = (address: string) => createHmac('sha256', key).update(address).digest('base64url');
@@ -39,14 +50,16 @@ export function createConsentHistory({ db, secret }: { db: Database; secret: str
     const [project] = await ex.select({ workspaceId: projects.workspace_id }).from(projects).where(eq(projects.id, projectId));
     if (!project) throw new Error('Consent history needs an existing project.');
     const at = new Date().toISOString(), rows = kept.map(event => ({ ...event, id: randomUUID() }));
-    await ex.insert(directConsentEvents).values(rows.map(event => ({ id: event.id, workspace_id: project.workspaceId, project_id: projectId, contact_id: event.contactId, channel: event.channel, action: event.action, source: event.source, actor: event.actor, destination_hash: event.destination ? addressHash(event.destination) : '', key_version: consentKeyVersion, created_at: at })));
+    const values = rows.map(event => ({ id: event.id, workspace_id: project.workspaceId, project_id: projectId, contact_id: event.contactId, channel: event.channel, action: event.action, source: event.source, actor: event.actor, destination_hash: event.destination ? addressHash(event.destination) : '', key_version: consentKeyVersion, created_at: at }));
+    await quietly(async () => { for (let i = 0; i < values.length; i += batchSize) await ex.insert(directConsentEvents).values(values.slice(i, i + batchSize)); }, 'The consent history could not be written.');
     // Evidence is optional free text; it is removed with the contact (foreign-key cascade), the event is not.
     const evidence = rows.filter(event => event.evidence && event.action !== 'contact_deleted').map(event => ({ event_id: event.id, workspace_id: project.workspaceId, project_id: projectId, contact_id: event.contactId, evidence: event.evidence! }));
-    if (evidence.length) await ex.insert(directConsentEvidence).values(evidence);
+    await quietly(async () => { for (let i = 0; i < evidence.length; i += batchSize) await ex.insert(directConsentEvidence).values(evidence.slice(i, i + batchSize)); }, 'The consent history could not be written.');
   }
 
   const columns = { id: directConsentEvents.id, contactId: directConsentEvents.contact_id, channel: directConsentEvents.channel, action: directConsentEvents.action, source: directConsentEvents.source, actor: directConsentEvents.actor, at: directConsentEvents.created_at, evidence: directConsentEvidence.evidence };
-  const read = (where: ReturnType<typeof and>, ex: Executor) => ex.select(columns).from(directConsentEvents).leftJoin(directConsentEvidence, eq(directConsentEvidence.event_id, directConsentEvents.id)).where(where).orderBy(asc(directConsentEvents.seq));
+  // Ordered by seq: created_at is the time of the change's transaction, so the events of one import share it.
+  const read = (where: ReturnType<typeof and>, ex: Executor) => quietly(() => ex.select(columns).from(directConsentEvents).leftJoin(directConsentEvidence, eq(directConsentEvidence.event_id, directConsentEvents.id)).where(where).orderBy(asc(directConsentEvents.seq)), 'The consent history could not be read.');
 
   // Cell-rate limiter (GCRA): `allowed_at` is when the key's bucket would be full again. A lookup is allowed while it lies
   // less than the burst ahead of now, and moves it one interval on. One conditional upsert, so parallel lookups cannot all

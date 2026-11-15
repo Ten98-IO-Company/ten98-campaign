@@ -3,7 +3,9 @@
 -- contact's history outlives the contact and still reads as one sequence; the address is kept only as a keyed hash
 -- (server/consent-history.ts), which also joins a deleted contact's history to a later contact with the same address.
 -- Free-text evidence, which can hold personal data, sits in its own table and is removed with the contact. Contacts
--- that existed before this migration get baseline events (source migration_baseline) when the app starts.
+-- that existed before this migration have no history; a backfill, if one is ever needed, is a one-off operator command,
+-- not start-up work. Append-only means no role can change, remove, back-date or reposition an event; it does not make an
+-- event true: any role allowed to insert can write any actor, source or action.
 --
 -- Database roles: the application role is to get SELECT and INSERT on the two history tables only, never UPDATE,
 -- DELETE or TRUNCATE; cascades run as the table owner. The guards below are then a second layer, not the only one.
@@ -11,7 +13,7 @@
 -- Under a policy the guards cannot tell "hidden" from "deleted", which is one more reason the application role gets no
 -- UPDATE or DELETE grant (or the guards become SECURITY DEFINER with their pinned search_path). direct_contacts carries
 -- project_id only, and direct_consent_lookup_limits has no tenant column (its key names the project and member); those
--- are decided once in the row-level-security migration. A regenerated baseline must carry the three functions and six
+-- are decided once in the row-level-security migration. A regenerated baseline must carry the three functions and five
 -- triggers below by hand.
 CREATE TABLE direct_consent_events (id text PRIMARY KEY, workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, project_id text NOT NULL REFERENCES projects(id) ON DELETE CASCADE, contact_id text NOT NULL, channel text NOT NULL, action text NOT NULL, source text NOT NULL, actor text NOT NULL, destination_hash text NOT NULL, key_version integer NOT NULL, created_at text NOT NULL, seq bigint GENERATED ALWAYS AS IDENTITY);
 CREATE INDEX direct_consent_events_contact ON direct_consent_events (project_id, contact_id, created_at);

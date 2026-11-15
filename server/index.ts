@@ -162,7 +162,6 @@ export async function createApp(options: AppOptions = {}) {
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
   const integrationSettings = await createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
-  await direct.baselineConsentHistory();
   const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts });
   await direct.attachSmsInbox(smsInbox);
   const links = createLinks({ db, appUrl });
@@ -531,7 +530,7 @@ function rejectProviderFields(body: ProviderRecord, collection = ''): void {
   if (['nativeProvider', 'nativeCustomerId', 'nativeCampaignResource', 'nativeResources', 'nativeAccountId', 'nativeCampaignId', 'nativeAdGroupId', 'nativeAdId', 'externalId', 'zernioPostId', 'providerStatus', 'remoteId', 'publishedAt', 'syncedAt', 'driveFileId', 'externalConversationId', 'zernioProfileId', 'providerResults', 'platformCampaignId', 'driveId', 'source', 'accountId', 'profileId', 'isLive', 'zernioConversationId', 'locationSource', 'controlOwner', 'thumbnailUrl', 'mimeType', 'deliveryUrl', 'modifiedTime', 'md5Checksum', 'approvalStatus', 'approvedBy', 'reviewedBy', 'providerDeletedAt', 'proposalItemId', 'screenId', 'bookingId'].some(key => Object.hasOwn(body, key) && !(collection === 'assets' && key === 'deliveryUrl'))) bad('Provider identifiers and publication evidence are managed by integrations.');
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const app = await createApp();
+  const app = await createApp().catch((error: any) => { console.error(String(error?.message || error).split('\nparams:')[0], error?.cause?.code ? `(${error.cause.code})` : ''); process.exit(1); });
   app.server.listen(Number(process.env.PORT || 3018), process.env.HOST || '127.0.0.1', () => console.log(`Campaign manager available at ${app.config.appUrl}`));
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, async () => { await app.close(); process.exit(0); });
 }

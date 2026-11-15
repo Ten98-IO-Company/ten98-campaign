@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { createStore } from './database.ts';
-import { directConsentEvents, directContacts, projects } from './schema.ts';
+import { directContacts } from './schema.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { activeSuppression, createContacts, lockContacts } from './contacts.ts';
@@ -530,26 +530,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
   async function backfillSms() {
     for (const { data: campaign } of await resultRows(db.execute(sql`SELECT data FROM direct_campaigns ORDER BY seq`))) { if (campaign.channel !== 'sms') continue; for (const delivery of await deliveries(campaign.id)) { if (!delivery.smsAccountSid && campaign.credentialHash === fingerprint(env, 'sms') && !env.TWILIO_MESSAGING_SERVICE_SID) Object.assign(delivery, { smsAccountSid: env.TWILIO_ACCOUNT_SID, smsSender: env.TWILIO_FROM_NUMBER }); await recordSms(campaign, delivery); } }
   }
-  /**
-   * Contacts saved before migration 0013 have no history. At start-up, each contact without any event gets one baseline
-   * event per current permission and permanent suppression (source migration_baseline, actor system, dated now and saying
-   * so by its source). It runs under each project's contacts lock and skips contacts that already have events, so it is
-   * safe on every start and from several instances.
-   */
-  async function baselineConsentHistory() {
-    for (const { id: projectId } of await db.select({ id: projects.id }).from(projects)) await db.transaction(async tx => {
-      await lockContacts(tx, projectId);
-      const recorded = new Set((await tx.selectDistinct({ id: directConsentEvents.contact_id }).from(directConsentEvents).where(eq(directConsentEvents.project_id, projectId))).map(row => row.id));
-      const destinationOf = (record: any, channel: string) => (channel === 'email' || channel === 'emailMarketing' ? record.email : record.phone) || '';
-      const events: ConsentEvent[] = (await contacts.list(projectId, tx)).filter(record => !recorded.has(record.id)).flatMap((record: any) => [
-        ...Object.keys(consentLabels).filter(channel => record.consents?.[channel]).map(channel => ({ contactId: record.id, channel, action: 'granted' as const, source: 'migration_baseline', actor: 'system', destination: destinationOf(record, channel), evidence: record.consentEvidence?.[channel]?.source })),
-        ...Object.entries(record.suppression || {}).filter(([, held]: [string, any]) => held && !held.expiresAt).map(([channel, held]: [string, any]) => ({ contactId: record.id, channel, action: 'suppressed' as const, source: 'migration_baseline', actor: 'system', destination: destinationOf(record, channel), evidence: held.reason })),
-      ]);
-      await history.record(tx, projectId, events);
-    });
-  }
-
-  return { handle, contacts, baselineConsentHistory, processPending, receiveTwilio, receiveSes, handleUnsubscribe,
+  return { handle, contacts, processPending, receiveTwilio, receiveSes, handleUnsubscribe,
     /** Attaches the inbox at once; the returned promise records existing campaign SMS in it. Await it before serving requests. */
     attachSmsInbox(service: any) { smsInbox = service; return attaching = backfillSms(); },
     close() { closed = true; },
