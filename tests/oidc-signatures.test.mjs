@@ -51,8 +51,8 @@ test('ID token signatures are verified against the issuer JWKS', { skip: postgre
   const count = async table => (await db.$client.query(`SELECT count(*) AS count FROM ${table}`)).rows[0].count;
   issuer.signingKey = issuer.unpublished.privateKey;
   await assert.rejects(signIn(), error => error.code === 'OIDC_SIGN_IN_FAILED');
-  assert.equal(await count('session'), 0); assert.equal(await count('oidc_identities'), 0);
+  assert.equal(await count('session'), 0); assert.equal(await count("account WHERE \"providerId\" LIKE 'oidc:%'"), 0);
   issuer.signingKey = issuer.published.privateKey;
   assert.equal((await signIn()).status, 302);
-  assert.equal(await count('session'), 1); assert.equal(await count('oidc_identities'), 1);
+  assert.equal(await count('session'), 1); assert.equal(await count("account WHERE \"providerId\" LIKE 'oidc:%'"), 1);
 });

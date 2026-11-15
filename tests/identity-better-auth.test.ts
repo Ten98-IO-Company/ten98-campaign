@@ -221,7 +221,7 @@ test('after 0014 a pre-move account with a mixed-case email and an old password 
   assert.deepEqual(await stored(), upgraded, 'The second sign-in did not rehash it again.');
 });
 
-test('migration 0014 can be reversed in development and applied again to the same schema', pg, async t => {
+test('migrations 0014 and 0015 can be reversed in development and applied again to the same schema', pg, async t => {
   const { database, migrate } = await premove(t, "INSERT INTO users VALUES ('local', 'Local', 'local@example.test', 'scrypt$fixture')");
   const { pool } = database;
   const shape = async () => ({
@@ -230,11 +230,11 @@ test('migration 0014 can be reversed in development and applied again to the sam
     indexes: (await pool.query("SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' ORDER BY 1, 2")).rows,
   });
   const before = await shape();
-  assert.deepEqual(await migrate(), ['0014']); const applied = await shape();
-  await pool.query(await readFile(new URL('../migrations/dev/0014_better_auth.down.sql', import.meta.url), 'utf8'));
+  assert.deepEqual(await migrate(), ['0014', '0015']); const applied = await shape();
+  for (const reverse of ['0015_oidc_accounts', '0014_better_auth']) await pool.query(await readFile(new URL(`../migrations/dev/${reverse}.down.sql`, import.meta.url), 'utf8'));
   assert.deepEqual(await shape(), before, 'The reverse restores the pre-move schema.');
   assert.deepEqual((await pool.query("SELECT id, email, password FROM users")).rows, [{ id: 'local', email: 'local@example.test', password: 'scrypt$fixture' }]);
-  assert.deepEqual(await migrate(), ['0014']); assert.deepEqual(await shape(), applied, 'Applied again, the schema is the same.');
+  assert.deepEqual(await migrate(), ['0014', '0015']); assert.deepEqual(await shape(), applied, 'Applied again, the schema is the same.');
   assert.deepEqual(await migrate(), [], 'The ledger never applies it twice.');
 });
 
@@ -311,4 +311,67 @@ test('a browser that signed in to an account before skips only the account-wide 
   await pool.query("UPDATE login_limits SET count = 30 WHERE key NOT LIKE 'email:%' AND key NOT LIKE 'client-email:%'");
   const throttled = await fetch(`http://127.0.0.1:${port}/api/auth/login`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', Cookie: known }, body: JSON.stringify({ email, password }) });
   assert.equal(throttled.status, 429, 'The per-client bucket refuses a known device too.');
+});
+
+test('an OIDC identity linked before the move becomes an account row without tokens and still signs in after 0014 and 0015', pg, async t => {
+  const issuer = 'https://auth.example/application/o/campaign/';
+  const { database, migrate } = await premove(t, `INSERT INTO installation VALUES (1, true) ON CONFLICT (id) DO UPDATE SET claimed = true; INSERT INTO users VALUES ('sso', 'SSO', 'SSO@Example.test', NULL); INSERT INTO oidc_identities VALUES ('${issuer}', 'subject-1', 'sso')`);
+  assert.deepEqual(await migrate(), ['0014', '0015']);
+  const { pool, db } = database;
+  assert.deepEqual((await pool.query('SELECT "userId", "providerId", "accountId", password, "accessToken", "refreshToken", "idToken" FROM account')).rows,
+    [{ userId: 'sso', providerId: 'oidc:https://auth.example/application/o/campaign', accountId: 'subject-1', password: null, accessToken: null, refreshToken: null, idToken: null }]);
+  assert.equal((await pool.query("SELECT to_regclass('oidc_identities') AS name")).rows[0].name, null);
+  // The same issuer and subject sign in again through the OIDC flow, with only the openid-client boundary stubbed.
+  const { createAuth } = await import('../server/auth.ts');
+  let sequence = 0;
+  const client = {
+    async discovery() { return { fixture: true }; },
+    randomState: () => 'state-' + ++sequence, randomNonce: () => 'nonce-' + sequence, randomPKCECodeVerifier: () => 'verifier-' + sequence,
+    async calculatePKCECodeChallenge(verifier: string) { return 'challenge-' + verifier; },
+    buildAuthorizationUrl: (_: unknown, params: Record<string, string>) => { const url = new URL(issuer + 'authorize'); for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value); return url; },
+    async authorizationCodeGrant() { return { claims: () => ({ iss: issuer, sub: 'subject-1', email: 'sso@example.test', email_verified: true }) }; },
+  };
+  const auth = createAuth(db, { appUrl: origin, sessionSecret: 'pre-move oidc fixture session secret of 32+', authSecret: 'pre-move oidc fixture auth secret of 32+ chars', oidcEnabled: true, oidcIssuer: issuer, oidcClientId: 'campaign', oidcAllowedEmails: [] }, { openidClient: async () => client as never });
+  type Reply = { headers: Record<string, unknown>; status?: number; setHeader(name: string, value: unknown): void; getHeader(name: string): unknown; writeHead(status: number, headers: Record<string, unknown>): void; end(): void };
+  const response = (): Reply => ({ headers: {}, setHeader(name, value) { this.headers[name] = value; }, getHeader(name) { return this.headers[name]; }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers); }, end() {} });
+  const cookies = (res: Reply) => ([] as string[]).concat(res.headers['Set-Cookie'] as string[] ?? []);
+  const started = response();
+  await auth.oidcStart({ url: '/api/auth/oidc/start', headers: {}, socket: { remoteAddress: '127.0.0.1' } } as never, started as never);
+  const state = new URL(started.headers.Location as string).searchParams.get('state')!, browser = cookies(started).find(value => value.startsWith('ten98_oidc_') && !value.startsWith('ten98_oidc_invite_'))!.split(';')[0];
+  const finished = response();
+  await auth.oidcCallback({ headers: { cookie: browser } } as never, finished as never, new URL(`${origin}/api/auth/oidc/callback?state=${state}&code=fixture`));
+  assert.equal(finished.status, 302); assert.equal(finished.headers.Location, origin + '/');
+  const session = cookies(finished).find(value => /\.session_token=[^;]/.test(value))!.split(';')[0];
+  assert.equal((await auth.user({ headers: { cookie: session } } as never))?.id, 'sso', 'The pre-move identity signs in to the same account.');
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM "user"')).rows[0].n, 1, 'No second account was provisioned.');
+});
+
+test('migration 0015 copies identities with the preset issuer normaliser, and every issuer form finds the same account', pg, async t => {
+  const { normaliseOidcIssuerSql } = await import('@ten98/runtime/auth');
+  const migration = await readFile(new URL('../migrations/0015_oidc_accounts.sql', import.meta.url), 'utf8');
+  assert.ok(migration.replaceAll('\r\n', '\n').includes(normaliseOidcIssuerSql), 'The normaliser appears unchanged.');
+  const { database, migrate } = await premove(t, "INSERT INTO users VALUES ('sso', 'SSO', 'sso@example.test', NULL); INSERT INTO oidc_identities VALUES ('HTTPS://Auth.Example:443/application/o/campaign/', 'subject-1', 'sso')");
+  assert.deepEqual(await migrate(), ['0014', '0015']);
+  const { oidcIdentityAccount } = await import('../server/auth.ts');
+  for (const issuer of ['https://auth.example/application/o/campaign', 'https://auth.example/application/o/campaign/', 'HTTPS://AUTH.EXAMPLE:443/application/o/campaign/']) {
+    assert.equal(await oidcIdentityAccount(database.db, issuer, 'subject-1'), 'sso', issuer);
+  }
+});
+
+test('migration 0015 stops, and changes nothing, when two identities differ only in issuer form', pg, async t => {
+  const { database, migrate } = await premove(t, "INSERT INTO users VALUES ('a', 'A', 'a@example.test', NULL), ('b', 'B', 'b@example.test', NULL); INSERT INTO oidc_identities VALUES ('https://auth.example/', 'same', 'a'), ('https://auth.example', 'same', 'b')");
+  await assert.rejects(migrate(), /oidc_accounts: 0 identit\(y\/ies\) with an issuer that is not a URL and 1 issuer and subject pair/);
+  assert.equal((await database.pool.query("SELECT max(version) AS v FROM schema_version")).rows[0].v, '0012');
+  assert.equal((await database.pool.query('SELECT count(*)::int AS n FROM oidc_identities')).rows[0].n, 2);
+});
+
+test('the preset provisions an OIDC account only for a provider configuration that trusts verified emails', pg, async t => {
+  const { app } = await fixture(t), { db, pool } = app.database;
+  const { signInOidcUser } = await import('@ten98/runtime/auth');
+  const claims = { iss: 'https://auth.example', sub: 'trust-subject', email: 'trusted@example.test', email_verified: true };
+  await assert.rejects(signInOidcUser(db, claims, { trustVerifiedEmail: false }), (error: { code?: string }) => error.code === 'OIDC_EMAIL_UNVERIFIED');
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM \"user\" WHERE email = 'trusted@example.test'")).rows[0].n, 0);
+  const created = await signInOidcUser(db, claims, { trustVerifiedEmail: true });
+  assert.equal(created.created, true);
+  assert.deepEqual((await pool.query('SELECT "emailVerified" FROM "user" WHERE id = $1', [created.userId])).rows, [{ emailVerified: true }]);
 });

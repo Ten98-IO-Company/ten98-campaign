@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { clientLimitKey } from '@ten98/runtime';
 import { createAuth, hashPassword, hostAuth, setLocalPassword, signInLimits } from '../server/auth.ts';
 import { blockWrites, postgresSkip, signInRedirectError, testApp, testDatabase } from './postgres.mjs';
-import { addUsers, seedAccounts } from './fixtures/accounts.ts';
+import { addOidcIdentity, addUsers, oidcIdentitiesSql, seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 function response() {
@@ -127,7 +127,7 @@ test('OIDC invitation continuation is browser-bound, single-use and origin-fixed
   const { db } = await testDatabase(t), config = oidcConfig('oidc-continuation-fixture-secret-32-characters'), invite = 'A'.repeat(43), appUrl = config.appUrl;
   await seedUser(db, 'local-user', 'local@example.test', 'unchanged-local-hash');
   await seedAccounts(db.$client, { users: [{ id: 'identity-user', name: 'Identity', email: 'identity@example.test' }] });
-  await db.$client.query('INSERT INTO oidc_identities VALUES ($1, $2, $3)', [config.oidcIssuer, 'existing-subject', 'identity-user']);
+  await addOidcIdentity(db.$client, config.oidcIssuer, 'existing-subject', 'identity-user');
   const oidc = oidcFixture(t, db, config), digest = value => createHmac('sha256', config.sessionSecret).update(value).digest('hex');
   for (const value of ['https://attacker.example/redirect', '../escape', 'short']) await assert.rejects(oidc.start('?invite=' + encodeURIComponent(value)), error => error.status === 400);
   assert.equal(await count(db, 'oidc_flows'), 0);
@@ -161,13 +161,13 @@ test('OIDC invitation continuation is browser-bound, single-use and origin-fixed
   const linking = await oidc.start('?invite=' + invite); oidc.claims = { iss: config.oidcIssuer, sub: 'unlinked-subject', email: 'local@example.test', email_verified: true };
   await assert.rejects(oidc.callback(linking), error => error.code === 'OIDC_ACCOUNT_EXISTS');
   assert.equal((await db.$client.query("SELECT password FROM account WHERE \"userId\" = 'local-user' AND \"providerId\" = 'credential'")).rows[0].password, 'unchanged-local-hash');
-  assert.equal((await db.$client.query("SELECT * FROM oidc_identities WHERE subject = 'unlinked-subject'")).rowCount, 0);
+  assert.equal((await db.$client.query(oidcIdentitiesSql + " AND \"accountId\" = 'unlinked-subject'")).rowCount, 0);
 });
 
 test('a replayed OIDC callback is claimed once even when the replays arrive together', pg, async t => {
   const { db, pool } = await testDatabase(t), config = oidcConfig('oidc-replay-fixture-secret-32-characters-x');
   await seedAccounts(db.$client, { users: [{ id: 'identity-user', name: 'Identity', email: 'identity@example.test' }] });
-  await db.$client.query('INSERT INTO oidc_identities VALUES ($1, $2, $3)', [config.oidcIssuer, 'existing-subject', 'identity-user']);
+  await addOidcIdentity(db.$client, config.oidcIssuer, 'existing-subject', 'identity-user');
   const oidc = oidcFixture(t, db, config), flow = await oidc.start();
   // Both replays find the flow before either claim commits unless the claim itself is the single DELETE ... RETURNING.
   const gate = await blockWrites(pool, 'oidc_flows');
@@ -188,7 +188,7 @@ test('two first sign-ins for one new identity provision a single account', pg, a
   await gate.waiting(2); await gate.release();
   assert.deepEqual(await Promise.all(sign), [302, 302]);
   assert.equal((await db.$client.query("SELECT count(*) AS count FROM \"user\" WHERE email = 'parallel@example.test'")).rows[0].count, 1);
-  assert.equal((await db.$client.query("SELECT count(*) AS count FROM oidc_identities WHERE subject = 'parallel-subject'")).rows[0].count, 1);
+  assert.equal((await db.$client.query("SELECT count(*) AS count FROM account WHERE \"providerId\" LIKE 'oidc:%' AND \"accountId\" = 'parallel-subject'")).rows[0].count, 1);
   assert.equal(await count(db, 'session'), 2);
 });
 
@@ -230,7 +230,7 @@ test('an invitation for another email or an unverified email does not provision 
   await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_EMAIL_UNVERIFIED');
   oidc.claims = invitedIdentity(config, 'invitee@example.test', { email_verified: 'true' });
   await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.status === 403);
-  assert.equal(await count(db, '"user"'), 1); assert.equal(await count(db, 'oidc_identities'), 0); assert.equal(await accepted(db, token), null);
+  assert.equal(await count(db, '"user"'), 1); assert.equal(await count(db, "account WHERE \"providerId\" LIKE 'oidc:%'"), 0); assert.equal(await accepted(db, token), null);
 });
 
 test('an expired, revoked or no-longer-authorized invitation falls back to the OIDC allowlist', pg, async t => {

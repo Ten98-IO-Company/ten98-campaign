@@ -153,13 +153,6 @@ export const oidcReturnTargets = pgTable('oidc_return_targets', {
   state: text('state').primaryKey().references(() => oidcFlows.state, { onDelete: 'cascade' }),
   invite_hash: text('invite_hash').notNull(),
 });
-export const oidcIdentities = pgTable('oidc_identities', {
-  issuer: text('issuer').notNull(),
-  subject: text('subject').notNull(),
-  user_id: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-}, t => [
-  primaryKey({ columns: [t.issuer, t.subject] }),
-]);
 export const loginLimits = pgTable('login_limits', {
   key: text('key').primaryKey(),
   count: integer('count').notNull(),

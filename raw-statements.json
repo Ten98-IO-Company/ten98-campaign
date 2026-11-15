@@ -12,8 +12,8 @@
     "reason": "Ad-spend approvals, receipts and idempotency over JSONB records with row locks. Converts to typed queries with exact BIGINT money in the relational redesign (unified-stack step 4); paid-work accounting results must stay identical."
   },
   "server/auth.ts": {
-    "count": 14,
-    "reason": "Campaign-owned sign-in state that Better Auth does not cover: the login_limits rate-limit upserts, the OIDC flow, return-target and identity rows, and the OIDC first-sign-in workspace. The OIDC rows move onto Better Auth accounts in the OIDC step (ten98-code-system#97); the rest become typed Drizzle queries with the team controller on Drizzle (#116). The shared lock helpers live in server/locks.ts."
+    "count": 12,
+    "reason": "Campaign-owned sign-in state that Better Auth does not cover: the login_limits rate-limit upserts, the OIDC flow and return-target rows, and the OIDC first-sign-in workspace. They become typed Drizzle queries with the team controller on Drizzle (ten98-code-system#116). The shared lock helpers live in server/locks.ts."
   },
   "server/calendar.ts": {
     "count": 8,

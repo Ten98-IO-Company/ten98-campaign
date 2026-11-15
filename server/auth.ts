@@ -6,12 +6,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { and, count, eq, gt, isNotNull, like, sql } from 'drizzle-orm';
 import { hashPassword as hashWithBetterAuth } from 'better-auth/crypto';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
-import { createTen98Auth, LockedAuthUserNotFoundError, type PasswordLimitAnswer, type PasswordSignInLimits, type ResetPasswordMessage, type Ten98Auth, type Ten98AuthSession } from '@ten98/runtime/auth';
+import { createTen98Auth, LockedAuthUserNotFoundError, OidcIdentityError, oidcProviderId, signInOidcUser, type PasswordLimitAnswer, type PasswordSignInLimits, type ResetPasswordMessage, type Ten98Auth, type Ten98AuthSession } from '@ten98/runtime/auth';
 import { readEnvironment } from '@ten98/runtime/config';
 import { clientLimitKey, parseTrustedProxies, resolveClientAddress } from '@ten98/runtime';
 import type { Database, Executor } from './database.ts';
 import { joinInvitation, lockInvitation } from './invitations.ts';
-import { advisoryLock, lockEmail } from './locks.ts';
+import { advisoryLock } from './locks.ts';
 import { accounts, instanceOperators, sessions, twoFactors, users, verifications } from './schema.ts';
 
 export { advisoryLock, lockEmail, lockUser, lockWorkspace } from './locks.ts';
@@ -86,6 +86,11 @@ export async function insertAccount(tx: Executor, account: { id: string; name: s
   await tx.insert(users).values({ id: account.id, name: account.name, email: account.email, createdAt: now, updatedAt: now });
   if (account.passwordHash) await tx.insert(accounts).values({ id: randomUUID(), accountId: account.id, providerId: 'credential', userId: account.id, password: account.passwordHash, createdAt: now, updatedAt: now });
 }
+/**
+ * The account an OIDC issuer and subject are linked to, if any: the preset's account row (provider oidcProviderId, the
+ * normalised issuer; account id the subject), which signInOidcUser writes. Campaign stores no provider token.
+ */
+export const oidcIdentityAccount = async (executor: Executor, issuer: string, subject: string) => (await executor.select({ userId: accounts.userId }).from(accounts).where(and(eq(accounts.providerId, oidcProviderId(issuer)), eq(accounts.accountId, subject))))[0]?.userId;
 /** The account with this (normalised) email, and whether it holds instance operator authority. */
 export const accountByEmail = (executor: Executor, email: string) => first<{ id: string; name: string; email: string; isOperator: boolean }>(executor.execute(sql`SELECT id, name, email, EXISTS (SELECT 1 FROM instance_operators o WHERE o.user_id = ${users}.id) AS "isOperator" FROM ${users} WHERE email = ${email}`));
 export const hasAnyAccount = async (executor: Executor) => (await executor.select({ id: users.id }).from(users).limit(1)).length > 0;
@@ -202,6 +207,9 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   async function signInVerified(req: IncomingMessage, res: ServerResponse, userId: string): Promise<void> {
     const response = await identity.withLockedAuth(db, userId, auth => auth.api.completeOidcSession({ body: { oidcUserId: userId, provider: deploymentProvider }, headers: headers(req), asResponse: true }));
     if (!response.ok) throw new HttpError(400, 'Identity sign-in could not be completed. Start again.');
+    // An account with two-factor enabled gets Better Auth's challenge instead of a session. Campaign offers no second-factor
+    // step yet (#285), so the challenge and its cookie are dropped and the sign-in is refused with its own code.
+    if ((await response.clone().json() as { twoFactorRedirect?: boolean }).twoFactorRedirect) throw new HttpError(403, 'Two-factor sign-in is not available in Campaign yet.', 'OIDC_TWO_FACTOR_UNAVAILABLE');
     forward(res, response);
   }
   function clearSessionCookies(req: IncomingMessage, res: ServerResponse) {
@@ -378,18 +386,24 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
           // workspace only; an unusable one leaves the allowlist rules in place.
           const invited = invite ? await lockInvitation(tx, invite).catch(error => { if (error instanceof HttpError) return undefined; throw error; }) : undefined;
           await advisoryLock(tx, 'oidc:' + JSON.stringify([claims.iss, claims.sub]));
-          const existing = await first<{ user_id: string }>(tx.execute(sql`SELECT user_id FROM oidc_identities WHERE issuer = ${claims.iss} AND subject = ${claims.sub}`));
-          if (existing) return existing.user_id;
+          const existing = await oidcIdentityAccount(tx, claims.iss, claims.sub);
+          if (existing) return existing;
           const email = typeof claims.email === 'string' ? claims.email.trim().toLowerCase() : '';
           if (claims.email_verified !== true) throw new HttpError(403, 'Verify this email address with your identity provider first.', 'OIDC_EMAIL_UNVERIFIED');
           if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.', 'OIDC_NOT_PROVISIONED');
           if (invited && invited.email !== email) throw new HttpError(403, `This invitation is for ${invited.email}. Sign in with that identity to accept it.`, 'OIDC_INVITE_EMAIL_MISMATCH');
           if (!invited && !config.oidcAllowedEmails.includes(email)) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.', 'OIDC_NOT_PROVISIONED');
-          await lockEmail(tx, email);
-          if (await accountByEmail(tx, email)) throw new HttpError(403, 'This email already has an account. Automatic identity linking is disabled.', 'OIDC_ACCOUNT_EXISTS');
-          const id = randomUUID(), workspace = randomUUID();
-          await insertAccount(tx, { id, name: typeof claims.name === 'string' ? claims.name.slice(0, 120) : email, email, passwordHash: null });
-          await tx.execute(sql`INSERT INTO oidc_identities VALUES (${claims.iss}, ${claims.sub}, ${id})`);
+          // The preset creates the account and its identity row under the shared email lock, never linking to an existing
+          // account (strict linking, #143); 'deployment' is Campaign's one provider configuration and trusts its verified
+          // emails, behind Campaign's own checks above.
+          const provisioned = await signInOidcUser(tx, { ...claims, iss: claims.iss, sub: claims.sub, email }, { trustVerifiedEmail: true }).catch(error => {
+            if (error instanceof OidcIdentityError && error.code === 'OIDC_ACCOUNT_EXISTS') throw new HttpError(403, 'This email already has an account. Automatic identity linking is disabled.', 'OIDC_ACCOUNT_EXISTS');
+            if (error instanceof OidcIdentityError && error.code === 'OIDC_EMAIL_UNVERIFIED') throw new HttpError(403, 'Verify this email address with your identity provider first.', 'OIDC_EMAIL_UNVERIFIED');
+            throw error;
+          });
+          // Another first sign-in of this identity linked it first: that account signs in, and nothing else is created.
+          if (!provisioned.created) return provisioned.userId;
+          const id = provisioned.userId, workspace = randomUUID();
           if (invited) { await joinInvitation(tx, invited, id); joined = true; return id; }
           await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspace}, 'My workspace')`);
           await tx.execute(sql`INSERT INTO memberships VALUES (${workspace}, ${id}, 'owner')`);

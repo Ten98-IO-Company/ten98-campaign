@@ -8,7 +8,8 @@ import { createServer } from 'node:http';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { createAuth } from '../server/auth.ts';
 import { postgresSkip, signInRedirectError, testDatabase } from './postgres.mjs';
-import { seedAccounts } from './fixtures/accounts.ts';
+import { normaliseOidcIssuer } from '@ten98/runtime/auth';
+import { oidcIdentitiesSql, seedAccounts } from './fixtures/accounts.ts';
 
 const pg = { skip: postgresSkip };
 const appUrl = 'https://campaign.example', clientId = 'campaign-fixture-client', clientSecret = randomBytes(24).toString('base64url');
@@ -95,8 +96,10 @@ test('OIDC sign-in completes against an Authentik-shaped issuer with the real cl
   assert.equal(signedIn.status, 302);
   assert.equal(signedIn.headers.Location, appUrl + '/');
   assert.ok([].concat(signedIn.headers['Set-Cookie']).some(value => /^__Secure-ten98-campaign-[0-9a-f]{16}\.session_token=[A-Za-z0-9]{32}\.[A-Za-z0-9%+/=_-]+; /.test(value)));
-  const identity = (await db.$client.query('SELECT i.issuer, i.subject, u.email FROM oidc_identities i JOIN "user" u ON u.id = i.user_id')).rows;
-  assert.deepEqual(identity, [{ issuer: idp.issuer, subject: 'a1b2c3d4e5f6', email: 'allowed@example.test' }]);
+  const identity = (await db.$client.query('SELECT i.issuer, i.subject, u.email FROM (' + oidcIdentitiesSql + ') i JOIN "user" u ON u.id = i.user_id')).rows;
+  // The identity is stored under the issuer as the preset normalises it (no trailing slash).
+  assert.deepEqual(identity, [{ issuer: normaliseOidcIssuer(idp.issuer), subject: 'a1b2c3d4e5f6', email: 'allowed@example.test' }]);
+  assert.deepEqual((await db.$client.query(oidcIdentitiesSql)).rows.map(row => [row.access_token, row.refresh_token, row.id_token]), [[null, null, null]], 'No OIDC token is stored.');
 
   // A later sign-in by the same issuer and subject reuses the account even when the email claim changes.
   const again = await start(), returned = await callback(again, idp.authorize(again.location, { email: 'renamed@example.test' }));
@@ -113,11 +116,32 @@ test('OIDC callback refuses ID tokens with the wrong nonce, audience or issuer',
     const flow = await start();
     await assert.rejects(callback(flow, idp.authorize(flow.location, { claims })), error => error.code === 'OIDC_SIGN_IN_FAILED', JSON.stringify(claims));
   }
-  assert.equal((await db.$client.query('SELECT count(*)::int AS count FROM oidc_identities')).rows[0].count, 0);
+  assert.equal((await db.$client.query("SELECT count(*)::int AS count FROM account WHERE \"providerId\" LIKE 'oidc:%'")).rows[0].count, 0);
 });
 
 test('OIDC provisioning needs email_verified true, which Authentik sends only when configured', pg, async t => {
   const { db, idp, start, callback } = await signIn(t), flow = await start();
   await assert.rejects(callback(flow, idp.authorize(flow.location, { claims: { email_verified: false } })), error => error.code === 'OIDC_EMAIL_UNVERIFIED');
-  assert.equal((await db.$client.query('SELECT count(*)::int AS count FROM oidc_identities')).rows[0].count, 0);
+  assert.equal((await db.$client.query("SELECT count(*)::int AS count FROM account WHERE \"providerId\" LIKE 'oidc:%'")).rows[0].count, 0);
+});
+
+test('an Authentik identity whose verified email already has an account is refused and never linked to it', pg, async t => {
+  const { db, idp, start, callback } = await signIn(t);
+  await seedAccounts(db.$client, { users: [{ id: 'local-allowed', name: 'Local', email: 'allowed@example.test', password: 'local-allowed-hash' }] });
+  const flow = await start();
+  await assert.rejects(callback(flow, idp.authorize(flow.location)), error => error.code === 'OIDC_ACCOUNT_EXISTS');
+  assert.equal((await db.$client.query(oidcIdentitiesSql)).rowCount, 0, 'The identity is not linked automatically.');
+  assert.equal((await db.$client.query('SELECT count(*)::int AS count FROM session')).rows[0].count, 0);
+  assert.equal((await db.$client.query("SELECT password FROM account WHERE \"userId\" = 'local-allowed' AND \"providerId\" = 'credential'")).rows[0].password, 'local-allowed-hash');
+});
+
+test('an Authentik sign-in for an account with two-factor enabled gets no session, since Campaign has no second-factor step yet', pg, async t => {
+  const { db, idp, start, callback } = await signIn(t), first = await start();
+  assert.equal((await callback(first, idp.authorize(first.location))).status, 302);
+  await db.$client.query("UPDATE \"user\" SET \"twoFactorEnabled\" = true WHERE email = 'allowed@example.test'");
+  await db.$client.query("INSERT INTO \"twoFactor\" (id, \"userId\", secret, \"backupCodes\") SELECT 'factor', id, 'fixture-secret', 'fixture-codes' FROM \"user\" WHERE email = 'allowed@example.test'");
+  const sessions = async () => (await db.$client.query('SELECT count(*)::int AS count FROM session')).rows[0].count;
+  const before = await sessions(), again = await start();
+  await assert.rejects(callback(again, idp.authorize(again.location)), error => error.code === 'OIDC_TWO_FACTOR_UNAVAILABLE');
+  assert.equal(await sessions(), before, 'No new session was issued.');
 });
