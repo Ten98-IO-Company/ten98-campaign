@@ -96,3 +96,13 @@ test('queue row actions keep short visible labels, full accessible identities an
   assert.equal(toggle(queue, { selected: { ...queue, _id: 'other' }, editing: true }).props.disabled, false, 'Edits to another queue do not block this row.');
   assert.equal(toggle({ ...queue, active: false, slots: [] }, { selected: null, editing: false }).props.disabled, true, 'A paused queue without slots cannot be activated.');
 });
+
+test('upcoming slot previews read in the queue’s own time zone, not the viewer’s', async () => {
+  const line = source.match(/^ {4}\{preview && <Alert[^\n]+$/m)?.[0]; assert.ok(line);
+  const { code } = await transformWithOxc(`const render = preview => (${line.trim().slice(1, -1)});`, 'QueuePreview.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', ...Object.keys(library), code + '; return render;')(React, ...Object.values(library));
+  const slot = '2026-11-16T05:00:00Z', html = renderToStaticMarkup(render({ queue: { name: 'Gulf mornings', timezone: 'Asia/Dubai' }, slots: [slot] }));
+  const inZone = library.createDisplayFormatter({ timeZone: 'Asia/Dubai' }).dateTime(slot), inUtc = library.createDisplayFormatter({ timeZone: 'UTC' }).dateTime(slot);
+  assert.notEqual(inZone, inUtc); assert.ok(html.includes(`>${inZone}</li>`), html); assert.ok(!html.includes(inUtc));
+  assert.match(html, /Asia\/Dubai\. These times are previews/);
+});

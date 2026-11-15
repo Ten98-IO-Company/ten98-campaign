@@ -13,6 +13,8 @@ import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import { firstProject } from './first-project.ts';
 import { grantOperators } from './fixtures/accounts.ts';
+import { format } from './fixtures/display-format.ts';
+import { formatMicros } from '../src/google-micros.ts';
 
 const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_ADS_CLIENT_SECRET: 'fixture-client-secret', GOOGLE_ADS_REFRESH_TOKEN: 'fixture-refresh-token', GOOGLE_ADS_DEVELOPER_TOKEN: 'fixture-developer-token', GOOGLE_ADS_LOGIN_CUSTOMER_ID: '9999999999' };
 
@@ -162,13 +164,12 @@ test('Shopping report budgets and spend retain the mapped currency precision', a
   const start = source.indexOf('const reportColumns = '), end = source.indexOf('\n];', start) + '\n];'.length;
   assert.ok(start > 0 && end > start);
   const { code } = await transformWithOxc(source.slice(start, end), 'ShoppingReport.tsx', { jsx: { runtime: 'classic' } });
-  const columns = new Function('React', ...Object.keys(ui), 'number', code + '; return reportColumns;')(React, ...Object.values(ui), number);
-  const render = (report, currency, digits) => React.createElement(ui.DataTable, { searchable: false, sortable: false, pagination: false, ariaLabel: 'Campaigns', rows: report.campaigns, rowKey: row => row.id, columns: columns(currency, digits) });
-  for (const [currency, micros, expected] of [['KWD', '1000', '0.001 KWD'], ['USD', '1230000', '1.23 USD'], ['JPY', '1000000', '1 JPY']]) {
-    const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
+  const columns = new Function('React', ...Object.keys(ui), 'number', 'formatMicros', code + '; return reportColumns;')(React, ...Object.values(ui), number, formatMicros);
+  const render = (report, currency) => React.createElement(ui.DataTable, { searchable: false, sortable: false, pagination: false, ariaLabel: 'Campaigns', rows: report.campaigns, rowKey: row => row.id, columns: columns(currency, format) });
+  for (const [currency, micros, expected] of [['KWD', '1000', 'KWD\u00a00.001'], ['USD', '1230000', '$1.23'], ['JPY', '1000000', '¥1'], ['USD', '1234567', '$1.234567']]) {
     for (const budgetPeriod of ['DAILY', 'CUSTOM_PERIOD']) {
       const row = { id: '123', name: 'Precision fixture', channel: 'SHOPPING', status: 'PAUSED', budgetPeriod, dailyBudgetMicros: micros, totalBudgetMicros: micros, metrics: { costMicros: micros } };
-      const text = readText(renderToStaticMarkup(render({ campaigns: [row] }, currency, digits)), '');
+      const text = readText(renderToStaticMarkup(render({ campaigns: [row] }, currency)), '');
       assert.equal(text.split(expected).length - 1, 2, 'Both the budget and spend must retain ' + expected);
     }
   }

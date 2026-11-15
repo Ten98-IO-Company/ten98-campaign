@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { stripTypeScriptTypes } from 'node:module';
+import { format } from './fixtures/display-format.ts';
+import { formatMicros, microsToDecimal } from '../src/google-micros.ts';
 import { firstProject } from './first-project.ts';
 
 test('Google Ads tools use real HTTP routes, selected customer scope, durable keyword mutations, planner, negatives, targeting and bidding', { skip: postgresSkip }, async t => {
@@ -148,12 +150,15 @@ test('Google Ads tools use real HTTP routes, selected customer scope, durable ke
 test('actual Google UI formats match types, micros and stale selection guards without treating strings as whole currency', async () => {
   const source = await readFile(new URL('../src/GoogleAdsTools.tsx', import.meta.url), 'utf8');
   const compile = (code, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
-  const matching = compile(source.match(/const matching = (.+);/)[1], {}), amount = compile(source.match(/const amount = (.+);/)[1], { number: value => String(value) });
+  const matching = compile(source.match(/const matching = (.+);/)[1], {});
   assert.deepEqual(matching('[campaign software]'), { text: 'campaign software', matchType: 'exact' }); assert.deepEqual(matching('"campaign software"'), { text: 'campaign software', matchType: 'phrase' });
-  assert.equal(amount('1500000', 'USD'), '1.5 USD'); assert.equal(amount(null), '—');
-  const formatNumber = compile(source.match(/const number = (.+);/)[1], {}), formatAmount = compile(source.match(/const amount = (.+);/)[1], { number: formatNumber });
-  assert.equal(formatAmount('1000', 'KWD'), '0.001 KWD'); assert.equal(formatAmount('1230000', 'USD'), '1.23 USD'); assert.equal(formatAmount('1000000', 'JPY'), '1 JPY');
-  assert.equal(formatAmount(null, 'KWD'), '—'); assert.equal(formatAmount('1500000'), '1.5 ');
+  const amount = (micros, currency) => formatMicros(micros, currency, format), money = compile(source.match(/const money = (.+);/)[1], {});
+  assert.ok(source.includes("header: 'Spend', render: (row: any) => formatMicros(row.costMicros, currency, format)"), 'Spend shows exact micros.');
+  assert.equal(amount('1500000', 'USD'), '$1.50'); assert.equal(amount('1000', 'KWD'), 'KWD\u00a00.001'); assert.equal(amount('1230000', 'USD'), '$1.23'); assert.equal(amount('1000000', 'JPY'), '¥1');
+  assert.equal(amount('1234567', 'USD'), '$1.234567', 'Micros stay exact rather than rounding to cents.'); assert.equal(amount('9007199254740993', 'USD'), '$9,007,199,254.740993');
+  assert.equal(amount(null, 'KWD'), '—'); assert.equal(amount('not micros', 'USD'), '—'); assert.equal(amount('1500000', undefined), '1.5 ');
+  assert.equal(money('0.000123', 'USD', format), '$0.000123'); assert.equal(money(12.5, 'EUR', format), '€12.50'); assert.equal(money(null, 'USD', format), '—');
+  assert.deepEqual(['0', '1', '-1500000', '12000000', 1500000, 1.5, '1e6', ''].map(microsToDecimal), ['0', '0.000001', '-1.5', '12', '1.5', null, null, null]);
   const writeSource = source.slice(source.indexOf('async function write('), source.indexOf('  const readKeywords'));
   const active = { current: true }, calls = []; let finish;
   const write = compile(writeSource, { active, requester: { current: (...args) => { calls.push(args); return new Promise(resolve => { finish = resolve; }); } }, base: { accountId: 'account-one', adAccountId: 'customer-one' } });

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Card, Checkbox, CodeBlock, Disclosure, Field, Heading, Inline, Input, List, ListItem, Option, Select, Stack, StatusLine, Text } from '@ten98/ui';
+import { Alert, Button, Card, Checkbox, CodeBlock, Disclosure, Field, Heading, Inline, Input, List, ListItem, Option, Select, Stack, StatusLine, Text, useDisplayFormat } from '@ten98/ui';
 
 type Row = Record<string, any>;
 type Props = { accountId: string; adAccountId: string; campaign?: Row; currency?: string; canWrite: boolean; request: (path: string, body?: any) => Promise<any> };
@@ -10,7 +10,7 @@ const title = (value: string) => value.replaceAll('_', ' ').toLowerCase();
 const actionDescription = (name: string, value: any) => name === 'primaryForGoal' ? value ? 'Primary' : 'Secondary' : name === 'alwaysUseDefaultValue' ? value ? 'Always use the default value' : 'Use the event value when provided' : name === 'countingType' ? value === 'ONE_PER_CLICK' ? 'One conversion per click' : 'Every conversion per click' : name === 'type' ? value === 'WEBPAGE' ? 'Website' : title(value) : ['category', 'status'].includes(name) ? title(value) : String(value);
 const fresh = (data: Row | null) => !!data && data.stale === false;
 const goalKey = (row: Row) => row.category + ':' + row.origin;
-function Freshness({ data }: { data: Row | null }) { return data && <Text tone="muted">{data.stale ? 'Older cached fallback. Changes are blocked until Google returns a fresh snapshot.' : 'Provider snapshot; Google may serve this from its current cache.'}{data.cachedAt ? ` Read ${new Date(data.cachedAt).toLocaleString()}.` : ''}</Text>; }
+function Freshness({ data }: { data: Row | null }) { const format = useDisplayFormat(); return data && <Text tone="muted">{data.stale ? 'Older cached fallback. Changes are blocked until Google returns a fresh snapshot.' : 'Provider snapshot; Google may serve this from its current cache.'}{data.cachedAt ? ` Read ${format.dateTime(data.cachedAt)}.` : ''}</Text>; }
 
 export default function GoogleConversions({ accountId, adAccountId, campaign, currency, canWrite, request }: Props) {
   const requester = useRef(request); requester.current = request;
