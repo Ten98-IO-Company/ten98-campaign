@@ -261,10 +261,12 @@ const inboxCommands: { key: InboxKey; id: string; label: string }[] = [
 // Front-style keys: j and k open the next and previous item, e marks it done and r moves to the reply. They are
 // registered with the shared shortcuts module inside the page's focus-activated "Inbox" scope, so, as single-character
 // keys (WCAG 2.1.4), they answer only while focus is in the inbox, never while typing in a field or inside a dialog.
-// The page owns any guard each key needs.
+// The shared module still runs letters on controls such as a checkbox, so a key that went to any form control (an open
+// reply or edit form) is declined and left to it, as the inbox's earlier listener did. The page owns any guard each key needs.
+const formControl = 'input, textarea, select, button[role="switch"], [contenteditable]:not([contenteditable="false"])';
 function InboxShortcuts({ onKey }: { onKey: (key: InboxKey) => void }) {
   const latest = useRef(onKey); latest.current = onKey;
-  for (const { key, id, label } of inboxCommands) useCommand({ id, label, group: 'Inbox', keys: key.toUpperCase(), run: () => latest.current(key) });
+  for (const { key, id, label } of inboxCommands) useCommand({ id, label, group: 'Inbox', keys: key.toUpperCase(), run: press => { if (press?.target?.closest?.(formControl)) { press.decline(); return; } latest.current(key); } });
   return null;
 }
 function privateMessageLimit(capabilities: Row, platform: string, attachmentUrl: string) {

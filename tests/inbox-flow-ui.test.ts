@@ -191,6 +191,14 @@ test('inbox keys are shared-module commands that answer only with focus in the i
   h.render({ onKey: (key: string) => pressed.push(key) });
   assert.deepEqual(registered.map(({ id, keys, group }) => [id, keys, group]), [['inbox.next', 'J', 'Inbox'], ['inbox.previous', 'K', 'Inbox'], ['inbox.done', 'E', 'Inbox'], ['inbox.reply', 'R', 'Inbox']]);
   registered.forEach(command => command.run()); assert.deepEqual(pressed, ['j', 'k', 'e', 'r']);
+  // A key that went to any form control (a checkbox in an open reply or edit form, a field, a select) is declined and left
+  // to that control; a key on any other element in the inbox still runs.
+  const press = (control: boolean) => { const result = { declined: 0, press: { event: {} as KeyboardEvent, target: { closest: (selector: string) => control && selector.includes('input') ? {} : null } as unknown as Element, decline() { result.declined++; } } }; return result; };
+  const onControl = press(true); registered.forEach(command => command.run(onControl.press));
+  assert.equal(onControl.declined, 4); assert.deepEqual(pressed, ['j', 'k', 'e', 'r'], 'No inbox key acts while focus is on a form control.');
+  const elsewhere = press(false); registered[0].run(elsewhere.press);
+  assert.equal(elsewhere.declined, 0); assert.deepEqual(pressed, ['j', 'k', 'e', 'r', 'j']);
+  pressed.length = 4;
   registered.length = 0; h.render({ onKey: (key: string) => pressed.push('latest:' + key) }); registered[0].run(); assert.equal(pressed.at(-1), 'latest:j', 'The newest handler answers.');
 
   // The shared resolver, with these exact chords: the inbox scope must hold focus, and a field, a modifier or IME
