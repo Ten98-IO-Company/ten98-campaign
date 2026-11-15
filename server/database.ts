@@ -5,6 +5,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import * as schema from './schema.ts';
 import { activity, records } from './schema.ts';
+import { databaseUrl } from './config.ts';
 
 // node-pg returns int8 (bigint columns, count(*), seq) as strings, which would silently break numeric
 // comparisons. Every int8 here (epoch ms, seq, counts) fits a double; fail loudly if one ever does not.
@@ -28,7 +29,7 @@ export function connect(connectionString: string, options: pg.PoolConfig = {}): 
 }
 
 let shared: Connection | undefined;
-export function getDatabase(connectionString = process.env.DATABASE_URL): Connection {
+export function getDatabase(connectionString = databaseUrl()): Connection {
   if (!shared) {
     if (!connectionString) throw new Error('Set DATABASE_URL to the PostgreSQL connection string.');
     shared = connect(connectionString);

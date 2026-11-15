@@ -8,12 +8,12 @@ import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-cre
 type DeliverabilityAlert = { provider: string; kind: string; contacts: number; expiresAt: string | null };
 // Every CSV row is created, merged or skipped; the count says how many rows were processed, with a correct plural (#135).
 const importNotice = (format: DisplayFormatter, result: any) => { const created = result.created || 0, updated = result.updated || 0, skipped = result.skipped || 0, total = created + updated + skipped; return `Processed ${format.count(total, { one: 'row', other: 'rows' })}: ${created} created, ${updated} merged, ${skipped} skipped. Check the contacts before sending.`; };
-const emailProviderName = (provider: string) => ({ cloudflare: 'Cloudflare', ses: 'Amazon SES' }[provider] || provider);
+const emailProviderName = (provider: string) => ({ cloudflare: 'Cloudflare', ses: 'Amazon SES', smtp: 'SMTP' }[provider] || provider);
 const emailProviderConsole = (provider: string) => ({ cloudflare: 'Cloudflare Email Sending', ses: 'the Amazon SES console' }[provider] || provider);
 // SES `undetermined` feedback is a bounce SES could not classify; other kinds are sender-side policy blocks.
 const deliverabilityCopy = (format: DisplayFormatter, alert: DeliverabilityAlert) => alert.kind === 'undetermined' ? { title: `${emailProviderName(alert.provider)} could not classify bounces for ${format.count(alert.contacts, { one: 'contact', other: 'contacts' })}`, body: `Check the bounce details in ${emailProviderConsole(alert.provider)}. Each one counts toward the repeated-bounce limit for that contact.` } : { title: `${emailProviderName(alert.provider)} reports a ${alert.kind} block for ${format.count(alert.contacts, { one: 'contact', other: 'contacts' })}`, body: `It may concern your sending account, not the recipients, so they were not suppressed. Check ${emailProviderConsole(alert.provider)}.` };
 // The status reports a null email provider when Amazon SES and Cloudflare are both configured and none is chosen (EMAIL_PROVIDER_REQUIRED).
-const emailProviderChoice = 'Amazon SES and Cloudflare are both configured. Choose which one sends email under Amazon SES email in Settings › Connections.';
+const emailProviderChoice = 'More than one email provider is configured. Choose which one sends email under Amazon SES email in Settings › Connections.';
 const deliverabilityAlerts = (status: any): DeliverabilityAlert[] => (Array.isArray(status?.deliverabilityAlerts) ? status.deliverabilityAlerts : []).filter((row: any) => typeof row?.provider === 'string' && typeof row.kind === 'string' && Number.isSafeInteger(row.contacts) && row.contacts > 0 && (row.expiresAt === null || typeof row.expiresAt === 'string'));
 
 type Row = { id: string; [key: string]: any };

@@ -268,8 +268,8 @@ test('Amazon SES settings take regions only from the server, never prefill the s
   assert.equal(secret.type, ui.Input); assert.equal(secret.props.type, 'password'); assert.equal(secret.props.value, ''); assert.equal(secret.props.placeholder, 'Configured — leave blank to keep');
   const choice = named(tree, 'emailProvider');
   assert.equal(choice.type, ui.Select); assert.equal(fieldOf(tree, 'emailProvider').props.label, 'Send email campaigns with');
-  assert.deepEqual(choice.props.options, [{ value: '', label: 'Automatic' }, { value: 'cloudflare', label: 'Cloudflare' }, { value: 'ses', label: 'Amazon SES' }]);
-  assert.match(fieldOf(tree, 'emailProvider').props.description, /When both are configured, choose one/);
+  assert.deepEqual(choice.props.options, [{ value: '', label: 'Automatic' }, { value: 'cloudflare', label: 'Cloudflare' }, { value: 'ses', label: 'Amazon SES' }, { value: 'smtp', label: 'SMTP' }]);
+  assert.match(fieldOf(tree, 'emailProvider').props.description, /When more than one is configured, choose one/);
   choice.props.onChange({ target: { value: 'ses' } }); tree = view.tree();
   named(tree, 'region').props.onChange({ target: { value: 'ap-south-1' } }); tree = view.tree();
   await submit(tree);
@@ -290,6 +290,30 @@ test('Amazon SES settings take regions only from the server, never prefill the s
   assert.deepEqual(named(tree, 'region').props.options.map(option => option.value), [''], 'Without the server list there is no region to choose.');
   assert.match(fieldOf(tree, 'region').props.description, /does not list Amazon SES regions/);
   unlisted.h.unmount();
+});
+
+test('SMTP email shows only its status from the deployment settings: no form, no values', async () => {
+  for (const configured of [true, false]) {
+    const h = mount('IntegrationSettings'), calls = [], smtp = { id: 'smtpEmail', label: 'SMTP email', configured, source: configured ? 'environment' : 'unconfigured', fields: {}, secretFields: {}, updatedAt: null };
+    const options = { ...props(async (...args) => {
+      calls.push(args); const [path, method] = args;
+      if (path === '/settings/integrations') return { providers: [structuredClone(smtp)] };
+      if (path.endsWith('/calendar/status')) return { calendarId: '' };
+      if (path.endsWith('/sms-inbox/status')) return { callbackUrl: 'https://campaign.example.test/inbound/a', publicCallbacks: true };
+      if (path === '/settings/integrations/smtpEmail/test' && method === 'POST') return { ok: false, status: 'send_test_required', message: 'Synthetic SMTP check.' };
+      throw new Error('Unexpected synthetic request: ' + args.join(' '));
+    }), mode: 'keys' };
+    h.render(options); h.flush(); await settle();
+    const tree = h.render(options), section = card(tree, 'smtpEmail'), html = renderToStaticMarkup(section);
+    assert.match(html, /SMTP email/); assert.match(html, configured ? /Set up/ : /Not set up/); assert.match(html, configured ? /Deployment settings/ : /Not configured/);
+    assert.equal(elements(section).filter(node => [ui.Input, ui.Textarea, ui.Select].includes(node.type)).length, 0, 'Nothing to type: SMTP is set in the deployment settings.');
+    assert.equal(elements(section).some(node => node.type === ui.Button && text(node.props.children) === 'Save settings'), false);
+    assert.match(text(elements(section).find(node => node.type === ui.Disclosure && node.props.summary === 'Setup instructions').props.children), /EMAIL_SMTP_HOST/);
+    const check = button(section, 'Test connection');
+    assert.equal(check.props.disabled, !configured);
+    if (configured) { await check.props.onClick(); assert.deepEqual(calls.filter(call => call[0].endsWith('/test')), [['/settings/integrations/smtpEmail/test', 'POST', { projectId: 'project-a' }]]); }
+    h.unmount();
+  }
 });
 
 test('Connections shows each tool on one line with Manage for this project; credentials live only in Service keys', async () => {

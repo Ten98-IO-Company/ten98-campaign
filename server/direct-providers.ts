@@ -2,6 +2,9 @@ import { IntegrationError, fail, reportObject as plain, providerRequest, zernioC
 import type { ProviderRecord } from './provider-core.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 import { SES_REGIONS, sendSesEmail } from '@ten98/runtime';
+import { getEmailStatus, sendTransactionalEmail } from '@ten98/runtime/email';
+import { z } from 'zod';
+import { activeSuppression } from './contacts.ts';
 
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
 const number = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
@@ -22,22 +25,34 @@ function smsReceipt(data: any, env: ProviderRecord, uncertain: boolean, expected
   if (data.from != null && !phone(data.from) || data.messaging_service_sid != null && !sid(data.messaging_service_sid, 'MG')) invalid('Twilio', uncertain);
   return { providerId: data.sid, status: data.status === 'canceled' ? 'cancelled' : data.status, recipient: data.to, ...(data.from ? { sender: data.from } : {}), ...(data.messaging_service_sid ? { messagingServiceSid: data.messaging_service_sid } : {}), ...(data.error_code != null ? { errorCode: String(data.error_code).slice(0, 100) } : {}) };
 }
+// SMTP settings, named as @ten98/runtime/email names them; each also accepts NAME_FILE. They are deployment settings only:
+// Settings › Connections shows whether SMTP is set up, never the values.
+export const SMTP_SETTINGS = ['EMAIL_FROM', 'EMAIL_SMTP_HOST', 'EMAIL_SMTP_PORT', 'EMAIL_SMTP_TLS', 'EMAIL_SMTP_USER', 'EMAIL_SMTP_PASSWORD'].flatMap(name => [name, `${name}_FILE`]);
+// The runtime picks its transport from EMAIL_TRANSPORT; Campaign picks the provider itself, so an SMTP send names it.
+const smtpEnvironment = (env: ProviderRecord) => ({ ...env, EMAIL_TRANSPORT: 'smtp', EMAIL_TRANSPORT_FILE: undefined });
+/** Complete and valid SMTP settings, with the nodemailer transport installed; contacts no server. */
+export const smtpConfigured = (env: ProviderRecord) => getEmailStatus(smtpEnvironment(env)).configured;
 /**
- * The installation's direct email provider: the configured one of Amazon SES and Cloudflare Email Sending, or EMAIL_PROVIDER
- * when both are configured (null until it is chosen). With neither, Cloudflare, so the send reports what to configure.
+ * The installation's direct email provider: the configured one of Amazon SES, Cloudflare Email Sending and SMTP, or
+ * EMAIL_PROVIDER when more than one is configured (null until it names one of them). With none, Cloudflare, so the send
+ * reports what to configure.
  */
-export function emailProvider(env: ProviderRecord): 'ses' | 'cloudflare' | null {
-  const ses = Boolean(SES_REGIONS.includes(env.AWS_SES_REGION) && env.AWS_SES_ACCESS_KEY_ID && env.AWS_SES_SECRET_ACCESS_KEY && email(env.AWS_SES_FROM_ADDRESS));
-  const cloudflare = Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS);
-  if (ses && cloudflare) return env.EMAIL_PROVIDER === 'ses' || env.EMAIL_PROVIDER === 'cloudflare' ? env.EMAIL_PROVIDER : null;
-  return ses ? 'ses' : 'cloudflare';
+export function emailProvider(env: ProviderRecord): 'ses' | 'cloudflare' | 'smtp' | null {
+  const configured = {
+    ses: Boolean(SES_REGIONS.includes(env.AWS_SES_REGION) && env.AWS_SES_ACCESS_KEY_ID && env.AWS_SES_SECRET_ACCESS_KEY && email(env.AWS_SES_FROM_ADDRESS)),
+    cloudflare: Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS),
+    smtp: smtpConfigured(env),
+  };
+  const names = (['ses', 'cloudflare', 'smtp'] as const).filter(name => configured[name]);
+  if (names.length > 1) return names.find(name => name === env.EMAIL_PROVIDER) ?? null;
+  return names[0] ?? 'cloudflare';
 }
 /** Whether the installation can send transactional email: one provider is in use and its sender is configured. */
 export function emailConfigured(env: ProviderRecord): boolean {
   const provider = emailProvider(env);
-  return provider === 'ses' || provider === 'cloudflare' && Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS);
+  return provider === 'ses' || provider === 'smtp' || provider === 'cloudflare' && Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS);
 }
-export const requireEmailProvider = (env: ProviderRecord) => emailProvider(env) ?? fail(409, 'EMAIL_PROVIDER_REQUIRED', 'Amazon SES and Cloudflare are both configured. Choose the email provider in Settings › Connections.');
+export const requireEmailProvider = (env: ProviderRecord) => emailProvider(env) ?? fail(409, 'EMAIL_PROVIDER_REQUIRED', 'More than one email provider is configured. Choose the email provider in Settings › Connections.');
 // SES refuses every message from a suspended, paused or misconfigured sender, so these stop the campaign for review
 // instead of failing one recipient after another. https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html
 const SES_SENDER_BLOCKS = new Set(['AccountSuspendedException', 'SendingPausedException', 'MailFromDomainNotVerifiedException', 'NotFoundException', 'LimitExceededException']);
@@ -70,6 +85,31 @@ async function sendSes(env: ProviderRecord, body: ProviderRecord, recipient: str
   if (!validId(result.messageId)) invalid('Amazon SES', true);
   // Delivery, bounces and complaints arrive later through the SNS webhook.
   return { providerId: result.messageId, status: 'accepted', recipient };
+}
+// The runtime's own SMTP input rules (src/email.mts in @ten98/runtime 0.28.0), checked here so that content it would refuse
+// is reported as such rather than as an unconfirmed send.
+const smtpRecipient = z.email().max(254);
+const SMTP_SUBJECT_REFUSED = /[\p{C}\p{Zl}\p{Zp}]/u, SMTP_TEXT_REFUSED = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]|[\uD800-\uDFFF]/u;
+async function sendSmtp(env: ProviderRecord, body: ProviderRecord, contact: ProviderRecord, assertMapping?: () => unknown) {
+  if (!smtpRecipient.safeParse(contact.email).success) fail(400, 'INVALID_RECIPIENT', 'SMTP sends only to plain email addresses: ASCII letters and digits, and a domain with a dot.');
+  if (body.subject.length > 200 || SMTP_SUBJECT_REFUSED.test(body.subject)) fail(400, 'INVALID_DIRECT_CONTENT', 'SMTP email subjects are limited to 200 characters, without tabs or invisible formatting characters.');
+  if (Buffer.byteLength(body.text) > 65_536 || SMTP_TEXT_REFUSED.test(body.text)) fail(400, 'INVALID_DIRECT_CONTENT', 'SMTP plain-text email is limited to 64 KB, without control characters.');
+  await assertMapping?.();
+  let suppressed = false;
+  try {
+    // The runtime's isSuppressed hook runs before it connects. It is the campaign's own suppression check on the contact
+    // being sent to: its active email suppression, which holds both the project ledger entry and any unexpired provider hold.
+    await sendTransactionalEmail({ to: contact.email, subject: body.subject, text: body.text }, {
+      env: smtpEnvironment(env),
+      isSuppressed: address => (suppressed = address !== contact.email || Boolean(activeSuppression(contact, 'email'))),
+    });
+  } catch {
+    if (suppressed) fail(409, 'RECIPIENT_SUPPRESSED', 'This recipient is suppressed for email. Nothing was sent.');
+    // The runtime reports every failure alike, so one after the message was handed over cannot be told from a refusal.
+    fail(502, 'PROVIDER_UNCERTAIN', 'The SMTP server did not confirm the message. Check the server before retrying a send.', true);
+  }
+  // SMTP returns no message ID, and no delivery or bounce reports reach Campaign.
+  return { providerId: null, status: 'accepted', recipient: contact.email };
 }
 function cloudflare(env: ProviderRecord) {
   if (!/^[a-fA-F0-9]{32}$/.test(env.CLOUDFLARE_ACCOUNT_ID || '') || !env.CLOUDFLARE_EMAIL_API_TOKEN || !email(env.CLOUDFLARE_EMAIL_FROM_ADDRESS)) fail(409, 'INTEGRATION_NOT_CONFIGURED', 'Configure the Cloudflare account, Email Sending API token, and sender address in Settings › Connections.');
@@ -107,7 +147,8 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
   const api = provider === 'cloudflare' ? cloudflare(env) : null;
   if (!email(contact.email)) fail(400, 'INVALID_RECIPIENT', 'Enter a valid email recipient.');
   const subject = text(campaign.subject, 'email subject', 998); if (/[\r\n]/.test(subject)) fail(400, 'INVALID_DIRECT_CONTENT', 'Email subjects cannot contain line breaks.');
-  const sender = provider === 'ses' ? { address: env.AWS_SES_FROM_ADDRESS, name: env.AWS_SES_FROM_NAME, replyTo: env.AWS_SES_REPLY_TO_ADDRESS } : { address: env.CLOUDFLARE_EMAIL_FROM_ADDRESS, name: env.CLOUDFLARE_EMAIL_FROM_NAME, replyTo: env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS };
+  // SMTP sends from EMAIL_FROM, which the runtime reads, with no display name or reply-to address.
+  const sender: { address?: string; name?: string; replyTo?: string } = provider === 'ses' ? { address: env.AWS_SES_FROM_ADDRESS, name: env.AWS_SES_FROM_NAME, replyTo: env.AWS_SES_REPLY_TO_ADDRESS } : provider === 'cloudflare' ? { address: env.CLOUDFLARE_EMAIL_FROM_ADDRESS, name: env.CLOUDFLARE_EMAIL_FROM_NAME, replyTo: env.CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS } : {};
   const body: ProviderRecord = { from: sender.name ? { address: sender.address, name: text(sender.name, 'sender name', 200) } : sender.address, to: [contact.email], subject, text: text(campaign.text, 'plain-text email', 100000) };
   if (campaign.html) body.html = text(campaign.html, 'HTML email', 500000);
   if (sender.replyTo) { if (!email(sender.replyTo)) fail(409, 'INVALID_REPLY_TO', 'Configure a valid email reply address.'); body.reply_to = sender.replyTo; }
@@ -121,6 +162,8 @@ export async function sendDirect({ channel, campaign, contact, delivery = {}, en
     body.headers = { 'List-Unsubscribe': `<${url}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click', ...(project?.id ? { 'List-ID': `<${project.id}.${new URL(appUrl).hostname}>` } : {}) };
   }
   if (provider === 'ses') return sendSes(env, body, contact.email, delivery.id, assertMapping);
+  // Plain text only: the runtime builds the HTML part from the text, so a campaign's own HTML is not sent over SMTP.
+  if (provider === 'smtp') return sendSmtp(env, body, contact, assertMapping);
   const data = await providerRequest(`${api!.base}/send`, { method: 'POST', headers: api!.headers, body: JSON.stringify(body) }, 'Cloudflare Email Sending', assertMapping);
   const buckets = { delivered: 'delivered', permanent_bounces: 'failed', queued: 'queued', suppressed_recipients: 'suppressed' }, matches = [];
   if (data?.success !== true || !plain(data.result)) invalid('Cloudflare Email Sending', true);

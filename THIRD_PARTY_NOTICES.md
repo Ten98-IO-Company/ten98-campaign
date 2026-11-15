@@ -32,6 +32,8 @@ Campaign ports selected behaviour from these references, adapted to its own stac
 | pg (node-postgres) | 8.23.0 | MIT; Brian Carlson. |
 | qrcode-generator | 2.0.4 | MIT; Kazuhiko Arase. |
 | drizzle-orm | 0.45.2 | Apache-2.0; Drizzle Team. |
+| zod | 4.6.6 | MIT; Colin McDonnell. Needed by `@ten98/runtime/config` and `./email`. |
+| Nodemailer | 10.1.4 | MIT-0; Andris Reinman. The SMTP transport behind `@ten98/runtime/email`. |
 | @types/node | 24.10.1 | MIT; DefinitelyTyped contributors. |
 | @types/pg | 8.15.6 | MIT; DefinitelyTyped contributors. |
 | Vite | 8.3.4 | MIT. |

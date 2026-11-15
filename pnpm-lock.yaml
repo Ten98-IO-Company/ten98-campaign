@@ -9,14 +9,17 @@ importers:
   .:
     dependencies:
       '@ten98/runtime':
-        specifier: file:vendor/ten98-runtime-0.27.1.tgz
-        version: file:vendor/ten98-runtime-0.27.1.tgz(drizzle-orm@0.45.2(@types/pg@8.15.6)(pg@8.23.0))(pg@8.23.0)
+        specifier: file:vendor/ten98-runtime-0.28.0.tgz
+        version: file:vendor/ten98-runtime-0.28.0.tgz(drizzle-orm@0.45.2(@types/pg@8.15.6)(pg@8.23.0))(nodemailer@10.1.4)(pg@8.23.0)(zod@4.6.6)
       '@ten98/ui':
         specifier: file:vendor/ten98-ui-0.39.3.tgz
         version: file:vendor/ten98-ui-0.39.3.tgz(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@types/pg@8.15.6)(pg@8.23.0)
+      nodemailer:
+        specifier: 10.1.4
+        version: 10.1.4
       openid-client:
         specifier: 6.8.8
         version: 6.8.8
@@ -32,6 +35,9 @@ importers:
       react-dom:
         specifier: 19.2.8
         version: 19.2.8(react@19.2.8)
+      zod:
+        specifier: 4.6.6
+        version: 4.6.6
     devDependencies:
       '@types/node':
         specifier: 24.10.1
@@ -156,20 +162,26 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@ten98/runtime@file:vendor/ten98-runtime-0.27.1.tgz':
-    resolution: {integrity: sha512-9egr50PJBqKCDFp3yvUVJsOIKQI7cBOFh1o4shzIcpS2LODJw1++aBnl3oskqWkB+YO/VVq5q19gwjb1sIDGsQ==, tarball: file:vendor/ten98-runtime-0.27.1.tgz}
-    version: 0.27.1
+  '@ten98/runtime@file:vendor/ten98-runtime-0.28.0.tgz':
+    resolution: {integrity: sha512-12AzlWQFHUiKfKD7Qpg8fbK+BYgG+Bpr11ty+EjiyJJ/8Fvbvpq4H9bASmqZEwszcbrgDrYR6CY3xqKSz8R84A==, tarball: file:vendor/ten98-runtime-0.28.0.tgz}
+    version: 0.28.0
     engines: {node: '>=24.22.1 <25'}
     peerDependencies:
       better-auth: 1.7.7
       drizzle-orm: 0.45.2
+      nodemailer: 10.1.4
       pg: 8.23.0
+      zod: 4.6.6
     peerDependenciesMeta:
       better-auth:
         optional: true
       drizzle-orm:
         optional: true
+      nodemailer:
+        optional: true
       pg:
+        optional: true
+      zod:
         optional: true
 
   '@ten98/ui@file:vendor/ten98-ui-0.39.3.tgz':
@@ -509,6 +521,10 @@ packages:
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
+  nodemailer@10.1.4:
+    resolution: {integrity: sha512-EsMnOR2oRv4LGnWvHgcVYkkQ4O2j8KO4WTw6l+PHR4sOXo8SAgIraxtEnGDmotjbhv0hDsu3IuDIFZm8iXwO4A==}
+    engines: {node: '>=20.0.0'}
+
   oauth4webapi@3.8.8:
     resolution: {integrity: sha512-8N28E+a/oxfXWBgOMt+ZP/JUf/XR+IFbvkAEPP3gznXOMv9BpAAwiIj0TFNz3tGTPc0ZQ8zmWBNgN1nAys0gng==}
 
@@ -663,6 +679,9 @@ packages:
     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
     engines: {node: '>=0.4'}
 
+  zod@4.6.6:
+    resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
+
 snapshots:
 
   '@oxc-project/types@0.154.0': {}
@@ -714,10 +733,12 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@ten98/runtime@file:vendor/ten98-runtime-0.27.1.tgz(drizzle-orm@0.45.2(@types/pg@8.15.6)(pg@8.23.0))(pg@8.23.0)':
+  '@ten98/runtime@file:vendor/ten98-runtime-0.28.0.tgz(drizzle-orm@0.45.2(@types/pg@8.15.6)(pg@8.23.0))(nodemailer@10.1.4)(pg@8.23.0)(zod@4.6.6)':
     optionalDependencies:
       drizzle-orm: 0.45.2(@types/pg@8.15.6)(pg@8.23.0)
+      nodemailer: 10.1.4
       pg: 8.23.0
+      zod: 4.6.6
 
   '@ten98/ui@file:vendor/ten98-ui-0.39.3.tgz(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
@@ -871,6 +892,8 @@ snapshots:
 
   nanoid@3.3.20: {}
 
+  nodemailer@10.1.4: {}
+
   oauth4webapi@3.8.8: {}
 
   openid-client@6.8.8:
@@ -1011,3 +1034,5 @@ snapshots:
       fsevents: 2.3.3
 
   xtend@4.0.2: {}
+
+  zod@4.6.6: {}

@@ -49,7 +49,7 @@ test('Google Shopping is configured and connection-tested from OAuth values alon
 test('Amazon SES settings validate, stay encrypted and masked, and test the account with signed read-only calls', { skip: postgresSkip }, async t => {
   const { db, pool } = await testDatabase(t), env = {}, manager = await createIntegrationSettings({ db, env, secret }), originalFetch = globalThis.fetch;
   const fields = { region: 'eu-west-1', accessKeyId: 'AKIAFIXTUREKEY000000', secretAccessKey: 'fixture/secret/access/key/0000000000000A', fromAddress: 'receipts@example.com', configurationSet: 'campaign-feedback', snsTopicArn: 'arn:aws:sns:eu-west-1:123456789012:ses-feedback' };
-  for (const [field, value] of [['emailProvider', 'smtp'], ['region', 'mars-north-1'], ['accessKeyId', 'not-a-key'], ['secretAccessKey', 'short'], ['configurationSet', 'bad set'], ['snsTopicArn', 'arn:aws:sqs:eu-west-1:123456789012:q']]) await rejects(manager.save('amazonSes', { ...fields, [field]: value }), 'INVALID_SETTING');
+  for (const [field, value] of [['emailProvider', 'postmark'], ['region', 'mars-north-1'], ['accessKeyId', 'not-a-key'], ['secretAccessKey', 'short'], ['configurationSet', 'bad set'], ['snsTopicArn', 'arn:aws:sqs:eu-west-1:123456789012:q']]) await rejects(manager.save('amazonSes', { ...fields, [field]: value }), 'INVALID_SETTING');
   await manager.save('amazonSes', fields);
   const described = provider(manager, 'amazonSes');
   assert.equal(described.configured, true); assert.deepEqual(described.secretFields.secretAccessKey, { configured: true, source: 'saved' }); assert.ok(described.options.region.includes('eu-west-1'));

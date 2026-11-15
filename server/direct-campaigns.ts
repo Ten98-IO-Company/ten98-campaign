@@ -5,7 +5,7 @@ import { directContacts } from './schema.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { activeSuppression, createContacts, lockContacts } from './contacts.ts';
-import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions, emailProvider, requireEmailProvider } from './direct-providers.ts';
+import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions, emailProvider, emailConfigured, requireEmailProvider, SMTP_SETTINGS } from './direct-providers.ts';
 import { SES_REGIONS, classifyEmailFeedback, readResponseText, verifySnsMessage } from '@ten98/runtime';
 
 const channels = ['email', 'sms', 'whatsapp'];
@@ -73,7 +73,8 @@ const consentLabels = { email: 'email', sms: 'SMS', whatsapp: 'WhatsApp', emailM
 const credentialFields: Record<string, string[]> = { email: ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_EMAIL_API_TOKEN', 'CLOUDFLARE_EMAIL_FROM_ADDRESS', 'CLOUDFLARE_EMAIL_FROM_NAME', 'CLOUDFLARE_EMAIL_REPLY_TO_ADDRESS'], sms: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'TWILIO_MESSAGING_SERVICE_SID'], whatsapp: ['ZERNIO_API_KEY'] };
 // SES settings join the email fingerprint only once any is set, so campaigns scheduled before SES keep their hash.
 const sesFields = ['EMAIL_PROVIDER', 'AWS_SES_REGION', 'AWS_SES_ACCESS_KEY_ID', 'AWS_SES_SECRET_ACCESS_KEY', 'AWS_SES_FROM_ADDRESS', 'AWS_SES_FROM_NAME', 'AWS_SES_REPLY_TO_ADDRESS', 'AWS_SES_CONFIGURATION_SET'];
-const fingerprint = (env: any, channel: string) => createHash('sha256').update(JSON.stringify([...credentialFields[channel], ...(channel === 'email' && sesFields.some(key => env[key]) ? sesFields : [])].map(key => env[key] || ''))).digest('hex');
+// SMTP settings join the same way, with EMAIL_PROVIDER, only once one is set.
+const fingerprint = (env: any, channel: string) => createHash('sha256').update(JSON.stringify([...credentialFields[channel], ...(channel === 'email' && sesFields.some(key => env[key]) ? sesFields : []), ...(channel === 'email' && SMTP_SETTINGS.some(key => env[key]) ? ['EMAIL_PROVIDER', ...SMTP_SETTINGS] : [])].map(key => env[key] || ''))).digest('hex');
 // Transient and undetermined bounces suppress a recipient at the third within seven days (brief for ten98-campaign#77).
 const feedbackRules = { threshold: 3, windowMs: 7 * 86400000 };
 const recipientHash = (email: string) => createHash('sha256').update(email.toLowerCase()).digest('hex');
@@ -159,7 +160,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     if (requireAuthor && !(await db.execute(sql`SELECT m.role FROM memberships m JOIN projects p ON p.workspace_id = m.workspace_id WHERE p.id = ${campaign.projectId} AND m.user_id = ${campaign.scheduledBy} AND m.role IN ('owner', 'admin', 'editor')`)).rowCount) fail(409, 'ACCESS_CHANGED', 'The campaign author no longer has permission to send.');
     return project;
   }
-  function ready(channel: string) { return channel === 'email' ? emailProvider(env) === 'ses' || emailProvider(env) === 'cloudflare' && Boolean(env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_EMAIL_API_TOKEN && env.CLOUDFLARE_EMAIL_FROM_ADDRESS) : channel === 'sms' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : Boolean(env.ZERNIO_API_KEY); }
+  function ready(channel: string) { return channel === 'email' ? emailConfigured(env) : channel === 'sms' ? Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)) : Boolean(env.ZERNIO_API_KEY); }
   function unsubscribeToken(projectId: string, email: string) { const value = Buffer.from(JSON.stringify([projectId, email])).toString('base64url'); return `${value}.${createHmac('sha256', secret).update(`direct-unsubscribe:${value}`).digest('base64url')}`; }
   function unsubscribe(token: any) {
     if (typeof token !== 'string' || token.length > 1000) fail(400, 'INVALID_LINK', 'The preference link is invalid.');
