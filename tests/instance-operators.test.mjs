@@ -88,6 +88,9 @@ test('native HTTP sessions observe host revocation immediately, retain workspace
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-operator-http-')), origin = 'http://127.0.0.1:3018';
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const app = await testApp(t, { dataDir, appUrl: origin, env: {}, directScheduler: false }), { pool, url } = app.database;
+  // runCli's spawnSync blocks the event loop this test's fetch client shares with the server, so a pooled socket can sit
+  // idle past Node's 5 s keep-alive; the server then closes it as the next request reuses it (ECONNRESET). Test-only.
+  app.server.keepAliveTimeout = 60000;
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   async function request(path, { body, cookie } = {}) {
     const response = await fetch(`http://127.0.0.1:${app.server.address().port}/api${path}`, { method: body ? 'POST' : 'GET', headers: { Origin: origin, ...(cookie ? { Cookie: cookie } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
