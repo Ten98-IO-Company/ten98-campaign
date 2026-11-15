@@ -1,9 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Card, CodeBlock, ConfirmDialog, CopyButton, DataTable, DescriptionList, Disclosure, EmptyState, Field, FormActions, FormGrid, Grid, Heading, Image, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
+import { Alert, Button, Card, CodeBlock, ConfirmDialog, CopyButton, DataTable, DescriptionList, Disclosure, EmptyState, Field, FormActions, FormGrid, Grid, Heading, Image, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, Textarea, useDisplayFormat } from '@ten98/ui';
 
 type Row = Record<string, any>;
 type Props = { projectId: string; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; campaigns?: Row[]; directCampaigns?: Row[]; readOnly?: boolean; canManageSettings?: boolean; canChangeDomain?: boolean; createFor?: string; onCreateHandled?: () => void };
-const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '—';
 const blank = () => ({ name: '', destination: '', campaignId: '', utm_source: '', utm_medium: '', utm_campaign: '', utm_content: '', utm_term: '' });
 // Thrown for problems the person fixes in the destination field, so the form can show them there.
 class DestinationError extends Error {}
@@ -18,7 +17,8 @@ const localShortAddress = (value: string) => { try { return ['localhost', '127.0
 const siteSnippet = (url: string) => `<script defer src="${url.replaceAll('&', '&amp;').replaceAll('"', '&quot;')}"></script>`;
 
 export default function CampaignLinks({ projectId, request, campaigns = [], directCampaigns, readOnly = false, canManageSettings = false, canChangeDomain = false, createFor, onCreateHandled }: Props) {
-  const path = `/projects/${encodeURIComponent(projectId)}/links`, requester = useRef(request), version = useRef(0), pending = useRef(false); requester.current = request;
+  const path = `/projects/${encodeURIComponent(projectId)}/links`, requester = useRef(request), version = useRef(0), pending = useRef(false), format = useDisplayFormat(); requester.current = request;
+  const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? format.number(value) : '—';
   const [settings, setSettings] = useState<Row | null>(null), [settingsForm, setSettingsForm] = useState({ shortBaseUrl: '', allowedWebsiteOrigins: '' }), [links, setLinks] = useState<Row[]>([]), [direct, setDirect] = useState<Row[]>(directCampaigns || []);
   const [draft, setDraft] = useState(blank), [editing, setEditing] = useState<{ id: string; name: string } | null>(null), [selected, setSelected] = useState(''), [search, setSearch] = useState('');
   const [days, setDays] = useState('30'), [campaignId, setCampaignId] = useState(''), [report, setReport] = useState<{ days: number; campaignId: string; result: Row } | null>(null);

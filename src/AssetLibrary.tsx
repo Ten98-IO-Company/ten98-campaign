@@ -1,6 +1,6 @@
 import React, { type DragEvent, type ReactNode, Suspense, useEffect, useRef, useState } from 'react';
 import { AppBadge, AppIcon as Icon } from '@ten98/ui/app';
-import { Alert, AssetDetails, Button, Card, DataTable, Dialog, Disclosure, EmptyState, FileField, Grid, Inline, Link, ResourceCard, SegmentedControl, Stack, StatusLine, Tabs, Text, type FileItem } from '@ten98/ui';
+import { Alert, AssetDetails, Button, Card, DataTable, Dialog, Disclosure, EmptyState, FileField, Grid, Inline, Link, ResourceCard, SegmentedControl, Stack, StatusLine, Tabs, Text, type FileItem, useDisplayFormat, type DisplayFormatter } from '@ten98/ui';
 import { assetDeliveryIssue } from '../shared/social-posts.ts';
 
 const ZernioMediaUpload = React.lazy(() => import('./ZernioMediaUpload'));
@@ -54,12 +54,12 @@ const label = (value: string) => value ? value.charAt(0).toUpperCase() + value.s
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`;
 const source = (asset: Row) => asset.source === 'google-drive' ? 'Drive' : asset.source === 'zernio' ? 'Uploaded' : asset.sample ? 'Sample' : 'Link';
 const sourceDetail = (asset: Row) => ({ Drive: 'Google Drive', Uploaded: 'Uploaded for publishing', Sample: 'Sample creative', Link: 'Linked file' })[source(asset)];
-const when = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : '';
+const when = (format: DisplayFormatter, value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? format.dateTime(value) : '';
 const bytes = (size: unknown) => typeof size === 'number' && size > 0 ? size < 1024 * 1024 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / 1024 / 1024).toFixed(1)} MB` : '';
 const approval = (asset: Row) => <AppBadge value={asset.approval || 'pending'} label={label(asset.approval || 'pending')}/>;
 
 export default function AssetLibrary({ projectId, assets, visibleAssets, busy, canWrite, drive, driveSyncReason, connected, tab, onTabChange, related, onSync, onAddLink, onUpload, request, onDeliverySaved, onOpen, onSetUpDrive, preview }: Props) {
-  const [view, setView] = useState('grid'), [selectedId, setSelectedId] = useState(''), [uploadOpen, setUploadOpen] = useState(false);
+  const [view, setView] = useState('grid'), [selectedId, setSelectedId] = useState(''), [uploadOpen, setUploadOpen] = useState(false), format = useDisplayFormat();
   const [uploads, setUploads] = useState<Upload[]>([]), [dragging, setDragging] = useState(false), [detailTab, setDetailTab] = useState('details');
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -118,20 +118,20 @@ export default function AssetLibrary({ projectId, assets, visibleAssets, busy, c
     { key: 'kind', header: 'Type', render: a => label(a.kind) },
     { key: 'source', header: 'Source', render: a => source(a) },
     { key: 'approval', header: 'Approval', render: a => approval(a) },
-    { key: 'updated', header: 'Updated', render: a => when(a.updatedAt) || '—' },
+    { key: 'updated', header: 'Updated', render: a => when(format, a.updatedAt) || '—' },
   ]} rowActionsLabel="Actions" rowActions={a => <Button variant="ghost" size="sm" aria-label={'View ' + a.name} onClick={() => { setDetailTab('details'); setSelectedId(a.id); }}>View</Button>}/>;
 
   const uses = selected ? assetUses(selected.id, related) : [], issue = selected ? assetDeliveryIssue(selected) : '';
   const details = selected && <AssetDetails assetId={selected.id} name={selected.name} kind={label(selected.kind)} preview={preview(selected)} source={sourceDetail(selected)}
-    metadata={[['Size', bytes(selected.size)], ['Dimensions', selected.width && selected.height ? `${selected.width} × ${selected.height}` : ''], ['Duration', typeof selected.duration === 'number' ? `${Math.round(selected.duration)} s` : ''], ['Modified', when(selected.modifiedTime)], ['Tags', selected.tags?.join(', ')], ['Description', selected.description]].filter(([, value]) => value).map(([term, value]) => ({ label: term, value }))}
+    metadata={[['Size', bytes(selected.size)], ['Dimensions', selected.width && selected.height ? `${selected.width} × ${selected.height}` : ''], ['Duration', typeof selected.duration === 'number' ? `${Math.round(selected.duration)} s` : ''], ['Modified', when(format, selected.modifiedTime)], ['Tags', selected.tags?.join(', ')], ['Description', selected.description]].filter(([, value]) => value).map(([term, value]) => ({ label: term, value }))}
     original={selected.url ? <Link variant="standalone" href={selected.url} target="_blank" rel="noreferrer">Open original</Link> : undefined}
     delivery={selected.sample ? 'Not applicable' : selected.deliveryUrl ? <Link variant="standalone" href={selected.deliveryUrl} target="_blank" rel="noreferrer">Open publishing copy</Link> : 'Not prepared for publishing'}
     approvalStatus={approval(selected)} deliveryStatus={selected.sample ? 'Never sent to networks' : issue || (selected.deliveryUrl ? 'Publishing copy available' : 'Not prepared for publishing')}
-    deliveryExpiry={selected.deliverySource === 'zernio' ? when(selected.deliveryExpiresAt) || 'Expiry unverified' : selected.deliveryUrl ? 'No expiry' : 'Not applicable'}
+    deliveryExpiry={selected.deliverySource === 'zernio' ? when(format, selected.deliveryExpiresAt) || 'Expiry unverified' : selected.deliveryUrl ? 'No expiry' : 'Not applicable'}
     readOnlyReason={selected.sample ? 'This is a sample creative. Sample assets are never sent to networks.' : !canWrite ? 'You have view-only access to this project.' : undefined}
     issue={issue || undefined}
     actions={canWrite ? <Inline gap={2}><Button variant="secondary" onClick={() => openEditor('asset', selected)}>Edit details</Button>{!selected.sample && <Button variant="secondary" onClick={() => openEditor('asset-delivery', selected)}>{selected.deliveryUrl ? 'Replace publishing copy' : 'Prepare for publishing'}</Button>}</Inline> : undefined}/>;
-  const usedIn = uses.length ? <Stack as="ul" gap={3}>{uses.map(use => <Inline as="li" key={use.kind + use.id} justify="between" align="center"><Stack gap={0}><Text weight="medium">{use.label}</Text><Text tone="muted" size="sm">{use.kind}{when(use.when) ? ' · ' + when(use.when) : ''}</Text></Stack>{use.status && <AppBadge value={use.status} label={label(use.status)}/>}</Inline>)}</Stack>
+  const usedIn = uses.length ? <Stack as="ul" gap={3}>{uses.map(use => <Inline as="li" key={use.kind + use.id} justify="between" align="center"><Stack gap={0}><Text weight="medium">{use.label}</Text><Text tone="muted" size="sm">{use.kind}{when(format, use.when) ? ' · ' + when(format, use.when) : ''}</Text></Stack>{use.status && <AppBadge value={use.status} label={label(use.status)}/>}</Inline>)}</Stack>
     : <Text tone="muted">Not used in any campaign, post, booking or activation yet.</Text>;
 
   return <>

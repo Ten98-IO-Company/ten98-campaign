@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { AppliedFilters, Button, DataTable, Disclosure, EmptyState, Icon, Inline, SegmentedControl, Select, Stack, StatusLine, Switch, Text, Tooltip, filterAndSortRows, type DataColumn, type TableSort } from '@ten98/ui';
+import { AppliedFilters, Button, DataTable, Disclosure, EmptyState, Icon, Inline, SegmentedControl, Select, Stack, StatusLine, Switch, Text, Tooltip, filterAndSortRows, type DataColumn, type TableSort, useDisplayFormat } from '@ten98/ui';
 import { adAccountOptions, adItemsPath, adRows, adSetRows, adsDirectViews, adsLevelViews, adsRangeOptions, anyNetwork, anyStatus, campaignKey, filterAdAccount, levelTotals, matchesFilters, networkOptions, statusOptions } from './ads-view';
 
 type Row = Record<string, any>;
@@ -13,11 +13,12 @@ type Props = {
   request: (path: string) => Promise<any>; onLoad: () => unknown; onOpen: (campaign: any) => void;
   empty: ReactNode; children?: ReactNode;
 };
-const readLimit = 10, plural = (count: number, noun: string) => `${count} ${count === 1 ? noun : noun + 's'}`;
+const readLimit = 10;
 
 // Issue #126: one table per level (Campaigns · Ad sets · Ads) under one period and one set of filters. Selecting rows
 // narrows the next level; a row opens the campaign's details. Direct connections replace the table with their own view.
 export default function AdsManager({ view, onView, connected, busy, data, query, columns, rowActions, range, onRange, account, onAccount, hideAmounts, onHideAmounts, network, request, onLoad, onOpen, empty, children }: Props) {
+  const format = useDisplayFormat(), plural = (count: number, noun: string) => format.count(count, { one: noun, other: noun + 's' });
   const [networkFilter, setNetworkFilter] = useState(anyNetwork), [statusFilter, setStatusFilter] = useState(anyStatus), [sort, setSort] = useState<TableSort>({ key: 'spend', direction: 'desc' });
   const [selected, setSelected] = useState<string[]>([]), [selectedSets, setSelectedSets] = useState<string[]>([]), [items, setItems] = useState<Record<string, { rows?: Row[]; error?: string }>>({});
   const asked = useRef(false), mounted = useRef(true), loaded = useRef<{ data?: Row; at: Date | null; generation: number }>({ at: null, generation: 0 });
@@ -79,7 +80,7 @@ export default function AdsManager({ view, onView, connected, busy, data, query,
         {level && connected && all.length > 0 && <Select aria-label="Ad account" width="auto" value={account} options={accounts} onChange={event => onAccount(event.currentTarget.value)}/>}
       </Inline>
       {level && connected && <Inline gap={3} align="center">
-        <Text tone="muted" size="sm">{busy && !data ? 'Loading campaigns…' : loaded.current.at ? `Updated ${loaded.current.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Not loaded'}</Text>
+        <Text tone="muted" size="sm">{busy && !data ? 'Loading campaigns…' : loaded.current.at ? `Updated ${format.dateTime(loaded.current.at)}` : 'Not loaded'}</Text>
         <Button variant="ghost" size="sm" icon={<Icon name="refresh" size={16}/>} disabled={busy} onClick={() => { void onLoad(); }}>Refresh</Button>
         <Switch label="Hide amounts" checked={hideAmounts} onCheckedChange={onHideAmounts}/>
       </Inline>}

@@ -1,5 +1,5 @@
 import React, { type ReactNode, useEffect, useRef, useState } from 'react';
-import { Alert, Button, Card, Checkbox, ConfirmDialog, Disclosure, Field, FormActions, FormGrid, Inline, Input, Link, ReviewSummary, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
+import { Alert, Button, Card, Checkbox, ConfirmDialog, Disclosure, Field, FormActions, FormGrid, Inline, Input, Link, ReviewSummary, Stack, StatusLine, Text, Textarea, useDisplayFormat } from '@ten98/ui';
 
 type CalendarEvent = { id: string; etag?: string; summary: string; description?: string; start: { date?: string; dateTime?: string }; end: { date?: string; dateTime?: string }; htmlLink?: string; managed?: boolean; projectId?: string; plan?: { collection: string; recordId: string; accountId?: string } };
 type PlanReview = { fingerprint: string; calendarId: string; projectId: string; upserts: (CalendarEvent & { action: string })[]; deletions: CalendarEvent[]; view: string };
@@ -9,7 +9,7 @@ const localTime = (value: string) => { const date = new Date(value); if (!Number
 const providerLink = (value?: string) => { try { const url = new URL(value || ''); return url.protocol === 'https:' && !url.username && !url.password ? url.href : ''; } catch { return ''; } };
 
 export default function GoogleCalendar({ projectId, canWrite, request, fromDate, toDate, onEvents, onOpenIntegrations, agenda }: Props) {
-  const today = new Date();
+  const today = new Date(), format = useDisplayFormat();
   const [status, setStatus] = useState<any>(null), [events, setEvents] = useState<CalendarEvent[]>([]), [, setLoaded] = useState(false);
   const [from, setFrom] = useState(fromDate || dateInput(new Date(today.getFullYear(), today.getMonth(), 1))), [to, setTo] = useState(toDate || dateInput(new Date(today.getFullYear(), today.getMonth() + 1, 0)));
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [editing, setEditing] = useState<string | null>(null);
@@ -84,7 +84,8 @@ export default function GoogleCalendar({ projectId, canWrite, request, fromDate,
   function edit(event: CalendarEvent) {
     setEditing(event.id); setDraft({ summary: event.summary, description: event.description || '', allDay: Boolean(event.start.date), start: event.start.date || localTime(event.start.dateTime || ''), end: event.end.date || localTime(event.end.dateTime || ''), etag: event.etag || '', calendarId: status.calendarId });
   }
-  function when(value: { date?: string; dateTime?: string }) { return value.date || (value.dateTime ? new Date(value.dateTime).toLocaleString() : 'Time unavailable'); }
+  // An all-day event's date is a calendar day; the formatter shows that day in every time zone.
+  function when(value: { date?: string; dateTime?: string }) { return value.date ? format.date(value.date) : value.dateTime ? format.dateTime(value.dateTime) : 'Time unavailable'; }
   const eventActions = (event: CalendarEvent) => { const managed = event.managed && event.projectId === projectId, link = providerLink(event.htmlLink); return <Inline gap={2}>
     {link && <Link href={link} target="_blank" rel="noopener noreferrer">Open in Google</Link>}
     {managed && canWrite && <><Button variant="secondary" size="sm" disabled={busy} onClick={() => edit(event)}>Edit</Button><Button variant="danger" size="sm" disabled={busy} onClick={() => setDeleting({ ...event, calendarId: status.calendarId })}>Delete</Button></>}

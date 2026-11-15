@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { postDisplayStatus } from '../shared/post-schedule.ts';
-import { Button, Card, DataTable, EmptyState, Heading, Icon, Inline, MetricCard, MetricGrid, Popover, SegmentedControl, Stack, Tabs, Text } from '@ten98/ui';
+import { Button, Card, DataTable, EmptyState, Heading, Icon, Inline, MetricCard, MetricGrid, Popover, SegmentedControl, Stack, Tabs, Text, useDisplayFormat } from '@ten98/ui';
 
 type Row = { id: string; [key: string]: any };
 export type CampaignItemKind = 'post' | 'placement' | 'activation';
@@ -51,7 +51,7 @@ export function campaignItems(campaignId: string, posts: Row[], placements: Row[
 }
 
 export default function CampaignDetail({ campaign, posts, placements, activations, canWrite, money, date, statusBadge, postTitle, onBack, onEdit, onAdd, onOpen, projectId, request }: Props) {
-  const [tab, setTab] = useState('overview'), [filter, setFilter] = useState('all'), [adding, setAdding] = useState(false), [loaded, setLoaded] = useState<Loaded | null>(null);
+  const [tab, setTab] = useState('overview'), [filter, setFilter] = useState('all'), [adding, setAdding] = useState(false), [loaded, setLoaded] = useState<Loaded | null>(null), format = useDisplayFormat();
   // Results load when the tab opens, over the campaign so far (up to a year).
   useEffect(() => {
     if (tab !== 'results' || loaded || !request || !projectId) return;
@@ -91,7 +91,7 @@ export default function CampaignDetail({ campaign, posts, placements, activation
     </MetricGrid>
     <Tabs label="Campaign sections" value={tab} onValueChange={setTab} items={[
       { value: 'overview', label: 'Overview', content: <Card as="section" headingLevel={3} title="Up next">{upNext.length ? table(upNext, 'Up next in ' + campaign.name) : <Text tone="muted">Nothing scheduled yet. {items.length ? 'Schedule an item to see it here.' : 'Add a post, booking or field activity to start.'}</Text>}</Card> },
-      { value: 'results', label: 'Results', content: <Stack gap={3}>{loaded ? null : <Text tone="muted">Loading results…</Text>}<MetricGrid list label={'Results for ' + campaign.name}>{results.map(result => <MetricCard key={result.label} label={result.label} hint={result.hint} {...(result.value === null ? { unavailable: result.failed ? 'Couldn’t load' : 'Not reported yet' } : { value: result.value.toLocaleString() })}/>)}</MetricGrid>{canWrite && <Inline><Button variant="ghost" onClick={onEdit}>Update entered totals</Button></Inline>}</Stack> },
+      { value: 'results', label: 'Results', content: <Stack gap={3}>{loaded ? null : <Text tone="muted">Loading results…</Text>}<MetricGrid list label={'Results for ' + campaign.name}>{results.map(result => <MetricCard key={result.label} label={result.label} hint={result.hint} {...(result.value === null ? { unavailable: result.failed ? 'Couldn’t load' : 'Not reported yet' } : { value: format.number(result.value) })}/>)}</MetricGrid>{canWrite && <Inline><Button variant="ghost" onClick={onEdit}>Update entered totals</Button></Inline>}</Stack> },
       { value: 'items', label: `Items · ${items.length}`, content: <Stack gap={3}><SegmentedControl label="Item type" value={filter} onValueChange={setFilter} options={filters.map(([value, label]) => ({ value, label }))}/>{table(shown, 'Items in ' + campaign.name)}</Stack> },
     ]}/>
   </Stack>;

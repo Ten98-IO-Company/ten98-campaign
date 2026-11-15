@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, MetricCard, MetricGrid, Select, Stack, Text, Textarea, useConfirmDialog } from '@ten98/ui';
+import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, MetricCard, MetricGrid, Select, Stack, Text, Textarea, useConfirmDialog, useDisplayFormat, type DisplayFormatter } from '@ten98/ui';
 import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentChannelList, consentWording, type ActivationType, type ConsentChannel } from '../shared/offline-activations.ts';
 import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
 
@@ -9,17 +9,18 @@ type Props = { projectId: string; brand: string; campaigns: Row[]; activations: 
 type Draft = { name: string; type: ActivationType; campaignId: string; status: string; startAt: string; endAt: string; location: string; notes: string; ownerId: string; teamIds: string[]; materials: Material[]; budget: string; spent: string; reached: string; promoCode: string };
 
 const STATUS_LABELS: Record<string, string> = { planned: 'Planned', completed: 'Completed', cancelled: 'Cancelled' };
+// Names the browser zone that DateTimeField's local wall time is entered in; this reads the zone, it formats nothing.
 const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 // DateTimeField edits local wall time (2026-11-07T10:00); the server stores ISO instants.
 const localInput = (iso?: string) => { if (!iso) return ''; const date = new Date(iso); return Number.isFinite(date.getTime()) ? new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''; };
 const instant = (local: string) => local ? new Date(local).toISOString() : '';
 const amount = (value: string, label: string, whole = false) => { const number = value.trim() === '' ? 0 : Number(value); if (!Number.isFinite(number) || number < 0 || whole && !Number.isInteger(number)) throw new Error(`${label} must be ${whole ? 'a whole number' : 'a number'} of zero or more.`); return number; };
-export const money = (value: number, currency = 'AED') => new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 0 }).format(value || 0);
-export function when(activation: Row) {
-  const start = new Date(activation.startAt), end = new Date(activation.endAt), day = { weekday: 'short', day: 'numeric', month: 'short' } as const, time = { hour: '2-digit', minute: '2-digit' } as const;
+// Field budgets and spend are shown in whole currency units; the stored amounts are unchanged.
+export const money = (format: DisplayFormatter, value: number, currency = 'AED') => format.currency(value || 0, currency, { wholeUnits: true });
+export function when(format: DisplayFormatter, activation: Row) {
+  const start = new Date(activation.startAt), end = new Date(activation.endAt);
   if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return 'Not scheduled';
-  const sameDay = start.toDateString() === end.toDateString();
-  return `${start.toLocaleDateString(undefined, day)}, ${start.toLocaleTimeString(undefined, time)} – ${sameDay ? '' : end.toLocaleDateString(undefined, day) + ', '}${end.toLocaleTimeString(undefined, time)}`;
+  return `${format.dateTime(start)} – ${format.dateTime(end)}`;
 }
 // The landing page with UTM tags naming the activation, so web analytics and the short link agree on the source.
 export function trackingDestination(landing: string, activation: Row, campaignName = '') {
@@ -29,6 +30,7 @@ export function trackingDestination(landing: string, activation: Row, campaignNa
   return url.href;
 }
 export function TrackingLink({ link }: { link: Row }) {
+  const format = useDisplayFormat();
   if (link.archived) return <Stack gap={1}>
     <Inline gap={2} align="center"><Text as="strong" weight="semibold">{link.shortUrl}</Text><Badge tone="neutral">Inactive</Badge></Inline>
     <Text tone="muted" size="sm">This link was archived in Links &amp; tracking, so its short address and QR code no longer redirect. Restore it there to use it again.</Text>
@@ -37,7 +39,7 @@ export function TrackingLink({ link }: { link: Row }) {
     <Image src={link.qrSvgUrl} alt={'QR code for ' + link.name} fit="contain" width={144} height={144}/>
     <Stack gap={1}>
       <Text as="strong" weight="semibold">{link.shortUrl}</Text>
-      <Text tone="muted" size="sm">{`${(link.clicks || 0).toLocaleString()} link visits · ${(link.qrScans || 0).toLocaleString()} QR scans`}</Text>
+      <Text tone="muted" size="sm">{`${format.count(link.clicks || 0, { one: 'link visit', other: 'link visits' })} · ${format.count(link.qrScans || 0, { one: 'QR scan', other: 'QR scans' })}`}</Text>
       <Inline gap={2}><CopyButton value={link.shortUrl} label="Copy link" messages={{ copied: 'Short link copied.' }}/><Link href={link.qrSvgUrl} download={`${link.name} QR.svg`}>Download QR</Link></Inline>
     </Stack>
   </Inline>;
@@ -50,13 +52,13 @@ export function rollUp(rows: Row[], results: Record<string, Result>) {
   return { ...total, costPerLead: total.leads ? total.spent / total.leads : null };
 }
 export function ResultsSummary({ rows, results, currency }: { rows: Row[]; results: Record<string, Result> | null; currency: string | null }) {
-  const total = rollUp(rows, results || {}), pending = results === null;
+  const total = rollUp(rows, results || {}), pending = results === null, format = useDisplayFormat();
   return <MetricGrid list label="Field results" minItemWidth="sm">
-    <MetricCard label="People reached" value={total.reached.toLocaleString()} hint="Counted by the team"/>
-    {pending ? <MetricCard label="Leads" unavailable="Loading…"/> : <MetricCard label="Leads" value={total.leads.toLocaleString()} hint="Contacts with consent"/>}
-    {pending ? <MetricCard label="Link and QR visits" unavailable="Loading…"/> : <MetricCard label="Link and QR visits" value={total.visits.toLocaleString()}/>}
-    {currency ? <MetricCard label="Spend" value={money(total.spent, currency)} hint={`of ${money(total.budget, currency)} planned`}/> : <MetricCard label="Spend" unavailable="Choose one campaign"/>}
-    {currency && total.costPerLead !== null && !pending ? <MetricCard label="Cost per lead" value={money(total.costPerLead, currency)}/> : <MetricCard label="Cost per lead" unavailable={currency ? 'No leads yet' : 'Choose one campaign'}/>}
+    <MetricCard label="People reached" value={format.number(total.reached)} hint="Counted by the team"/>
+    {pending ? <MetricCard label="Leads" unavailable="Loading…"/> : <MetricCard label="Leads" value={format.number(total.leads)} hint="Contacts with consent"/>}
+    {pending ? <MetricCard label="Link and QR visits" unavailable="Loading…"/> : <MetricCard label="Link and QR visits" value={format.number(total.visits)}/>}
+    {currency ? <MetricCard label="Spend" value={money(format, total.spent, currency)} hint={`of ${money(format, total.budget, currency)} planned`}/> : <MetricCard label="Spend" unavailable="Choose one campaign"/>}
+    {currency && total.costPerLead !== null && !pending ? <MetricCard label="Cost per lead" value={money(format, total.costPerLead, currency)}/> : <MetricCard label="Cost per lead" unavailable={currency ? 'No leads yet' : 'Choose one campaign'}/>}
   </MetricGrid>;
 }
 type Lead = { name: string; email: string; phone: string; channels: ConsentChannel[] };
@@ -109,7 +111,7 @@ export function patchBody(draft: Draft, existing: Row | null) {
 }
 
 export default function OfflineActivations({ projectId, brand, campaigns, activations, request, readOnly = false, onChanged, createFor, createIntent, onCreateHandled, onCreateCampaign, onGuardChange }: Props) {
-  const path = `/projects/${encodeURIComponent(projectId)}/activations`, requester = useRef(request); requester.current = request;
+  const path = `/projects/${encodeURIComponent(projectId)}/activations`, requester = useRef(request), format = useDisplayFormat(); requester.current = request;
   const [filter, setFilter] = useState(''), [members, setMembers] = useState<Row[]>([]), [editing, setEditing] = useState<Row | 'new' | null>(null), [draft, setDraft] = useState<Draft>(blankDraft()), [dirty, setDirty] = useState(false);
   const [link, setLink] = useState<Row | null>(null), [linkLoading, setLinkLoading] = useState(false), opened = useRef(''), [landing, setLanding] = useState(''), [linkError, setLinkError] = useState(''), [linking, setLinking] = useState(false);
   const [material, setMaterial] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState(''), [removing, setRemoving] = useState<Row>(), [capturing, setCapturing] = useState<Row | null>(null), [results, setResults] = useState<Record<string, Result> | null>(null);
@@ -192,10 +194,10 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
         emptyState={<EmptyState title={campaigns.length ? 'No field activity planned' : 'Create a campaign first'} description={campaigns.length ? 'Plan a roadshow stop, door-to-door area, event, street team or sampling shift.' : 'Activations belong to a campaign, so their spend and leads roll up into it.'}/>}
         columns={[
           { key: 'name', header: 'Activation', rowHeader: true, render: activation => <Stack gap={0}><Text as="strong" weight="semibold">{activation.name}</Text><Text tone="muted" size="sm">{ACTIVATION_TYPE_LABELS[activation.type as ActivationType] || activation.type}{filter ? '' : ' · ' + (campaignOf(activation.campaignId)?.name || 'Campaign removed')}</Text></Stack> },
-          { key: 'startAt', header: 'When', render: when },
+          { key: 'startAt', header: 'When', render: activation => when(format, activation) },
           { key: 'location', header: 'Where', wrap: true, minWidth: 'sm', render: activation => activation.location },
-          { key: 'spent', header: 'Spend', numeric: true, render: activation => { const currency = campaignOf(activation.campaignId)?.currency || 'AED'; return `${money(activation.spent, currency)} of ${money(activation.budget, currency)}`; } },
-          { key: 'results', header: 'Leads', numeric: true, render: activation => results?.[activation.id] ? results[activation.id].leads.toLocaleString() : '—' },
+          { key: 'spent', header: 'Spend', numeric: true, render: activation => { const currency = campaignOf(activation.campaignId)?.currency || 'AED'; return `${money(format, activation.spent, currency)} of ${money(format, activation.budget, currency)}`; } },
+          { key: 'results', header: 'Leads', numeric: true, render: activation => results?.[activation.id] ? format.number(results[activation.id].leads) : '—' },
           { key: 'status', header: 'Status', render: activation => <Badge tone={activation.status === 'completed' ? 'success' : activation.status === 'cancelled' ? 'neutral' : 'info'}>{STATUS_LABELS[activation.status] || activation.status}</Badge> },
         ]}
         rowActionsLabel="Actions" rowActions={activation => <Inline gap={2}>{editable && activation.status !== 'cancelled' && <Button size="sm" onClick={() => setCapturing(activation)} aria-label={`Capture leads at ${activation.name}`}>Capture leads</Button>}<Button variant="secondary" size="sm" onClick={() => open(activation)} aria-label={`${editable ? 'Edit' : 'View'} ${activation.name}`}>{editable ? 'Edit' : 'View'}</Button></Inline>}/>

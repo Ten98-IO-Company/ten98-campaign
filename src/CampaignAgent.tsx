@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, ConfirmDialog, DescriptionList, Disclosure, EmptyState, Field, Inline, Link, Stack, Text, Textarea } from '@ten98/ui';
+import { Alert, Badge, Button, Card, ConfirmDialog, DescriptionList, Disclosure, EmptyState, Field, Inline, Link, Stack, Text, Textarea, useDisplayFormat } from '@ten98/ui';
 
 type Props = { projectId: string; canWrite: boolean; request: (path: string, method?: string, body?: unknown, key?: string) => Promise<any>; onSaved: (collection: string) => void; onOpenAdDraft?: (draft: Record<string, any>) => void; onOpenIntegrations?: () => void };
 const label: Record<string, string> = { campaigns: 'Campaign draft', posts: 'Social post draft', placements: 'OOH booking draft', ads: 'Ad creative draft' };
 // Model and draft text keeps its line breaks without native pre-wrap markup.
 const lines = (text: unknown) => <Text preserveWhitespace>{String(text)}</Text>;
 export default function CampaignAgent({ projectId, canWrite, request, onSaved, onOpenAdDraft, onOpenIntegrations }: Props) {
+  const format = useDisplayFormat();
   const [status, setStatus] = useState<any>(null), [runs, setRuns] = useState<any[]>([]), [message, setMessage] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [confirming, setConfirming] = useState<any>(null);
   const key = useRef<{ input: string; value: string } | null>(null), active = useRef(true), path = `/projects/${projectId}/agent`;
   async function history() { const data = await request(path + '/history'); if (active.current) setRuns(data.runs); }
@@ -32,7 +33,7 @@ export default function CampaignAgent({ projectId, canWrite, request, onSaved, o
     {!status?.configured && status && <Alert tone="warning" actions={onOpenIntegrations && <Button variant="secondary" size="sm" onClick={onOpenIntegrations}>Open Connections</Button>}>Writing with AI isn’t set up yet. Ask your admin to turn it on in Settings › Connections.</Alert>}{!canWrite && <Text tone="muted" size="sm">Your workspace role is view only.</Text>}
     <Text size="sm" tone="muted">Model: {status?.model || 'Not configured'}</Text>
   </Stack></Card>{error && <Alert tone="danger">{error}</Alert>}
-  <Stack gap={4}>{runs.map(item => <Card as="section" key={item.id} title={item.message} description={`${new Date(item.createdAt).toLocaleString()} · ${item.model}`} headingLevel={2} actions={<Badge>{item.status}</Badge>}><Stack gap={3}>{item.content && <Stack gap={0}>{lines(item.content)}</Stack>}{item.error && <Alert tone="warning">{item.error}</Alert>}
+  <Stack gap={4}>{runs.map(item => <Card as="section" key={item.id} title={item.message} description={`${format.dateTime(item.createdAt)} · ${item.model}`} headingLevel={2} actions={<Badge>{item.status}</Badge>}><Stack gap={3}>{item.content && <Stack gap={0}>{lines(item.content)}</Stack>}{item.error && <Alert tone="warning">{item.error}</Alert>}
     {item.actions?.map((action: any) => <Card as="article" key={action.id} title={action.data.name || 'Post suggestion'} description={label[action.collection]} headingLevel={3}><Stack gap={2}>{action.data.content && <Stack gap={0}>{lines(action.data.content)}</Stack>}{action.data.description && <Stack gap={0}>{lines(action.data.description)}</Stack>}<DescriptionList items={Object.entries(action.data).filter(([name]) => !['content', 'name', 'description', 'status'].includes(name)).map(([name, value]) => ({ key: name, term: name.replace(/([A-Z])/g, ' $1'), description: Array.isArray(value) ? value.join(', ') : String(value ?? '') }))}/><Inline><Button variant="secondary" disabled={busy || !canWrite || action.status === 'applied'} onClick={() => applyDraft(action)}>{action.collection === 'ads' ? 'Review in ad builder' : action.status === 'applied' ? 'Draft saved' : 'Save as draft'}</Button></Inline></Stack></Card>)}
     <Disclosure summary="Usage and cost" variant="plain"><Inline gap={3}><Text as="span">{item.usage.requests} model requests</Text><Text as="span">{item.usage.promptTokens ?? '—'} input / {item.usage.completionTokens ?? '—'} output tokens</Text><Text as="span">{typeof item.usage.cost === 'number' ? `$${item.usage.cost.toFixed(6)}` : 'Cost not reported'}</Text></Inline></Disclosure>
     {item.status === 'uncertain' && canWrite && <Inline><Link href="https://openrouter.ai/activity" target="_blank" rel="noreferrer">Review OpenRouter activity</Link><Button variant="secondary" disabled={busy} onClick={() => setConfirming(item)}>Mark usage reviewed</Button></Inline>}
