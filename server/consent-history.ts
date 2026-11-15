@@ -21,21 +21,25 @@ import { directConsentEvents, directConsentEvidence, directConsentLookupLimits, 
 export const consentKeyLabel = 'ten98-campaign:consent-address:v1', consentKeyVersion = 1;
 export type ConsentAction = 'granted' | 'withdrawn' | 'suppressed' | 'suppression_ended' | 'contact_deleted';
 export type ConsentEvent = { contactId: string; channel: string; action: ConsentAction; source: string; actor: string; destination: string; evidence?: string };
-// 60 lookups at once, refilled at one a minute.
+// Up to 60 lookups at once, refilled at one a minute (so up to 119 in the first hour, then 60 an hour).
 const lookupBurst = 60, lookupInterval = 60_000;
 
 export function createConsentHistory({ db, secret }: { db: Database; secret: string }) {
   const key = Buffer.from(hkdfSync('sha256', secret, '', consentKeyLabel, 32));
   const addressHash = (address: string) => createHmac('sha256', key).update(address).digest('base64url');
 
-  /** Appends events for one project; call it with the change's own transaction. Events without an address are skipped. */
+  /**
+   * Appends events for one project; call it with the change's own transaction. An event of a contact without an address
+   * for its channel (say, suppressing SMS for an email-only contact) is kept with an empty hash, so it is listed for the
+   * contact but never matches an address. The database stamps each event's time and order.
+   */
   async function record(ex: Executor, projectId: string, events: ConsentEvent[]) {
-    const kept = events.filter(event => event.destination);
+    const kept = events.filter(event => event.destination || event.contactId);
     if (!kept.length) return;
     const [project] = await ex.select({ workspaceId: projects.workspace_id }).from(projects).where(eq(projects.id, projectId));
     if (!project) throw new Error('Consent history needs an existing project.');
     const at = new Date().toISOString(), rows = kept.map(event => ({ ...event, id: randomUUID() }));
-    await ex.insert(directConsentEvents).values(rows.map(event => ({ id: event.id, workspace_id: project.workspaceId, project_id: projectId, contact_id: event.contactId, channel: event.channel, action: event.action, source: event.source, actor: event.actor, destination_hash: addressHash(event.destination), key_version: consentKeyVersion, created_at: at })));
+    await ex.insert(directConsentEvents).values(rows.map(event => ({ id: event.id, workspace_id: project.workspaceId, project_id: projectId, contact_id: event.contactId, channel: event.channel, action: event.action, source: event.source, actor: event.actor, destination_hash: event.destination ? addressHash(event.destination) : '', key_version: consentKeyVersion, created_at: at })));
     // Evidence is optional free text; it is removed with the contact (foreign-key cascade), the event is not.
     const evidence = rows.filter(event => event.evidence && event.action !== 'contact_deleted').map(event => ({ event_id: event.id, workspace_id: project.workspaceId, project_id: projectId, contact_id: event.contactId, evidence: event.evidence! }));
     if (evidence.length) await ex.insert(directConsentEvidence).values(evidence);

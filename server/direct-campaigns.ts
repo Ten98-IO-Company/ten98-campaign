@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { createStore } from './database.ts';
-import { directContacts } from './schema.ts';
+import { directConsentEvents, directContacts, projects } from './schema.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { activeSuppression, createContacts, lockContacts } from './contacts.ts';
@@ -312,7 +312,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       const permissions = (before: any, after: any) => Object.entries(consentLabels).filter(([channel]) => !!before?.consents?.[channel] !== !!after?.consents?.[channel]).map(([channel, label]) => `${label} ${after?.consents?.[channel] ? 'on' : 'off'}`).join(', ');
       if (!id && method === 'GET') send(200, { contacts: await contacts.list(project.id) });
       // History by email or phone, normalized as contacts are; the hash is compared on the server and never returned.
-      else if (id === 'history' && !action && method === 'GET') { const target = contacts.destination(Object.fromEntries(['email', 'phone'].filter(key => url.searchParams.get(key)).map(key => [key, url.searchParams.get(key)]))), value = target.email || target.phone; if (!value) fail(400, 'DESTINATION_REQUIRED', 'Provide an email address or phone number.'); send(200, { history: await history.forAddress(project.id, user.id, value) }); }
+      else if (id === 'history' && !action && method === 'GET') { const phone = url.searchParams.get('phone'); if (phone && !/^\+[1-9]\d{6,14}$/.test(phone.trim())) fail(400, 'INVALID_PHONE', 'Use an international E.164 phone number, such as +971501234567, with the + encoded as %2B.'); const target = contacts.destination(Object.fromEntries(['email', 'phone'].filter(key => url.searchParams.get(key)).map(key => [key, url.searchParams.get(key)]))), value = target.email || target.phone; if (!value) fail(400, 'DESTINATION_REQUIRED', 'Provide an email address or phone number.'); send(200, { history: await history.forAddress(project.id, user.id, value) }); }
       else if (id && action === 'history' && method === 'GET') { if (!await contacts.get(project.id, id)) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { history: await history.forContact(project.id, id) }); }
       else if (!id && method === 'POST') { const contact = await contacts.save(project.id, body, undefined, { create: true, audit: async (tx, _previous, record) => { await history.record(tx, project.id, changes(undefined, record, 'manual')); const changed = permissions(undefined, record); if (changed) await log(tx, `Permission recorded for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(201, { contact }); }
       else if (id === 'import' && method === 'POST') { const result = await contacts.import(project.id, body, { audit: async (tx, imported, previous) => { await history.record(tx, project.id, imported.contacts.flatMap((record: any) => changes(previous.get(record.id), record, 'csv_import'))); if (imported.imported) await log(tx, `Contacts imported from CSV by ${actor}: ${imported.created} created, ${imported.updated} updated, ${imported.skipped} skipped.${granted(body?.consents)}`); } }); send(200, result); }
@@ -530,7 +530,26 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
   async function backfillSms() {
     for (const { data: campaign } of await resultRows(db.execute(sql`SELECT data FROM direct_campaigns ORDER BY seq`))) { if (campaign.channel !== 'sms') continue; for (const delivery of await deliveries(campaign.id)) { if (!delivery.smsAccountSid && campaign.credentialHash === fingerprint(env, 'sms') && !env.TWILIO_MESSAGING_SERVICE_SID) Object.assign(delivery, { smsAccountSid: env.TWILIO_ACCOUNT_SID, smsSender: env.TWILIO_FROM_NUMBER }); await recordSms(campaign, delivery); } }
   }
-  return { handle, contacts, processPending, receiveTwilio, receiveSes, handleUnsubscribe,
+  /**
+   * Contacts saved before migration 0013 have no history. At start-up, each contact without any event gets one baseline
+   * event per current permission and permanent suppression (source migration_baseline, actor system, dated now and saying
+   * so by its source). It runs under each project's contacts lock and skips contacts that already have events, so it is
+   * safe on every start and from several instances.
+   */
+  async function baselineConsentHistory() {
+    for (const { id: projectId } of await db.select({ id: projects.id }).from(projects)) await db.transaction(async tx => {
+      await lockContacts(tx, projectId);
+      const recorded = new Set((await tx.selectDistinct({ id: directConsentEvents.contact_id }).from(directConsentEvents).where(eq(directConsentEvents.project_id, projectId))).map(row => row.id));
+      const destinationOf = (record: any, channel: string) => (channel === 'email' || channel === 'emailMarketing' ? record.email : record.phone) || '';
+      const events: ConsentEvent[] = (await contacts.list(projectId, tx)).filter(record => !recorded.has(record.id)).flatMap((record: any) => [
+        ...Object.keys(consentLabels).filter(channel => record.consents?.[channel]).map(channel => ({ contactId: record.id, channel, action: 'granted' as const, source: 'migration_baseline', actor: 'system', destination: destinationOf(record, channel), evidence: record.consentEvidence?.[channel]?.source })),
+        ...Object.entries(record.suppression || {}).filter(([, held]: [string, any]) => held && !held.expiresAt).map(([channel, held]: [string, any]) => ({ contactId: record.id, channel, action: 'suppressed' as const, source: 'migration_baseline', actor: 'system', destination: destinationOf(record, channel), evidence: held.reason })),
+      ]);
+      await history.record(tx, projectId, events);
+    });
+  }
+
+  return { handle, contacts, baselineConsentHistory, processPending, receiveTwilio, receiveSes, handleUnsubscribe,
     /** Attaches the inbox at once; the returned promise records existing campaign SMS in it. Await it before serving requests. */
     attachSmsInbox(service: any) { smsInbox = service; return attaching = backfillSms(); },
     close() { closed = true; },

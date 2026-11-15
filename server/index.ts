@@ -162,6 +162,7 @@ export async function createApp(options: AppOptions = {}) {
   const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
   const integrationSettings = await createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
+  await direct.baselineConsentHistory();
   const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts });
   await direct.attachSmsInbox(smsInbox);
   const links = createLinks({ db, appUrl });
