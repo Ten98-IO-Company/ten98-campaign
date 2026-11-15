@@ -72,7 +72,7 @@ test('failed claims roll back, and of two competing first sign-ups exactly one c
   try {
     const request = await start(first), competing = await start(second);
     const body = { name: 'Owner', email: 'owner@example.test', password: 'first sign-up fixture password', workspaceName: 'Owner team' };
-    const tables = ['users', 'instance_operators', 'instance_operator_audit', 'workspaces', 'memberships', 'sessions'];
+    const tables = ['"user"', 'instance_operators', 'instance_operator_audit', 'workspaces', 'memberships', 'session'];
     for (const table of ['instance_operator_audit', 'memberships']) {
       const restore = await failInserts(pool, table, 'synthetic setup failure');
       assert.equal((await request('/auth/setup', body)).status, 500);
@@ -81,12 +81,12 @@ test('failed claims roll back, and of two competing first sign-ups exactly one c
       await restore();
     }
     // Both sign-ups pass the unlocked pre-check; only the installation row lock stops the second from also claiming.
-    const gate = await blockWrites(pool, 'users');
+    const gate = await blockWrites(pool, '"user"');
     const results = Promise.all([request('/auth/setup', body), competing('/auth/setup', { ...body, email: 'other@example.test', workspaceName: 'Other team' })]);
     await gate.waiting(2); await gate.release();
     const settled = await results;
     assert.deepEqual(settled.map(result => result.status).sort(), [201, 409]);
-    for (const table of ['users', 'instance_operators', 'workspaces', 'memberships', 'sessions']) assert.equal(await count(pool, table), 1);
+    for (const table of ['"user"', 'instance_operators', 'workspaces', 'memberships', 'session']) assert.equal(await count(pool, table), 1);
     const winner = settled.find(result => result.status === 201).data;
     assert.deepEqual((await pool.query('SELECT id, email FROM "user"')).rows, [{ id: winner.user.id, email: winner.user.email }]);
     const audit = (await pool.query('SELECT user_id, action, source FROM instance_operator_audit')).rows;

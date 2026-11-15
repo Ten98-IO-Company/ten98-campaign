@@ -154,7 +154,7 @@ test('an invitation accepted twice at once joins once, and one new address invit
   await seedAccounts(pool, { memberships: [['workspace-b', 'owner', 'owner']] });
   const inA = await create('twice@example.test'), inB = await request('/workspaces/workspace-b/invitations', { method: 'POST', body: { email: 'twice@example.test', role: 'editor' } });
   // Without the email lock both acceptances see no account and race to create it.
-  const users_ = await blockWrites(pool, 'users');
+  const users_ = await blockWrites(pool, '"user"');
   const signups = [accept(inA), accept(inB)];
   await users_.waiting(2); await users_.release();
   const outcomes = await Promise.all(signups);

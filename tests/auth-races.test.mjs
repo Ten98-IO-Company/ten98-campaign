@@ -27,14 +27,14 @@ test('an old-password login already verifying cannot create a session after a pa
   await seedUser(db, 'user-a', 'fixture@example.test', await hashPassword(oldPassword));
   const auth = createAuth(db, raceConfig), reset = async password => setLocalPassword(hostAuth(db), db, 'user-a', await hashPassword(password));
   // Sign-in first: it holds the account lock while it writes its session, so the change waits and then ends that session.
-  let gate = await blockWrites(pool, 'sessions');
+  let gate = await blockWrites(pool, 'session');
   const res = response(), signingIn = auth.login(client, res, { email: 'fixture@example.test', password: oldPassword });
   await gate.waiting(1); const changing = reset(nextPassword); await gate.waiting(2); await gate.release();
   assert.equal((await signingIn).id, 'user-a'); await changing;
   assert.equal(await count(db, 'session'), 0, 'The change ended the session the old password had just opened.');
   assert.equal(await auth.user({ headers: { cookie: cookieOf(res) } }), null);
   // Change first: it holds the account lock while it writes the credential, so the old-password sign-in waits and is refused.
-  gate = await blockWrites(pool, 'accounts');
+  gate = await blockWrites(pool, 'account');
   const changingAgain = reset('third fixture password 2026'); await gate.waiting(1);
   const late = response(), refused = auth.login(client, late, { email: 'fixture@example.test', password: nextPassword }).then(() => 'signed in', error => error.status);
   await gate.waiting(2); await gate.release(); await changingAgain;
@@ -50,7 +50,7 @@ test('a password change cannot replace credentials or recreate a session revoked
   const auth = createAuth(db, raceConfig), signIn = async () => { const res = response(); await auth.login(client, res, { email: 'fixture@example.test', password: oldPassword }); return { headers: { cookie: cookieOf(res) }, socket: client.socket }; };
   const deviceA = await signIn(), deviceB = await signIn();
   // Device B signs out device A first; A's password change waits for the account lock and finds its session ended.
-  const gate = await blockWrites(pool, 'sessions');
+  const gate = await blockWrites(pool, 'session');
   const revoking = auth.revokeOtherSessions(deviceB, 'user-a'); await gate.waiting(1);
   const res = response(), changing = auth.changePassword(deviceA, res, 'user-a', oldPassword, 'replacement fixture password 2026');
   await gate.waiting(2); await gate.release();
@@ -182,7 +182,7 @@ test('two first sign-ins for one new identity provision a single account', pg, a
   const oidc = oidcFixture(t, db, config); oidc.claims = { iss: config.oidcIssuer, sub: 'parallel-subject', email: 'parallel@example.test', email_verified: true };
   const flows = [await oidc.start(), await oidc.start()];
   // Without the identity lock both callbacks see no account and race to create one.
-  const gate = await blockWrites(pool, 'users');
+  const gate = await blockWrites(pool, '"user"');
   const sign = flows.map(flow => oidc.callback(flow).then(res => res.status, error => error.status));
   // Two waiters: one blocked inserting the account, the other on the identity lock (or, without it, on its own insert).
   await gate.waiting(2); await gate.release();
@@ -274,7 +274,7 @@ test('two parallel OIDC callbacks for one invitation provision one account and o
   const oidc = oidcFixture(t, db, config); oidc.claims = invitedIdentity(config, 'invitee@example.test');
   const flows = [await oidc.start('?invite=' + token), await oidc.start('?invite=' + token)];
   // One callback blocks inserting the account while the other waits behind the workspace and invitation locks.
-  const gate = await blockWrites(pool, 'users');
+  const gate = await blockWrites(pool, '"user"');
   const sign = flows.map(flow => oidc.callback(flow).then(res => res.status, error => error.status));
   await gate.waiting(2); await gate.release();
   assert.deepEqual(await Promise.all(sign), [302, 302]);
