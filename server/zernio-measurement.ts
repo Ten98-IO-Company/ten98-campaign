@@ -1,7 +1,8 @@
-import { sql } from 'drizzle-orm';
+import { and, eq, inArray, ne } from 'drizzle-orm';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 type Ctx = OperationContext & { body: any };
 import { IntegrationError, operation, scopedAccounts, requireAccount, adAccounts, fail, reportObject as object } from './provider-core.ts';
+import { integrationOperations } from './schema.ts';
 
 const platforms = new Set(['metaads', 'googleads', 'linkedinads', 'tiktokads', 'pinterestads', 'xads', 'openaiads', 'redditads']);
 const eventTypes = ['order_created', 'lead_created', 'items_added', 'contents_viewed', 'checkout_started', 'registration_completed', 'subscription_created', 'trial_started', 'appointment_scheduled', 'page_viewed', 'app_installed', 'app_opened'];
@@ -84,7 +85,7 @@ export async function handleZernioMeasurement(context: Ctx, api: ZernioApi, prof
     if (!object(body) || Object.keys(body).some(key => !allowed.includes(key)) || !label(body.name, account.platform === 'tiktokads' ? 40 : 200) || !body.name.trim() || account.platform === 'tiktokads' && /[\p{Extended_Pictographic}\uFE0F\u20E3]/u.test(body.name)) fail(400, 'INVALID_MEASUREMENT_SETTINGS', 'Enter a valid tag name using the fields available for this platform.');
     if (body.defaultEventType !== undefined && (account.platform !== 'openaiads' || !eventTypes.includes(body.defaultEventType))) fail(400, 'INVALID_MEASUREMENT_SETTINGS', 'Choose a supported ChatGPT conversion event.');
     const payload = { adAccountId, name: body.name.trim(), ...(body.defaultEventType ? { defaultEventType: body.defaultEventType } : {}) };
-    const unresolved = async () => { if (creating && (await context.db.execute(sql`SELECT id FROM integration_operations WHERE project_id = ${context.project.id} AND request_key <> ${req.headers['idempotency-key'] as string} AND status IN ('pending','uncertain') AND action_path = 'POST /integrations/measurement/:id/tags/create'`)).rowCount) fail(409, 'OPERATION_UNCERTAIN', 'Review the previous tracking tag creation before creating another pixel.'); };
+    const unresolved = async () => { if (creating && (await context.db.select({ id: integrationOperations.id }).from(integrationOperations).where(and(eq(integrationOperations.project_id, context.project.id), ne(integrationOperations.request_key, req.headers['idempotency-key'] as string), inArray(integrationOperations.status, ['pending', 'uncertain']), eq(integrationOperations.action_path, 'POST /integrations/measurement/:id/tags/create')))).length) fail(409, 'OPERATION_UNCERTAIN', 'Review the previous tracking tag creation before creating another pixel.'); };
     await unresolved();
     // ponytail: unknown tag creation blocks this project; use persisted per-account resource locks if concurrent account provisioning is needed.
     const outcome = await operation(context, async key => {

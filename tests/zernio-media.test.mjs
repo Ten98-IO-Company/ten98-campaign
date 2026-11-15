@@ -252,7 +252,7 @@ test('parallel duplicate preparation, transfer and completion mint one grant, se
     const readHeld = new Promise(resolve => { heldRead = resolve; }), readReleased = new Promise(resolve => { releaseRead = resolve; });
     pool.query = async function (...args) {
       const result = await query.apply(this, args), text = typeof args[0] === 'string' ? args[0] : args[0]?.text || '';
-      if (holdRead && text.startsWith('SELECT data FROM zernio_media_uploads WHERE id=')) { holdRead = false; heldRead(); await readReleased; }
+      if (holdRead && text.startsWith('select "data" from "zernio_media_uploads" where ("zernio_media_uploads"."id" =')) { holdRead = false; heldRead(); await readReleased; }
       return result;
     };
     let duplicate;

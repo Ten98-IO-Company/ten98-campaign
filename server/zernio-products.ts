@@ -3,7 +3,8 @@ type Ctx = OperationContext & { body: any };
 import { createHash } from 'node:crypto';
 import { IntegrationError, operation, claimFence, scopedAccounts, requireAccount, reportObject as object , fail } from './provider-core.ts';
 import { validPostInstant } from '../shared/social-posts.ts';
-import { sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
+import { zernioProductCreateReceipts } from './schema.ts';
 
 const text = (value: any, max: any) => typeof value === 'string' && value.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(value);
 const nullableText = (value: any, max: any) => value == null || text(value, max);
@@ -343,13 +344,14 @@ export async function handleZernioProducts(context: Ctx, api: ZernioApi, profile
       const resource = JSON.stringify(['shopify', ready.account.platformUserId]);
       // One draft creation per native store at a time; the fence stays held until a later claim finds this receipt resolved.
       if (!await claimFence(db, 'zernio_product_creates', resource, context.project.id, key)) fail(409, 'PRODUCT_PREVIOUS_OUTCOME_UNRESOLVED', 'This draft was not sent. Review the earlier creation outcome before creating another product in this store.');
-      await db.execute(sql`INSERT INTO zernio_product_create_receipts (project_id, request_key, account_id, native_product_id) VALUES (${context.project.id}, ${key}, ${accountId}, NULL)`);
+      await db.insert(zernioProductCreateReceipts).values({ project_id: context.project.id, request_key: key, account_id: accountId, native_product_id: null });
       // The provider transport calls observeReceipt synchronously; the native ID write it starts is awaited before any outcome is recorded.
+      // A query builder only runs when awaited, so execute() starts the write now.
       let recorded: Promise<unknown> | undefined;
       const observeReceipt = (response: any) => {
         try {
           scope(response, before.account, profileId); scope(response.product, before.account, profileId);
-          if (response.product.accountId === accountId && response.product.platform === 'shopify' && identifier(response.product.id)) recorded = db.execute(sql`UPDATE zernio_product_create_receipts SET native_product_id=${response.product.id} WHERE project_id=${context.project.id} AND request_key=${key}`);
+          if (response.product.accountId === accountId && response.product.platform === 'shopify' && identifier(response.product.id)) recorded = db.update(zernioProductCreateReceipts).set({ native_product_id: response.product.id }).where(and(eq(zernioProductCreateReceipts.project_id, context.project.id), eq(zernioProductCreateReceipts.request_key, key))).execute();
         } catch (error) { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
       };
       const title = body.title.trim(), response = await api('/commerce/products', {}, { accountId, title, ...(Object.hasOwn(body, 'descriptionHtml') ? { descriptionHtml: body.descriptionHtml } : {}), status: 'draft', variants: [{ price: body.price }] }, key, 'POST', observeReceipt).finally(() => recorded);

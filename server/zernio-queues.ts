@@ -1,7 +1,8 @@
 import type { OperationContext, ZernioApi } from './provider-core.ts';
 import { createHash } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { and, eq, inArray, like, ne } from 'drizzle-orm';
 import { fail, reportObject as object, IntegrationError, operation, validProviderInstant } from './provider-core.ts';
+import { integrationOperations } from './schema.ts';
 
 const validId = (value: any) => typeof value === 'string' && value.length > 0 && value.length <= 500 && !/[\s\u0000-\u001f\u007f]/.test(value);
 const id = (value: any) => { if (!validId(value)) fail(400, 'INVALID_QUEUE', 'Choose a valid publishing queue.'); return value; };
@@ -58,7 +59,7 @@ export function assertQueueReceipt(remote: any, post: any, profileId: any) {
 function uncertain(error: any): never { if (error instanceof IntegrationError) error.uncertain = true; throw error; }
 async function unresolved(context: OperationContext & { body: any }) {
   // ponytail: an unknown queue mutation blocks this project until reviewed; persist per-queue locks if simultaneous recovery is needed.
-  if ((await context.db.execute(sql`SELECT id FROM integration_operations WHERE project_id=${context.project.id} AND request_key<>${context.req.headers['idempotency-key'] as string} AND status IN ('pending','uncertain') AND action_path LIKE 'POST /integrations/queues/%'`)).rowCount) fail(409, 'QUEUE_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous publishing queue change before changing another schedule. This new change has not been sent.');
+  if ((await context.db.select({ id: integrationOperations.id }).from(integrationOperations).where(and(eq(integrationOperations.project_id, context.project.id), ne(integrationOperations.request_key, context.req.headers['idempotency-key'] as string), inArray(integrationOperations.status, ['pending', 'uncertain']), like(integrationOperations.action_path, 'POST /integrations/queues/%')))).length) fail(409, 'QUEUE_PREVIOUS_OUTCOME_UNRESOLVED', 'Review the previous publishing queue change before changing another schedule. This new change has not been sent.');
 }
 function editable(body: any) {
   if (typeof body.name !== 'string' || !body.name.trim() || body.name.length > 200 || /[\u0000-\u001f\u007f]/.test(body.name) || !timezone(body.timezone) || typeof body.active !== 'boolean') fail(400, 'INVALID_QUEUE_SETTINGS', 'Enter a queue name, IANA timezone and active state.');
