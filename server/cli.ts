@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { sql } from 'drizzle-orm';
 import { assertSchema, closeDatabase, getDatabase, migrate, type Database } from './database.ts';
-import { hashPassword, hasLocalPassword, insertAccount, setLocalPassword } from './auth.ts';
+import { accountByEmail, hashPassword, hasAnyAccount, hasLocalPassword, insertAccount, setLocalPassword } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
 
 class CliError extends Error {}
@@ -14,8 +13,8 @@ async function account(command: string, db: Database) {
   let input; try { input = JSON.parse(raw); } catch { throw new CliError('Supply valid JSON account input.'); }
   const email = typeof input?.email === 'string' ? input.email.trim().toLowerCase() : '';
   if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new CliError('Supply a valid email address.');
-  if (!(await db.execute(sql`SELECT id FROM users LIMIT 1`)).rowCount) throw new CliError('Complete first-run setup in the app before provisioning other users.');
-  const existing = (await db.execute(sql`SELECT id FROM users WHERE email = ${email}`)).rows[0] as { id: string } | undefined;
+  if (!await hasAnyAccount(db)) throw new CliError('Complete first-run setup in the app before provisioning other users.');
+  const existing = await accountByEmail(db, email);
   if (command === 'grant-operator' || command === 'revoke-operator') {
     if (!existing) throw new CliError('The account does not exist. Create it first.');
     const enabled = command === 'grant-operator', changed = await db.transaction(tx => setInstanceOperator(tx, existing.id, enabled, 'host'));

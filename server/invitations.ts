@@ -1,9 +1,10 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
-import { advisoryLock, hashPassword, HttpError, insertAccount, lockWorkspace, memberRole, publicUser } from './auth.ts';
+import { accountByEmail, advisoryLock, hashPassword, HttpError, insertAccount, lockWorkspace, memberRole, publicUser, type Credential } from './auth.ts';
 import type { Database, Executor } from './database.ts';
 import type { ProviderRecord } from './provider-core.ts';
+import { users } from './schema.ts';
 
 function fail(status: number, message: string): never { throw new HttpError(status, message); }
 const digest = (token: string) => createHash('sha256').update(token).digest('hex');
@@ -40,7 +41,7 @@ export async function joinInvitation(tx: Executor, invite: ProviderRecord, userI
 export async function revokeMemberInvitations(tx: Executor, workspaceId: string, userId: string, role: string | null): Promise<void> {
   const now = Date.now(), { rows } = await tx.execute(sql`SELECT id, role FROM workspace_invitations WHERE workspace_id = ${workspaceId} AND inviter_id = ${userId} AND accepted_at IS NULL AND revoked_at IS NULL`);
   for (const row of rows as ProviderRecord[]) if (!mayGrantWorkspaceRole(role, row.role)) await tx.execute(sql`UPDATE workspace_invitations SET revoked_at = ${now} WHERE id = ${row.id} AND accepted_at IS NULL AND revoked_at IS NULL`);
-  if (role === null) await tx.execute(sql`UPDATE workspace_invitations SET revoked_at = ${now} WHERE workspace_id = ${workspaceId} AND email = (SELECT email FROM users WHERE id = ${userId}) AND accepted_at IS NULL AND revoked_at IS NULL`);
+  if (role === null) await tx.execute(sql`UPDATE workspace_invitations SET revoked_at = ${now} WHERE workspace_id = ${workspaceId} AND email = (SELECT email FROM ${users} WHERE id = ${userId}) AND accepted_at IS NULL AND revoked_at IS NULL`);
 }
 function object(body: any, allowed: string[]) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'Use only the fields shown in the invitation form.');
@@ -52,7 +53,7 @@ function email(value: unknown) {
   return result;
 }
 type AccountRow = { id: string; name: string; email: string; isOperator: unknown };
-const account = async (db: Executor, mail: string) => await first(db.execute(sql`SELECT id, name, email, EXISTS (SELECT 1 FROM instance_operators o WHERE o.user_id = users.id) AS "isOperator" FROM users WHERE email = ${mail}`)) as AccountRow | undefined;
+const account = (db: Executor, mail: string): Promise<AccountRow | undefined> => accountByEmail(db, mail);
 // Team changes re-read the actor's role under the workspace lock; the role read before the transaction may be stale.
 async function lockedRole(tx: Executor, workspaceId: string, userId: string): Promise<string> {
   const role = await lockWorkspace(tx, workspaceId) ? await memberRole(tx, workspaceId, userId) : undefined;
@@ -85,7 +86,7 @@ export async function handleInvitations(context: ProviderRecord) {
     object(details, ['name', 'password']);
     if (user && !signedIn) fail(403, `Sign out and sign in as ${invite.email} to accept this invitation.`);
     if (existing && !signedIn) fail(401, 'Sign in with the invited account before accepting this invitation.');
-    let name: string | undefined, hash: string | undefined;
+    let name: string | undefined, hash: Credential | undefined;
     if (!existing) {
       if (typeof establish !== 'function') fail(500, 'The invitation sign-in service is unavailable.');
       if (typeof details.name !== 'string' || !details.name.trim() || details.name.length > 120 || /[\u0000-\u001f\u007f]/.test(details.name)) fail(400, 'Enter your name using at most 120 characters.');

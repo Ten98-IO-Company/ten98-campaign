@@ -3,10 +3,14 @@ import { promisify } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { clientLimitKey, parseTrustedProxies, resolveClientAddress } from '@ten98/runtime';
 import type { Database, Executor } from './database.ts';
 import { joinInvitation, lockInvitation } from './invitations.ts';
+import { advisoryLock, lockUser } from './locks.ts';
+import { users } from './schema.ts';
+
+export { advisoryLock, lockUser, lockWorkspace } from './locks.ts';
 
 export interface AuthConfig { appUrl: string; sessionSecret: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[]; trustedProxies?: string | string[] }
 export interface PublicUser { id: string; name: string; email: string; isOperator: boolean }
@@ -32,9 +36,13 @@ function storedSecret(dataDir: string, provided: string | undefined, filename: s
   }
 }
 export const sessionSecret = (dataDir: string, provided?: string) => storedSecret(dataDir, provided, 'session-secret', 'SESSION_SECRET');
-export async function hashPassword(password: string): Promise<string> {
+declare const credentialBrand: unique symbol;
+/** A password hash that only hashPassword makes; account writes accept nothing else, so this module owns the hash format. */
+export type Credential = string & { readonly [credentialBrand]: true };
+/** The only call to the password hasher. Callers hash before taking locks, so the locks stay short. */
+export async function hashPassword(password: string): Promise<Credential> {
   const salt = randomBytes(16).toString('hex');
-  return `scrypt$${salt}$${(await derive(password, salt, 64, { N: 65536, maxmem: 128 * 1024 * 1024 })).toString('hex')}`;
+  return `scrypt$${salt}$${(await derive(password, salt, 64, { N: 65536, maxmem: 128 * 1024 * 1024 })).toString('hex')}` as Credential;
 }
 async function verify(password: string, encoded: string | null | undefined): Promise<boolean> {
   const [, salt = 'absent-account', expected = '0'.repeat(128)] = (encoded || '').split('$');
@@ -46,18 +54,17 @@ export function cookies(req: IncomingMessage): Record<string, string> {
   return Object.fromEntries((req.headers.cookie || '').split(';').map(part => part.trim().split(/=(.*)/s)).filter(part => part[0]).map(([key, value]) => [key, value || '']));
 }
 const first = async <T>(query: Promise<{ rows: unknown[] }>): Promise<T | undefined> => (await query).rows[0] as T | undefined;
-// Lock order (issue #25): installation → workspaces → invitations → advisory (email:, oidc:) → users row.
-export const advisoryLock = (tx: Executor, key: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
-export const lockUser = (tx: Executor, userId: string) => first<{ id: string; password: string | null }>(tx.execute(sql`SELECT id, password FROM users WHERE id = ${userId} FOR UPDATE`));
-/** Per-workspace mutex for membership, ownership and invitation changes; returns false when the workspace is gone. */
-export const lockWorkspace = async (tx: Executor, workspaceId: string) => Boolean((await tx.execute(sql`SELECT id FROM workspaces WHERE id = ${workspaceId} FOR UPDATE`)).rowCount);
 export const memberRole = async (executor: Executor, workspaceId: string, userId: string) => (await first<{ role: string }>(executor.execute(sql`SELECT role FROM memberships WHERE workspace_id = ${workspaceId} AND user_id = ${userId}`)))?.role;
 // Account storage is reached only through this module, so the move to the shared identity preset (ten98-code-system#97)
 // changes one file. A null password hash is an SSO-only account.
-export const insertAccount = (tx: Executor, account: { id: string; name: string; email: string; passwordHash: string | null }) => tx.execute(sql`INSERT INTO users VALUES (${account.id}, ${account.name}, ${account.email}, ${account.passwordHash})`);
+export const insertAccount = (tx: Executor, account: { id: string; name: string; email: string; passwordHash: Credential | null }) => tx.execute(sql`INSERT INTO users VALUES (${account.id}, ${account.name}, ${account.email}, ${account.passwordHash})`);
+/** The account with this (normalised) email, and whether it holds instance operator authority. */
+export const accountByEmail = (executor: Executor, email: string) => first<{ id: string; name: string; email: string; isOperator: boolean }>(executor.execute(sql`SELECT id, name, email, EXISTS (SELECT 1 FROM instance_operators o WHERE o.user_id = ${users}.id) AS "isOperator" FROM ${users} WHERE email = ${email}`));
+export const hasAnyAccount = async (executor: Executor) => (await executor.select({ id: users.id }).from(users).limit(1)).length > 0;
+export const updateDisplayName = (executor: Executor, userId: string, name: string) => executor.update(users).set({ name }).where(eq(users.id, userId));
 export const hasLocalPassword = async (executor: Executor, userId: string) => Boolean((await first<{ password: string | null }>(executor.execute(sql`SELECT password FROM users WHERE id = ${userId}`)))?.password);
 /** Host recovery: under the user lock, replaces the local password, retires any reset link and ends every session. */
-export async function setLocalPassword(tx: Executor, userId: string, passwordHash: string): Promise<void> {
+export async function setLocalPassword(tx: Executor, userId: string, passwordHash: Credential): Promise<void> {
   await lockUser(tx, userId);
   await tx.execute(sql`UPDATE users SET password = ${passwordHash} WHERE id = ${userId}`);
   await tx.execute(sql`DELETE FROM password_resets WHERE user_id = ${userId}`);

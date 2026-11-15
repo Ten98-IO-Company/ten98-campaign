@@ -12,20 +12,16 @@
     "reason": "Ad-spend approvals, receipts and idempotency over JSONB records with row locks. Converts to typed queries with exact BIGINT money in the relational redesign (unified-stack step 4); paid-work accounting results must stay identical."
   },
   "server/auth.ts": {
-    "count": 43,
-    "reason": "Accounts, passwords and sessions on Campaign's own tables, replaced by Better Auth through @ten98/runtime/auth (unified-stack step 2, ten98-code-system#97). The file also holds the advisoryLock, lockUser and lockWorkspace helpers that non-identity modules call; step 2 keeps them with an unchanged API and moves their statements to their own module."
+    "count": 41,
+    "reason": "Accounts, passwords and sessions on Campaign's own tables. Replaced by Better Auth through @ten98/runtime/auth (unified-stack step 2, ten98-code-system#97); the shared lock helpers now live in server/locks.ts."
   },
   "server/calendar.ts": {
     "count": 8,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through auth.ts's advisoryLock helper, which must keep their order in the typed version."
-  },
-  "server/cli.ts": {
-    "count": 2,
-    "reason": "Host account commands (create user, reset password, operator grants). Replaced by Better Auth and the shared team controller (unified-stack step 2, ten98-code-system#97 and #116)."
+    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through the shared advisoryLock helper (server/locks.ts), which must keep their order in the typed version."
   },
   "server/contacts.ts": {
     "count": 18,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through auth.ts's advisoryLock helper, which must keep their order in the typed version."
+    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through the shared advisoryLock helper (server/locks.ts), which must keep their order in the typed version."
   },
   "server/database.ts": {
     "count": 3,
@@ -40,36 +36,40 @@
     "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); its FOR UPDATE row locks and advisory locks must keep their order in the typed version."
   },
   "server/index.ts": {
-    "count": 30,
+    "count": 29,
     "reason": "Route-handler SQL in the plain HTTP server (setup, session, workspaces, members, health). Moves onto the framework route table in unified-stack step 3 and becomes typed queries in step 4."
   },
   "server/instance-operators.ts": {
-    "count": 2,
+    "count": 1,
     "reason": "Instance operator grants under a row lock. Replaced by the shared team controller once ten98-code-system#116 ships (unified-stack step 2)."
   },
   "server/integration-settings.ts": {
     "count": 4,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through auth.ts's advisoryLock helper, which must keep their order in the typed version."
+    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through the shared advisoryLock helper (server/locks.ts), which must keep their order in the typed version."
   },
   "server/integrations.ts": {
     "count": 9,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through auth.ts's advisoryLock helper, which must keep their order in the typed version."
+    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through the shared advisoryLock helper (server/locks.ts), which must keep their order in the typed version."
   },
   "server/invitations.ts": {
-    "count": 14,
+    "count": 13,
     "reason": "Memberships and invitations under the workspace row lock. Replaced by the shared team controller once ten98-code-system#116 ships (unified-stack step 2)."
   },
   "server/links.ts": {
     "count": 36,
     "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); its FOR UPDATE row locks and advisory locks must keep their order in the typed version."
   },
+  "server/locks.ts": {
+    "count": 3,
+    "reason": "Transaction locks shared by every module (advisory, account row and workspace row FOR UPDATE), moved out of server/auth.ts unchanged. They become typed Drizzle .for(\"update\") selects and a typed advisory-lock helper with the team controller on Drizzle (ten98-code-system#116)."
+  },
   "server/native-google-ads.ts": {
     "count": 4,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through auth.ts's advisoryLock helper, which must keep their order in the typed version."
+    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through the shared advisoryLock helper (server/locks.ts), which must keep their order in the typed version."
   },
   "server/native-microsoft-ads.ts": {
     "count": 6,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through auth.ts's advisoryLock helper, which must keep their order in the typed version."
+    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through the shared advisoryLock helper (server/locks.ts), which must keep their order in the typed version."
   },
   "server/ooh.ts": {
     "count": 14,
@@ -105,7 +105,7 @@
   },
   "server/zernio-contacts.ts": {
     "count": 6,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through auth.ts's advisoryLock helper, which must keep their order in the typed version."
+    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through the shared advisoryLock helper (server/locks.ts), which must keep their order in the typed version."
   },
   "server/zernio-leads.ts": {
     "count": 6,
