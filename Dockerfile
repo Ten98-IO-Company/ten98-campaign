@@ -22,7 +22,7 @@ RUN pnpm build && pnpm prune --prod --ignore-scripts
 FROM node:24.22.1-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
 # Openship passes no build args, so the defaults are what ships there: APP_VERSION must equal package.json's version
 # (tests/image-labels.test.mjs fails CI otherwise) and APP_REVISION is overridden by `--build-arg` where one is available.
-ARG APP_VERSION=0.40.0
+ARG APP_VERSION=0.41.0
 ARG APP_REVISION=unknown
 LABEL org.opencontainers.image.title="Ten98 Campaign" \
       org.opencontainers.image.description="Open-source campaign management for per-platform social publishing, advertising, OOH media and digital assets" \

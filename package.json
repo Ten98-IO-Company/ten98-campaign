@@ -1,6 +1,6 @@
 {
   "name": "ten98-campaign",
-  "version": "0.40.0",
+  "version": "0.41.0",
   "private": true,
   "packageManager": "pnpm@11.19.0",
   "type": "module",
