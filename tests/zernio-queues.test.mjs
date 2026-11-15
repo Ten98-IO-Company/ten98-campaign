@@ -11,6 +11,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { useTestDisplayFormat } from './display-format.ts';
 
 async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-queue-')), originalFetch = globalThis.fetch, origin = 'https://queue.example.test', calls = [], queues = [], remotePosts = new Map();
@@ -208,7 +209,7 @@ test('queue approval cards show verified weekly timing and block stale approval 
     // The whole approvals page on its "All" view (state 4) with the server's queue item as the loaded queue (state 0).
     const render = entry => {
       let index = 0; const useState = initial => { const current = index++; return [current === 0 ? { requireApproval: true, posts: [entry] } : current === 4 ? 'all' : initial, () => {}]; };
-      const scope = { React, useState, useEffect() {}, useRef: value => ({ current: value }), useFocusReturn: () => () => {}, PostVariantPreview: () => null, PLATFORM_RULES: {}, reviewKeyAction: () => null, adSpendActionLabel: String, adSpendPlatformLabel: String, formatMinorUnits: String, document: { getElementById: () => null }, ...ui };
+      const scope = { React, useState, useEffect() {}, useRef: value => ({ current: value }), useFocusReturn: () => () => {}, useDisplayFormat: useTestDisplayFormat, PostVariantPreview: () => null, PLATFORM_RULES: {}, reviewKeyAction: () => null, adSpendActionLabel: String, adSpendPlatformLabel: String, formatMinorUnits: String, document: { getElementById: () => null }, ...ui };
       return renderToStaticMarkup(new Function(...Object.keys(scope), code + '; return ContentApprovals;')(...Object.values(scope))({ projectId: 'project', role: 'owner', request() {} }));
     };
     let markup = render(item); assert.match(markup, /Visible launch queue/); assert.match(markup, /America\/New_York/); assert.match(markup, /Monday 09:00/); assert.match(markup, /next free slot assigned on submission/); assert.doesNotMatch(markup, /No planned publishing time/); assert.doesNotMatch(markup, /disabled=""[^>]*>Approve post/);
