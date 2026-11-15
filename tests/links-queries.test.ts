@@ -210,7 +210,9 @@ test('website intake counts every request in both buckets and adds repeat events
     assert.equal((await f.rows('SELECT * FROM website_event_ids')).length, 5);
     const buckets = async () => Object.fromEntries((await f.rows('SELECT bucket, SUM(count)::int AS total FROM website_event_limits GROUP BY bucket')).map(row => [row.bucket, row.total]));
     assert.deepEqual(await buckets(), { '*': 6, [siteToken]: 6 }, 'Both buckets count every request, repeated events included.');
-    await f.pool.query("INSERT INTO website_event_limits VALUES ('*', $1, 10000) ON CONFLICT (bucket, minute) DO UPDATE SET count = 10000", [Math.floor(Date.now() / 60000)]);
+    // Full for this minute and the next, so the request is refused even if the minute turns over while it runs.
+    const minute = Math.floor(Date.now() / 60000);
+    await f.pool.query("INSERT INTO website_event_limits VALUES ('*', $1, 10000), ('*', $2, 10000) ON CONFLICT (bucket, minute) DO UPDATE SET count = 10000", [minute, minute + 1]);
     const before = (await buckets())[siteToken];
     assert.equal((await send('pageview', '/c')).status, 429, 'The shared bucket stops intake first.');
     assert.equal((await buckets())[siteToken], before, 'The site bucket is not counted once the shared one refuses.');
