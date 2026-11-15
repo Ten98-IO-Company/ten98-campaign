@@ -6,6 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { format } from './fixtures/display-format.ts';
 
 const source = await readFile(new URL('../src/ZernioMediaUpload.tsx', import.meta.url), 'utf8');
 function handler(name, next, context) {
@@ -16,7 +17,7 @@ function handler(name, next, context) {
 }
 const fileOptions = { maxSize: 5_000_000_000, formats: [{ contentType: 'image/jpeg', extensions: ['jpg', 'jpeg'], kind: 'image' }, { contentType: 'video/mp4', extensions: ['mp4'], kind: 'video' }, { contentType: 'application/pdf', extensions: ['pdf'], kind: 'document' }] };
 const metadataSource = stripTypeScriptTypes(source.slice(source.indexOf('export function mediaFileMetadata'), source.indexOf('\nexport default function')).replace('export ', ''));
-const metadata = new Function(`return (${metadataSource});`)();
+const metadata = new Function('createDisplayFormatter', `return (${metadataSource});`)(ui.createDisplayFormatter);
 const baseAttempt = { id: 'upload-reviewed', projectId: 'project-one', filename: 'creative.jpg', contentType: 'image/jpeg', size: 1024, status: 'awaiting_upload' };
 const statuses = ['preparing', 'awaiting_upload', 'uploading', 'transfer_uncertain', 'uploaded', 'completed', 'cancelled', 'preparation_failed', 'expired'];
 function acceptance(overrides = {}) {
@@ -134,7 +135,7 @@ test('shared transfer progress preserves unknown length, receipt uncertainty and
   const labels = new Function(stripTypeScriptTypes(source.match(/^const labels:[^\n]+/m)[0]) + '; return labels;')();
   const noop = () => {}, file = { name: baseAttempt.filename, type: baseAttempt.contentType, size: baseAttempt.size };
   function render(overrides = {}) {
-    const context = { React, ...Object.fromEntries(Object.entries(ui).filter(([name]) => /^[A-Z]/.test(name))), assetId: 'asset-reviewed', configured: true, options: { ...fileOptions, asset: { id: 'asset-reviewed', name: 'Original creative' } }, disabled: false, busy: '', canChoose: true, file, attempt: { ...baseAttempt, status: 'transfer_uncertain', expiresAt: '2026-10-27T12:00:00Z' }, knownAttempt: { current: baseAttempt.id }, labels, progress: null, error: '', notice: '', terminal: false, setRefresh: noop, choose: noop, upload: noop, act: noop, check: noop, recover: noop, complete: noop, cancel: noop, ...overrides };
+    const context = { React, ...Object.fromEntries(Object.entries(ui).filter(([name]) => /^[A-Z]/.test(name))), format, assetId: 'asset-reviewed', configured: true, options: { ...fileOptions, asset: { id: 'asset-reviewed', name: 'Original creative' } }, disabled: false, busy: '', canChoose: true, file, attempt: { ...baseAttempt, status: 'transfer_uncertain', expiresAt: '2026-10-27T12:00:00Z' }, knownAttempt: { current: baseAttempt.id }, labels, progress: null, error: '', notice: '', terminal: false, setRefresh: noop, choose: noop, upload: noop, act: noop, check: noop, recover: noop, complete: noop, cancel: noop, ...overrides };
     const View = new Function(...Object.keys(context), code + '; return UploadView;')(...Object.values(context));
     return renderToStaticMarkup(React.createElement(View));
   }

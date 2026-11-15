@@ -5,9 +5,9 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as designSystem from '@ten98/ui';
+import { format, hooklessUi as designSystem } from './fixtures/display-format.ts';
 
-const ui = Object.fromEntries(Object.entries(designSystem).filter(([name]) => /^[A-Z]/.test(name)));
+const ui = Object.fromEntries(Object.entries(designSystem).filter(([name]) => /^[A-Z]|^useDisplayFormat$/.test(name)));
 import { handleZernioInsights } from '../server/zernio-insights.ts';
 import { IntegrationError } from '../server/provider-core.ts';
 
@@ -189,9 +189,9 @@ test('actual report UI preserves a previous successful report after failure and 
 
 test('rendered specialist reports identify old filters, unknown Story data, undocumented hourly timezone and retention above 100%', async () => {
   const source = await readFile(new URL('../src/ZernioInsights.tsx', import.meta.url), 'utf8'), start = source.indexOf('  return <', source.indexOf('export default function')), end = source.lastIndexOf('\n}'), { code } = await transformWithOxc(`const render = () => (${source.slice(start + '  return '.length, end).trim().replace(/;$/, '')});`, 'InsightsView.tsx', { jsx: { runtime: 'classic' } });
-  const helpers = new Function(stripTypeScriptTypes(source.slice(source.indexOf('const labels:'), source.indexOf('export default'))) + '; return {labels,metricLabels,number,human,dayNames,plain};')();
+  const helpers = new Function(stripTypeScriptTypes(source.slice(source.indexOf('const labels:'), source.indexOf('export default'))) + '; return {labels,metricLabels,number,percent,human,dayNames,plain};')();
   function render(data, maximum = 1) {
-    const account = { _id: data.accountId, platform: data.platform, reports: [data.kind] }, context = { React, ...ui, ...helpers, account, accountId: account._id, accounts: [account], busy: false, loading: false, kind: data.kind, metricType: 'total_value', setMetricType() {}, personalView: 'lifetime', setPersonalView() {}, orgMin: '2025-10-18', orgMax: '2026-10-16', dated: false, postReport: false, source: 'all', metric: 'follower_demographics', timeframe: 'this_month', from: range.fromDate, to: range.toDate, today: '2026-10-18', postId: '', items: [], choicesLoaded: false, report: { data, accountName: 'Captured report account' }, data, maximum, chartId: 'retention-test', error: 'Refresh failed.', load() {}, loadChoices() {}, setAccountId() {}, setKind() {}, resetReport() {}, setFrom() {}, setTo() {}, setSource() {}, setMetric() {}, setTimeframe() {}, setPostId() {} };
+    const account = { _id: data.accountId, platform: data.platform, reports: [data.kind] }, context = { React, ...ui, ...helpers, format, account, accountId: account._id, accounts: [account], busy: false, loading: false, kind: data.kind, metricType: 'total_value', setMetricType() {}, personalView: 'lifetime', setPersonalView() {}, orgMin: '2025-10-18', orgMax: '2026-10-16', dated: false, postReport: false, source: 'all', metric: 'follower_demographics', timeframe: 'this_month', from: range.fromDate, to: range.toDate, today: '2026-10-18', postId: '', items: [], choicesLoaded: false, report: { data, accountName: 'Captured report account' }, data, maximum, chartId: 'retention-test', error: 'Refresh failed.', load() {}, loadChoices() {}, setAccountId() {}, setKind() {}, resetReport() {}, setFrom() {}, setTo() {}, setSource() {}, setMetric() {}, setTimeframe() {}, setPostId() {} };
     return renderToStaticMarkup(new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))());
   }
   const base = { accountId: 'instagram-a', platform: 'instagram', loadedAt: '2026-09-03T10:00:00Z', note: null };

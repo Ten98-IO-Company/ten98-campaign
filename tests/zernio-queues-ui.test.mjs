@@ -6,6 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as library from '@ten98/ui';
+import { format } from './fixtures/display-format.ts';
 
 const source = await readFile(new URL('../src/ZernioQueues.tsx', import.meta.url), 'utf8');
 const section = (start, end) => { const from = source.indexOf(start), to = source.indexOf(end, from); assert.ok(from >= 0 && to > from); return stripTypeScriptTypes(source.slice(from, to)); };
@@ -17,7 +18,7 @@ const { code: renderCode } = await transformWithOxc(`const render = () => { ${lo
 function ui(read) {
   const state = { loaded: false, queues: [], listVersion: '', posts: [], approvalRequired: false, enqueueReviews: {}, error: '', notice: '', busy: false };
   const set = name => value => { state[name] = typeof value === 'function' ? value(state[name]) : value; };
-  const context = { path: '/projects/one/integrations/queues', projectPath: '/projects/one', current: () => true, busyRef: { current: false }, requester: { current: read }, ...Object.fromEntries(Object.keys(state).map(name => ['set' + name[0].toUpperCase() + name.slice(1), set(name)])) };
+  const context = { path: '/projects/one/integrations/queues', projectPath: '/projects/one', format, current: () => true, busyRef: { current: false }, requester: { current: read }, ...Object.fromEntries(Object.keys(state).map(name => ['set' + name[0].toUpperCase() + name.slice(1), set(name)])) };
   const load = compile(loadCode, context), action = compile(actionCode, context);
   const html = () => { const values = { React, ...library, ...state }; return renderToStaticMarkup(new Function(...Object.keys(values), renderCode + '; return render();')(...Object.values(values))); };
   return { state, context, load, action, html };
@@ -59,7 +60,7 @@ test('confirmed enqueue keeps refresh diagnostics and its confirmed-write warnin
     const enqueue = compile(section('async function enqueue(', '  const localPosts ='), { ...view.context, canWrite: true, queues: [queue], approvalRequired: false, enqueueReviews: { 'post-one': 'reviewed' }, enqueueReviewKey: () => 'reviewed', action: view.action, load: view.load, onChanged: failureAt === 'onChanged' ? async () => { throw new Error('Project refresh unavailable'); } : null, write: async () => { writes++; return { post: { scheduledAt: '2070-01-01T09:00:00Z' } }; } });
     await enqueue(item);
     assert.equal(writes, 1); assert.equal(view.state.posts.length, 0); assert.equal(view.state.loaded, failureAt === 'onChanged');
-    assert.match(view.state.notice, /Post assigned to the provider queue/);
+    assert.equal(view.state.notice, 'Post assigned to the provider queue for Jan 1, 2070, 9:00 AM.');
     const diagnostic = failureAt === 'onChanged' ? 'Project refresh unavailable' : 'Could not load publishing queues. Gateway unavailable';
     assert.equal(view.state.error, 'The queue submission was confirmed, but the latest local list could not be refreshed. Refresh before another action. ' + diagnostic);
     if (failureAt === 'load') assert.doesNotMatch(view.html(), /No unsent local posts/);
