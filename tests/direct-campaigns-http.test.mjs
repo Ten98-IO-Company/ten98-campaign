@@ -465,6 +465,48 @@ test('no server code updates or deletes consent history rows', async () => {
   assert.deepEqual(found, []);
 });
 
+test('a contact deleted while it is being edited stays deleted', pg, async t => {
+  const f = await fixture(t);
+  try {
+    for (let round = 0; round < 10; round++) {
+      const contact = await f.person({ email: 'race' + round + '@example.com', phone: '+1202555' + String(3000 + round) });
+      const [edited, deleted] = await Promise.all([
+        f.request(f.path + '/contacts/' + contact.id, 'PATCH', round % 2 ? { name: 'Renamed' } : { consents: { email: true, sms: false } }),
+        f.request(f.path + '/contacts/' + contact.id, 'DELETE'),
+      ]);
+      assert.equal(deleted.status, 200);
+      assert.ok([200, 404].includes(edited.status), 'The edit either ran first or found the contact gone: ' + edited.status);
+      assert.equal((await f.request(f.path + '/contacts')).data.contacts.some(item => item.id === contact.id), false, 'Round ' + round + ': the deleted contact did not come back.');
+    }
+  } finally { await f.close(); }
+});
+
+test('a change that fails at commit leaves no Activity entry, and nothing that changed nothing is logged', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const messages = async () => (await pool.query('SELECT message FROM activity WHERE project_id = $1 ORDER BY seq', [f.projectId])).rows.map(row => row.message);
+    const kept = await f.person({ email: 'commit@example.com', phone: '+12025550241' }), draft = await f.draft({ contactIds: [kept.id] });
+    const before = (await messages()).length;
+    // A deferred check fails each change at commit, after its Activity entry was written in the same transaction.
+    await pool.query("CREATE FUNCTION refuse_at_commit() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'refused at commit'; END $$ LANGUAGE plpgsql");
+    for (const table of ['direct_contacts', 'direct_campaigns']) await pool.query('CREATE CONSTRAINT TRIGGER refuse_at_commit AFTER INSERT OR UPDATE OR DELETE ON ' + table + ' DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_at_commit()');
+    for (const [path, method, body] of [['/contacts/' + kept.id, 'PATCH', { consents: { sms: false } }], ['/contacts/' + kept.id + '/suppress', 'POST', { channel: 'email', reason: 'Asked to stop' }], ['/contacts/import', 'POST', { csv: 'name,email\nNew,new-commit@example.com\n', consents: { email: true }, consentSource: 'Sheet' }], ['/contacts/' + kept.id, 'DELETE'], ['/campaigns/' + draft.id + '/cancel', 'POST', {}]])
+      assert.ok((await f.request(f.path + path, method, body)).status >= 500, method + ' ' + path);
+    for (const table of ['direct_contacts', 'direct_campaigns']) await pool.query('DROP TRIGGER refuse_at_commit ON ' + table);
+    assert.deepEqual((await messages()).slice(before), [], 'No entry outlives its failed change.');
+    // Nothing removed, a dry run, nothing imported: no entry.
+    assert.equal((await f.request(f.path + '/contacts/no-such-contact', 'DELETE')).status, 404);
+    assert.equal((await f.request(f.path + '/contacts/import', 'POST', { csv: 'name,email\nDry,dry@example.com\n', dryRun: true })).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/import', 'POST', { csv: 'name,email\nBroken,not-an-email\n' })).status, 200);
+    assert.deepEqual((await messages()).slice(before), []);
+    // An opt-in imported onto a suppressed address is not stored, and the entry does not claim it was.
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id + '/suppress', 'POST', { channel: 'email', reason: 'Asked to stop' })).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/import', 'POST', { csv: 'name,email\nKept,commit@example.com\n', consents: { email: true }, consentSource: 'Sheet' })).status, 200);
+    const entry = (await messages()).find(message => message.startsWith('Contacts imported'));
+    assert.ok(entry && !entry.includes('Permission recorded for email'), entry);
+  } finally { await f.close(); }
+});
+
 test('scheduling a campaign re-checks its preview on the queuing transaction, without a second connection', pg, async t => {
   // One pool connection: a preview read through the pool inside the queuing transaction would time out. The sending
   // worker is left out because its lease transaction deliberately works on other connections.
