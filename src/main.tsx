@@ -759,7 +759,8 @@ function takeReset(location: Pick<Location, 'pathname' | 'search' | 'hash'>, his
   const token = new URLSearchParams(location.hash.slice(1)).get('password-reset');
   if (token === null) return null;
   history.replaceState(history.state, '', location.pathname + location.search);
-  return { kind: 'reset', token: /^[\w-]{43}$/.test(token) ? token : null };
+  // Better Auth's reset tokens are 24 letters and digits.
+  return { kind: 'reset', token: /^[A-Za-z0-9]{24}$/.test(token) ? token : null };
 }
 const startupReset = takeReset(window.location, window.history);
 // A link pasted into an open tab changes only the fragment, so the running app reads it the same way.

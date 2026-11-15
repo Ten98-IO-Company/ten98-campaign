@@ -64,7 +64,7 @@ async function signIn(t) {
   const { discovery, ...real } = await import('openid-client');
   // The fixture issuer is plain HTTP on loopback; every other openid-client step runs unmodified.
   const client = { ...real, discovery: (url, id, secret) => discovery(url, id, secret, undefined, { execute: [real.allowInsecureRequests] }) };
-  const auth = createAuth(db, { appUrl, sessionSecret: 'oidc-protocol-fixture-secret-of-32-characters', oidcEnabled: true, oidcIssuer: idp.issuer, oidcClientId: clientId, oidcClientSecret: clientSecret, oidcAllowedEmails: ['allowed@example.test'] }, { openidClient: async () => client });
+  const auth = createAuth(db, { appUrl, sessionSecret: 'oidc-protocol-fixture-secret-of-32-characters', authSecret: 'better-auth fixture secret of at least 32 characters', oidcEnabled: true, oidcIssuer: idp.issuer, oidcClientId: clientId, oidcClientSecret: clientSecret, oidcAllowedEmails: ['allowed@example.test'] }, { openidClient: async () => client });
   const start = async () => {
     const res = response();
     await auth.oidcStart({ url: '/api/auth/oidc/start', headers: {}, socket: { remoteAddress: '127.0.0.1' } }, res);
@@ -94,14 +94,14 @@ test('OIDC sign-in completes against an Authentik-shaped issuer with the real cl
   const signedIn = await callback(flow, idp.authorize(flow.location));
   assert.equal(signedIn.status, 302);
   assert.equal(signedIn.headers.Location, appUrl + '/');
-  assert.ok([].concat(signedIn.headers['Set-Cookie']).some(value => /^ten98_session_[0-9a-f]{16}=[\w-]{43}; /.test(value)));
-  const identity = (await db.$client.query('SELECT i.issuer, i.subject, u.email FROM oidc_identities i JOIN users u ON u.id = i.user_id')).rows;
+  assert.ok([].concat(signedIn.headers['Set-Cookie']).some(value => /^__Secure-ten98-campaign-[0-9a-f]{16}\.session_token=[A-Za-z0-9]{32}\.[A-Za-z0-9%+/=_-]+; /.test(value)));
+  const identity = (await db.$client.query('SELECT i.issuer, i.subject, u.email FROM oidc_identities i JOIN "user" u ON u.id = i.user_id')).rows;
   assert.deepEqual(identity, [{ issuer: idp.issuer, subject: 'a1b2c3d4e5f6', email: 'allowed@example.test' }]);
 
   // A later sign-in by the same issuer and subject reuses the account even when the email claim changes.
   const again = await start(), returned = await callback(again, idp.authorize(again.location, { email: 'renamed@example.test' }));
   assert.equal(returned.status, 302);
-  assert.equal((await db.$client.query('SELECT count(*)::int AS count FROM users')).rows[0].count, 2);
+  assert.equal((await db.$client.query('SELECT count(*)::int AS count FROM "user"')).rows[0].count, 2);
   assert.equal(idp.issued.tokenRequests, 2);
 });
 

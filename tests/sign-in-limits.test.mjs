@@ -13,7 +13,7 @@ const request = (peer, forwarded) => ({ headers: forwarded === undefined ? {} : 
 
 // Address parsing belongs to @ten98/runtime; these cases check which per-client bucket a failed sign-in charges.
 test('sign-in limits charge the client a trusted proxy reports and otherwise the socket peer', pg, async t => {
-  const { db } = await testDatabase(t), auth = createAuth(db, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies: '10.0.0.0/8, 2001:db8:ffff::/48' });
+  const { db } = await testDatabase(t), auth = createAuth(db, { sessionSecret: secret, authSecret: 'better-auth fixture secret of at least 32 characters', appUrl: 'https://campaign.example', trustedProxies: '10.0.0.0/8, 2001:db8:ffff::/48' });
   // Keys come from clientLimitKey (ten98-code-system#76): HMAC of the resolved address, IPv6 per /56, and one dedicated
   // key for unresolved clients.
   const key = address => clientLimitKey('ip', address, secret);
@@ -37,14 +37,14 @@ test('sign-in limits charge the client a trusted proxy reports and otherwise the
 
 test('an invalid TRUSTED_PROXIES setting stops startup', () => {
   for (const value of ['proxy.example', '10.0.0.0/33', ['10.0.0.2', '2001:db8::/129']]) {
-    assert.throws(() => createAuth(undefined, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies: value }), /TRUSTED_PROXIES must be/);
+    assert.throws(() => createAuth(undefined, { sessionSecret: secret, authSecret: 'better-auth fixture secret of at least 32 characters', appUrl: 'https://campaign.example', trustedProxies: value }), /TRUSTED_PROXIES must be/);
   }
 });
 
 test('failed sign-ins from one client behind a trusted proxy leave other clients able to sign in', pg, async t => {
   const { db } = await testDatabase(t), password = 'proxy fixture password 2026';
   await addUsers(db.$client, [{ id: 'member', name: 'Member', email: 'member@example.test', password: await hashPassword(password) }]);
-  const auth = createAuth(db, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies: ['10.0.0.2'] }), viaProxy = client => request('10.0.0.2', client);
+  const auth = createAuth(db, { sessionSecret: secret, authSecret: 'better-auth fixture secret of at least 32 characters', appUrl: 'https://campaign.example', trustedProxies: ['10.0.0.2'] }), viaProxy = client => request('10.0.0.2', client);
   for (let attempt = 0; attempt < signInLimits.client; attempt++) {
     await assert.rejects(auth.login(viaProxy('203.0.113.7'), response(), { email: `guess-${attempt}@example.test`, password: 'wrong password guess' }), error => error.status === 401);
   }
@@ -62,7 +62,7 @@ test('failed sign-ins from one client behind a trusted proxy leave other clients
 test('the per-account sign-in limit trips across client addresses, and one client alone cannot reach it', pg, async t => {
   const { db } = await testDatabase(t), password = 'account fixture password 2026';
   await addUsers(db.$client, [{ id: 'member', name: 'Member', email: 'member@example.test', password: await hashPassword(password) }]);
-  const auth = createAuth(db, { sessionSecret: secret, appUrl: 'https://campaign.example', trustedProxies: ['10.0.0.2'] }), viaProxy = client => request('10.0.0.2', client);
+  const auth = createAuth(db, { sessionSecret: secret, authSecret: 'better-auth fixture secret of at least 32 characters', appUrl: 'https://campaign.example', trustedProxies: ['10.0.0.2'] }), viaProxy = client => request('10.0.0.2', client);
   const wrong = { email: 'Member@Example.test', password: 'wrong password guess' }, failed = async (client, status) => assert.rejects(auth.login(viaProxy(client), response(), wrong), error => error.status === status);
   // One client stops at its per-account limit; the account stays open to everyone else.
   for (let attempt = 0; attempt < signInLimits.clientAccount; attempt++) await failed('203.0.113.7', 401);

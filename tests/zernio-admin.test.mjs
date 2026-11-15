@@ -110,7 +110,7 @@ test('provider team HTTP reads require live operator and administration and with
     await app.sql.run("UPDATE memberships SET role='owner' WHERE workspace_id=? AND user_id=?", workspaceId, userId);
     await app.sql.run('DELETE FROM instance_operators WHERE user_id=?', userId); assert.equal((await request(route)).status, 403); await grantOperators(app.sql, [userId]);
     assert.equal((await request(route, { method: 'POST', body: {} })).status, 405);
-    const outsider = randomUUID(), hash = (await app.sql.get('SELECT password FROM users WHERE id=?', userId)).password;
+    const outsider = randomUUID(), hash = (await app.sql.get("SELECT password FROM account WHERE \"userId\"=? AND \"providerId\"='credential'", userId)).password;
     await addUsers(app.sql, [{ id: outsider, name: 'Outside', email: 'team-outsider@example.test', password: hash }]);
     const outsideCookie = (await request('/auth/login', { method: 'POST', body: { email: 'team-outsider@example.test', password } })).cookie;
     assert.equal((await request(route, { selected: outsideCookie })).status, 404); assert.equal(calls.length, beforeDenied);

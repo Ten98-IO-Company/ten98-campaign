@@ -20,7 +20,7 @@ test('record deletion preserves assignments and administrators can remove sample
     const setup = await request('/api/auth/setup', { method: 'POST', body: { name: 'Lifecycle owner', email: 'lifecycle-owner@example.test', password: secret } }); setup.data.projectId = await firstProject(app, setup, { sample: true });
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const initial = (await request('/api/state')).data, projectId = initial.projectId, project = `/api/projects/${projectId}`, workspaceId = initial.workspaces[0].id;
-    const hash = (await app.sql.get('SELECT password FROM users WHERE id=?', initial.user.id)).password;
+    const hash = (await app.sql.get("SELECT password FROM account WHERE \"userId\"=? AND \"providerId\"='credential'", initial.user.id)).password;
     const cookies = {};
     for (const role of ['admin', 'editor', 'viewer']) {
       const id = randomUUID(), email = `lifecycle-${role}@example.test`;

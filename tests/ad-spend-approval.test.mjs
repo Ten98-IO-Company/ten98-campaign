@@ -18,7 +18,7 @@ const people = { owner: 'Olive Owner', admin: 'Avery Admin', editor: 'Casey Edit
 
 async function spendFixture(t, { members = ['owner', 'admin', 'editor', 'viewer'], poolOptions } = {}) {
   const database = await testDatabase(t, poolOptions), { db, pool } = database, store = createStore(db);
-  await pool.query(`INSERT INTO users (id, name, email) VALUES ${members.map(id => `('${id}','${people[id]}','${id}@example.test')`).join(',')}; INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO memberships VALUES ${members.map(id => `('w','${id}','${id}')`).join(',')}; INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('spend-project','w','Spend','spend-profile')`);
+  await pool.query(`INSERT INTO "user" (id, name, email) VALUES ${members.map(id => `('${id}','${people[id]}','${id}@example.test')`).join(',')}; INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO memberships VALUES ${members.map(id => `('w','${id}','${id}')`).join(',')}; INSERT INTO projects (id, workspace_id, name, zernio_profile_id) VALUES ('spend-project','w','Spend','spend-profile')`);
   await pool.query(`INSERT INTO native_google_connections VALUES ('spend-project','1234567890'); INSERT INTO microsoft_ad_connections VALUES ('spend-project','555','777','{"name":"Fixture","currency":"USD","timeZone":"Dubai"}')`);
   const project = { id: 'spend-project', zernioProfileId: 'spend-profile' };
   const state = { campaignOwned: false, setAmount: 20, campaignAmount: 40, googleAmount: 50, openaiAmount: 500, openaiType: 'lifetime', nativeMicros: '25000000', nativeStatus: 'PAUSED', nativePeriod: 'DAILY', msStatus: 'Paused', msBudget: 30 };

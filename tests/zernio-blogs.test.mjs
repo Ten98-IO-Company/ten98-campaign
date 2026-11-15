@@ -359,7 +359,7 @@ test('HTTP draft edits, publication and WordPress scheduling share scoped PATCH,
         if (scenario === 'role') await sql.run("UPDATE memberships SET role='admin'");
         if (scenario === 'mapping') await sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'changed-profile', projectId);
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-fixture-key-' + publishedMode } } })).status, 200);
-        if (scenario === 'session') await sql.run('DELETE FROM sessions');
+        if (scenario === 'session') await sql.run('DELETE FROM session');
         if (scenario === 'native-site') account.platformUserId = 'replaced-native-site';
         if (scenario === 'revoked') account.needsReconnection = true;
       };

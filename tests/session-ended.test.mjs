@@ -20,10 +20,12 @@ test('a stale session cookie is reported once as an ended session and cleared', 
   const setup = await request('/auth/setup', { body: { name: 'Owner', email: 'owner@example.test', password: 'session ended fixture password' } });
   const cookie = setup.setCookies.map(value => value.split(';')[0]).join('; ');
   assert.equal((await request('/session', { cookie })).data.sessionEnded, undefined, 'A valid session is not reported as ended.');
-  await app.sql.run('DELETE FROM sessions');
+  await app.sql.run('DELETE FROM session');
   const ended = await request('/session', { cookie });
   assert.equal(ended.status, 200); assert.equal(ended.data.user, null); assert.equal(ended.data.sessionEnded, true);
-  assert.ok(ended.setCookies.some(value => /^ten98_session_[0-9a-f]{16}=;.*Max-Age=0/.test(value)), 'The stale cookie is cleared so the notice shows once.');
+  assert.ok(ended.setCookies.some(value => /^ten98-campaign-[0-9a-f]{16}\.session_token=;.*Max-Age=0/.test(value)), 'The stale cookie is cleared so the notice shows once.');
   assert.equal((await request('/session')).data.sessionEnded, undefined, 'Once the browser drops the cleared cookie, the notice does not return.');
   assert.equal((await request('/session', { cookie: 'ten98_session_0000000000000000=not-a-session-token' })).data.sessionEnded, undefined, 'A malformed cookie is not treated as a real ended session.');
+  const unscoped = await request('/session', { cookie: 'ten98_session=' + 'u'.repeat(43) });
+  assert.equal(unscoped.data.sessionEnded, undefined, "Another instance's unscoped cookie is not this app's ended session."); assert.deepEqual(unscoped.setCookies, [], 'and it is not cleared.');
 });

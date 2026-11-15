@@ -117,7 +117,7 @@ test('in-flight publishing reads stop after session, membership, mapping or cred
     try {
       f.setHook(async url => {
         if (!url.pathname.endsWith('/publishing-limit')) return;
-        if (change === 'session') await f.app.sql.run('DELETE FROM sessions');
+        if (change === 'session') await f.app.sql.run('DELETE FROM session');
         if (change === 'membership') await f.app.sql.run('DELETE FROM memberships');
         if (change === 'role') await f.app.sql.run("UPDATE memberships SET role='viewer'");
         if (change === 'mapping') await f.app.sql.run("UPDATE projects SET zernio_profile_id='another'");
