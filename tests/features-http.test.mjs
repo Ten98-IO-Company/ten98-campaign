@@ -51,7 +51,7 @@ test('HTTP feature wiring preserves signed bytes, project boundaries, protected 
     const maps = await request(project + '/maps/config');
     assert.deepEqual(maps.data, { configured: true, browserKey: env.GOOGLE_MAPS_BROWSER_API_KEY, mapId: env.GOOGLE_MAPS_MAP_ID });
     assert.equal(JSON.stringify(maps).includes(env.GOOGLE_PRIVATE_KEY), false); assert.equal(JSON.stringify(maps).includes(env.ZERNIO_WEBHOOK_SECRET), false);
-    const passwordHash = (await app.sql.get('SELECT password FROM users WHERE id=?', initialState.user.id)).password, viewerId = randomUUID();
+    const passwordHash = (await app.sql.get("SELECT password FROM accounts WHERE user_id=? AND provider_id='credential'", initialState.user.id)).password, viewerId = randomUUID();
     await addUsers(app.sql, [{ id: viewerId, name: 'Other member', email: 'member-http@example.test', password: passwordHash }]);
     const viewerCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'member-http@example.test', password: 'a sufficiently long fixture password' } })).cookie;
     assert.equal((await request(project + '/maps/config', { cookie: viewerCookie })).status, 404);

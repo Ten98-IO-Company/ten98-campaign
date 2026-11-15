@@ -147,7 +147,7 @@ test('an administrator manages editors and viewers but not owners or administrat
 test('project assignees list editors and above for editors, without email addresses', { skip: postgresSkip }, async t => {
   const { pool, request, workspaceId, first } = await owners(t);
   const projectId = (await request('/state', { cookie: first.cookie })).data.projects.find(project => project.workspaceId === workspaceId).id;
-  const password = 'team race fixture password', hash = (await pool.query("SELECT password FROM users WHERE id = 'second'")).rows[0].password;
+  const password = 'team race fixture password', hash = (await pool.query("SELECT password FROM accounts WHERE user_id = 'second' AND provider_id = 'credential'")).rows[0].password;
   for (const [id, role] of [['editor', 'editor'], ['viewer', 'viewer']]) { await addUsers(pool, [{ id: id, name: id[0].toUpperCase() + id.slice(1), email: id + '@example.test', password: hash }]); await addMemberships(pool, [[workspaceId, id, role]]); }
   const login = async email => (await request('/auth/login', { method: 'POST', body: { email, password } })).cookie;
   const editor = await login('editor@example.test'), viewer = await login('viewer@example.test');

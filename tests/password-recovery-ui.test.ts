@@ -41,7 +41,7 @@ test('without email the request stage says to ask an administrator', async () =>
 });
 
 test('the reset stage posts the token once, signs in on success and explains a used or expired link', async () => {
-  const token = 'A'.repeat(43), calls: unknown[][] = [], signIns: unknown[] = [];
+  const token = 'A'.repeat(24), calls: unknown[][] = [], signIns: unknown[] = [];
   let answer: () => Promise<unknown> = async () => ({ ok: true });
   const ui = view({ value: { kind: 'reset', token }, initialEmail: '', request: async (path: string, method?: string, body?: unknown) => { calls.push([path, method, body]); return answer(); }, onRequest() {}, onSignIn: (changed?: boolean) => signIns.push(changed) });
   ui.render(); ui.effects.forEach(effect => effect());
@@ -62,7 +62,7 @@ test('a #password-reset= link leaves the address and opens the reset step; sign-
   const { code: readerCode } = await transformWithOxc(main.slice(start, end), 'takeReset.ts');
   const takeReset = new Function(readerCode + '; return takeReset;')();
   const replaced: string[] = [], history = { state: null, replaceState: (_: unknown, __: string, url: string) => { replaced.push(url); } };
-  assert.deepEqual(takeReset({ pathname: '/', search: '?view=overview', hash: '#password-reset=' + 'B'.repeat(43) }, history), { kind: 'reset', token: 'B'.repeat(43) });
+  assert.deepEqual(takeReset({ pathname: '/', search: '?view=overview', hash: '#password-reset=' + 'B'.repeat(24) }, history), { kind: 'reset', token: 'B'.repeat(24) });
   assert.deepEqual(replaced, ['/?view=overview'], 'The token leaves the address bar.');
   assert.deepEqual(takeReset({ pathname: '/', search: '', hash: '#password-reset=short' }, history), { kind: 'reset', token: null });
   assert.equal(takeReset({ pathname: '/', search: '', hash: '#invite=abc' }, history), null);

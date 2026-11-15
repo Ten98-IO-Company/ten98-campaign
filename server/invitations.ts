@@ -63,7 +63,7 @@ async function lockedRole(tx: Executor, workspaceId: string, userId: string): Pr
 }
 
 export async function handleInvitations(context: ProviderRecord) {
-  const { req, url, body = {}, user, auth, config, send, workspaceAccess, establish } = context, db: Database = context.db;
+  const { req, url, body = {}, user, auth, config, send, workspaceAccess, signIn } = context, db: Database = context.db;
   // Clients POST { token } to /inspect and /accept. The token-in-path GET/POST routes remain for clients from before that move.
   const bodyAction = req.method === 'POST' ? url.pathname.match(/^\/api\/invitations\/(inspect|accept)$/)?.[1] : undefined;
   const publicRoute = bodyAction ? null : url.pathname.match(/^\/api\/invitations\/([^/]+)$/), teamRoute = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/invitations(?:\/([^/]+))?$/);
@@ -88,7 +88,7 @@ export async function handleInvitations(context: ProviderRecord) {
     if (existing && !signedIn) fail(401, 'Sign in with the invited account before accepting this invitation.');
     let name: string | undefined, hash: Credential | undefined;
     if (!existing) {
-      if (typeof establish !== 'function') fail(500, 'The invitation sign-in service is unavailable.');
+      if (typeof signIn !== 'function') fail(500, 'The invitation sign-in service is unavailable.');
       if (typeof details.name !== 'string' || !details.name.trim() || details.name.length > 120 || /[\u0000-\u001f\u007f]/.test(details.name)) fail(400, 'Enter your name using at most 120 characters.');
       if (typeof details.password !== 'string' || details.password.length < 12 || details.password.length > 128) fail(400, 'Use a password between 12 and 128 characters.');
       name = details.name.trim(); hash = await hashPassword(details.password);
@@ -102,9 +102,10 @@ export async function handleInvitations(context: ProviderRecord) {
       const joined = target || { id: randomUUID(), name: name!, email: current.email, isOperator: false };
       if (!target) await insertAccount(tx, { id: joined.id, name: joined.name, email: joined.email, passwordHash: hash! });
       const role = await joinInvitation(tx, current, joined.id);
-      if (!target) await establish(joined.id, tx);
       return { user: publicUser(joined), workspaceId: current.workspace_id, role: role || current.role, alreadyMember: Boolean(role), created: !target };
     });
+    // A new account signs in through Better Auth once its account and membership have committed together.
+    if (accepted.created) await signIn(accepted.user!.email, details.password);
     send(200, accepted); return true;
   }
   if (!user) fail(401, 'Sign in to manage workspace invitations.');

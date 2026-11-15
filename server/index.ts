@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { oidcEndpoint, workspaceRoles as roles, mayManageWorkspaceMember } from '@ten98/runtime';
 import { assertSchema, closeDatabase, createStore, collections, getDatabase, type Connection, type Executor, type Store } from './database.ts';
-import { createAuth, sessionSecret, hashPassword, HttpError, insertAccount, lockWorkspace, memberRole, publicUser, updateDisplayName, type AuthConfig, type PublicUser } from './auth.ts';
+import { authSecret, createAuth, sessionSecret, hashPassword, HttpError, insertAccount, lockWorkspace, memberRole, publicUser, updateDisplayName, type AuthConfig, type PublicUser } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
 import { users } from './schema.ts';
 import { seedSample } from './seed.ts';
@@ -157,9 +157,16 @@ export async function createApp(options: AppOptions = {}) {
   if (env.BROADSIGN_CURRENCY && !/^[A-Z]{3}$/.test(env.BROADSIGN_CURRENCY)) throw new Error('BROADSIGN_CURRENCY must be a three-letter ISO currency code, such as USD.');
   const { pool, db } = options.database || getDatabase(env.DATABASE_URL), store = createStore(db);
   await assertSchema(pool);
-  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean), trustedProxies: env.TRUSTED_PROXIES || '' };
+  const config: AppConfig = { ...options, env, dataDir, appUrl, sessionSecret: sessionSecret(dataDir, options.sessionSecret || env.SESSION_SECRET), authSecret: authSecret(dataDir, env), oidcIssuer: env.OIDC_ISSUER || '', oidcClientId: env.OIDC_CLIENT_ID || '', oidcClientSecret: env.OIDC_CLIENT_SECRET || '', oidcAllowedEmails: (env.OIDC_ALLOWED_EMAILS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean), trustedProxies: env.TRUSTED_PROXIES || '' };
   config.oidcEnabled = Boolean(config.oidcIssuer && config.oidcClientId);
-  const auth = createAuth(db, config), dist = resolve(options.distDir || 'dist');
+  // The sendResetPassword seam: server/auth.ts calls it after the reset link's transaction commits, and the email goes out
+  // after the response through the installation's transactional email.
+  const sendResetPassword = (reset: { email: string; token: string }) => {
+    const link = new URL('/#password-reset=' + reset.token, appUrl).href, sendEnv = { ...env };
+    const text = ['A password reset was requested for your ten98 Campaign account.', '', 'Open this link within one hour to choose a new password:', link, '', 'If you did not ask for this, ignore this email; your password stays the same.'].join('\n');
+    setImmediate(() => { sendDirect({ channel: 'email', campaign: { emailPurpose: 'transactional', subject: 'Reset your ten98 Campaign password', text }, contact: { email: reset.email }, env: sendEnv }).catch(error => { console.error('Password reset email was not sent:', error?.code || error?.message || 'unknown error'); }); });
+  };
+  const auth = createAuth(db, config, { sendResetPassword }), dist = resolve(options.distDir || 'dist');
   const integrationSettings = await createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
   const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts });
@@ -210,7 +217,7 @@ export async function createApp(options: AppOptions = {}) {
         if (path === '/api/session' && req.method === 'GET') {
           // A session cookie that matches no session (expired, revoked, or from before the PostgreSQL upgrade, which
           // carries no sessions over) is reported once and cleared, so the sign-in screen can say why.
-          const current = await auth.user(req, res), sessionEnded = !current && Boolean(auth.sessionKey(req));
+          const current = await auth.user(req, res), sessionEnded = !current && auth.carriesSession(req);
           if (sessionEnded) await auth.logout(req, res);
           return send(200, { user: publicUser(current), setupRequired: !await claimed(db), oidcEnabled: config.oidcEnabled, ...(sessionEnded ? { sessionEnded: true } : {}) });
         }
@@ -219,7 +226,7 @@ export async function createApp(options: AppOptions = {}) {
           if (await claimed(db)) throw new HttpError(409, 'Setup is complete. Sign in with the owner account.');
           // The first sign-up claims the installation as its owner (as in Discover); afterwards accounts join only by invitation.
           // Any legacy setup token in the body is ignored. The first project, and its optional sample, is the next step.
-          const name = text(body.name, 'Name'), mail = email(body.email), hash = await hashPassword(password(body.password)), workspace = workspaceName(body.workspaceName);
+          const name = text(body.name, 'Name'), mail = email(body.email), secret = password(body.password), hash = await hashPassword(secret), workspace = workspaceName(body.workspaceName);
           const id = randomUUID(), workspaceId = randomUUID();
           // The installation row lock makes setup single use under parallel requests.
           await db.transaction(async tx => {
@@ -228,8 +235,9 @@ export async function createApp(options: AppOptions = {}) {
             await setInstanceOperator(tx, id, true, 'bootstrap');
             await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspaceId}, ${workspace})`); await tx.execute(sql`INSERT INTO memberships VALUES (${workspaceId}, ${id}, 'owner')`);
             await tx.execute(sql`UPDATE installation SET claimed = true WHERE id = 1`);
-            await auth.establish(res, id, req, tx);
           });
+          // The owner is signed in through Better Auth once the claim has committed.
+          await auth.signIn(req, res, mail, secret);
           return send(201, { user: { id, name, email: mail, isOperator: true }, workspaceId });
         }
         if (path === '/api/auth/login' && req.method === 'POST') return send(200, { user: await auth.login(req, res, { email: email(body.email), password: loginPassword(body.password) }) });
@@ -240,12 +248,7 @@ export async function createApp(options: AppOptions = {}) {
           if (Object.keys(body).some(key => key !== 'email')) bad('Use the email field.');
           const address = email(body.email);
           if (!emailConfigured(env)) throw new HttpError(503, 'Email recovery is not configured. Ask your administrator to reset your password.');
-          const reset = await auth.requestPasswordReset(req, address);
-          if (reset) {
-            const link = new URL('/#password-reset=' + reset.token, appUrl).href, sendEnv = { ...env };
-            const text = ['A password reset was requested for your ten98 Campaign account.', '', 'Open this link within one hour to choose a new password:', link, '', 'If you did not ask for this, ignore this email; your password stays the same.'].join('\n');
-            setImmediate(() => { sendDirect({ channel: 'email', campaign: { emailPurpose: 'transactional', subject: 'Reset your ten98 Campaign password', text }, contact: { email: reset.email }, env: sendEnv }).catch(error => { console.error('Password reset email was not sent:', error?.code || error?.message || 'unknown error'); }); });
-          }
+          await auth.requestPasswordReset(req, address);
           return send(200, { ok: true });
         }
         if (path === '/api/auth/reset-password' && req.method === 'POST') {
@@ -261,7 +264,7 @@ export async function createApp(options: AppOptions = {}) {
         }
         if (path === '/api/auth/oidc/callback' && req.method === 'GET') return await auth.oidcCallback(req, res, url);
         const signedIn = await auth.user(req, res);
-        if (await handleInvitations({ req, url, body, user: signedIn, db, auth, config, send, workspaceAccess, establish: (id: string, tx: Executor) => auth.establish(res, id, req, tx) })) return;
+        if (await handleInvitations({ req, url, body, user: signedIn, db, auth, config, send, workspaceAccess, signIn: (address: string, secret: string) => auth.signIn(req, res, address, secret) })) return;
         const user = signedIn; if (!user) throw new HttpError(401, 'Sign in to continue.');
         if (path === '/api/account' && req.method === 'GET') return send(200, { user, ...await auth.account(user.id) });
         if (path === '/api/account' && req.method === 'PATCH') { if (Object.keys(body).some(key => key !== 'name')) bad('Only your display name can be changed here.'); await updateDisplayName(db, user.id, text(body.name, 'Name')); return send(200, { user: await auth.user(req, res) }); }

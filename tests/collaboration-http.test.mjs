@@ -42,8 +42,8 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     const accepted = await request(invitation, { method: 'POST', body: signup, cookie: null });
     assert.equal(accepted.status, 200); assert.equal(accepted.data.created, true); assert.equal(accepted.data.role, 'editor'); assert.equal(accepted.data.workspaceId, workspaceId); assert.equal(accepted.data.user.isOperator, false);
     assert.ok(accepted.cookie); assert.match(accepted.cookieHeader, /HttpOnly/); assert.match(accepted.cookieHeader, /SameSite=Lax/);
-    const colleagueCookie = accepted.cookie, colleagueId = accepted.data.user.id, colleague = await app.sql.get('SELECT * FROM users WHERE id=?', colleagueId);
-    assert.match(colleague.password, /^scrypt\$/); assert.equal(colleague.password.includes(newPassword), false);
+    const colleagueCookie = accepted.cookie, colleagueId = accepted.data.user.id, colleague = await app.sql.get("SELECT u.*, a.password FROM users u JOIN accounts a ON a.user_id = u.id AND a.provider_id = 'credential' WHERE u.id=?", colleagueId);
+    assert.match(colleague.password, /^[0-9a-f]{32}:[0-9a-f]{128}$/); assert.equal(colleague.password.includes(newPassword), false);
     assert.equal(await app.sql.get('SELECT * FROM instance_operators WHERE user_id=?', colleagueId), undefined);
     const colleagueState = (await request('/api/state', { cookie: colleagueCookie })).data;
     assert.equal(colleagueState.user.id, colleagueId); assert.deepEqual(colleagueState.workspaces.map(workspace => [workspace.id, workspace.role]), [[workspaceId, 'editor']]);
@@ -59,7 +59,7 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     assert.equal((await app.sql.get('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?', workspaceId, ownerState.user.id)).role, 'owner');
     assert.equal((await request(team + '/members')).status, 200);
 
-    const existingId = randomUUID(), ownerHash = (await app.sql.get('SELECT password FROM users WHERE id=?', ownerState.user.id)).password;
+    const existingId = randomUUID(), ownerHash = (await app.sql.get("SELECT password FROM accounts WHERE user_id=? AND provider_id='credential'", ownerState.user.id)).password;
     await addUsers(app.sql, [{ id: existingId, name: 'Existing account', email: 'existing-colleague@example.test', password: ownerHash }]);
     const existingCookie = (await request('/api/auth/login', { method: 'POST', body: { email: 'existing-colleague@example.test', password: ownerPassword }, cookie: null })).cookie;
     const separate = await request('/api/workspaces', { method: 'POST', body: { name: 'Existing private workspace' }, cookie: existingCookie }); assert.equal(separate.status, 201);
@@ -75,7 +75,7 @@ test('HTTP invitation links safely onboard new accounts, require the existing id
     assert.equal((await request(existingPath, { cookie: existingCookie })).data.requiresSignIn, false);
     const joinedExisting = await request(existingPath, { method: 'POST', body: {}, cookie: existingCookie });
     assert.equal(joinedExisting.status, 200); assert.equal(joinedExisting.data.created, false); assert.equal(joinedExisting.data.user.id, existingId); assert.equal(joinedExisting.data.role, 'viewer'); assert.equal(joinedExisting.cookie, undefined, 'Accepting with an existing identity does not mint a replacement session.');
-    assert.equal((await app.sql.get('SELECT password FROM users WHERE id=?', existingId)).password, ownerHash);
+    assert.equal((await app.sql.get("SELECT password FROM accounts WHERE user_id=? AND provider_id='credential'", existingId)).password, ownerHash);
     assert.equal((await app.sql.get('SELECT name FROM users WHERE id=?', existingId)).name, 'Existing account');
     assert.equal((await app.sql.get('SELECT role FROM memberships WHERE workspace_id=? AND user_id=?', separate.data.workspace.id, existingId)).role, 'owner');
     const existingState = (await request(`/api/state?projectId=${projectId}`, { cookie: existingCookie })).data;

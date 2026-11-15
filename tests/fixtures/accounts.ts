@@ -19,10 +19,14 @@ export type SeedAccounts = {
   operators?: string[];
 };
 
+/** `password` is a stored hash (from hashPassword, or any fixture text); with one, the user gets a Better Auth credential account. */
 export async function addUsers(db: Db, users: SeedUser[]): Promise<void> {
-  for (const user of users) await exec(db, 'INSERT INTO users (id, name, email, password) VALUES ($1, $2, $3, $4)', [user.id, user.name, user.email, user.password ?? null]);
+  for (const user of users) {
+    await exec(db, 'INSERT INTO users (id, name, email) VALUES ($1, $2, $3)', [user.id, user.name, user.email]);
+    // Each placeholder once: the tests' sql wrapper numbers `?` placeholders in order.
+    if (user.password) await exec(db, "INSERT INTO accounts (id, account_id, provider_id, user_id, password, created_at, updated_at) VALUES ($1, $2, 'credential', $3, $4, $5, $6)", ['credential-' + user.id, user.id, user.id, user.password, Date.now(), Date.now()]);
+  }
 }
-
 export async function addWorkspaces(db: Db, workspaces: { id: string; name: string }[]): Promise<void> {
   for (const workspace of workspaces) await exec(db, 'INSERT INTO workspaces (id, name) VALUES ($1, $2)', [workspace.id, workspace.name]);
 }

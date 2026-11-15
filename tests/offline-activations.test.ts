@@ -23,7 +23,7 @@ async function start(t: TestContext) {
   const state = (await request('/state', 'GET', undefined, owner)).body, workspaceId = state.workspaces[0].id;
   // Adds a workspace member with the given role and returns their id and session cookie.
   async function member(role: string | null, name: string) {
-    const id = randomUUID(), email = `${name.toLowerCase()}@example.test`, hash = (await app.sql.get('SELECT password FROM users WHERE id=?', state.user.id)).password;
+    const id = randomUUID(), email = `${name.toLowerCase()}@example.test`, hash = (await app.sql.get("SELECT password FROM accounts WHERE user_id=? AND provider_id='credential'", state.user.id)).password;
     await addUsers(app.sql, [{ id: id, name: name, email: email, password: hash }]);
     if (role) await addMemberships(app.sql, [[workspaceId, id, role]]);
     return { id, cookie: (await request('/auth/login', 'POST', { email, password: 'a long offline fixture password' })).cookie };

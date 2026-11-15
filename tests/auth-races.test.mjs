@@ -5,7 +5,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { clientLimitKey } from '@ten98/runtime';
-import { createAuth, hashPassword, signInLimits } from '../server/auth.ts';
+import { createAuth, hashPassword, hostAuth, setLocalPassword, signInLimits } from '../server/auth.ts';
 import { blockWrites, postgresSkip, signInRedirectError, testApp, testDatabase } from './postgres.mjs';
 import { addUsers, seedAccounts } from './fixtures/accounts.ts';
 
@@ -14,50 +14,55 @@ function response() {
   return { headers: {}, status: null, ended: false, setHeader(name, value) { this.headers[name] = value; }, getHeader(name) { return this.headers[name]; }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers); }, end() { this.ended = true; } };
 }
 const count = async (db, table) => (await db.$client.query(`SELECT count(*) AS count FROM ${table}`)).rows[0].count;
-// Resolves after the first query whose SQL contains `marker` has returned, so a test can act at that exact point.
-function afterQuery(db, marker) {
-  let seen; const reached = new Promise(resolve => { seen = resolve; });
-  const watched = new Proxy(db, { get(target, property) {
-    if (property !== 'execute') return Reflect.get(target, property);
-    return async query => { const result = await target.execute(query); if (target.dialect.sqlToQuery(query).sql.includes(marker)) seen(); return result; };
-  } });
-  return { db: watched, reached };
-}
 async function seedUser(db, id, email, password) { await addUsers(db.$client, [{ id: id, name: 'Fixture', email: email, password: password }]); }
+// P1 and P2: every credential and session change takes the account row lock first (server/locked-auth.ts), so a change
+// that races a sign-in or a password change is ordered against it. Each test drives both orders through a real locking
+// path (CLI reset-password, or signing out other sessions) and holds the racing write at a table lock until both wait.
+const raceConfig = { sessionSecret: 'auth-race-fixture-session-secret-32-characters', authSecret: 'better-auth fixture secret of at least 32 characters', appUrl: 'https://campaign.example' };
+const client = { headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+const cookieOf = res => [].concat(res.headers['Set-Cookie']).find(value => /^__Secure-ten98-[0-9a-f]{16}\.session_token=/.test(value)).split(';')[0];
 
 test('an old-password login already verifying cannot create a session after a password change', pg, async t => {
-  const { db } = await testDatabase(t), oldPassword = 'old fixture password 2026', nextPassword = 'new fixture password 2026';
-  const oldHash = await hashPassword(oldPassword), nextHash = await hashPassword(nextPassword);
-  await seedUser(db, 'user-a', 'fixture@example.test', oldHash);
-  const watched = afterQuery(db, 'FROM users u WHERE email'), config = { sessionSecret: 'auth-race-fixture-session-secret-32-characters', appUrl: 'https://campaign.example' }, auth = createAuth(watched.db, config);
-  const req = { headers: {}, socket: { remoteAddress: '127.0.0.1' } }, res = response();
-  const pending = auth.login(req, res, { email: 'fixture@example.test', password: oldPassword });
-  // login has read the old hash and yielded to asynchronous scrypt verification.
-  await watched.reached; await db.$client.query('UPDATE users SET password = $1 WHERE id = $2', [nextHash, 'user-a']);
-  await assert.rejects(pending, error => error.status === 401 && /password changed/i.test(error.message));
-  assert.equal(res.headers['Set-Cookie'], undefined); assert.equal(await count(db, 'sessions'), 0);
-  await assert.rejects(auth.login(req, response(), { email: 'fixture@example.test', password: oldPassword }), error => error.status === 401);
-  const current = response(), user = await auth.login(req, current, { email: 'fixture@example.test', password: nextPassword });
-  assert.equal(user.id, 'user-a'); assert.match(current.headers['Set-Cookie'], /HttpOnly; SameSite=Lax; Max-Age=604800; Secure/); assert.equal(await count(db, 'sessions'), 1);
+  const { db, pool } = await testDatabase(t), oldPassword = 'old fixture password 2026', nextPassword = 'new fixture password 2026';
+  await seedUser(db, 'user-a', 'fixture@example.test', await hashPassword(oldPassword));
+  const auth = createAuth(db, raceConfig), reset = async password => setLocalPassword(hostAuth(db), db, 'user-a', await hashPassword(password));
+  // Sign-in first: it holds the account lock while it writes its session, so the change waits and then ends that session.
+  let gate = await blockWrites(pool, 'sessions');
+  const res = response(), signingIn = auth.login(client, res, { email: 'fixture@example.test', password: oldPassword });
+  await gate.waiting(1); const changing = reset(nextPassword); await gate.waiting(2); await gate.release();
+  assert.equal((await signingIn).id, 'user-a'); await changing;
+  assert.equal(await count(db, 'sessions'), 0, 'The change ended the session the old password had just opened.');
+  assert.equal(await auth.user({ headers: { cookie: cookieOf(res) } }), null);
+  // Change first: it holds the account lock while it writes the credential, so the old-password sign-in waits and is refused.
+  gate = await blockWrites(pool, 'accounts');
+  const changingAgain = reset('third fixture password 2026'); await gate.waiting(1);
+  const late = response(), refused = auth.login(client, late, { email: 'fixture@example.test', password: nextPassword }).then(() => 'signed in', error => error.status);
+  await gate.waiting(2); await gate.release(); await changingAgain;
+  assert.equal(await refused, 401); assert.equal(late.headers['Set-Cookie'], undefined); assert.equal(await count(db, 'sessions'), 0);
+  const current = response(), user = await auth.login(client, current, { email: 'fixture@example.test', password: 'third fixture password 2026' });
+  assert.equal(user.id, 'user-a'); assert.match([].concat(current.headers['Set-Cookie']).join('\n'), /^__Secure-ten98-[0-9a-f]{16}\.session_token=[^;]+; Max-Age=604800; Path=\/; HttpOnly; Secure; SameSite=Lax$/m); assert.equal(await count(db, 'sessions'), 1);
 });
 
 test('a password change cannot replace credentials or recreate a session revoked during password verification', pg, async t => {
-  const { db } = await testDatabase(t), oldPassword = 'existing fixture password 2026', oldHash = await hashPassword(oldPassword);
-  await seedUser(db, 'user-a', 'fixture@example.test', oldHash);
-  const watched = afterQuery(db, 'SELECT password FROM users WHERE id'), auth = createAuth(watched.db, { sessionSecret: 'auth-revocation-fixture-secret-32-characters', appUrl: 'https://campaign.example' }), signedIn = response();
-  await auth.establish(signedIn, 'user-a');
-  const req = { headers: { cookie: signedIn.headers['Set-Cookie'].split(';')[0] } }, res = response();
-  const pending = auth.changePassword(req, res, 'user-a', oldPassword, 'replacement fixture password 2026');
-  // The request has entered asynchronous verification when another signed-in device revokes it.
-  await watched.reached; await db.$client.query('DELETE FROM sessions WHERE user_id = $1', ['user-a']);
-  await assert.rejects(pending, error => error.status === 403 && /session ended/i.test(error.message));
-  assert.equal((await db.$client.query('SELECT password FROM users WHERE id = $1', ['user-a'])).rows[0].password, oldHash);
-  assert.equal(await count(db, 'sessions'), 0);
-  assert.equal(res.headers['Set-Cookie'], undefined);
+  const { db, pool } = await testDatabase(t), oldPassword = 'existing fixture password 2026';
+  await seedUser(db, 'user-a', 'fixture@example.test', await hashPassword(oldPassword));
+  const stored = async () => (await pool.query("SELECT password FROM accounts WHERE user_id = 'user-a' AND provider_id = 'credential'")).rows[0].password, oldHash = await stored();
+  const auth = createAuth(db, raceConfig), signIn = async () => { const res = response(); await auth.login(client, res, { email: 'fixture@example.test', password: oldPassword }); return { headers: { cookie: cookieOf(res) }, socket: client.socket }; };
+  const deviceA = await signIn(), deviceB = await signIn();
+  // Device B signs out device A first; A's password change waits for the account lock and finds its session ended.
+  const gate = await blockWrites(pool, 'sessions');
+  const revoking = auth.revokeOtherSessions(deviceB, 'user-a'); await gate.waiting(1);
+  const res = response(), changing = auth.changePassword(deviceA, res, 'user-a', oldPassword, 'replacement fixture password 2026');
+  await gate.waiting(2); await gate.release();
+  assert.equal(await revoking, 1);
+  await assert.rejects(changing, error => error.status === 403 && /session ended/i.test(error.message));
+  assert.equal(await stored(), oldHash, 'The credential is unchanged.');
+  assert.equal(await count(db, 'sessions'), 1, 'Only device B is still signed in.');
+  assert.equal(res.headers['Set-Cookie'], undefined, 'No session was recreated for device A.');
 });
 
 test('parallel attempts cannot exceed a rate limit', pg, async t => {
-  const { db, pool } = await testDatabase(t), auth = createAuth(db, { sessionSecret: 'limit-fixture-session-secret-32-characters', appUrl: 'https://campaign.example' });
+  const { db, pool } = await testDatabase(t), auth = createAuth(db, { sessionSecret: 'limit-fixture-session-secret-32-characters', authSecret: 'better-auth fixture secret of at least 32 characters', appUrl: 'https://campaign.example' });
   await auth.limit('warm-up', 10);
   // Every attempt reads the bucket before any increment commits; only the single conditional upsert holds the line.
   const gate = await blockWrites(pool, 'login_limits');
@@ -69,7 +74,7 @@ test('parallel attempts cannot exceed a rate limit', pg, async t => {
 });
 
 test('parallel sign-ins cannot exceed the per-client or per-account limits', pg, async t => {
-  const { db, pool } = await testDatabase(t), config = { sessionSecret: 'sign-in-race-fixture-secret-32-characters', appUrl: 'https://campaign.example', trustedProxies: ['10.0.0.2'] }, auth = createAuth(db, config);
+  const { db, pool } = await testDatabase(t), config = { sessionSecret: 'sign-in-race-fixture-secret-32-characters', authSecret: 'better-auth fixture secret of at least 32 characters', appUrl: 'https://campaign.example', trustedProxies: ['10.0.0.2'] }, auth = createAuth(db, config);
   await auth.limit('warm-up', 10);
   const attempt = (client, email) => auth.login({ headers: { 'x-forwarded-for': client }, socket: { remoteAddress: '10.0.0.2' } }, response(), { email, password: 'wrong password guess' }).then(() => 'allowed', error => error.status);
   // Every attempt reads its buckets before any increment commits; only the single conditional upserts hold the lines.
@@ -116,7 +121,7 @@ function oidcFixture(t, db, config) {
   };
   return fixture;
 }
-const oidcConfig = (secret) => ({ appUrl: 'https://campaign.example', sessionSecret: secret, oidcEnabled: true, oidcIssuer: 'https://identity.example', oidcClientId: 'fixture-client', oidcAllowedEmails: ['allowed@example.test', 'local@example.test', 'parallel@example.test'] });
+const oidcConfig = (secret) => ({ appUrl: 'https://campaign.example', sessionSecret: secret, authSecret: 'better-auth fixture secret of at least 32 characters', oidcEnabled: true, oidcIssuer: 'https://identity.example', oidcClientId: 'fixture-client', oidcAllowedEmails: ['allowed@example.test', 'local@example.test', 'parallel@example.test'] });
 
 test('OIDC invitation continuation is browser-bound, single-use and origin-fixed without bypassing provisioning or identity linking', pg, async t => {
   const { db } = await testDatabase(t), config = oidcConfig('oidc-continuation-fixture-secret-32-characters'), invite = 'A'.repeat(43), appUrl = config.appUrl;
@@ -155,7 +160,7 @@ test('OIDC invitation continuation is browser-bound, single-use and origin-fixed
   assert.equal((await db.$client.query('SELECT * FROM oidc_return_targets WHERE state = $1', [digest(denied.state)])).rowCount, 0);
   const linking = await oidc.start('?invite=' + invite); oidc.claims = { iss: config.oidcIssuer, sub: 'unlinked-subject', email: 'local@example.test', email_verified: true };
   await assert.rejects(oidc.callback(linking), error => error.code === 'OIDC_ACCOUNT_EXISTS');
-  assert.equal((await db.$client.query("SELECT password FROM users WHERE id = 'local-user'")).rows[0].password, 'unchanged-local-hash');
+  assert.equal((await db.$client.query("SELECT password FROM accounts WHERE user_id = 'local-user' AND provider_id = 'credential'")).rows[0].password, 'unchanged-local-hash');
   assert.equal((await db.$client.query("SELECT * FROM oidc_identities WHERE subject = 'unlinked-subject'")).rowCount, 0);
 });
 
@@ -189,7 +194,7 @@ test('two first sign-ins for one new identity provision a single account', pg, a
 
 // An owner's workspace with one project and one invitation; returns the raw invitation token.
 async function seedInvitation(db, { token = 'I'.repeat(43), email = 'invitee@example.test', role = 'editor', expiresAt = Date.now() + 86400000, revokedAt = null } = {}) {
-  await db.$client.query("INSERT INTO users VALUES ('inviter', 'Inviter', 'inviter@example.test', NULL) ON CONFLICT DO NOTHING");
+  await db.$client.query("INSERT INTO users (id, name, email) VALUES ('inviter', 'Inviter', 'inviter@example.test') ON CONFLICT DO NOTHING");
   await db.$client.query("INSERT INTO workspaces (id, name) VALUES ('team', 'Team') ON CONFLICT DO NOTHING");
   await db.$client.query("INSERT INTO memberships VALUES ('team', 'inviter', 'owner') ON CONFLICT DO NOTHING");
   await db.$client.query("INSERT INTO projects (id, workspace_id, name) VALUES ('team-project', 'team', 'Team project') ON CONFLICT DO NOTHING");
@@ -208,7 +213,7 @@ test('a verified invited email outside the OIDC allowlist joins only the invitin
   assert.deepEqual(await memberships(db, 'invitee@example.test'), [{ workspaceId: 'team', role: 'editor' }], 'membership only, no personal workspace');
   assert.equal(await count(db, 'workspaces'), 1); assert.equal(await count(db, 'projects'), 1);
   assert.ok(await accepted(db, token)); assert.equal(await count(db, 'sessions'), 1);
-  assert.equal((await db.$client.query("SELECT password FROM users WHERE email = 'invitee@example.test'")).rows[0].password, null);
+  assert.equal((await db.$client.query("SELECT (SELECT a.password FROM accounts a WHERE a.user_id = u.id AND a.provider_id = 'credential') AS password FROM users u WHERE email = 'invitee@example.test'")).rows[0].password, null);
   // The invitation is single use: a second identity with the same email gets no account through it.
   oidc.claims = { ...invitedIdentity(config, 'invitee@example.test'), sub: 'second-subject' };
   await assert.rejects(oidc.callback(await oidc.start('?invite=' + token)), error => error.code === 'OIDC_NOT_PROVISIONED');
@@ -280,9 +285,9 @@ test('two parallel OIDC callbacks for one invitation provision one account and o
 
 test('a member without a personal workspace loads the app state and the invited workspace projects', pg, async t => {
   const origin = 'http://127.0.0.1:3000', app = await testApp(t, { dataDir: await mkdtemp(join(tmpdir(), 'ten98-oidc-invite-')), appUrl: origin });
-  const db = app.database.db, config = { ...oidcConfig(app.config.sessionSecret), appUrl: origin }, token = await seedInvitation(db);
+  const db = app.database.db, config = { ...oidcConfig(app.config.sessionSecret), authSecret: app.config.authSecret, appUrl: origin }, token = await seedInvitation(db);
   const oidc = oidcFixture(t, db, config); oidc.claims = invitedIdentity(config, 'invitee@example.test');
-  const signedIn = await oidc.callback(await oidc.start('?invite=' + token)), cookie = [].concat(signedIn.headers['Set-Cookie']).find(value => value.startsWith('ten98_session_')).split(';')[0];
+  const signedIn = await oidc.callback(await oidc.start('?invite=' + token)), cookie = [].concat(signedIn.headers['Set-Cookie']).find(value => /^(__Secure-)?ten98-[0-9a-f]{16}\.session_token=/.test(value)).split(';')[0];
   await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve); });
   const get = async path => { const result = await fetch(`http://127.0.0.1:${app.server.address().port}${path}`, { headers: { Cookie: cookie } }); return { status: result.status, data: await result.json() }; };
   const state = await get('/api/state');

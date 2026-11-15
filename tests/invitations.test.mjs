@@ -16,7 +16,7 @@ async function fixture(t) {
   async function request(path, { method = 'GET', body = {}, user = users.owner } = {}) {
     let response;
     try {
-      const handled = await handleInvitations({ req: { method, socket: { remoteAddress: '127.0.0.1' } }, url: new URL('https://campaign.example/api' + path), body, user, db, auth, config: { appUrl: 'https://campaign.example' }, workspaceAccess, establish: async id => { established.push(id); }, send: (status, data) => { response = { status, data }; } });
+      const handled = await handleInvitations({ req: { method, socket: { remoteAddress: '127.0.0.1' } }, url: new URL('https://campaign.example/api' + path), body, user, db, auth, config: { appUrl: 'https://campaign.example' }, workspaceAccess, signIn: async email => { established.push((await pool.query('SELECT id FROM users WHERE email = $1', [email])).rows[0].id); }, send: (status, data) => { response = { status, data }; } });
       assert.equal(handled, true); return response;
     } catch (error) { if (error instanceof HttpError) return { status: error.status, data: { error: error.message } }; throw error; }
   }
@@ -50,8 +50,8 @@ test('workspace invitations use hashed single-use links, enforce current authori
   assert.equal((await accept(invitation, { user: users.outside })).status, 403);
   result = await accept(invitation); assert.equal(result.status, 200); assert.equal(result.data.user.isOperator, false); assert.equal(result.data.role, 'editor');
   assert.deepEqual(established, [result.data.user.id]); assert.equal((await one('SELECT role FROM memberships WHERE workspace_id = $1 AND user_id = $2', ['workspace-a', result.data.user.id])).role, 'editor');
-  const joined = await one('SELECT * FROM users WHERE id = $1', [result.data.user.id]);
-  assert.match(joined.password, /^scrypt\$/); assert.equal(joined.password.includes('a secure personal password'), false);
+  const joined = await one("SELECT password FROM accounts WHERE user_id = $1 AND provider_id = 'credential'", [result.data.user.id]);
+  assert.match(joined.password, /^[0-9a-f]{32}:[0-9a-f]{128}$/); assert.equal(joined.password.includes('a secure personal password'), false);
   assert.equal(await one('SELECT * FROM instance_operators WHERE user_id = $1', [joined.id]), undefined);
   assert.equal((await accept(invitation)).status, 410); assert.equal((await read(invitation)).status, 410);
   const existing = await create('existing@example.test', 'viewer');
@@ -61,7 +61,7 @@ test('workspace invitations use hashed single-use links, enforce current authori
   assert.equal((await accept(existing, { user: users.existing, body: { password: 'overwrite attempt password' } })).status, 400);
   result = await read(existing, { user: users.existing }); assert.equal(result.data.requiresSignIn, false);
   result = await accept(existing, { user: users.existing, body: {} }); assert.equal(result.status, 200); assert.equal(result.data.role, 'viewer');
-  assert.equal((await one("SELECT password FROM users WHERE id = 'existing'")).password, 'EXISTING_HASH'); assert.equal(established.length, 1);
+  assert.equal((await one("SELECT password FROM accounts WHERE user_id = 'existing'")).password, 'EXISTING_HASH'); assert.equal(established.length, 1);
   const elevated = await create('elevated@example.test', 'owner');
   await pool.query("UPDATE memberships SET role = 'admin' WHERE workspace_id = 'workspace-a' AND user_id = 'owner'");
   assert.equal((await read(elevated)).status, 410); assert.equal((await accept(elevated)).status, 410);

@@ -44,7 +44,7 @@ test('native host CLI persists command audits including idempotent repeats while
   rows = await history(pool);
   assert.deepEqual(rows.map(row => row.action), ['grant', 'grant', 'grant', 'revoke', 'revoke', 'revoke', 'grant']); assert.deepEqual(rows[0], first);
   assert.equal(new Set(rows.map(row => row.id)).size, rows.length);
-  assert.deepEqual((await pool.query('SELECT id, password FROM users ORDER BY id')).rows, [{ id: 'member', password: 'preserved-member-hash' }, { id: 'owner', password: 'preserved-owner-hash' }]);
+  assert.deepEqual((await pool.query("SELECT user_id AS id, password FROM accounts WHERE provider_id = 'credential' ORDER BY user_id")).rows, [{ id: 'member', password: 'preserved-member-hash' }, { id: 'owner', password: 'preserved-owner-hash' }]);
   assert.deepEqual((await pool.query('SELECT user_id, role FROM memberships ORDER BY user_id')).rows, [{ user_id: 'member', role: 'editor' }, { user_id: 'owner', role: 'owner' }]);
 });
 

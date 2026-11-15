@@ -5,48 +5,33 @@ import { createAuth, hashPassword } from '../server/auth.ts';
 import { postgresSkip, signInRedirectError, testDatabase } from './postgres.mjs';
 import { addUsers } from './fixtures/accounts.ts';
 
-test('same-host instances keep session and OIDC cookies isolated while safely migrating their own legacy cookies', { skip: postgresSkip }, async t => {
+test('same-host instances keep session and OIDC cookies isolated, and an OIDC sign-in passes the same session checks', { skip: postgresSkip }, async t => {
   const { db: dbA, sql: sqlA } = await testDatabase(t), { db: dbB, sql: sqlB } = await testDatabase(t);
   const secret = 'cookie fixture session secret of sufficient length', issuer = 'https://identity.example', password = 'cookie isolation fixture password', hash = await hashPassword(password);
-  const config = appUrl => ({ appUrl, sessionSecret: secret, oidcEnabled: true, oidcIssuer: issuer, oidcClientId: appUrl, oidcAllowedEmails: [] });
+  const config = appUrl => ({ appUrl, sessionSecret: secret, authSecret: 'better-auth fixture secret of at least 32 characters', oidcEnabled: true, oidcIssuer: issuer, oidcClientId: appUrl, oidcAllowedEmails: [] });
   const configA = config('http://127.0.0.1:3018'), configB = config('http://127.0.0.1:3019'), digest = value => createHmac('sha256', secret).update(value).digest('hex');
   for (const [sql, id] of [[sqlA, 'alice'], [sqlB, 'bob']]) { await addUsers(sql, [{ id: id, name: id, email: id + '@example.test', password: hash }]); await sql.run('INSERT INTO oidc_identities VALUES(?,?,?)', issuer, 'existing-identity', id); }
   const jar = new Map(), request = () => ({ headers: { cookie: [...jar].map(([name, value]) => name + '=' + value).join('; ') }, socket: { remoteAddress: '127.0.0.1' } });
   function response() { return { headers: {}, setHeader(name, value) { this.headers[name] = value; }, getHeader(name) { return this.headers[name]; }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers); }, end() {} }; }
   const setCookies = res => { const value = res.headers['Set-Cookie']; return Array.isArray(value) ? value : value ? [value] : []; };
   function absorb(res) { for (const cookie of setCookies(res)) { const [pair] = cookie.split(';'), separator = pair.indexOf('='), name = pair.slice(0, separator), value = pair.slice(separator + 1); if (/Max-Age=0(?:;|$)/.test(cookie)) jar.delete(name); else jar.set(name, value); } }
-  async function legacySession(sql, age = 120000) { const token = randomBytes(32).toString('base64url'); await sql.run('INSERT INTO sessions VALUES(?,?,?)', digest(token), sql === sqlA ? 'alice' : 'bob', Date.now() + age); return token; }
-  const authA = createAuth(dbA, configA), authB = createAuth(dbB, configB), firstA = response(), firstB = response();
-  await authA.establish(firstA, 'alice'); absorb(firstA); await authB.establish(firstB, 'bob'); absorb(firstB);
-  const nameA = setCookies(firstA)[0].split('=')[0], nameB = setCookies(firstB)[0].split('=')[0];
-  assert.notEqual(nameA, nameB); assert.match(nameA, /^ten98_session_[a-f0-9]{16}$/); assert.equal(jar.size, 2);
+  const authA = createAuth(dbA, configA), authB = createAuth(dbB, configB), signIn = async (auth, email) => { const res = response(); await auth.login(request(), res, { email, password }); absorb(res); return res; };
+  const firstA = await signIn(authA, 'alice@example.test'), firstB = await signIn(authB, 'bob@example.test');
+  const sessionCookie = res => setCookies(res).find(cookie => /\.session_token=/.test(cookie)), nameA = sessionCookie(firstA).split('=')[0], nameB = sessionCookie(firstB).split('=')[0];
+  // Each installation names its session cookie from its own origin, and the cookie is HttpOnly and SameSite=Lax (Secure on https).
+  assert.notEqual(nameA, nameB); assert.match(nameA, /^ten98-[a-f0-9]{16}\.session_token$/); assert.equal(jar.size, 2);
+  assert.match(sessionCookie(firstA), /; HttpOnly; SameSite=Lax$/); assert.doesNotMatch(sessionCookie(firstA), /Secure/);
   assert.equal((await authA.user(request())).id, 'alice'); assert.equal((await authB.user(request())).id, 'bob');
-  const extra = response(); await authA.establish(extra, 'alice'); assert.equal(await authA.revokeOtherSessions(request(), 'alice'), 1); assert.equal((await authA.user(request())).id, 'alice');
+  // Another installation's cookie is never accepted, under its own name or under this installation's.
+  assert.equal(await authA.user({ headers: { cookie: `${nameB}=${jar.get(nameB)}` } }), null);
+  assert.equal(await authA.user({ headers: { cookie: `${nameA}=${jar.get(nameB)}` } }), null, 'A cookie signed for another installation is refused.');
+  assert.equal(await authA.user({ headers: { cookie: `${nameA}=invalid; ten98_session=${jar.get(nameA)}` } }), null, 'An invalid cookie must not fall back to another one.');
+  const extra = response(); await authA.login(request(), extra, { email: 'alice@example.test', password }); absorb(extra);
+  assert.equal(await authA.revokeOtherSessions(request(), 'alice'), 1); assert.equal((await authA.user(request())).id, 'alice');
   const signout = response(); await authA.logout(request(), signout); absorb(signout);
   assert.equal(await authA.user(request()), null); assert.equal((await authB.user(request())).id, 'bob'); assert.equal(jar.has(nameB), true);
-
-  const legacy = await legacySession(sqlA); jar.set('ten98_session', legacy);
-  const foreignOnly = { headers: { cookie: 'ten98_session=' + legacy } }, foreignRes = response();
-  assert.equal(await authB.user(foreignOnly, foreignRes), null); assert.deepEqual(setCookies(foreignRes), []);
-  const migration = response(); assert.equal((await authA.user(request(), migration)).id, 'alice');
-  const scopedMigration = setCookies(migration).find(cookie => cookie.startsWith(nameA + '='));
-  assert.ok(scopedMigration); assert.ok(Number(/Max-Age=(\d+)/.exec(scopedMigration)[1]) <= 120, 'Migration must not extend the legacy session lifetime.');
-  absorb(migration); assert.equal(jar.has('ten98_session'), false); assert.equal((await authA.user(request())).id, 'alice'); assert.equal((await authB.user(request())).id, 'bob');
-  const downgradeLegacy = await legacySession(sqlA), badScoped = response();
-  assert.equal(await authA.user({ headers: { cookie: `${nameA}=invalid; ten98_session=${downgradeLegacy}` } }, badScoped), null, 'An invalid scoped cookie must not fall back to another identity.');
-  assert.deepEqual(setCookies(badScoped), []);
-  jar.set('ten98_session', downgradeLegacy);
-  const signedOut = response(); await authA.logout(request(), signedOut); absorb(signedOut);
-  assert.equal(await authA.user(request()), null); assert.equal((await authB.user(request())).id, 'bob');
-  assert.equal(await authA.user({ headers: { cookie: 'ten98_session=' + downgradeLegacy } }), null, 'Logout must revoke local legacy fallback tokens too.');
-  const expired = await legacySession(sqlA, -1000), expiredRes = response(); assert.equal(await authA.user({ headers: { cookie: 'ten98_session=' + expired } }, expiredRes), null); assert.deepEqual(setCookies(expiredRes), []);
-
-  const localLegacy = await legacySession(sqlA); jar.set('ten98_session', localLegacy);
-  const login = response(); await authA.login(request(), login, { email: 'alice@example.test', password }); absorb(login);
-  assert.equal(jar.has('ten98_session'), false); assert.equal(await authA.user({ headers: { cookie: 'ten98_session=' + localLegacy } }), null); assert.equal((await authA.user(request())).id, 'alice'); assert.equal((await authB.user(request())).id, 'bob');
-  const foreignLegacy = await legacySession(sqlB); jar.set('ten98_session', foreignLegacy);
-  const anotherLogin = response(); await authA.login(request(), anotherLogin, { email: 'alice@example.test', password }); absorb(anotherLogin);
-  assert.equal(jar.get('ten98_session'), foreignLegacy, 'An app must not clear a legacy cookie validated only by another database.');
+  const again = response(); await authA.login(request(), again, { email: 'alice@example.test', password }); absorb(again);
+  assert.equal((await authA.user(request())).id, 'alice'); assert.equal((await authB.user(request())).id, 'bob');
 
   let sequence = 0, exchanges = 0;
   const oidcClient = {
