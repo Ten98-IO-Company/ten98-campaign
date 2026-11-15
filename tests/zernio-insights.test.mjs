@@ -5,7 +5,9 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { format, hooklessUi as designSystem } from './fixtures/display-format.ts';
+import * as designSystemExports from '@ten98/ui';
+import { testDisplayFormat as format, withTestDisplayFormat } from './display-format.ts';
+const designSystem = withTestDisplayFormat(designSystemExports);
 
 const ui = Object.fromEntries(Object.entries(designSystem).filter(([name]) => /^[A-Z]|^useDisplayFormat$/.test(name)));
 import { handleZernioInsights } from '../server/zernio-insights.ts';

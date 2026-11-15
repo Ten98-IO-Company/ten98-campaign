@@ -6,13 +6,13 @@ import React from 'react';
 import * as ui from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import { format, hooklessUiUi } from './fixtures/display-format.ts';
+import { testDisplayFormat as format, withTestDisplayFormat } from './display-format.ts';
 
 const source = await readFile(new URL('../src/UnifiedInbox.tsx', import.meta.url), 'utf8');
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 function compile(code, context = {}) { return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context)); }
 const event = { preventDefault() {} }, path = '/projects/project-a/integrations/inbox';
-const { AppliedFilters } = ui, uiNames = Object.keys(hooklessUi), uiValues = Object.values(hooklessUi);
+const hooklessUi = withTestDisplayFormat(ui), { AppliedFilters } = ui, uiNames = Object.keys(hooklessUi), uiValues = Object.values(hooklessUi);
 const merge = (before, after) => [...new Map([...before, ...after].map(row => [row.id, row])).values()];
 
 const linkedInReactions = { LIKE: 'Like', PRAISE: 'Celebrate', EMPATHY: 'Love', INTEREST: 'Insightful', APPRECIATION: 'Support', ENTERTAINMENT: 'Funny' };

@@ -6,7 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
-import { format } from './fixtures/display-format.ts';
+import { testDisplayFormat as format } from './display-format.ts';
 
 const source = await readFile(new URL('../src/ZernioMediaUpload.tsx', import.meta.url), 'utf8');
 function handler(name, next, context) {

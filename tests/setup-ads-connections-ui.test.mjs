@@ -5,7 +5,8 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
-import { hooklessUi } from './fixtures/display-format.ts';
+import { withTestDisplayFormat } from './display-format.ts';
+const hooklessUi = withTestDisplayFormat(ui);
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children), ...elements(node.props.actions)] : [];

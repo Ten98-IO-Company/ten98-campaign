@@ -13,7 +13,7 @@ import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import { firstProject } from './first-project.ts';
 import { grantOperators } from './fixtures/accounts.ts';
-import { format } from './fixtures/display-format.ts';
+import { testDisplayFormat as format } from './display-format.ts';
 import { formatMicros } from '../src/google-micros.ts';
 
 const env = { GOOGLE_ADS_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_ADS_CLIENT_SECRET: 'fixture-client-secret', GOOGLE_ADS_REFRESH_TOKEN: 'fixture-refresh-token', GOOGLE_ADS_DEVELOPER_TOKEN: 'fixture-developer-token', GOOGLE_ADS_LOGIN_CUSTOMER_ID: '9999999999' };

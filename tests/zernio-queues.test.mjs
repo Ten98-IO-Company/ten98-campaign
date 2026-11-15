@@ -7,11 +7,11 @@ import { randomUUID } from 'node:crypto';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import * as designSystem from '@ten98/ui';
-import { format } from './fixtures/display-format.ts';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { firstProject } from './first-project.ts';
+import { useTestDisplayFormat } from './display-format.ts';
 
 async function fixture(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'campaign-queue-')), originalFetch = globalThis.fetch, origin = 'https://queue.example.test', calls = [], queues = [], remotePosts = new Map();
@@ -209,7 +209,7 @@ test('queue approval cards show verified weekly timing and block stale approval 
     // The whole approvals page on its "All" view (state 4) with the server's queue item as the loaded queue (state 0).
     const render = entry => {
       let index = 0; const useState = initial => { const current = index++; return [current === 0 ? { requireApproval: true, posts: [entry] } : current === 4 ? 'all' : initial, () => {}]; };
-      const scope = { React, useState, useEffect() {}, useRef: value => ({ current: value }), useFocusReturn: () => () => {}, PostVariantPreview: () => null, PLATFORM_RULES: {}, reviewKeyAction: () => null, adSpendActionLabel: String, adSpendPlatformLabel: String, formatMinorUnits: String, document: { getElementById: () => null }, ...ui };
+      const scope = { React, useState, useEffect() {}, useRef: value => ({ current: value }), useFocusReturn: () => () => {}, useDisplayFormat: useTestDisplayFormat, PostVariantPreview: () => null, PLATFORM_RULES: {}, reviewKeyAction: () => null, adSpendActionLabel: String, adSpendPlatformLabel: String, formatMinorUnits: String, document: { getElementById: () => null }, ...ui };
       return renderToStaticMarkup(new Function(...Object.keys(scope), code + '; return ContentApprovals;')(...Object.values(scope))({ projectId: 'project', role: 'owner', request() {} }));
     };
     let markup = render(item); assert.match(markup, /Visible launch queue/); assert.match(markup, /America\/New_York/); assert.match(markup, /Monday 09:00/); assert.match(markup, /next free slot assigned on submission/); assert.doesNotMatch(markup, /No planned publishing time/); assert.doesNotMatch(markup, /disabled=""[^>]*>Approve post/);
@@ -239,7 +239,7 @@ test('queue enqueue requires inline review of the exact saved post and queue sna
   function render(loaded = true, localPosts = [item]) { const context = { React, ...designSystem, loaded, localPosts, queues: [queue], approvalRequired, enqueueReviewKey, enqueueReviews, setEnqueueReviews: review, canWrite: true, busy: false, onOpenApprovals: null, onEditPost: null, enqueue() {} }; return new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)); }
   const all = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(all)];
   const submit = async () => {
-    const context = { canWrite: true, queues: [queue], approvalRequired, enqueueReviews, enqueueReviewKey, projectPath, format, action: async run => run(), write: async () => { calls++; return { post: { scheduledAt: '2070-01-01T09:00:00Z' } }; }, current: () => true, setPosts() {}, setNotice() {}, setError() {}, onChanged: null, load: async () => {} };
+    const context = { canWrite: true, queues: [queue], approvalRequired, enqueueReviews, enqueueReviewKey, projectPath, format: useTestDisplayFormat(), action: async run => run(), write: async () => { calls++; return { post: { scheduledAt: '2070-01-01T09:00:00Z' } }; }, current: () => true, setPosts() {}, setNotice() {}, setError() {}, onChanged: null, load: async () => {} };
     return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(enqueueStart, enqueueEnd))});`)(...Object.values(context))(item);
   };
   assert.doesNotMatch(renderToStaticMarkup(render(false, [])), /No unsent local posts/); assert.match(renderToStaticMarkup(render(true, [])), /No unsent local posts/);

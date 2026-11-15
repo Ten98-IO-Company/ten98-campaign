@@ -6,7 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as library from '@ten98/ui';
-import { format } from './fixtures/display-format.ts';
+import { testDisplayFormat as format } from './display-format.ts';
 
 const source = await readFile(new URL('../src/ZernioQueues.tsx', import.meta.url), 'utf8');
 const section = (start, end) => { const from = source.indexOf(start), to = source.indexOf(end, from); assert.ok(from >= 0 && to > from); return stripTypeScriptTypes(source.slice(from, to)); };

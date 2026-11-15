@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
-import { hooklessUi } from './fixtures/display-format.ts';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import * as offline from '../shared/offline-activations.ts';
 import { adSpendBlock } from '../src/approval-status.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 type Row = Record<string, any>;
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -34,7 +35,7 @@ async function component(name: string, additions: Row = {}): Promise<any> {
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace(/^export (default )?/gm, ''), name + '.tsx', { jsx: { runtime: 'classic' } });
   // The provider pages render the real shared frame.
   const AdProviderFrame = name === 'AdProviderFrame' ? undefined : await component('AdProviderFrame');
-  const scope = { React, ...hooks, ...hooklessUi, ...offline, FormData: FormValues, adSpendBlock, AdSpendNotice: () => null, AdProviderFrame, ...additions };
+  const scope = { React, ...hooks, ...ui, ...offline, FormData: FormValues, adSpendBlock, AdSpendNotice: () => null, AdProviderFrame, ...additions };
   return new Function(...Object.keys(scope), code + `; return ${name};`)(...Object.values(scope));
 }
 const projectId = 'project / exact';

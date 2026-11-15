@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { postgresSkip, testApp } from './postgres.mjs';
 import { stripTypeScriptTypes } from 'node:module';
-import { format } from './fixtures/display-format.ts';
+import { testDisplayFormat as format } from './display-format.ts';
 import { formatMicros, microsToDecimal } from '../src/google-micros.ts';
 import { firstProject } from './first-project.ts';
 

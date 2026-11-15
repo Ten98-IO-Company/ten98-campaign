@@ -4,8 +4,9 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
-import { hooklessUi } from './fixtures/display-format.ts';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 const sources = Object.fromEntries(await Promise.all(['GoogleCalendar', 'UnifiedInbox', 'IntegrationSettings'].map(async name => {
   const source = await readFile(new URL('../src/' + name + '.tsx', import.meta.url), 'utf8');
@@ -34,7 +35,7 @@ function mount(sourceName, name = sourceName) {
     if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) effects[index] = { deps, callback, cleanup: previous?.cleanup };
   };
   const window = { addEventListener() {}, removeEventListener() {}, setInterval: () => 1, clearInterval() {}, confirm: () => true, location: { origin: 'https://campaign.example.test' } };
-  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'loadGoogleMaps', 'ZernioWebhooks', 'window', ...Object.keys(ui), sources[sourceName] + '; return ' + name + ';')(React, useEffect, useRef, useState, () => { throw new Error('Maps must not load.'); }, () => null, window, ...Object.values(hooklessUi));
+  const Component = new Function('React', 'useEffect', 'useRef', 'useState', 'loadGoogleMaps', 'ZernioWebhooks', 'window', ...Object.keys(ui), sources[sourceName] + '; return ' + name + ';')(React, useEffect, useRef, useState, () => { throw new Error('Maps must not load.'); }, () => null, window, ...Object.values(ui));
   return {
     updates,
     render(props) { stateIndex = refIndex = effectIndex = 0; return Component(props); },
