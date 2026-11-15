@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { assertSchema, closeDatabase, getDatabase, migrate, type Database } from './database.ts';
-import { hashPassword, lockUser } from './auth.ts';
+import { hashPassword, hasLocalPassword, insertAccount, setLocalPassword } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
 
 class CliError extends Error {}
@@ -21,11 +21,11 @@ async function account(command: string, db: Database) {
     const enabled = command === 'grant-operator', changed = await db.transaction(tx => setInstanceOperator(tx, existing.id, enabled, 'host'));
     console.log(changed ? `${enabled ? 'Granted' : 'Revoked'} instance operator authority ${enabled ? 'to' : 'from'} ${email}. Workspace membership is still required.` : `Instance operator authority for ${email} is already ${enabled ? 'granted' : 'revoked'}.`);
   } else if (command === 'reset-password') {
-    if (!existing || !(await db.execute(sql`SELECT password FROM users WHERE id = ${existing.id}`)).rows[0]?.password) throw new CliError('A local password account was not found. Use your identity provider for SSO recovery.');
+    if (!existing || !await hasLocalPassword(db, existing.id)) throw new CliError('A local password account was not found. Use your identity provider for SSO recovery.');
     if (typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) throw new CliError('Use a password between 12 and 128 characters.');
     const next = await hashPassword(input.password);
     // The user row lock orders the reset against a sign-in or password change running in the app.
-    await db.transaction(async tx => { await lockUser(tx, existing.id); await tx.execute(sql`UPDATE users SET password = ${next} WHERE id = ${existing.id}`); await tx.execute(sql`DELETE FROM password_resets WHERE user_id = ${existing.id}`); await tx.execute(sql`DELETE FROM sessions WHERE user_id = ${existing.id}`); });
+    await db.transaction(tx => setLocalPassword(tx, existing.id, next));
     console.log('Local password reset. All account sessions were signed out.');
   } else {
     if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 120 || /[\u0000-\u001f]/.test(input.name)) throw new CliError('Use a name between 1 and 120 characters.');
@@ -33,7 +33,7 @@ async function account(command: string, db: Database) {
     if (existing) throw new CliError('An account already uses this email address.');
     const hash = await hashPassword(input.password);
     // A unique-email violation means a concurrent signup won; report it as the existing-account error.
-    try { await db.execute(sql`INSERT INTO users VALUES (${randomUUID()}, ${input.name.trim()}, ${email}, ${hash})`); }
+    try { await insertAccount(db, { id: randomUUID(), name: input.name.trim(), email, passwordHash: hash }); }
     catch (error: any) { if (error?.cause?.code === '23505' || error?.code === '23505') throw new CliError('An account already uses this email address.'); throw error; }
     console.log(`Created local account for ${email}. Add it to a workspace in the app.`);
   }
