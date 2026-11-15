@@ -10,9 +10,12 @@ export function microsToDecimal(micros: unknown): string | null {
   return `${sign}${whole}${fraction ? '.' + fraction : ''}`;
 }
 
-/** A decimal amount in currency units ("12.345678" or 12.5) as whole micros; null beyond micro precision. */
+/**
+ * A decimal amount in currency units as whole micros. A string must be exact to the micro ("12.345678"); a number is
+ * already a float, so it is fixed to six decimals (0.1 + 0.2 gives 300000). Null for anything else.
+ */
 export function decimalToMicros(amount: unknown): string | null {
-  const match = /^(-?)(\d+)(?:\.(\d{1,6}))?$/.exec(typeof amount === 'number' ? String(amount) : typeof amount === 'string' ? amount.trim() : '');
+  const match = /^(-?)(\d+)(?:\.(\d{1,6}))?$/.exec(typeof amount === 'number' ? (Number.isFinite(amount) ? amount.toFixed(6) : '') : typeof amount === 'string' ? amount.trim() : '');
   return match ? `${match[1]}${BigInt(match[2] + (match[3] || '').padEnd(6, '0'))}` : null;
 }
 

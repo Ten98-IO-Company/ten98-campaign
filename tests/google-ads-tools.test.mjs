@@ -162,12 +162,15 @@ test('actual Google UI formats match types, micros and stale selection guards wi
   assert.equal(metric('1500', 'KWD'), 'KWD\u00a00.002'); assert.equal(metric('1499', 'KWD'), 'KWD\u00a00.001'); assert.equal(metric('1500000', 'JPY'), '¥2'); assert.equal(metric('12000000', 'USD'), '$12.00');
   assert.equal(metric('-12345000', 'USD'), '-$12.35'); assert.equal(metric('9007199254740993', 'USD'), '$9,007,199,254.74', 'Rounding stays in integers beyond float precision.'); assert.equal(metric(null, 'USD'), '—');
   assert.deepEqual([['9007199254745000', 'USD'], ['4999', 'USD'], ['5000', 'USD'], ['1234567', undefined]].map(([micros, code]) => roundMicrosToMinor(micros, code)), ['9007199254750000', '0', '10000', '1230000']);
-  assert.deepEqual(['12.345678', 12.5, '-0.5', '0.0000001', '1e3', ''].map(decimalToMicros), ['12345678', '12500000', '-500000', null, null, null]);
+  assert.deepEqual(['12.345678', 12.5, '-0.5', '0.0000001', '1e3', ''].map(decimalToMicros), ['12345678', '12500000', '-500000', null, null, null], 'Strings must be exact to the micro.');
+  assert.deepEqual([0.1 + 0.2, 12.3456789, 1e-7, NaN, Infinity].map(decimalToMicros), ['300000', '12345679', '0', null, null], 'A number is already a float and is fixed to six decimals.');
   assert.equal(amount('1500000', 'USD'), '$1.50'); assert.equal(amount('1000', 'KWD'), 'KWD\u00a00.001'); assert.equal(amount('1230000', 'USD'), '$1.23'); assert.equal(amount('1000000', 'JPY'), '¥1');
   assert.equal(amount('1234567', 'USD'), '$1.234567', 'Micros stay exact rather than rounding to cents.'); assert.equal(amount('9007199254740993', 'USD'), '$9,007,199,254.740993');
   assert.equal(amount(null, 'KWD'), '—'); assert.equal(amount('not micros', 'USD'), '—'); assert.equal(amount('1500000', undefined), '1.5 ');
   assert.equal(money('0.000123', 'USD', format), '$0.000123'); assert.equal(money(12.5, 'EUR', format), '€12.50'); assert.equal(money(null, 'USD', format), '—');
   assert.equal(money('12.345', 'USD', format, { round: 'minor' }), '$12.35', 'A reported decimal rounds half-up on its digits.'); assert.equal(money(12.345, 'USD', format, { round: 'minor' }), '$12.35');
+  // A reported number keeps showing its value whatever float noise or exponent it carries.
+  assert.deepEqual([0.1 + 0.2, 12.3456789, 1e-7, NaN].map(value => money(value, 'USD', format, { round: 'minor' })), ['$0.30', '$12.35', '$0.00', '—']);
   assert.deepEqual(['0', '1', '-1500000', '12000000', 1500000, 1.5, '1e6', ''].map(microsToDecimal), ['0', '0.000001', '-1.5', '12', '1.5', null, null, null]);
   const writeSource = source.slice(source.indexOf('async function write('), source.indexOf('  const readKeywords'));
   const active = { current: true }, calls = []; let finish;
