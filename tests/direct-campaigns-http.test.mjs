@@ -145,6 +145,27 @@ test('a draft is saved only with contacts of its own project', pg, async t => {
   } finally { await f.close(); }
 });
 
+test('a draft refuses any foreign contact id: alone, swapped in on edit, and without storing a refused draft', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const drafts = async () => Number((await pool.query('SELECT count(*)::int AS n FROM direct_campaigns WHERE project_id = $1', [f.projectId])).rows[0].n);
+    const known = await f.person({ email: 'own@example.com', phone: '+12025550171' }), other = await f.person({ email: 'other@example.com', phone: '+12025550172' });
+    const before = await drafts();
+    let response = await f.request(f.path + '/campaigns', 'POST', { name: 'Notice', channel: 'sms', text: 'Hello', contactIds: ['foreign-contact-id'] });
+    assert.equal(response.status, 400); assert.equal(response.data.error.code, 'CONTACT_NOT_FOUND');
+    assert.equal(await drafts(), before, 'A refused create stores nothing.');
+    const draft = await f.draft({ contactIds: [known.id, other.id] });
+    // Same length, one id swapped for a foreign one: refused, and the stored contacts are unchanged.
+    response = await f.request(f.path + '/campaigns/' + draft.id, 'PATCH', { contactIds: [known.id, 'foreign-contact-id'] });
+    assert.equal(response.status, 400); assert.equal(response.data.error.code, 'CONTACT_NOT_FOUND');
+    assert.deepEqual((await f.request(f.path + '/campaigns/' + draft.id)).data.campaign.contactIds, [known.id, other.id]);
+    // A contact deleted after it was chosen: the draft can still be edited to drop it.
+    assert.equal((await f.request(f.path + '/contacts/' + other.id, 'DELETE')).status, 200);
+    assert.equal((await f.request(f.path + '/campaigns/' + draft.id, 'PATCH', { name: 'Still editable' })).status, 200, 'Edits that leave the contacts alone still save.');
+    assert.equal((await f.request(f.path + '/campaigns/' + draft.id, 'PATCH', { contactIds: [known.id] })).status, 200, 'The deleted contact can be cleared.');
+  } finally { await f.close(); }
+});
+
 test('scheduling a campaign re-checks its preview on the queuing transaction, without a second connection', pg, async t => {
   // One pool connection: a preview read through the pool inside the queuing transaction would time out. The sending
   // worker is left out because its lease transaction deliberately works on other connections.

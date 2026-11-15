@@ -18,7 +18,7 @@ const strip = (text: string) => text.replace(/^import .+;\r?\n/gm, '').replace(/
 const compiled = async (text: string, file: string) => (await transformWithOxc(strip(text), file, { jsx: { runtime: 'classic' } })).code;
 const templateModule = new Function('React', ...Object.keys(library), await compiled(templateSource, 'WhatsAppTemplate.tsx') + '; return { WhatsAppTemplate, templateRestriction, templatePreviewText, templateParameter, templateMissing };')(React, ...Object.values(library));
 const module = new Function('React', 'useEffect', 'useRef', 'useState', 'WhatsAppTemplate', 'templateRestriction', 'templatePreviewText', 'templateMissing', 'useRevealPanel', ...Object.keys(library),
-  await compiled(source, 'DirectCampaigns.tsx') + '; return { DirectCampaigns, localAudience, exclusionGroups, campaignChecks, campaignProgress, ChecklistRow, CampaignStatus, CampaignResults, defaultName };',
+  await compiled(source, 'DirectCampaigns.tsx') + '; return { DirectCampaigns, localAudience, exclusionGroups, campaignChecks, campaignProgress, ChecklistRow, CampaignStatus, CampaignResults, defaultName, contactChoices };',
 )(React, useEffect, useRef, useState, templateModule.WhatsAppTemplate, templateModule.templateRestriction, templateModule.templatePreviewText, templateModule.templateMissing, () => {}, ...Object.values(library));
 
 const draft = (changes: Row = {}) => ({ name: 'Autumn notice', channel: 'email', emailPurpose: 'transactional', subject: 'Your receipt', text: 'Thanks {{name}}', html: '', accountId: '', templateName: '', templateLanguage: 'en', templateComponents: [], contactIds: [], tags: [], ...changes });
@@ -163,6 +163,15 @@ test('main mounts Campaign messaging and Messages contacts with their scope, acc
   assert.doesNotMatch(messages, /sections: \['campaigns'\]/, 'Message creation has one home under Campaign.');
 });
 
+
+test('a chosen contact deleted since is listed so it can be unticked, once the contact list has loaded (#345)', () => {
+  const chosen = draft({ contactIds: ['a', 'gone'] });
+  const loaded = module.contactChoices([person('a'), person('b')], chosen, true);
+  assert.deepEqual(loaded.map((option: Row) => option.value), ['a', 'b', 'gone']);
+  assert.equal(loaded[2].label, 'Deleted contact'); assert.match(loaded[2].description, /Untick it/);
+  assert.deepEqual(module.contactChoices([], chosen, false), [], 'Before the list loads, nothing is called deleted.');
+  assert.deepEqual(module.contactChoices([], chosen, true).map((option: Row) => option.value), ['a', 'gone'], 'With every contact deleted the list still shows, so both can be unticked.');
+});
 
 test('a message without its own name takes its subject, first SMS line or template, so naming is not a required step', () => {
   assert.equal(module.defaultName(draft({ name: '', subject: '  Your October receipt ' })), 'Your October receipt');

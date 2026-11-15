@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { createStore } from './database.ts';
+import { directContacts } from './schema.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { activeSuppression, createContacts, lockContacts } from './contacts.ts';
@@ -111,9 +112,11 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
   const requireCampaign = async (projectId: string, campaignId: string, ex: Executor = db) => { if (campaignId && !await createStore(ex).get(projectId, 'campaigns', campaignId)) fail(400, 'INVALID_CAMPAIGN', 'Choose a campaign from this project.'); };
   // Chosen contacts must be this project's when a draft is saved, as the audience check requires later.
   const requireContacts = async (projectId: string, contactIds: string[], ex: Executor = db) => {
-    if (!contactIds.length) return;
-    const known = new Set((await contacts.list(projectId, ex)).map((contact: any) => contact.id));
-    if (contactIds.some(id => !known.has(id))) fail(400, 'CONTACT_NOT_FOUND', 'A selected contact does not belong to this project.');
+    // Only the chosen ids are read, so a large contact list does not slow every draft save.
+    const wanted = [...new Set(contactIds)];
+    if (!wanted.length) return;
+    const found = await ex.select({ id: directContacts.id }).from(directContacts).where(and(eq(directContacts.project_id, projectId), inArray(directContacts.id, wanted)));
+    if (found.length !== wanted.length) fail(400, 'CONTACT_NOT_FOUND', 'A selected contact does not belong to this project.');
   };
   // Row lock: read-modify-write of the stored campaign, so a concurrent worker, refresh or cancellation write is not lost.
   const changeCampaign = (projectId: string, id: string, change: (campaign: any) => unknown) => db.transaction(async tx => {
