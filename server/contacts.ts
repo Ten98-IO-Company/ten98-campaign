@@ -85,7 +85,12 @@ export function createContacts({ db }: { db: Database }) {
     const found = await resultRows(ex.execute(sql`SELECT c.data FROM direct_contact_messenger_identities i JOIN direct_contacts c ON c.id = i.contact_id AND c.project_id = i.project_id WHERE i.project_id = ${projectId} AND i.account_id = ${messengerId(accountId, 'account ID')} AND i.participant_id = ${messengerId(participantId, 'participant ID')}`));
     return (await contactViews(ex, found))[0] || null;
   }
-  async function prepare(ex: Executor, projectId: string, body: any, previous?: ProviderRecord, messengerIdentity?: ProviderRecord): Promise<ProviderRecord> {
+  /**
+   * `confirmed` names channels the person agreed to in this very request for the destination it carries (in-person
+   * capture). Their consent survives a destination change and gets fresh evidence; every other changed destination
+   * loses its consent, as an edit must not carry a consent given for an old address over to a new one.
+   */
+  async function prepare(ex: Executor, projectId: string, body: any, previous?: ProviderRecord, messengerIdentity?: ProviderRecord, confirmed: string[] = []): Promise<ProviderRecord> {
     if (!object(body) || Object.keys(body).some(key => !['name', 'email', 'phone', 'company', 'tags', 'consents', 'consentSource'].includes(key))) fail(400, 'Use the supported contact fields.');
     const result: ProviderRecord = { name: '', email: '', phone: '', company: '', tags: [], ...previous };
     for (const field of ['name', 'company']) if (own(body, field)) result[field] = text(body[field], field);
@@ -104,9 +109,10 @@ export function createContacts({ db }: { db: Database }) {
       // A provider's temporary suppression belongs to the old address; it does not follow an edited destination.
       if (medium === channel && previous && destination !== oldDestination && result.suppression[channel]?.expiresAt) delete result.suppression[channel];
       if (medium === channel && destination) { const suppressed = await ledger(ex, projectId, channel, destination) || channel === 'sms' && await smsSuppression(destination, ex); if (suppressed) result.suppression[channel] = suppressed; }
-      if (!destination || previous && destination !== oldDestination || result.suppression[medium] && !result.suppression[medium].expiresAt) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
+      const moved = !!previous && destination !== oldDestination, reconfirmed = moved && confirmed.includes(channel) && body.consents?.[channel] === true;
+      if (!destination || moved && !reconfirmed || result.suppression[medium] && !result.suppression[medium].expiresAt) { result.consents[channel] = false; delete result.consentEvidence[channel]; }
       if (result.consents[channel]) {
-        const newlyEnabled = previous?.consents?.[channel] !== true;
+        const newlyEnabled = reconfirmed || previous?.consents?.[channel] !== true;
         if (!source || newlyEnabled && !own(body, 'consentSource')) fail(400, 'Record the source of explicit consent before enabling a channel.');
         if (body.consents?.[channel] === true && (newlyEnabled || !result.consentEvidence[channel])) result.consentEvidence[channel] = { source, at: now };
       } else delete result.consentEvidence[channel];
@@ -163,7 +169,7 @@ export function createContacts({ db }: { db: Database }) {
       const recorded = requested.filter(channel => !refused.includes(channel));
       if (!recorded.length) fail(409, 'This person opted out of the ticked channels earlier, so nothing was saved.');
       const body = { ...(person.name && !previous?.name ? { name: person.name } : {}), ...(target.email ? { email: target.email } : {}), ...(target.phone ? { phone: target.phone } : {}), tags: [...new Set([...(previous?.tags || []), tag])], consents: Object.fromEntries([...recorded, ...(recorded.includes('email') ? ['emailMarketing'] : [])].map(channel => [channel, true])), consentSource: source };
-      const contact = await write(tx, projectId, await prepare(tx, projectId, body, previous), previous);
+      const contact = await write(tx, projectId, await prepare(tx, projectId, body, previous, undefined, Object.keys(body.consents)), previous);
       return { contactId: contact.id, recorded, refused };
     });
   }
