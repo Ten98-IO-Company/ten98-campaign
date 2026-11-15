@@ -8,7 +8,7 @@ import { campaignCreationRoute } from '../src/campaign-creation.ts';
 
 const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
 const routes = source.slice(source.indexOf('const pageRoutes:'), source.indexOf('const channels:'));
-const { readNavigation, navigationUrl, editorValues, pageRoutes, pageSections, areas, areaOf, areaTab } = new Function(stripTypeScriptTypes(routes) + '; return {readNavigation, navigationUrl, editorValues, pageRoutes, pageSections, areas, areaOf, areaTab};')();
+const { readNavigation, navigationUrl, showsNotFound, editorValues, pageRoutes, pageSections, areas, areaOf, areaTab } = new Function(stripTypeScriptTypes(routes) + '; return {readNavigation, navigationUrl, showsNotFound, editorValues, pageRoutes, pageSections, areas, areaOf, areaTab};')();
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test('Page not found clears through Go to Home, the sidebar entry of its fallback page, and keeps its address on reload', async () => {
@@ -26,6 +26,24 @@ test('Page not found clears through Go to Home, the sidebar entry of its fallbac
   assert.equal(ui.navigationRef.current.notFound, undefined); assert.match(ui.window.location.search, /view=ads/); assert.doesNotMatch(ui.window.location.search, /section=contacts/);
   // A known address with nothing to clear stays a no-op, as before.
   const calls = ui.calls.length; ui.setPage('Ads manager'); assert.equal(ui.calls.length, calls);
+});
+
+test('an unknown path or an unknown campaign in the address shows Page not found, and a campaign still loading does not', () => {
+  // Campaign lives at "/"; any other path is an address it doesn't have.
+  for (const pathname of ['/nonsense/path', '/overview', '/campaigns/c1']) assert.deepEqual(readNavigation('', pathname), { page: 'Overview', section: '', projectId: '', notFound: true }, pathname);
+  assert.equal(readNavigation('?view=ads&project=a', '/nonsense').notFound, true);
+  for (const pathname of ['/', '/index.html', undefined]) assert.equal(readNavigation('?view=ads', pathname).notFound, undefined, String(pathname));
+  assert.match(source, /readNavigation\(window\.location\.search, window\.location\.pathname\)\)/, 'The first read of the address includes its path.');
+  assert.match(source, /next = readNavigation\(window\.location\.search, window\.location\.pathname\)/, 'Back and forward read the path too.');
+  // The same mechanism serves a campaign id that is not among the loaded campaigns; it never fires before the campaigns are known.
+  const open = { page: 'Campaigns', section: '', projectId: 'a', item: 'gone' };
+  assert.equal(showsNotFound(open, [{ id: 'c1' }], 'a'), true, 'An unknown campaign id is reported.');
+  assert.equal(showsNotFound({ ...open, item: 'c1' }, [{ id: 'c1' }], 'a'), false, 'A loaded campaign opens.');
+  assert.equal(showsNotFound({ ...open, projectId: '' }, [{ id: 'c1' }], 'a'), true, 'An address without a project is checked against the open project.');
+  assert.equal(showsNotFound(open, [], 'b'), false, 'Campaigns of another project are not the ones in the address, so nothing is reported yet.');
+  assert.equal(showsNotFound({ page: 'Calendar', section: '', projectId: 'a', item: 'gone' }, [], 'a'), false, 'Other pages ignore item.');
+  assert.equal(showsNotFound({ page: 'Overview', section: '', projectId: '', notFound: true }, [], 'a'), true);
+  assert.match(source, /showsNotFound\(navigation, state\.campaigns, state\.projectId\) \? <Card as="section"><EmptyState icon="search" title="Page not found"/, 'The shell renders the one Page not found state for both.');
 });
 
 test('outcome checks preserve the original key without creating a first send and editor wrappers forward the check', async () => {

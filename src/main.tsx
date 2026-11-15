@@ -82,15 +82,15 @@ type State = { user: Row; workspaces: Row[]; projects: Row[]; projectId: string 
 type Page = 'Overview' | 'Campaigns' | 'Publishing' | 'Calendar' | 'Ads manager' | 'OOH media' | 'Asset library' | 'Media providers' | 'Analytics' | 'Settings' | 'Draft content' | 'Integrations' | 'Approvals' | 'Direct campaigns' | 'Unified inbox' | 'Links & tracking' | 'Field activity';
 const pageRoutes: Record<Page, string> = { Overview: 'overview', Campaigns: 'campaigns', Publishing: 'publishing', Calendar: 'calendar', 'Ads manager': 'ads', 'OOH media': 'ooh', 'Asset library': 'assets', 'Media providers': 'providers', Analytics: 'analytics', Settings: 'settings', 'Draft content': 'draft-content', Integrations: 'integrations', Approvals: 'approvals', 'Direct campaigns': 'direct', 'Unified inbox': 'inbox', 'Links & tracking': 'links', 'Field activity': 'activations' };
 const pageSections: Partial<Record<Page, string[]>> = { Publishing: ['posts', 'library', 'queues', 'recycling', 'destinations'], 'Ads manager': ['campaigns', 'adsets', 'ads', 'leads', 'measurement', 'events', 'search', 'shopping', 'microsoft'], Analytics: ['summary', 'accounts', 'links', 'messages', 'offline'], 'Direct campaigns': ['campaigns', 'templates', 'contacts', 'people'], Settings: ['general', 'approvals', 'activity', 'members', 'profile', 'security', 'sign-in'], Integrations: ['connections', 'keys'] };
-// notFound: the address named a view or section Campaign doesn't have; the page shows that instead of another page.
+// notFound: the address named a path, view or section Campaign doesn't have; the page shows that instead of another page.
 type Navigation = { page: Page; section: string; projectId: string; item?: string; notFound?: boolean };
-function readNavigation(search: string): Navigation {
+function readNavigation(search: string, pathname = '/'): Navigation {
   const params = new URLSearchParams(search), view = params.get('view');
   const page = (Object.keys(pageRoutes) as Page[]).find(label => pageRoutes[label] === view) || (view === 'assistant' ? 'Draft content' : 'Overview');
   const sections = pageSections[page] || [];
   const item = page === 'Campaigns' ? params.get('item') || '' : '';
-  const knownView = !view || page !== 'Overview' || view === 'overview', requested = params.get('section') || '', knownSection = !requested || sections.includes(requested);
-  return { page, section: knownSection && requested ? requested : sections[0] || '', projectId: params.get('project') || '', ...(item ? { item } : {}), ...(knownView && knownSection ? {} : { notFound: true }) };
+  const knownPath = pathname === '/' || pathname === '/index.html', knownView = !view || page !== 'Overview' || view === 'overview', requested = params.get('section') || '', knownSection = !requested || sections.includes(requested);
+  return { page, section: knownSection && requested ? requested : sections[0] || '', projectId: params.get('project') || '', ...(item ? { item } : {}), ...(knownPath && knownView && knownSection ? {} : { notFound: true }) };
 }
 function navigationUrl(next: Navigation, href: string) {
   const url = new URL(href); url.searchParams.set('view', pageRoutes[next.page]);
@@ -98,6 +98,12 @@ function navigationUrl(next: Navigation, href: string) {
   if (next.projectId) url.searchParams.set('project', next.projectId); else url.searchParams.delete('project');
   if (next.item) url.searchParams.set('item', next.item); else url.searchParams.delete('item');
   return url.pathname + url.search + url.hash;
+}
+// An address can name a campaign that isn't in the project (deleted, mistyped, another project's). That shows the same
+// Page not found; nothing is reported for an address that names another project, whose campaigns aren't loaded.
+function showsNotFound(navigation: Navigation, campaigns: Row[], projectId: string | null) {
+  if (navigation.notFound) return true;
+  return navigation.page === 'Campaigns' && !!navigation.item && (!navigation.projectId || navigation.projectId === projectId) && !campaigns.some(campaign => campaign.id === navigation.item);
 }
 function editorValues(dialog: ParentNode) {
   return JSON.stringify(Array.from(dialog.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select'), input => [input.tagName, input.name, input.type, input.value, 'checked' in input ? input.checked : null, 'files' in input ? Array.from(input.files || [], file => [file.name, file.size, file.lastModified]) : null]));
@@ -173,7 +179,7 @@ function App() {
   const date = (value: string) => value ? format.date(value) : 'Not set';
   // inviteSignIn is set while an invited person signs in instead; it carries the invited email for the sign-in form.
   const [inviteToken, setInviteToken] = useState(startupInvite), [inviteSignIn, setInviteSignIn] = useState<{ email?: string } | null>(startupAuthError ? {} : null);
-  const [navigation, setNavigation] = useState(() => readNavigation(window.location.search)), [query, setQuery] = useState(''), [tab, setTab] = useState('all');
+  const [navigation, setNavigation] = useState(() => readNavigation(window.location.search, window.location.pathname)), [query, setQuery] = useState(''), [tab, setTab] = useState('all');
   const { page, section } = navigation;
   const adsView = page === 'Ads manager' ? section : 'campaigns', publishingView = page === 'Publishing' ? section : 'posts', insightsView = page === 'Analytics' ? section : 'summary', directView = page === 'Direct campaigns' ? section : 'campaigns';
   const navigationRef = useRef(navigation); navigationRef.current = navigation;
@@ -371,7 +377,7 @@ function App() {
       await api('/auth/logout', 'POST', {}); clearSignedInState();
       // The next sign-in, possibly by someone else, starts at the overview instead of this person's page and project.
       const url = new URL(window.location.href); for (const key of ['view', 'section', 'project']) url.searchParams.delete(key);
-      window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash); navigationRef.current = readNavigation(''); setNavigation(navigationRef.current);
+      window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash); navigationRef.current = readNavigation('', window.location.pathname); setNavigation(navigationRef.current);
       setSession(await api('/session'));
     }); }, true);
   }
@@ -457,7 +463,7 @@ function App() {
   useEffect(() => {
     const onPop = () => {
       if (restoringPop.current) { const restored = restoringPop.current; restoringPop.current = null; restored(); return; }
-      const next = readNavigation(window.location.search), targetIndex = Number.isSafeInteger(window.history.state?.campaignIndex) ? window.history.state.campaignIndex : historyIndex.current;
+      const next = readNavigation(window.location.search, window.location.pathname), targetIndex = Number.isSafeInteger(window.history.state?.campaignIndex) ? window.history.state.campaignIndex : historyIndex.current;
       const delta = targetIndex - historyIndex.current;
       if (state && next.projectId && !state.projects.some(project => project.id === next.projectId)) {
         if (delta) { restoringPop.current = () => setError('That project is unavailable.'); window.history.go(-delta); }
@@ -537,7 +543,7 @@ function App() {
   const [adsRange, setAdsRange] = useState('default'), [adsAccount, setAdsAccount] = useState(allAdAccounts), [hideAmounts, setHideAmounts] = useState(readHideAmounts), adsRead = useRef(0);
   const triggerRef = useRef<HTMLElement | null>(null), signedOutFocus = useRef(false);
   // Settings links stay real links; a plain click navigates in place through the editor guard.
-  const settingsNavigate = useRef((_href: string) => {}); settingsNavigate.current = href => navigate(readNavigation(new URL(href, window.location.href).search));
+  const settingsNavigate = useRef((_href: string) => {}); settingsNavigate.current = href => navigate(readNavigation(new URL(href, window.location.href).search, new URL(href, window.location.href).pathname));
   const SettingsLink = useMemo<NavLinkComponent>(() => function SettingsLink({ href, onClick, ...props }) { return <Link {...props} variant="quiet" href={href} onClick={event => { onClick?.(event); if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); settingsNavigate.current(href); }}/>; }, []);
   // A layout effect still sees the control that opened the editor; the dialog's own effect then moves focus inside it.
   useLayoutEffect(() => { triggerRef.current = modal && document.activeElement instanceof HTMLElement ? document.activeElement : null; }, [!!modal]);
@@ -685,7 +691,7 @@ function App() {
       </>}
       topbar={<AppTopbar menuToggle menuLabel="Open navigation" breadcrumb={{ scope: project?.name, current: area.label }} search={searchable ? <SearchField variant="topbar" label={'Search ' + areaCurrent.label} hideLabel placeholder="Search this view…" value={query} onValueChange={setQuery} shortcut={searchShortcut} inputRef={searchRef}/> : undefined}
         actions={<AccountMenu name={state.user.name} email={state.user.email} items={[{ id: 'settings', kind: 'button', label: 'Settings', icon: 'settings', onSelect: () => setPage('Settings') }, { id: 'separator', kind: 'separator' }, { id: 'sign-out', kind: 'button', label: 'Sign out', danger: true, onSelect: signOut }]}/>}/>}>
-        {navigation.notFound ? <Card as="section"><EmptyState icon="search" title="Page not found" description="This address doesn't match a page in Campaign. The link may be out of date or mistyped." action={<Button variant="primary" onClick={() => setPage('Overview')}>Go to Home</Button>}/></Card> : <>
+        {showsNotFound(navigation, state.campaigns, state.projectId) ? <Card as="section"><EmptyState icon="search" title="Page not found" description="This address doesn't match a page in Campaign. The link may be out of date or mistyped." action={<Button variant="primary" onClick={() => setPage('Overview')}>Go to Home</Button>}/></Card> : <>
         {area.id !== 'settings' && <PageHeader title={area.label} actions={area.id === 'campaign' && canWrite ? <Button variant="primary" icon={<Icon name="plus" size={17}/>} disabled={busy} onClick={() => startCampaignCreation(creationKind)}>New campaign</Button> : page === 'Overview' || page === 'Analytics' && insightsView === 'summary' ? <Inline><Button variant="secondary" icon={<Icon name="download" size={16}/>} onClick={exportReport}>Export report</Button>{canWrite && page === 'Overview' && <Button variant="primary" icon={<Icon name="plus" size={17}/>} onClick={() => startCampaignCreation()}>New campaign</Button>}</Inline> : actionKind[page] && canWrite && !(page === 'Publishing' && publishingView === 'library') && !openedCampaign ? <Button variant="primary" icon={<Icon name="plus" size={17}/>} onClick={() => actionKind[page] === 'provider' ? setModal({ type: 'provider' }) : startCampaignCreation(creationKind)}>{actionText[page]}</Button> : undefined}/>}
         {error && <Alert tone="danger" onDismiss={() => setError('')} dismissLabel="Dismiss error">{error}</Alert>}
         {spendBlock && <AdSpendNotice block={spendBlock} onOpenApprovals={() => { setSpendBlock(null); setPage('Approvals'); }} onDismiss={() => setSpendBlock(null)}/>}
