@@ -5,7 +5,7 @@ import { directContacts } from './schema.ts';
 import type { Database, Executor, Store, Transaction } from './database.ts';
 import { IntegrationError, fail, operation, reportObject as plain, scopedAccounts, zernioClient } from './provider-core.ts';
 import { activeSuppression, createContacts, lockContacts } from './contacts.ts';
-import { createConsentHistory, type ConsentEvent } from './consent-history.ts';
+import { consentOrigin, createConsentHistory } from './consent-history.ts';
 import { sendDirect, listWhatsAppTemplates, validateWhatsAppTemplate, createWhatsAppBroadcast, addWhatsAppRecipients, sendWhatsAppBroadcast, getWhatsAppBroadcast, cancelWhatsAppBroadcast, getSmsStatus, syncEmailSuppressions, emailProvider, requireEmailProvider } from './direct-providers.ts';
 import { SES_REGIONS, classifyEmailFeedback, readResponseText, verifySnsMessage } from '@ten98/runtime';
 
@@ -96,7 +96,8 @@ const atomic = <T>(executor: Executor, run: (tx: Transaction) => Promise<T>): Pr
 // Twilio's re-subscribe keywords (Advanced Opt-Out): a signed START, YES or UNSTOP, or its OptOutType.
 export const smsStarted = (form: URLSearchParams) => form.get('OptOutType') === 'START' || /^(START|UNSTOP|YES)$/i.test((form.get('Body') || '').trim());
 export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Database; env: any; appUrl: string; secret: string; store?: Store }) {
-  const contacts = createContacts({ db }), history = createConsentHistory({ db, secret });
+  // The shared contacts (index.ts hands them to the SMS inbox and webhooks too) record consent history for every caller.
+  const history = createConsentHistory({ db, secret }), contacts = createContacts({ db, history });
   let smsInbox: any, attaching: Promise<void> | undefined;
   const campaignRows = async (projectId: string) => (await resultRows(db.execute(sql`SELECT data FROM direct_campaigns WHERE project_id = ${projectId} ORDER BY seq DESC`))).map(row => row.data);
   const find = async (projectId: string, id: string, ex: Executor = db, lock = false) => {
@@ -217,8 +218,8 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       // Only a policy row alerts; any other row, including a reason the classifier does not recognise, suppresses (fail safe).
       if (outcome?.action === 'deliverability-alert') policy.push({ contactId: contact.id, expiresAt: match.expiresAt });
       // Cloudflare refuses the address itself until the row expires, so an expiring row holds the contact until then.
-      else if (outcome?.expiresAt) await contacts.suppressUntil(projectId, contact.id, 'email', match.reason, outcome.expiresAt);
-      else await contacts.suppress(projectId, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason);
+      else if (outcome?.expiresAt) await contacts.suppressUntil(projectId, contact.id, 'email', match.reason, outcome.expiresAt, consentOrigin.emailHold('cloudflare'));
+      else await contacts.suppress(projectId, contact.id, 'email', match.reason === 'hard_bounce' ? 'hard-bounce' : match.reason, { origin: consentOrigin.emailFeedback('cloudflare', outcome?.reason) });
     }
     await db.transaction(async tx => {
       const seenAt = nowISO();
@@ -272,6 +273,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
           delivery.status = 'sending';
           // Claim: only a still-pending row moves to sending, so a cancellation that committed after the read above is never sent.
           if ((await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; Object.assign(current, delivery); }))?.status !== 'sending') { await finish(campaign); continue; }
+          let accepted: any;
           try {
             const result: any = await sendDirect({ channel: campaign.channel, campaign: rendered, contact, delivery: { ...delivery, callbackUrl: `${appUrl}/api/webhooks/twilio/status/${delivery.id}` }, env: currentEnv, project, appUrl, unsubscribeUrl: `${appUrl}/api/direct/unsubscribe/${unsubscribeToken(campaign.projectId, contact.email)}`, assertMapping });
             const latest = await changeDelivery(delivery.id, latest => {
@@ -279,13 +281,16 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
               latest.providerId = result.providerId; latest.status = nextStatus(latest.status, result.status); if (campaign.channel === 'sms') { latest.smsSender = result.sender || latest.smsSender; latest.smsMessagingServiceSid = result.messagingServiceSid || latest.smsMessagingServiceSid; }
             });
             if (campaign.channel === 'sms') await recordSms(campaign, latest);
-            if (campaign.channel === 'sms' && result.errorCode === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
-            if (result.suppressionReason) await contacts.suppressDestination(campaign.projectId, campaign.channel, delivery.recipient, result.suppressionReason);
+            accepted = result;
           } catch (error: any) {
-            if (campaign.channel === 'sms' && error.providerCode === 21610) await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
+            if (campaign.channel === 'sms' && error.providerCode === 21610) await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out', consentOrigin.smsOptOut);
             const latest = await changeDelivery(delivery.id, latest => { if (latest.providerId) return false; latest.status = error.uncertain ? 'uncertain' : 'failed'; latest.error = error instanceof IntegrationError ? error.message : 'The provider did not confirm the message.'; });
             if (error.uncertain || error.status === 429 || error.code === 'EMAIL_SENDER_BLOCKED') { campaign.status = 'attention'; campaign.lastError = latest.error || 'Review the provider acknowledgement before continuing.'; }
           }
+          // After the send's catch, which would take a failed write for a send failure: a suppression that cannot be stored
+          // stops the campaign for review (the outer catch) instead of vanishing.
+          if (campaign.channel === 'sms' && accepted?.errorCode === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out', consentOrigin.smsOptOut);
+          if (accepted?.suppressionReason) await contacts.suppressDestination(campaign.projectId, campaign.channel, delivery.recipient, accepted.suppressionReason, consentOrigin.emailFeedback(campaign.emailProvider, accepted.suppressionReason));
           await finish(campaign);
         }
       } catch (error: any) { campaign.status = 'attention'; campaign.lastError = error instanceof IntegrationError ? error.message : 'The campaign could not continue. Check its provider status.'; await save(campaign); }
@@ -302,24 +307,21 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       // Recent Activity for consent and contact changes: who changed a contact's permissions, suppressed, imported or deleted
       // contacts, naming the actor and a short contact reference, never the contact's name, address or number. Activity keeps
       // only the newest 50 entries, so it is not the lasting record; that is each contact's consent evidence.
+      // The retained consent history is written by the contacts module itself, in the same transaction, from `origin`.
       const actor = user.name || user.id, log = (tx: Executor, message: string) => createStore(tx).activity(project.id, message), ref = (contactId: string) => 'contact ' + contactId.slice(0, 8);
-      // Retained consent history: one event per channel whose permission changed, with the evidence entered for it.
-      const by = 'user:' + user.id, destinationOf = (record: any, channel: string) => (channel === 'email' || channel === 'emailMarketing' ? record?.email : record?.phone) || '';
-      const changes = (before: any, after: any, source: string): ConsentEvent[] => Object.keys(consentLabels).filter(channel => !!before?.consents?.[channel] !== !!after?.consents?.[channel]).map(channel => after.consents[channel]
-        ? { contactId: after.id, channel, action: 'granted', source, actor: by, destination: destinationOf(after, channel), evidence: after.consentEvidence?.[channel]?.source }
-        : { contactId: after.id, channel, action: 'withdrawn', source, actor: by, destination: destinationOf(before, channel) });
+      const origin = consentOrigin.manual(user.id);
       const granted = (consents: any) => { const labels = Object.entries(consentLabels).filter(([channel]) => consents?.[channel] === true).map(([, label]) => label); return labels.length ? ` Permission recorded for ${labels.join(', ')}.` : ''; };
       const permissions = (before: any, after: any) => Object.entries(consentLabels).filter(([channel]) => !!before?.consents?.[channel] !== !!after?.consents?.[channel]).map(([channel, label]) => `${label} ${after?.consents?.[channel] ? 'on' : 'off'}`).join(', ');
       if (!id && method === 'GET') send(200, { contacts: await contacts.list(project.id) });
       // History by email or phone, normalized as contacts are; the hash is compared on the server and never returned.
       else if (id === 'history' && !action && method === 'GET') { const phone = url.searchParams.get('phone'); if (phone && !/^\+[1-9]\d{6,14}$/.test(phone.trim())) fail(400, 'INVALID_PHONE', 'Use an international E.164 phone number, such as +971501234567, with the + encoded as %2B.'); const target = contacts.destination(Object.fromEntries(['email', 'phone'].filter(key => url.searchParams.get(key)).map(key => [key, url.searchParams.get(key)]))), value = target.email || target.phone; if (!value) fail(400, 'DESTINATION_REQUIRED', 'Provide an email address or phone number.'); send(200, { history: await history.forAddress(project.id, user.id, value) }); }
       else if (id && action === 'history' && method === 'GET') { if (!await contacts.get(project.id, id)) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { history: await history.forContact(project.id, id) }); }
-      else if (!id && method === 'POST') { const contact = await contacts.save(project.id, body, undefined, { create: true, audit: async (tx, _previous, record) => { await history.record(tx, project.id, changes(undefined, record, 'manual')); const changed = permissions(undefined, record); if (changed) await log(tx, `Permission recorded for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(201, { contact }); }
-      else if (id === 'import' && method === 'POST') { const result = await contacts.import(project.id, body, { audit: async (tx, imported, previous) => { await history.record(tx, project.id, imported.contacts.flatMap((record: any) => changes(previous.get(record.id), record, 'csv_import'))); if (imported.imported) await log(tx, `Contacts imported from CSV by ${actor}: ${imported.created} created, ${imported.updated} updated, ${imported.skipped} skipped.${granted(body?.consents)}`); } }); send(200, result); }
+      else if (!id && method === 'POST') { const contact = await contacts.save(project.id, body, undefined, { create: true, origin, audit: async (tx, _previous, record) => { const changed = permissions(undefined, record); if (changed) await log(tx, `Permission recorded for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(201, { contact }); }
+      else if (id === 'import' && method === 'POST') { const result = await contacts.import(project.id, body, { origin: consentOrigin.csvImport(user.id), audit: async (tx, imported) => { if (imported.imported) await log(tx, `Contacts imported from CSV by ${actor}: ${imported.created} created, ${imported.updated} updated, ${imported.skipped} skipped.${granted(body?.consents)}`); } }); send(200, result); }
       else if (id === 'assess-dns' && method === 'POST') { const result = await contacts.assessDNS(project.id, body.ids, { assertAccess: context.assertIntegrationSettings }); await context.assertIntegrationSettings(); send(200, result); }
-      else if (id && !action && method === 'PATCH') { const contact = await contacts.save(project.id, body, id, { audit: async (tx, before, record) => { await history.record(tx, project.id, changes(before, record, 'manual')); const changed = permissions(before, record); if (changed) await log(tx, `Permission changed for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(200, { contact }); }
-      else if (id && !action && method === 'DELETE') { if (!await contacts.remove(project.id, id, { audit: async (tx, record) => { await history.record(tx, project.id, (['email', 'sms'] as const).map(channel => ({ contactId: id, channel, action: 'contact_deleted', source: 'manual', actor: by, destination: destinationOf(record, channel) }))); await log(tx, `Deleted ${ref(id)} by ${actor}. Its suppressions are kept.`); } })) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { removed: true }); }
-      else if (id && action === 'suppress' && method === 'POST') { const contact = await contacts.suppress(project.id, id, body.channel, body.reason, { audit: async (tx, consentsBefore, record, reason) => { await history.record(tx, project.id, [{ contactId: id, channel: body.channel, action: 'suppressed', source: 'manual', actor: by, destination: destinationOf(record, body.channel), evidence: reason }, ...changes({ consents: consentsBefore, email: record.email, phone: record.phone }, record, 'manual')]); await log(tx, `Suppressed ${ref(id)} for ${consentLabels[body.channel as keyof typeof consentLabels] || body.channel} by ${actor}.`); } }); send(200, { contact }); }
+      else if (id && !action && method === 'PATCH') { const contact = await contacts.save(project.id, body, id, { origin, audit: async (tx, before, record) => { const changed = permissions(before, record); if (changed) await log(tx, `Permission changed for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(200, { contact }); }
+      else if (id && !action && method === 'DELETE') { if (!await contacts.remove(project.id, id, { origin, audit: tx => log(tx, `Deleted ${ref(id)} by ${actor}. Its suppressions are kept.`) })) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { removed: true }); }
+      else if (id && action === 'suppress' && method === 'POST') { const contact = await contacts.suppress(project.id, id, body.channel, body.reason, { origin, audit: tx => log(tx, `Suppressed ${ref(id)} for ${consentLabels[body.channel as keyof typeof consentLabels] || body.channel} by ${actor}.`) }); send(200, { contact }); }
       else return false;
       return true;
     }
@@ -419,7 +421,7 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
         for (const delivery of (await deliveries(id)).filter((row: any) => row.providerId && !terminal.has(row.status)).slice(0, 25)) {
           const result = await getSmsStatus({ env: { ...env }, providerId: delivery.providerId, assertMapping }); if (result.recipient !== delivery.recipient) fail(502, 'DELIVERY_MISMATCH', 'The provider returned another recipient.');
           const latest = await changeDelivery(delivery.id, latest => { if (result.sender && latest.smsSender && result.sender !== latest.smsSender || result.messagingServiceSid && result.messagingServiceSid !== (latest.smsMessagingServiceSid || '')) fail(502, 'DELIVERY_MISMATCH', 'The provider returned another sending number or messaging service.'); latest.status = nextStatus(latest.status, result.status); if (result.errorCode) latest.errorCode = result.errorCode; if (result.sender) Object.assign(latest, { smsSender: result.sender, smsAccountSid: env.TWILIO_ACCOUNT_SID, smsMessagingServiceSid: result.messagingServiceSid || latest.smsMessagingServiceSid || '' }); });
-          await recordSms(campaign, latest); if (result.errorCode === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
+          await recordSms(campaign, latest); if (result.errorCode === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out', consentOrigin.smsOptOut);
         }
       }
       if (campaign.channel === 'email' && ready('email') && emailProvider(env) === 'cloudflare') await applyEmailSuppressions(project.id, () => context.assertIntegrationSettings());
@@ -481,8 +483,8 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
         const counted = await tx.execute(sql`INSERT INTO direct_email_feedback VALUES (${projectId}, 'ses', ${eventId}, ${target}, ${message.bounce?.bounceType === 'Undetermined' ? 'undetermined' : 'transient'}, ${outcome.subType ?? null}, ${at}) ON CONFLICT DO NOTHING`);
         if (!counted.rowCount) continue;
       }
-      if (outcome.action === 'suppress') await contacts.suppressDestination(projectId, 'email', recipient, SES_SUPPRESSION_REASONS[outcome.reason] || outcome.reason, tx);
-      if (outcome.action === 'record' && outcome.reason === 'unsubscribed-recipient') await contacts.suppressDestination(projectId, 'email', recipient, 'Unsubscribed', tx);
+      if (outcome.action === 'suppress') await contacts.suppressDestination(projectId, 'email', recipient, SES_SUPPRESSION_REASONS[outcome.reason] || outcome.reason, consentOrigin.emailFeedback('ses', outcome.reason), tx);
+      if (outcome.action === 'record' && outcome.reason === 'unsubscribed-recipient') await contacts.suppressDestination(projectId, 'email', recipient, 'Unsubscribed', consentOrigin.emailOptOut('ses'), tx);
       if (['deliverability-alert', 'flag-undetermined'].includes(outcome.action)) {
         // SES alerts lapse a week after the latest report; Cloudflare's are replaced by each suppression sync.
         const expires = new Date(Date.parse(at) + feedbackRules.windowMs).toISOString(), kind = outcome.action === 'flag-undetermined' ? 'undetermined' : 'policy';
@@ -516,17 +518,17 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
       if (!delivery) fail(404, 'DELIVERY_NOT_FOUND', 'Delivery not found.');
       await finishLatest(row.project_id, campaign.id);
       await recordSms(campaign, delivery);
-      if (form.get('ErrorCode') === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out');
+      if (form.get('ErrorCode') === '21610') await contacts.suppressSmsGlobally(delivery.recipient, 'Recipient opted out', consentOrigin.smsOptOut);
     } else if (/^\/api\/webhooks\/twilio\/inbound(?:\/[\w-]+)?$/.test(url.pathname)) {
       if (form.get('To') !== env.TWILIO_FROM_NUMBER && !(env.TWILIO_MESSAGING_SERVICE_SID && form.get('MessagingServiceSid') === env.TWILIO_MESSAGING_SERVICE_SID)) fail(400, 'SENDER_MISMATCH', 'The callback is for another sender.');
       if (smsInbox) return await smsInbox.receiveVerified(form, { projectId: url.pathname.split('/')[5] || undefined });
       if (form.get('OptOutType') === 'STOP' || /^(STOP|STOPALL|UNSUBSCRIBE|CANCEL|END|QUIT|REVOKE|OPT OUT)$/i.test((form.get('Body') || '').trim())) {
-        await contacts.suppressSmsGlobally(form.get('From')!, 'Recipient opted out');
-      } else if (smsStarted(form)) await contacts.liftSmsOptOut(form.get('From')!);
+        await contacts.suppressSmsGlobally(form.get('From')!, 'Recipient opted out', consentOrigin.smsKeyword);
+      } else if (smsStarted(form)) await contacts.liftSmsOptOut(form.get('From')!, consentOrigin.smsKeyword);
     } else fail(404, 'WEBHOOK_NOT_FOUND', 'Webhook not found.');
     return { accepted: true };
   }
-  async function handleUnsubscribe(token: any, method: string) { const [projectId, email] = unsubscribe(token); if (method === 'POST' && await projectFor(projectId)) await contacts.suppressDestination(projectId, 'email', email, 'Unsubscribed'); return method === 'POST' ? '<h1>Preferences updated</h1><p>This address will receive no further email campaigns from this project.</p>' : '<h1>Email preferences</h1><form method="post"><button type="submit">Stop email from this project</button></form>'; }
+  async function handleUnsubscribe(token: any, method: string) { const [projectId, email] = unsubscribe(token); if (method === 'POST' && await projectFor(projectId)) await contacts.suppressDestination(projectId, 'email', email, 'Unsubscribed', consentOrigin.unsubscribeLink); return method === 'POST' ? '<h1>Preferences updated</h1><p>This address will receive no further email campaigns from this project.</p>' : '<h1>Email preferences</h1><form method="post"><button type="submit">Stop email from this project</button></form>'; }
   async function backfillSms() {
     for (const { data: campaign } of await resultRows(db.execute(sql`SELECT data FROM direct_campaigns ORDER BY seq`))) { if (campaign.channel !== 'sms') continue; for (const delivery of await deliveries(campaign.id)) { if (!delivery.smsAccountSid && campaign.credentialHash === fingerprint(env, 'sms') && !env.TWILIO_MESSAGING_SERVICE_SID) Object.assign(delivery, { smsAccountSid: env.TWILIO_ACCOUNT_SID, smsSender: env.TWILIO_FROM_NUMBER }); await recordSms(campaign, delivery); } }
   }

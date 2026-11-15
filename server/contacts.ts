@@ -4,8 +4,10 @@ import { domainToASCII } from 'node:url';
 import { sql } from 'drizzle-orm';
 import { advisoryLock, HttpError } from './auth.ts';
 import type { Database, Executor, Transaction } from './database.ts';
+import { consentOrigin, type ConsentEvent, type ConsentHistory, type ConsentOrigin } from './consent-history.ts';
 import { reportObject as object } from './provider-core.ts';
 import type { ProviderRecord } from './provider-core.ts';
+import { directContacts } from './schema.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 const channels = ['email', 'sms', 'whatsapp'], own = (value: object, key: string) => Object.hasOwn(value, key);
@@ -65,13 +67,42 @@ export function activeSuppression(contact: any, channel: string) {
   const entry = contact?.suppression?.[channel];
   return entry && !(entry.expiresAt && Date.parse(entry.expiresAt) <= Date.now()) ? entry : null;
 }
-/** Runs inside the change's own transaction, after the change; a failure rolls the change back (the consent audit entry). */
+// A consent history event before its origin is added.
+type Change = Omit<ConsentEvent, keyof ConsentOrigin>;
+const destinationOf = (record: any, channel: string) => (channelOf(channel) === 'email' ? record?.email : record?.phone) || '';
+const permanent = (record: any, channel: string) => !!record.suppression?.[channel] && !record.suppression[channel].expiresAt;
+const snapshot = (record: ProviderRecord) => ({ ...record, consents: { ...record.consents } });
+/** One `granted` or `withdrawn` event per channel whose permission changed; a grant carries the evidence recorded for it. */
+function consentChanges(before: any, after: ProviderRecord): Change[] {
+  return consentKeys.filter(channel => !!before?.consents?.[channel] !== !!after.consents?.[channel]).map((channel): Change => after.consents[channel]
+    ? { contactId: after.id, channel, action: 'granted', destination: destinationOf(after, channel), evidence: after.consentEvidence?.[channel]?.source }
+    : { contactId: after.id, channel, action: 'withdrawn', destination: destinationOf(before, channel) });
+}
+/** A new permanent suppression, then each permission it ended. */
+const suppressionEvents = (before: any, after: ProviderRecord, channel: string, reason: string): Change[] => [{ contactId: after.id, channel, action: 'suppressed', destination: destinationOf(after, channel), evidence: reason }, ...consentChanges(before, after)];
 
-export function createContacts({ db }: { db: Database }) {
+/**
+ * With `history`, every consent or suppression change appends its events (consent-history.ts) in the change's own
+ * transaction, so a change whose history cannot be written is not stored either. Each change names its `origin`.
+ */
+export function createContacts({ db, history }: { db: Database; history?: ConsentHistory }) {
   const hash = (target: string) => createHash('sha256').update(target).digest('hex');
   const ledger = async (ex: Executor, projectId: string, channel: string, target: string) => (await resultRows(ex.execute(sql`SELECT reason, created_at AS at FROM direct_contact_suppressions WHERE project_id = ${projectId} AND channel = ${channel} AND target_hash = ${hash(target)}`)))[0];
   const remember = (ex: Executor, projectId: string, channel: string, targetHash: string, reason: string, at: string) => ex.execute(sql`INSERT INTO direct_contact_suppressions VALUES (${projectId}, ${channel}, ${targetHash}, ${reason}, ${at}) ON CONFLICT (project_id, channel, target_hash) DO NOTHING`);
   const smsSuppression = async (target: string, ex: Executor = db): Promise<any> => target ? (await resultRows(ex.execute(sql`SELECT reason, created_at AS at FROM direct_sms_suppressions WHERE target_hash = ${hash(target)}`)))[0] : null;
+  async function note(ex: Executor, projectId: string, origin: ConsentOrigin | undefined, events: Change[]) {
+    if (!history || !events.length) return;
+    if (!origin) throw new Error('A consent change needs its origin for the consent history.');
+    await history.record(ex, projectId, events.map(event => ({ ...event, ...origin })));
+  }
+  // Stored contacts holding this number in any project, by project: an SMS opt-out or opt-in applies in all of them.
+  async function phoneHolders(ex: Executor, phone: string) {
+    const byProject = new Map<string, ProviderRecord[]>();
+    for (const row of await ex.select({ data: directContacts.data }).from(directContacts).where(sql`${directContacts.data}->>'phone' = ${phone}`).orderBy(directContacts.project_id)) {
+      const record = row.data as ProviderRecord; byProject.set(record.projectId, [...byProject.get(record.projectId) || [], record]);
+    }
+    return byProject;
+  }
   // One suppression lookup per read instead of one query per contact.
   async function contactViews(ex: Executor, found: ProviderRecord[]): Promise<ProviderRecord[]> {
     const contacts = found.map(row => row.data as ProviderRecord), hashes = [...new Set(contacts.filter(contact => contact.phone).map(contact => hash(contact.phone)))], blocked = new Map<string, ProviderRecord>();
@@ -141,13 +172,14 @@ export function createContacts({ db }: { db: Database }) {
     return record;
   }
   /** `create`: a new contact only; an existing contact with the same email or phone is refused instead of updated. */
-  async function save(projectId: string, body: any, id?: string, { create = false, audit }: { create?: boolean; audit?: (tx: Executor, previous: ProviderRecord | null | undefined, record: ProviderRecord) => Promise<unknown> } = {}) {
+  async function save(projectId: string, body: any, id?: string, { create = false, origin, audit }: { create?: boolean; origin?: ConsentOrigin; audit?: (tx: Executor, previous: ProviderRecord | null | undefined, record: ProviderRecord) => Promise<unknown> } = {}) {
     return db.transaction(async tx => {
       await lockContacts(tx, projectId);
       if (!object(body)) fail(400, 'Use the supported contact fields.');
       const previous = id ? await get(projectId, id, tx) ?? fail(404, 'Contact not found in this project.') : match(await byDestination(projectId, destination(body), tx), body);
       if (create && previous) fail(409, 'A contact with this email address or phone number already exists. Open it from the list to change it.');
       const record = await write(tx, projectId, await prepare(tx, projectId, body, previous), previous);
+      await note(tx, projectId, origin, consentChanges(previous, record));
       await audit?.(tx, previous, record);
       return record;
     });
@@ -162,8 +194,9 @@ export function createContacts({ db }: { db: Database }) {
    * destination back in, keeps existing opt-ins and name, and adds the activation tag. Stores nothing when no channel can
    * be recorded: refused when every ticked channel is suppressed.
    * The field wording asks for news and offers, so an email opt-in also records marketing permission (emailMarketing).
+   * `recorded` lists every permission stored, that one included. `userId` is the member capturing the lead.
    */
-  async function capture(projectId: string, person: { name?: string; email?: string; phone?: string }, requested: string[], source: string, tag: string) {
+  async function capture(projectId: string, person: { name?: string; email?: string; phone?: string }, requested: string[], source: string, tag: string, userId?: string) {
     return db.transaction(async tx => {
       await lockContacts(tx, projectId);
       const target = destination(person), previous = match(await byDestination(projectId, target, tx), person), refused: string[] = [];
@@ -176,7 +209,8 @@ export function createContacts({ db }: { db: Database }) {
       if (!recorded.length) fail(409, 'This person opted out of the ticked channels earlier, so nothing was saved.');
       const body = { ...(person.name && !previous?.name ? { name: person.name } : {}), ...(target.email ? { email: target.email } : {}), ...(target.phone ? { phone: target.phone } : {}), tags: [...new Set([...(previous?.tags || []), tag])], consents: Object.fromEntries([...recorded, ...(recorded.includes('email') ? ['emailMarketing'] : [])].map(channel => [channel, true])), consentSource: source };
       const contact = await write(tx, projectId, await prepare(tx, projectId, body, previous, undefined, Object.keys(body.consents)), previous);
-      return { contactId: contact.id, recorded, refused };
+      await note(tx, projectId, userId ? consentOrigin.leadCapture(userId) : undefined, consentChanges(previous, contact));
+      return { contactId: contact.id, recorded: Object.keys(body.consents), refused };
     });
   }
   /** Pass the webhook transaction as `executor`; the contact and identity writes then run in a savepoint inside it. */
@@ -208,7 +242,7 @@ export function createContacts({ db }: { db: Database }) {
       return record;
     });
   }
-  async function importCsv(projectId: string, options: any, { audit }: { audit?: (tx: Executor, result: ProviderRecord, previous: Map<string, ProviderRecord>) => Promise<unknown> } = {}) {
+  async function importCsv(projectId: string, options: any, { origin, audit }: { origin?: ConsentOrigin; audit?: (tx: Executor, result: ProviderRecord) => Promise<unknown> } = {}) {
     if (!object(options) || Object.keys(options).some(key => !['csv', 'dryRun', 'consents', 'consentSource'].includes(key)) || options.dryRun !== undefined && typeof options.dryRun !== 'boolean') fail(400, 'Use CSV text, optional consent evidence and an optional dry-run flag.');
     if (options.consents !== undefined && (!object(options.consents) || Object.entries(options.consents).some(([channel, granted]) => !consentKeys.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use explicit channel consent flags.');
     if (Object.values(options.consents || {}).some(Boolean) && (!options.consentSource || !text(options.consentSource, 'consent source', 1000))) fail(400, 'Record the source of explicit consent before importing opt-ins.');
@@ -230,7 +264,7 @@ export function createContacts({ db }: { db: Database }) {
       }
       if (!result.dryRun) for (const record of new Map<string, ProviderRecord>(result.contacts.map((record: ProviderRecord): [string, ProviderRecord] => [record.id, record])).values()) await persist(tx, record);
       result.contacts = [...new Map(result.contacts.map((record: ProviderRecord): [string, ProviderRecord] => [record.id, record])).values()];
-      if (!result.dryRun) await audit?.(tx, result, original);
+      if (!result.dryRun) { await note(tx, projectId, origin, result.contacts.flatMap((record: ProviderRecord) => consentChanges(original.get(record.id), record))); await audit?.(tx, result); }
       return result;
     });
   }
@@ -247,21 +281,22 @@ export function createContacts({ db }: { db: Database }) {
     if (channel === 'email' && reason === 'hard-bounce') record.hardBounceAt ||= at;
     return persist(ex, record);
   }
-  async function suppress(projectId: string, id: string, channel: string, reason: any, { audit }: { audit?: (tx: Executor, consentsBefore: Record<string, boolean>, record: ProviderRecord, reason: string) => Promise<unknown> } = {}) {
+  async function suppress(projectId: string, id: string, channel: string, reason: any, { origin, audit }: { origin?: ConsentOrigin; audit?: (tx: Executor) => Promise<unknown> } = {}) {
     reason = suppressionReason(channel, reason);
     return db.transaction(async tx => {
       await lockContacts(tx, projectId);
       const record = await get(projectId, id, tx); if (!record) fail(404, 'Contact not found in this project.');
       // Already permanently suppressed for this channel: nothing new to record.
-      const already = !!record.suppression[channel] && !record.suppression[channel].expiresAt, consentsBefore = { ...record.consents }, result = await suppressRecord(tx, record, channel, reason, new Date().toISOString());
-      if (!already) await audit?.(tx, consentsBefore, result, reason);
+      const already = permanent(record, channel), before = snapshot(record), result = await suppressRecord(tx, record, channel, reason, new Date().toISOString());
+      if (!already) { await note(tx, projectId, origin, suppressionEvents(before, result, channel, reason)); await audit?.(tx); }
       return result;
     });
   }
   // A provider's temporary suppression (Cloudflare's soft bounce, or a hard bounce it lists with an expiry) holds sends
   // until it expires. Campaign did not withdraw the recipient's permission, so consent and its evidence stay, and the
   // entry is not copied to the permanent ledger. A permanent suppression already on the contact wins.
-  async function suppressUntil(projectId: string, id: string, channel: string, reason: any, expiresAt: string) {
+  // Its history event is `suppressed` with evidence naming the expiry; consent is kept, so nothing is withdrawn.
+  async function suppressUntil(projectId: string, id: string, channel: string, reason: any, expiresAt: string, origin: ConsentOrigin) {
     reason = suppressionReason(channel, reason);
     if (!Number.isFinite(Date.parse(expiresAt))) fail(400, 'Provide a valid suppression expiry.');
     return db.transaction(async tx => {
@@ -270,32 +305,43 @@ export function createContacts({ db }: { db: Database }) {
       const current = record.suppression[channel], at = new Date().toISOString();
       if (current && !current.expiresAt || current?.reason === reason && current.expiresAt === expiresAt) return record;
       record.suppression[channel] = { reason, at: current?.reason === reason ? current.at : at, expiresAt }; record.updatedAt = at;
-      return persist(tx, record);
+      await persist(tx, record);
+      await note(tx, projectId, origin, [{ contactId: record.id, channel, action: 'suppressed', destination: destinationOf(record, channel), evidence: `${reason}, held until ${expiresAt}` }]);
+      return record;
     });
   }
-  async function suppressDestination(projectId: string, channel: string, target: any, reason: any, executor: Executor = db) {
+  async function suppressDestination(projectId: string, channel: string, target: any, reason: any, origin: ConsentOrigin, executor: Executor = db) {
     reason = suppressionReason(channel, reason);
     target = channel === 'email' ? emailAddress(target) : text(target, 'phone number', 16);
     if (!target || channel !== 'email' && !/^\+[1-9]\d{6,14}$/.test(target)) fail(400, 'Provide a valid destination to suppress.');
     return atomic(executor, async tx => {
       if (!(await tx.execute(sql`SELECT id FROM projects WHERE id = ${projectId}`)).rowCount) return { suppressed: 0 };
       await lockContacts(tx, projectId);
-      const at = new Date().toISOString(); await remember(tx, projectId, channel, hash(target), reason, at);
+      const at = new Date().toISOString(), added = Boolean((await remember(tx, projectId, channel, hash(target), reason, at)).rowCount), events: Change[] = [];
       const matching = (await byDestination(projectId, channel === 'email' ? { email: target } : { phone: target }, tx)).filter(record => (channel === 'email' ? record.email : record.phone) === target);
-      for (const record of matching) await suppressRecord(tx, record, channel, reason, at);
+      for (const record of matching) { const already = permanent(record, channel), before = snapshot(record); await suppressRecord(tx, record, channel, reason, at); if (!already) events.push(...suppressionEvents(before, record, channel, reason)); }
+      // An address that is no contact here: the event, under no contact, keeps it in the address's history.
+      if (!matching.length && added) events.push({ contactId: '', channel, action: 'suppressed', destination: target });
+      await note(tx, projectId, origin, events);
       return { suppressed: matching.length };
     });
   }
-  async function suppressSmsGlobally(target: any, reason: any) {
+  // One event per project where a contact holds the number, in the transaction that stores the opt-out; a contact already
+  // permanently suppressed there gets none.
+  async function suppressSmsGlobally(target: any, reason: any, origin: ConsentOrigin) {
     reason = suppressionReason('sms', reason); target = text(target, 'phone number', 16);
     if (!/^\+[1-9]\d{6,14}$/.test(target)) fail(400, 'Provide a valid destination to suppress.');
-    await db.execute(sql`INSERT INTO direct_sms_suppressions VALUES (${hash(target)}, ${reason}, ${new Date().toISOString()}) ON CONFLICT (target_hash) DO NOTHING`);
-    return { suppressed: true };
+    return db.transaction(async tx => {
+      const added = (await tx.execute(sql`INSERT INTO direct_sms_suppressions VALUES (${hash(target)}, ${reason}, ${new Date().toISOString()}) ON CONFLICT (target_hash) DO NOTHING`)).rowCount;
+      if (added && history) for (const [projectId, records] of await phoneHolders(tx, target)) await note(tx, projectId, origin, records.filter(record => !permanent(record, 'sms')).map((record): Change => ({ contactId: record.id, channel: 'sms', action: 'suppressed', destination: target, evidence: reason })));
+      return { suppressed: true };
+    });
   }
   // A signed START/UNSTOP is the recipient's own re-opt-in at the carrier: it lifts only the opt-out suppression a STOP
   // wrote, never a manual or hard suppression, and restores no campaign consent (contacts keep sms consent off until a
   // new consent source is recorded). Council decision ten98-code-system#35 Q3.
-  async function liftSmsOptOut(target: any): Promise<boolean> {
+  // Each project where a contact holds the number records `suppression_ended`, when the opt-out it saw was lifted.
+  async function liftSmsOptOut(target: any, origin: ConsentOrigin): Promise<boolean> {
     if (typeof target !== 'string' || !/^\+[1-9]\d{6,14}$/.test(target)) return false;
     const reason = 'Recipient opted out', targetHash = hash(target);
     return db.transaction(async tx => {
@@ -306,6 +352,7 @@ export function createContacts({ db }: { db: Database }) {
         await lockContacts(tx, projectId);
         for (const record of (await byDestination(projectId, { phone: target }, tx)).filter(record => record.phone === target && record.suppression.sms?.reason === reason)) { delete record.suppression.sms; record.updatedAt = new Date().toISOString(); await persist(tx, record); }
       }
+      if ((global.rowCount || projects.length) && history) for (const [projectId, records] of await phoneHolders(tx, target)) if (global.rowCount || projects.includes(projectId)) await note(tx, projectId, origin, records.map((record): Change => ({ contactId: record.id, channel: 'sms', action: 'suppression_ended', destination: target, evidence: reason })));
       return Boolean(global.rowCount || projects.length);
     });
   }
@@ -358,12 +405,12 @@ export function createContacts({ db }: { db: Database }) {
       return { checked: outcomes.size, contacts, notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' };
     });
   }
-  return { list, get, byDestination, destination, save, capture, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string, { audit }: { audit?: (tx: Executor, record: ProviderRecord) => Promise<unknown> } = {}) {
+  return { list, get, byDestination, destination, save, capture, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string, { origin, audit }: { origin?: ConsentOrigin; audit?: (tx: Executor) => Promise<unknown> } = {}) {
     return db.transaction(async tx => {
       await lockContacts(tx, projectId);
       const record = await get(projectId, id, tx);
       const removed = Boolean((await tx.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount);
-      if (removed && record) await audit?.(tx, record);
+      if (removed && record) { await note(tx, projectId, origin, ['email', 'sms'].map((channel): Change => ({ contactId: id, channel, action: 'contact_deleted', destination: destinationOf(record, channel) }))); await audit?.(tx); }
       return removed;
     });
   } };

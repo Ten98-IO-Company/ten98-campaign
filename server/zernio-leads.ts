@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 type Ctx = OperationContext & { body: any };
 import { createHash } from 'node:crypto';
+import { consentOrigin } from './consent-history.ts';
 import { IntegrationError, claimFence, operation, releaseFence, scopedAccounts, requireAccount, adAccounts, mediaUrl, validProviderInstant, fail, reportObject as object } from './provider-core.ts';
 
 const platforms = new Set(['metaads', 'facebook', 'instagram', 'linkedinads']), administrators = new Set(['owner', 'admin']), writers = new Set(['owner', 'admin', 'editor']);
@@ -230,7 +231,7 @@ export async function handleZernioLeads(context: Ctx, api: ZernioApi, profileId:
       if (!mapped.email && !mapped.phone) fail(400, 'LEAD_CONTACT_IDENTITY_REQUIRED', 'Map an email address or international phone number before importing.');
       if (mapped.phone) mapped.phone = mapped.phone.replace(/[()\s.-]/g, '');
       await context.assertProjectMapping?.(profileId);
-      let contact; try { contact = await context.contacts.save(context.project.id, mapped); } catch (error: any) { if (Number.isInteger(error.status)) fail(error.status, 'LEAD_CONTACT_REJECTED', error.message); throw error; }
+      let contact; try { contact = await context.contacts.save(context.project.id, mapped, undefined, { origin: consentOrigin.providerLead(context.user.id) }); } catch (error: any) { if (Number.isInteger(error.status)) fail(error.status, 'LEAD_CONTACT_REJECTED', error.message); throw error; }
       // ponytail: the contact API owns its transaction; canonical destination matching makes a crash-before-association retry deduplicate instead of creating another contact.
       const importedAt = new Date().toISOString(); await context.db.execute(sql`INSERT INTO zernio_lead_associations (project_id, profile_id, account_id, form_id, lead_id, contact_id, lead_version, imported_at) VALUES (${context.project.id}, ${profileId}, ${accountId}, ${formId}, ${leadId}, ${contact.id}, ${current.version}, ${importedAt})`);
       return { contact, association: { contactId: contact.id, importedAt } };

@@ -23,7 +23,7 @@ async function fixture(t) {
   const { db, pool } = await testDatabase(t);
   await seedAccounts(pool, { users: [{ id: 'owner', name: 'Owner', email: 'owner@example.test' }], workspaces: [{ id: 'wa', name: 'A' }, { id: 'wb', name: 'B' }], memberships: [['wa', 'owner', 'owner'], ['wb', 'owner', 'owner']] }); await pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('a', 'wa', 'A'), ('b', 'wb', 'B')");
   const env = { TWILIO_ACCOUNT_SID: token('AC', 1), TWILIO_AUTH_TOKEN: 'sms-inbox-fixture-secret', TWILIO_FROM_NUMBER: '+12025550100' }, appUrl = 'https://campaign.example.test', contacts = createContacts({ db }), originalFetch = globalThis.fetch, calls = [];
-  const store = { activity() {} }, direct = createDirectCampaigns({ db, env, appUrl, secret: 'fixture-session-secret-with-enough-entropy', store }), inbox = createSmsInbox({ db, env, appUrl, contacts }); await direct.attachSmsInbox(inbox);
+  const store = { activity() {} }, direct = createDirectCampaigns({ db, env, appUrl, secret: 'fixture-session-secret-with-enough-entropy', store }), inbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts }); await direct.attachSmsInbox(inbox);
   let hook, counter = 1, access = true;
   globalThis.fetch = async (url, options) => {
     const target = new URL(url); assert.ok(['api.twilio.com', 'api.cloudflare.com'].includes(target.hostname)); calls.push({ url: target, ...options });
@@ -186,6 +186,23 @@ test('signed STOP excludes future-project imports and campaign sends; START lift
     await f.outbound('future'); const conversation = (await f.request('sms-inbox/conversations', 'GET', undefined, undefined, 'future')).data.conversations[0]; assert.equal(conversation.blocked, false);
     assert.equal((await f.request(`sms-inbox/conversations/${conversation.id}/reply`, 'POST', { message: 'Replies resume after START' }, undefined, 'future')).status, 200); assert.equal(f.calls.length, 1);
     await f.inbound({ MessageSid: token('SM', 903), Body: 'STOP' }); assert.equal((await f.request('sms-inbox/conversations', 'GET', undefined, undefined, 'future')).data.conversations[0].blocked, true, 'A later STOP applies again.');
+  } finally { await f.close(); }
+});
+
+// ten98-campaign#337: STOP and START apply to every project, so each project holding the number records its own event.
+test('a signed STOP records one sms_keyword event in each project holding the number, and START records its end there', pg, async t => {
+  const f = await fixture(t);
+  try {
+    await f.pool.query("INSERT INTO projects (id, workspace_id, name) VALUES ('c', 'wa', 'C')");
+    const phone = '+12025550123', holders = {};
+    for (const projectId of ['a', 'b']) holders[projectId] = (await f.contacts.save(projectId, { phone, consents: { sms: true }, consentSource: 'Explicit signup record' })).id;
+    await f.contacts.save('c', { phone: '+12025550124', consents: { sms: true }, consentSource: 'Another person' });
+    const events = async () => (await f.pool.query('SELECT e.project_id, e.contact_id, e.channel, e.action, e.source, e.actor, v.evidence FROM direct_consent_events e LEFT JOIN direct_consent_evidence v ON v.event_id = e.id ORDER BY e.seq')).rows.map(row => [row.project_id, row.contact_id === holders[row.project_id], row.channel, row.action, row.source, row.actor, row.evidence]);
+    for (const sid of [920, 921]) await f.inbound({ MessageSid: token('SM', sid), Body: 'STOP' });
+    const stopped = [['a', true, 'sms', 'suppressed', 'sms_keyword', 'system:twilio', 'Recipient opted out'], ['b', true, 'sms', 'suppressed', 'sms_keyword', 'system:twilio', 'Recipient opted out']];
+    assert.deepEqual(await events(), stopped, 'One event per project holding the number; a repeated STOP and project c add nothing.');
+    for (const sid of [922, 923]) await f.inbound({ MessageSid: token('SM', sid), Body: 'START' });
+    assert.deepEqual(await events(), [...stopped, ['a', true, 'sms', 'suppression_ended', 'sms_keyword', 'system:twilio', 'Recipient opted out'], ['b', true, 'sms', 'suppression_ended', 'sms_keyword', 'system:twilio', 'Recipient opted out']], 'A repeated START adds nothing.');
   } finally { await f.close(); }
 });
 

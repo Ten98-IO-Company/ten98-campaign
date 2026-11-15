@@ -792,3 +792,98 @@ test('SMS delivery refresh preserves the original sender and service when the pr
     assert.equal(result.status, 200); assert.equal(result.data.deliveries[0].status, 'delivered'); assert.equal(result.data.deliveries[0].smsSender, original.smsSender);
   } finally { await f.close(); }
 });
+
+// ten98-campaign#337: every path that changes consent or suppression outside the contact form records its history event,
+// with a fixed source, the member or provider that acted, and the evidence the path already stores.
+const steps = history => history.map(event => [event.channel, event.action, event.source, event.actor, event.evidence ?? null]);
+const memberId = async f => (await f.app.database.pool.query("SELECT id FROM users WHERE email = 'direct-owner@example.test'")).rows[0].id;
+const contactHistory = async (f, id) => { const response = await f.request(f.path + '/contacts/' + id + '/history'); assert.equal(response.status, 200, JSON.stringify(response.data)); return response.data.history; };
+
+test('lead capture records each permission it stores as lead_capture by the member who captured it, with the consent wording as evidence', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const actor = 'user:' + await memberId(f), project = `/api/projects/${f.projectId}`;
+    const campaign = await f.request(project + '/campaigns', 'POST', { name: 'Field push', channel: 'offline' }); assert.equal(campaign.status, 201, JSON.stringify(campaign.data));
+    const activation = await f.request(project + '/activations', 'POST', { name: 'Mall roadshow', type: 'roadshow', campaignId: campaign.data.record.id, startAt: '2026-11-07T10:00:00Z', endAt: '2026-11-07T18:00:00Z', location: 'City Centre Mall' }); assert.equal(activation.status, 201, JSON.stringify(activation.data));
+    const lead = await f.request(`${project}/activations/${activation.data.record.id}/leads`, 'POST', { name: 'Pat', email: 'pat@example.com', phone: '+12025550301', consents: { email: true, sms: true, whatsapp: false } });
+    assert.equal(lead.status, 201, JSON.stringify(lead.data));
+    const history = await contactHistory(f, lead.data.contactId);
+    assert.deepEqual(steps(history).map(step => step.slice(0, 4)), [['email', 'granted', 'lead_capture', actor], ['sms', 'granted', 'lead_capture', actor], ['emailMarketing', 'granted', 'lead_capture', actor]]);
+    assert.ok(history.every(event => /^In person at Roadshow stop “Mall roadshow” .+ Wording shown: “Yes, .+ may send me news and offers by email and text message./.test(event.evidence)), JSON.stringify(history));
+  } finally { await f.close(); }
+});
+
+test('an unsubscribe link records the suppression and each withdrawn permission as unsubscribe_link by system:campaign, once, also for an address that is no contact', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const leaving = await f.person({ email: 'leave@example.com', phone: '+12025550302' }), moved = await f.person({ email: 'old-address@example.com', phone: '+12025550303' });
+    const campaign = await f.draft({ channel: 'email', emailPurpose: 'transactional', subject: 'Receipt', text: 'Your requested receipt.', contactIds: [leaving.id, moved.id] });
+    assert.equal((await f.arm(campaign)).status, 200); await f.app.direct.processPending(); await f.app.direct.processPending();
+    const link = address => new URL(JSON.parse(f.calls.find(call => call.url.endsWith('/send') && JSON.parse(call.body).to[0] === address).body).text.match(/https:\/\/\S+/)[0]).pathname;
+    for (let i = 0; i < 2; i++) assert.equal((await f.request(link(leaving.email), 'POST', {})).status, 200);
+    assert.deepEqual(steps(await contactHistory(f, leaving.id)).slice(3), [['email', 'suppressed', 'unsubscribe_link', 'system:campaign', 'Unsubscribed'], ['email', 'withdrawn', 'unsubscribe_link', 'system:campaign', null]], 'A second click adds nothing.');
+    // The link still names the old address after the contact moved to a new one: the address alone is suppressed.
+    assert.equal((await f.request(f.path + '/contacts/' + moved.id, 'PATCH', { email: 'new-address@example.com' })).status, 200);
+    assert.equal((await f.request(link('old-address@example.com'), 'POST', {})).status, 200);
+    const old = (await f.request(f.path + '/contacts/history?email=old-address@example.com')).data.history.at(-1);
+    assert.deepEqual([old.contactId, ...steps([old])[0]], ['', 'email', 'suppressed', 'unsubscribe_link', 'system:campaign', null], 'Evidence is kept with a contact, so an address alone keeps the event only.');
+  } finally { await f.close(); }
+});
+
+test('Cloudflare outcomes record provider_bounce, provider_complaint and a provider_hold naming its expiry, by system:cloudflare, once each', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const bounced = await f.person({ email: 'bounced@example.com', phone: '+12025550311' }), complained = await f.person({ email: 'complained@example.com', phone: '+12025550312' }), held = await f.person({ email: 'held@example.com', phone: '+12025550313' });
+    const until = new Date(Date.now() + 86400000).toISOString(), account = { type: 'account' };
+    f.setSuppressions([{ id: 's1', email: bounced.email, reason: 'hard_bounce', scope: account, expires_at: null }, { id: 's2', email: complained.email, reason: 'complaint', scope: account, expires_at: null }, { id: 's3', email: held.email, reason: 'soft_bounce', scope: account, expires_at: until }]);
+    const draft = await f.draft({ channel: 'email', subject: 'Service', text: 'Service' });
+    for (let i = 0; i < 2; i++) assert.equal((await f.request(f.path + `/campaigns/${draft.id}/refresh`, 'POST', {})).status, 200);
+    assert.deepEqual(steps(await contactHistory(f, bounced.id)).slice(3), [['email', 'suppressed', 'provider_bounce', 'system:cloudflare', 'hard-bounce'], ['email', 'withdrawn', 'provider_bounce', 'system:cloudflare', null]]);
+    assert.deepEqual(steps(await contactHistory(f, complained.id)).slice(3), [['email', 'suppressed', 'provider_complaint', 'system:cloudflare', 'complaint'], ['email', 'withdrawn', 'provider_complaint', 'system:cloudflare', null]]);
+    const hold = steps(await contactHistory(f, held.id)).slice(3);
+    assert.deepEqual(hold.map(step => step.slice(0, 4)), [['email', 'suppressed', 'provider_hold', 'system:cloudflare']], 'A hold keeps consent, so nothing is withdrawn.');
+    assert.ok(hold[0][4].includes(until), hold[0][4]);
+    // A send Cloudflare answers with a permanent bounce suppresses the address from the send result.
+    const dead = await f.person({ email: 'dead@example.com', phone: '+12025550314' }); f.setEmailMode('bounce');
+    assert.equal((await f.arm(await f.draft({ channel: 'email', subject: 'Service update', text: 'Your service update.', contactIds: [dead.id] }))).status, 200); await f.app.direct.processPending();
+    assert.deepEqual(steps(await contactHistory(f, dead.id)).slice(3), [['email', 'suppressed', 'provider_bounce', 'system:cloudflare', 'hard-bounce'], ['email', 'withdrawn', 'provider_bounce', 'system:cloudflare', null]]);
+  } finally { await f.close(); }
+});
+
+test('Twilio error 21610 on a delivery callback records provider_opt_out by system:twilio, once', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const contact = await f.person({ email: 'gone-sms@example.com', phone: '+12025550321' }), campaign = await f.draft({ contactIds: [contact.id] });
+    assert.equal((await f.arm(campaign)).status, 200); await f.app.direct.processPending();
+    const delivery = (await f.request(f.path + '/campaigns/' + campaign.id)).data.deliveries[0];
+    for (let i = 0; i < 2; i++) assert.equal((await f.twilio(`/api/webhooks/twilio/status/${delivery.id}`, { MessageSid: delivery.providerId, To: contact.phone, MessageStatus: 'undelivered', ErrorCode: '21610' })).status, 200);
+    assert.deepEqual(steps(await contactHistory(f, contact.id)).slice(3), [['sms', 'suppressed', 'provider_opt_out', 'system:twilio', 'Recipient opted out']]);
+  } finally { await f.close(); }
+});
+
+test('when its history event cannot be written, no STOP, hold or send bounce is applied: the webhook asks for a retry and the campaign stops for review', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const contact = await f.person({ email: 'retry@example.com', phone: '+12025550331' }), stop = { MessageSid: 'SM' + 'e'.repeat(32), From: contact.phone, To: f.env.TWILIO_FROM_NUMBER, Body: 'STOP' };
+    await pool.query("CREATE FUNCTION refuse_consent_event() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'history unavailable'; END $$ LANGUAGE plpgsql");
+    await pool.query('CREATE TRIGGER refuse_consent_event BEFORE INSERT ON direct_consent_events FOR EACH ROW EXECUTE FUNCTION refuse_consent_event()');
+    const refused = await f.twilio('/api/webhooks/twilio/inbound', stop);
+    assert.ok(refused.status >= 500, 'Twilio is asked to retry: ' + refused.status);
+    f.setSuppressions([{ id: 'h1', email: contact.email, reason: 'soft_bounce', scope: { type: 'account' }, expires_at: new Date(Date.now() + 86400000).toISOString() }]);
+    const draft = await f.draft({ channel: 'email', subject: 'Service', text: 'Service' });
+    assert.ok((await f.request(f.path + `/campaigns/${draft.id}/refresh`, 'POST', {})).status >= 500);
+    // A send whose result suppresses the address stops its campaign for review instead of losing the suppression.
+    f.setSuppressions([]); f.setEmailMode('bounce');
+    const bounced = await f.draft({ channel: 'email', subject: 'Service update', text: 'Your service update.', contactIds: [contact.id] });
+    assert.equal((await f.arm(bounced)).status, 200); await f.app.direct.processPending();
+    assert.equal(f.calls.filter(call => call.url.endsWith('/send')).length, 1, 'The email was sent.');
+    assert.equal((await f.request(f.path + '/campaigns/' + bounced.id)).data.campaign.status, 'attention');
+    await pool.query('DROP TRIGGER refuse_consent_event ON direct_consent_events');
+    assert.equal(Number((await pool.query('SELECT count(*)::int AS n FROM direct_sms_suppressions')).rows[0].n), 0, 'The STOP was not stored without its event.');
+    const stored = (await f.request(f.path + '/contacts')).data.contacts.find(row => row.id === contact.id);
+    assert.deepEqual([stored.consents.sms, stored.suppression.sms, stored.suppression.email], [true, undefined, undefined], 'Neither change was stored.');
+    // Twilio's retry then applies the STOP with its event.
+    assert.equal((await f.twilio('/api/webhooks/twilio/inbound', stop)).status, 200);
+    assert.deepEqual(steps(await contactHistory(f, contact.id)).slice(3), [['sms', 'suppressed', 'sms_keyword', 'system:twilio', 'Recipient opted out']]);
+  } finally { await f.close(); }
+});

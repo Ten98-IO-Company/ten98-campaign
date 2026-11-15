@@ -832,12 +832,13 @@ test('new text conversations check platform recipients, keep X eligibility enabl
 });
 
 test('new WhatsApp and Zernio SMS conversations require current local permission and exact approved template values', pg, async t => {
-  const f = await fixture(t), route = f.path + '/conversations/start', contacts = f.app.direct.contacts;
-  const ready = await contacts.save(f.projectId, { name: 'Permitted', phone: '+12025550101', consents: { whatsapp: true, sms: true }, consentSource: 'Synthetic opt-in record' });
+  // The shared contacts record consent history, so each change here names an origin.
+  const f = await fixture(t), route = f.path + '/conversations/start', contacts = f.app.direct.contacts, origin = { source: 'manual', actor: 'user:fixture-owner' };
+  const ready = await contacts.save(f.projectId, { name: 'Permitted', phone: '+12025550101', consents: { whatsapp: true, sms: true }, consentSource: 'Synthetic opt-in record' }, undefined, { origin });
   const notPermitted = await contacts.save(f.projectId, { name: 'No permission', phone: '+12025550102' }); let revoke = false;
   const template = { id: 'approved-template', name: 'appointment_update', language: 'en', status: 'APPROVED', category: 'UTILITY', components: [{ type: 'HEADER', text: 'Appointment {{1}}', format: 'TEXT' }, { type: 'BODY', text: 'Your appointment is {{1}}' }, { type: 'BUTTONS', buttons: [{ type: 'URL', text: 'Details', url: 'https://example.com/{{1}}' }] }] };
   f.setHook(async (url, options) => {
-    if (url.pathname.endsWith('/whatsapp/templates')) { if (revoke) await contacts.suppress(f.projectId, ready.id, 'whatsapp', 'Recipient opted out during lookup'); return Response.json({ success: true, templates: [template] }); }
+    if (url.pathname.endsWith('/whatsapp/templates')) { if (revoke) await contacts.suppress(f.projectId, ready.id, 'whatsapp', 'Recipient opted out during lookup', { origin }); return Response.json({ success: true, templates: [template] }); }
     if (url.pathname.endsWith('/inbox/conversations') && options.method === 'POST') return Response.json({ success: true, data: { messageId: 'opening-1', conversationId: 'thread-1' } });
   });
   try {
@@ -847,7 +848,7 @@ test('new WhatsApp and Zernio SMS conversations require current local permission
     assert.equal(f.writes().length, 0);
     const accepted = await f.request(route, 'POST', body); assert.equal(accepted.status, 200, JSON.stringify(accepted.data)); assert.deepEqual(f.writes().at(-1).body, { accountId: 'wa', participantId: '12025550101', templateName: 'appointment_update', templateLanguage: 'en', templateParams: ['A1', 'Friday', 'appointment-1'] });
     assert.equal((await f.request(route, 'POST', { accountId: 'sm', contactId: ready.id, message: 'Your appointment is confirmed', confirmSend: true })).status, 200);
-    await contacts.suppressSmsGlobally(ready.phone, 'STOP'); const beforeStop = f.writes().length; assert.equal((await f.request(route, 'POST', { accountId: 'sm', contactId: ready.id, message: 'Blocked after STOP', confirmSend: true })).status, 409); assert.equal(f.writes().length, beforeStop);
+    await contacts.suppressSmsGlobally(ready.phone, 'STOP', { source: 'sms_keyword', actor: 'system:twilio' }); const beforeStop = f.writes().length; assert.equal((await f.request(route, 'POST', { accountId: 'sm', contactId: ready.id, message: 'Blocked after STOP', confirmSend: true })).status, 409); assert.equal(f.writes().length, beforeStop);
     revoke = true; const beforeRevoke = f.writes().length; assert.equal((await f.request(route, 'POST', { ...body, templateComponents: body.templateComponents.map(row => row.type === 'body' ? { ...row, parameters: [{ type: 'text', text: 'Saturday' }] } : row) })).status, 409); assert.equal(f.writes().length, beforeRevoke);
   } finally { await f.close(); }
 });

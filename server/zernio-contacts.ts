@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 import type { Executor } from './database.ts';
 import { advisoryLock } from './auth.ts';
+import { consentOrigin } from './consent-history.ts';
 type Ctx = OperationContext & { body: any };
 import { createHash, randomUUID } from 'node:crypto';
 import { IntegrationError, claimFence, operation, pathSegment, releaseFence, scopedAccounts, requireAccount, fail, reportObject as object } from './provider-core.ts';
@@ -281,7 +282,7 @@ export async function handleZernioContacts(context: Ctx, api: ZernioApi, profile
           for (const channel of current.channels) { const link = mapped.find((row: ProviderRecord) => row.channelId === channel.id && row.accountId === channel.accountId), selected = link && await context.contacts.get(project.id, link.localContactId); if (!selected || !permitted(selected, channel)) { unpermitted = true; break; } }
           if (!current.exclusive || !current.channels.length || current.isBlocked !== false || unpermitted) fail(409, 'LOCAL_CHANNEL_PERMISSION_REQUIRED', 'Subscription needs an unblocked, exclusive contact with every phone channel linked to a locally permitted, unsuppressed destination.'); };
         await checkSubscription();
-      } else for (const channel of current.ownChannels) if (['whatsapp', 'sms'].includes(channel.platform)) await context.contacts.suppressDestination(project.id, channel.platform, '+' + telephone(channel.platformIdentifier), 'Unsubscribed in connected contact settings');
+      } else for (const channel of current.ownChannels) if (['whatsapp', 'sms'].includes(channel.platform)) await context.contacts.suppressDestination(project.id, channel.platform, '+' + telephone(channel.platformIdentifier), 'Unsubscribed in connected contact settings', consentOrigin.connectedSettings(context.user.id));
       payload = { isSubscribed: body.subscribed };
     }
     if (task === 'set' || task === 'clear') {

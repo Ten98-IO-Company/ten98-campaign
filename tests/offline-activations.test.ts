@@ -71,7 +71,8 @@ test('staff capture leads at an activation with explicit per-channel consent, an
   const tag = 'offline:' + activation.id.slice(0, 8);
 
   let response = await request(leads, 'POST', { name: 'Pat Doe', email: 'pat@example.test', phone: '+447700900123', consents: { email: true, sms: true, whatsapp: false } }, editor.cookie);
-  assert.equal(response.status, 201, JSON.stringify(response.body)); assert.deepEqual([response.body.recorded, response.body.refused], [['email', 'sms'], []]);
+  // `recorded` lists every permission stored, so the email opt-in's marketing permission too (#351).
+  assert.equal(response.status, 201, JSON.stringify(response.body)); assert.deepEqual([response.body.recorded, response.body.refused], [['email', 'sms', 'emailMarketing'], []]);
   assert.equal(JSON.stringify(response.body).includes('pat@example.test'), false, 'The staff phone gets no contact details back.');
   let contact = (await request(project + '/direct/contacts', 'GET', undefined, owner)).body.contacts.find((row: any) => row.email === 'pat@example.test');
   // The field wording asks for news and offers, so an email opt-in is also marketing permission (#165).
