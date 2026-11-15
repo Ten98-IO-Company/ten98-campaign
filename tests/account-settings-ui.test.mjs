@@ -12,8 +12,10 @@ const source = await readFile(new URL('../src/AccountSettings.tsx', import.meta.
 const body = source.replace(/^import .*?;\r?\n/gm, '').replace('export default function', 'function');
 const { code } = await transformWithOxc(body, 'AccountSettings.tsx', { jsx: { runtime: 'classic' } });
 // The shared exports with the test formatter, since the adapter is called outside a React render.
-const ui = withTestDisplayFormat(uiExports);
-const names = ['AccountProfileFlow', 'Alert', 'Button', 'Card', 'PasswordChangeFlow', 'Stack', 'StatusLine', 'Text', 'useDisplayFormat'];
+// useConfirmDialog is a stand-in too: each confirm() records its question and resolves with the next scripted answer.
+const questions = [], answers = [];
+const ui = { ...withTestDisplayFormat(uiExports), useConfirmDialog: () => [async question => { questions.push(question); return answers.shift() ?? false; }, null] };
+const names = ['AccountProfileFlow', 'Alert', 'Button', 'Card', 'PasswordChangeFlow', 'Stack', 'StatusLine', 'Text', 'useConfirmDialog', 'useDisplayFormat'];
 
 function view(account, request) {
   const state = [];
@@ -45,6 +47,20 @@ test('password change uses the shared flow, posts only the password fields and r
   assert.match(renderToStaticMarkup(tree), /Password changed\. Other sessions have been signed out\./);
   await find(tree, ui.PasswordChangeFlow).props.onSubmit({ currentPassword: 'wrong', newPassword: 'new password value!' });
   assert.match(renderToStaticMarkup(render()), /Current password is incorrect\./);
+});
+
+test('signing out other sessions asks first, opens on Cancel, and only a confirmed answer revokes them', async () => {
+  const calls = [], account = { user: { email: 'member@example.test', name: 'Member' }, localPassword: true, activeSessions: 3 };
+  const render = view(account, async (path, method, body) => { calls.push([path, method, body]); return path === '/account' ? account : { revoked: 2 }; });
+  const button = () => { const all = []; const walk = node => { if (!node || typeof node !== 'object') return; if (Array.isArray(node)) return node.forEach(walk); if (node.type === ui.Button) all.push(node); walk(node.props?.children); }; walk(render()); return all.find(node => [].concat(node.props.children).join('') === 'Sign out other sessions'); };
+  questions.length = 0; answers.push(false);
+  await button().props.onClick();
+  assert.equal(questions.length, 1); assert.equal(questions[0].title, 'Sign out other sessions?'); assert.equal(questions[0].initialFocus, 'cancel');
+  assert.deepEqual(calls, [], 'Cancel sends nothing.');
+  answers.push(true);
+  await button().props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls[0], ['/account/sessions/revoke', 'POST', {}]);
 });
 
 test('accounts without a local password see the provider note instead of the form', () => {

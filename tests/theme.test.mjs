@@ -11,7 +11,7 @@ import viteConfig from '../vite.config.mjs';
 import { themeStorageKey as key } from '../shared/theme.ts';
 import { withTestDisplayFormat } from './display-format.ts';
 // The shared exports with the test formatter, since AccountSettings is called outside a React render.
-const shell = withTestDisplayFormat(ui);
+const shell = { ...withTestDisplayFormat(ui), useConfirmDialog: () => [async () => false, null] };
 
 // The CSS parser is vite's own postcss dependency: Campaign's architecture declaration does not list postcss, and
 // pnpm does not hoist a dependency's dependencies to the root.
