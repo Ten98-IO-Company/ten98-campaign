@@ -15,10 +15,6 @@
     "count": 41,
     "reason": "Accounts, passwords and sessions on Campaign's own tables. Replaced by Better Auth through @ten98/runtime/auth (unified-stack step 2, ten98-code-system#97); the shared lock helpers now live in server/locks.ts."
   },
-  "server/calendar.ts": {
-    "count": 8,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through the shared advisoryLock helper (server/locks.ts), which must keep their order in the typed version."
-  },
   "server/contacts.ts": {
     "count": 18,
     "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); it takes advisory locks through the shared advisoryLock helper (server/locks.ts), which must keep their order in the typed version."
@@ -54,10 +50,6 @@
   "server/invitations.ts": {
     "count": 13,
     "reason": "Memberships and invitations under the workspace row lock. Replaced by the shared team controller once ten98-code-system#116 ships (unified-stack step 2)."
-  },
-  "server/links.ts": {
-    "count": 36,
-    "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); its FOR UPDATE row locks and advisory locks must keep their order in the typed version."
   },
   "server/locks.ts": {
     "count": 3,
