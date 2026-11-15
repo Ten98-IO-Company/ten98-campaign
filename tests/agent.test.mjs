@@ -4,7 +4,7 @@ import { createStore } from '../server/database.ts';
 import { handleAgent } from '../server/agent.ts';
 import { postgresSkip, testDatabase } from './postgres.mjs';
 
-const fixtures = (users, projects) => `INSERT INTO users (id, name, email) VALUES ${users.map(id => `('${id}','${id}','${id}@example.test')`).join(',')}; INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ${projects.map(id => `('${id}','w','${id}')`).join(',')}`;
+const fixtures = (users, projects) => `INSERT INTO "user" (id, name, email) VALUES ${users.map(id => `('${id}','${id}','${id}@example.test')`).join(',')}; INSERT INTO workspaces (id, name) VALUES ('w','W'); INSERT INTO projects (id, workspace_id, name) VALUES ${projects.map(id => `('${id}','w','${id}')`).join(',')}`;
 
 test('the OpenRouter agent keeps tools scoped, drafts reviewable, paid retries durable, and user history private', { skip: postgresSkip }, async t => {
   const { db, pool, sql } = await testDatabase(t), originalFetch = globalThis.fetch, calls = [];

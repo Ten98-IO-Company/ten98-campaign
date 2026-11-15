@@ -10,6 +10,7 @@ const allowed = new Map([
   ['agent.test.mjs', 'builds its fixture SQL from user and project lists'],
   ['ad-targeting.test.mjs', 'restores a role with ON CONFLICT … DO UPDATE'],
   ['auth-races.test.mjs', 'reseeds the same rows with ON CONFLICT DO NOTHING'],
+  ['identity-better-auth.test.ts', 'seeds the pre-move users shape (with its password column) to test the migrations from before the Better Auth move'],
   ['sms-media.test.mjs', 'resolves the workspace with a subselect'],
 ]);
 const raw = /INSERT INTO (users|workspaces|memberships|instance_operators)\b/;

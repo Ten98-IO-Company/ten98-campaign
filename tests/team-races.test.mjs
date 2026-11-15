@@ -87,7 +87,7 @@ test('demoting an inviter below the invite role revokes their pending invitation
   assert.equal((await accept()).status, 410);
   assert.equal((await member('second', 'admin')).status, 200);
   assert.equal((await accept()).status, 410); assert.equal((await invitation()).accepted_at, null);
-  assert.equal((await pool.query("SELECT * FROM users WHERE email = 'invitee@example.test'")).rowCount, 0);
+  assert.equal((await pool.query("SELECT * FROM \"user\" WHERE email = 'invitee@example.test'")).rowCount, 0);
 });
 
 test('an owner demoted to administrator keeps pending invitations an administrator may still grant', { skip: postgresSkip }, async t => {
@@ -121,7 +121,7 @@ test('a demotion racing an acceptance either follows the acceptance or refuses i
   const acceptance = late.accept(); await gate.waiting(2); await gate.release();
   assert.deepEqual([(await demotion).status, (await acceptance).status], [200, 410]);
   assert.equal((await late.invitation()).accepted_at, null);
-  assert.equal((await late.pool.query("SELECT * FROM users WHERE email = 'invitee@example.test'")).rowCount, 0);
+  assert.equal((await late.pool.query("SELECT * FROM \"user\" WHERE email = 'invitee@example.test'")).rowCount, 0);
   // Acceptance first: the demotion waits, then finds nothing left to revoke.
   const early = await pendingInvitation(t);
   gate = await blockWrites(early.pool, 'memberships');
@@ -147,7 +147,7 @@ test('an administrator manages editors and viewers but not owners or administrat
 test('project assignees list editors and above for editors, without email addresses', { skip: postgresSkip }, async t => {
   const { pool, request, workspaceId, first } = await owners(t);
   const projectId = (await request('/state', { cookie: first.cookie })).data.projects.find(project => project.workspaceId === workspaceId).id;
-  const password = 'team race fixture password', hash = (await pool.query("SELECT password FROM users WHERE id = 'second'")).rows[0].password;
+  const password = 'team race fixture password', hash = (await pool.query("SELECT password FROM account WHERE \"userId\" = 'second' AND \"providerId\" = 'credential'")).rows[0].password;
   for (const [id, role] of [['editor', 'editor'], ['viewer', 'viewer']]) { await addUsers(pool, [{ id: id, name: id[0].toUpperCase() + id.slice(1), email: id + '@example.test', password: hash }]); await addMemberships(pool, [[workspaceId, id, role]]); }
   const login = async email => (await request('/auth/login', { method: 'POST', body: { email, password } })).cookie;
   const editor = await login('editor@example.test'), viewer = await login('viewer@example.test');

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { assertSchema, closeDatabase, getDatabase, migrate, type Database } from './database.ts';
-import { accountByEmail, hashPassword, hasAnyAccount, hasLocalPassword, insertAccount, setLocalPassword } from './auth.ts';
+import { accountByEmail, hashPassword, hasAnyAccount, hasLocalPassword, hostAuth, insertAccount, setLocalPassword } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
 
 class CliError extends Error {}
@@ -24,7 +24,7 @@ async function account(command: string, db: Database) {
     if (typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) throw new CliError('Use a password between 12 and 128 characters.');
     const next = await hashPassword(input.password);
     // The user row lock orders the reset against a sign-in or password change running in the app.
-    await db.transaction(tx => setLocalPassword(tx, existing.id, next));
+    await setLocalPassword(hostAuth(db), db, existing.id, next);
     console.log('Local password reset. All account sessions were signed out.');
   } else {
     if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 120 || /[\u0000-\u001f]/.test(input.name)) throw new CliError('Use a name between 1 and 120 characters.');
@@ -32,7 +32,7 @@ async function account(command: string, db: Database) {
     if (existing) throw new CliError('An account already uses this email address.');
     const hash = await hashPassword(input.password);
     // A unique-email violation means a concurrent signup won; report it as the existing-account error.
-    try { await insertAccount(db, { id: randomUUID(), name: input.name.trim(), email, passwordHash: hash }); }
+    try { await db.transaction(tx => insertAccount(tx, { id: randomUUID(), name: input.name.trim(), email, passwordHash: hash })); }
     catch (error: any) { if (error?.cause?.code === '23505' || error?.code === '23505') throw new CliError('An account already uses this email address.'); throw error; }
     console.log(`Created local account for ${email}. Add it to a workspace in the app.`);
   }

@@ -63,7 +63,7 @@ test('HTTP platform variants publish, schedule, refresh, edit and retry the exac
     assert.equal(setup.status, 201); ownerCookie = setup.cookie;
     const state = (await request('/api/state')).data, projectId = state.projectId, project = `/api/projects/${projectId}`, integrations = `${project}/integrations/social`;
     assert.equal((await request(project, { method: 'PATCH', body: { zernioProfileId: profileId } })).status, 200);
-    const viewerId = randomUUID(), owner = await app.sql.get('SELECT password FROM users WHERE id=?', state.user.id);
+    const viewerId = randomUUID(), owner = await app.sql.get("SELECT password FROM account WHERE \"userId\"=? AND \"providerId\"='credential'", state.user.id);
     await addUsers(app.sql, [{ id: viewerId, name: 'Platform viewer', email: 'platform-viewer@example.test', password: owner.password }]);
     await addMemberships(app.sql, [[state.workspaces[0].id, viewerId, 'viewer']]);
     const viewerCookie = (await post('/api/auth/login', { email: 'platform-viewer@example.test', password: 'platform fixture password that is long enough' })).cookie;

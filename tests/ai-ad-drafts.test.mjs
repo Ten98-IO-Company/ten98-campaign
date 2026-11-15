@@ -32,7 +32,7 @@ test('AI ad suggestions stay private, reviewable and unsubmitted until the user 
     assert.deepEqual(await app.store.list(projectId, 'campaigns'), []); assert.equal(generated.data.run.usage.cost, 0.002);
     for (let attempt = 0; attempt < 2; attempt++) { const opened = await api(`${path}/actions/${action.id}/apply`, 'POST', {}); assert.equal(opened.status, 200); assert.deepEqual(opened.data.adDraft, draft); }
     assert.deepEqual(await app.store.list(projectId, 'campaigns'), []); assert.equal(calls, 2, 'Opening a saved suggestion cannot bill another model call.');
-    const foreign = (await app.sql.get('SELECT id FROM users')).id;
+    const foreign = (await app.sql.get('SELECT id FROM "user"')).id;
     await app.sql.run("UPDATE memberships SET role='viewer' WHERE user_id=?", foreign);
     assert.equal((await api(`${path}/actions/${action.id}/apply`, 'POST', {})).status, 403);
     assert.equal(calls, 2);

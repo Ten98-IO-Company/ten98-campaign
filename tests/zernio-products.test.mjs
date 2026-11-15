@@ -109,7 +109,7 @@ test('HTTP Shopify collection title rename uses exact partial PATCH, independent
         if (scenario === 'role') await app.sql.run("UPDATE memberships SET role='viewer'");
         if (scenario === 'mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", projectId);
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-collection-fixture-key' } } })).status, 200);
-        if (scenario === 'session') await app.sql.run('DELETE FROM sessions');
+        if (scenario === 'session') await app.sql.run('DELETE FROM session');
       };
       // Changing the collection before the second native read must invalidate its original review.
       if (scenario === 'between-reads') { let reads = 0; providerHook = (call, result) => { if (call.url.pathname.endsWith(encodeURIComponent(collection.id)) && ++reads === 2) result.collection.updatedAt = collection.updatedAt = '2026-10-19T10:00:00Z'; }; }
@@ -646,7 +646,7 @@ test('HTTP Shopify content and classification updates use fresh reviews, exact P
         if (scenario === 'role') await app.sql.run("UPDATE memberships SET role='editor'");
         if (scenario === 'mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", projectId);
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-fixture-key' } } })).status, 200);
-        if (scenario === 'session') await app.sql.run('DELETE FROM sessions');
+        if (scenario === 'session') await app.sql.run('DELETE FROM session');
         if (scenario === 'native-store') account.platformUserId = 'other-native-store';
         if (scenario === 'store-domain') store.domain = 'other.myshopify.com';
         if (scenario === 'currency') store.currency = 'USD';
@@ -789,7 +789,7 @@ test('HTTP Shopify draft creation forces one priced variant, fresh store review,
         if (scenario === 'between-reads') store.currency = 'USD';
         if (scenario === 'mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='other-profile' WHERE id=?", projectId);
         if (scenario === 'role') await app.sql.run("UPDATE memberships SET role='viewer'");
-        if (scenario === 'session') await app.sql.run('DELETE FROM sessions');
+        if (scenario === 'session') await app.sql.run('DELETE FROM session');
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-create-fixture-key' } } })).status, 200);
       };
       assert.ok([403, 409].includes((await request(route() + '/create', { body })).status), scenario); assert.equal(writes().length, before); providerHook = undefined;
@@ -930,7 +930,7 @@ test('HTTP Shopify single-variant price uses exact native fields, verified readb
         if (scenario === 'role') await app.sql.run("UPDATE memberships SET role='viewer'");
         if (scenario === 'mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", projectId);
         if (scenario === 'credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-price-fixture-key' } } })).status, 200);
-        if (scenario === 'session') await app.sql.run('DELETE FROM sessions');
+        if (scenario === 'session') await app.sql.run('DELETE FROM session');
       };
       const result = await request(route(product) + '/price', { body }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); if (scenario.endsWith('price')) assert.equal(result.data.error.code, 'PRODUCT_PRICE_PERMISSION_REQUIRED'); assert.equal(writes().length, before); providerHook = undefined;
       await app.sql.run("UPDATE memberships SET role='owner'"); await app.sql.run('UPDATE projects SET zernio_profile_id=? WHERE id=?', 'product-price-profile', projectId);
@@ -1120,7 +1120,7 @@ for (const stateAction of ['deactivate', 'archive', 'activate', 'delete']) test(
           if (scenario === 'final-role') await app.sql.run("UPDATE memberships SET role='viewer'");
           if (scenario === 'final-mapping') await app.sql.run("UPDATE projects SET zernio_profile_id='changed-profile' WHERE id=?", projectId);
           if (scenario === 'final-credentials') assert.equal((await request('/api/settings/integrations/zernio', { method: 'PUT', body: { fields: { apiKey: 'changed-state-key' } } })).status, 200);
-          if (scenario === 'final-session') await app.sql.run('DELETE FROM sessions');
+          if (scenario === 'final-session') await app.sql.run('DELETE FROM session');
         }
       };
       const result = await request(route(product) + '/' + stateAction, { body }); assert.ok([403, 409].includes(result.status), scenario + JSON.stringify(result)); assert.equal(writes().length, before, scenario); providerHook = undefined;
