@@ -6,14 +6,13 @@ import React from 'react';
 import * as ui from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import { format, hooklessUiUi } from './fixtures/display-format.ts';
 
 const source = await readFile(new URL('../src/UnifiedInbox.tsx', import.meta.url), 'utf8');
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 function compile(code, context = {}) { return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context)); }
 const event = { preventDefault() {} }, path = '/projects/project-a/integrations/inbox';
-// Harnesses call components as plain functions, so the formatter hook returns the no-provider formatter directly.
-const format = ui.createDisplayFormatter({ locale: 'en', timeZone: 'UTC' }), hookless = { ...ui, useDisplayFormat: () => format };
-const { AppliedFilters } = ui, uiNames = Object.keys(hookless), uiValues = Object.values(hookless);
+const { AppliedFilters } = ui, uiNames = Object.keys(hooklessUi), uiValues = Object.values(hooklessUi);
 const merge = (before, after) => [...new Map([...before, ...after].map(row => [row.id, row])).values()];
 
 const linkedInReactions = { LIKE: 'Like', PRAISE: 'Celebrate', EMPATHY: 'Love', INTEREST: 'Insightful', APPRECIATION: 'Support', ENTERTAINMENT: 'Funny' };
@@ -126,7 +125,7 @@ test('Reddit inline edit exposes before and after review only for owned comments
   const helper = section('  function commentMessage(', '  const noun = '), { code } = await transformWithOxc('function Comments() {' + helper + ' return <ConversationThread label="Post comments" messages={threadRows.map(row => commentMessage(row, selected))}/>; }', 'Comments.tsx', { jsx: { runtime: 'classic' } });
   const row = { id: 'comment', message: 'Original', from: { isOwner: true }, editVersion: 'review', depth: 0 }, commentEdit = { ...row, accountId: 'rd', postId: 'post', content: 'Corrected', confirmed: '' };
   const render = changes => {
-    const context = { React, ...hookless, format, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'rd', account: { platform: 'reddit', name: 'Reddit account' }, capabilities: { commentEdit: true }, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [row], detail: {}, commentEdit, when: () => '', link: () => '', states: {}, triageLabel: () => '', waitingFor: () => '', userId: '', triageError: '', assignees: [], TriageControls: () => null, changeTriage() {}, notesFor: () => null, ...changes };
+    const context = { React, ...hooklessUi, format, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'rd', account: { platform: 'reddit', name: 'Reddit account' }, capabilities: { commentEdit: true }, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [row], detail: {}, commentEdit, when: () => '', link: () => '', states: {}, triageLabel: () => '', waitingFor: () => '', userId: '', triageError: '', assignees: [], TriageControls: () => null, changeTriage() {}, notesFor: () => null, ...changes };
     return renderToStaticMarkup(new Function(...Object.keys(context), code + '; return Comments;')(...Object.values(context))());
   };
   const html = render(); assert.match(html, /Edit comment/); assert.match(html, /<figcaption[^>]*>Before</); assert.match(html, /<label[^>]*>After</); assert.match(html, /Original/); assert.match(html, /Corrected/); assert.match(html, /I reviewed this account and the before and after text/); assert.match(html, /disabled="">Save comment edit/); assert.match(html, /after this review can be overwritten/);
@@ -1082,7 +1081,7 @@ test('review, mention and comment rows show their triage label, with waiting tim
   assert.match(renderToStaticMarkup(React.createElement(TriageControls, { kind: 'mention', error: 'x', readOnly: false, busy: false, userId: '', onChange() {} })), /Refresh the mentions to try again/);
 
   const helper = section('  function commentMessage(', '  const noun = '), comments = await transformWithOxc('function Comments() {' + helper + ' return <ConversationThread label="Post comments" messages={threadRows.map(row => commentMessage(row, selected))}/>; }', 'Comments.tsx', { jsx: { runtime: 'classic' } });
-  const context = { React, ...hookless, format, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'tg', account: { platform: 'facebook' }, capabilities: {}, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [{ id: 'comment-1', message: 'Hello', likeCount: 2, depth: 0 }], detail: {}, commentEdit: null, when: () => '', link: () => '', states: kindStates('comment', ['comment-1'], { status: 'resolved', assigneeId: 'mate', waitingSince }), triageLabel, waitingFor, userId: 'me', triageError: '', assignees: [{ id: 'mate', name: 'Sam' }], TriageControls, changeTriage() {}, notesFor: () => null };
+  const context = { React, ...hooklessUi, format, tab: 'comments', selected: { id: 'post' }, focusedComment: '', busy: '', readOnly: false, accountId: 'tg', account: { platform: 'facebook' }, capabilities: {}, canReply: false, privateReplyTarget: null, projectId: 'project-a', threadRows: [{ id: 'comment-1', message: 'Hello', likeCount: 2, depth: 0 }], detail: {}, commentEdit: null, when: () => '', link: () => '', states: kindStates('comment', ['comment-1'], { status: 'resolved', assigneeId: 'mate', waitingSince }), triageLabel, waitingFor, userId: 'me', triageError: '', assignees: [{ id: 'mate', name: 'Sam' }], TriageControls, changeTriage() {}, notesFor: () => null };
   const thread = renderToStaticMarkup(new Function(...Object.keys(context), comments.code + '; return Comments;')(...Object.values(context))());
   assert.match(thread, /2 likes · Resolved · Assigned · waiting 3h/); assert.match(thread, /Comment triage/); assert.match(thread, /Triage: Resolved · waiting 3h · Assigned to Sam/); assert.match(thread, />Reopen<\/button>/);
 });

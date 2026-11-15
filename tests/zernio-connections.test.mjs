@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
-import * as design from '@ten98/ui';
+import { hooklessUi as design } from './fixtures/display-format.ts';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { handleZernioConnections } from '../server/zernio-connections.ts';

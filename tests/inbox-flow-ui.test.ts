@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { hooklessUi } from './fixtures/display-format.ts';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { assertNoMarkup, readText } from './read-text.ts';
 
@@ -11,8 +12,6 @@ import { assertNoMarkup, readText } from './read-text.ts';
 // banner per affected account and answers j/k/e/r. The actual components run with ordered hook stubs and a stub transport.
 const source = await readFile(new URL('../src/UnifiedInbox.tsx', import.meta.url), 'utf8');
 const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace('export default function', 'function'), 'UnifiedInbox.tsx', { jsx: { runtime: 'classic' } });
-// Components run as plain functions, so the formatter hook returns the no-provider formatter directly.
-const format = ui.createDisplayFormatter({ locale: 'en', timeZone: 'UTC' });
 const settle = () => new Promise(resolve => setImmediate(resolve));
 // Walks every element-valued prop, so list, detail, emptyMessage and actions slots are searched too.
 const elements = (node: any): any[] => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...Object.values(node.props as Record<string, unknown>).flatMap(elements)] : [];
@@ -27,7 +26,7 @@ function mount(name: string, globals: Record<string, unknown> = {}) {
   const useRef = (initial: any) => refs[refIndex++] ||= { current: initial };
   const useEffect = (callback: () => any, deps: any[]) => { const index = effectIndex++, previous = effects[index]; if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) effects[index] = { deps, callback, cleanup: previous?.cleanup }; };
   const window = { addEventListener() {}, removeEventListener() {}, setInterval: () => 1, clearInterval() {} };
-  const scope = { React, useState, useRef, useEffect, useLayoutEffect: (callback: () => void) => { callback(); }, WhatsAppTemplate: () => null, templateRestriction: () => '', validPostInstant: (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)), window, document: undefined, ...globals, ...ui, useFocusReturn: () => () => {}, useDisplayFormat: () => format };
+  const scope = { React, useState, useRef, useEffect, useLayoutEffect: (callback: () => void) => { callback(); }, WhatsAppTemplate: () => null, templateRestriction: () => '', validPostInstant: (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)), window, document: undefined, ...globals, ...hooklessUi, useFocusReturn: () => () => {} };
   const Component = new Function(...Object.keys(scope), code + '; return ' + name + ';')(...Object.values(scope));
   return {
     render(props: any) { stateIndex = refIndex = effectIndex = 0; return Component(props); },

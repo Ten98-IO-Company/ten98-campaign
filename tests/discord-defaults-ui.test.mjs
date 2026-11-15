@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import * as design from '@ten98/ui';
+import { hooklessUi as design } from './fixtures/display-format.ts';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 import { transformWithOxc } from 'vite';
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Checkbox, ConfirmDialog, DataTable, DescriptionList, Disclosure, Field, Fieldset, FormActions, FormGrid, Heading, Inline, Input, Link, List, ListItem, Option, Select, Stack, StatusLine, Text } from '@ten98/ui';
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, DescriptionList, Disclosure, Field, Fieldset, FormActions, FormGrid, Heading, Inline, Input, Link, List, ListItem, Option, Select, Stack, StatusLine, Text, useDisplayFormat } from '@ten98/ui';
+import type { DisplayFormatter } from '@ten98/ui';
 import { publicMediaUrl } from '../shared/social-posts.ts';
 
 type Health = { status: string; canPost?: boolean; canFetchAnalytics?: boolean; tokenValid?: boolean; tokenExpiresAt?: string; needsReconnect?: boolean; issues: string[]; recommendations: string[]; tokenStatus?: { valid?: boolean; needsRefresh?: boolean; expiresAt?: string; expiresIn?: string }; permissions?: { canPost?: boolean; canFetchAnalytics?: boolean; missingRequired: string[]; posting: Permission[]; analytics: Permission[]; optional: Permission[] }; analyticsSync?: { status: string; lastSyncedAt?: string }; platformConnection?: { status: string; checkedAt?: string; phoneStatus?: string; inboundWebhookSubscribed?: boolean }; messagingRestriction?: { code?: number; subcode?: number; message?: string; firstSeenAt?: string; lastSeenAt?: string; pausedUntil?: string } };
@@ -15,9 +16,10 @@ type DiscordDefaults = { webhookUsername: string; webhookAvatarUrl: string };
 type DiscordSettings = DiscordDefaults & { accountId: string; guildId: string; channelId: string; channelType: string; channelName: string | null; accountVersion: string; version: string };
 const name = (account: Account) => account.displayName || account.username || account.platform;
 const yes = (value?: boolean) => value === undefined || value === null ? 'Not reported' : value ? 'Yes' : 'No';
-const when = (value?: string) => value ? new Date(value).toLocaleString() : 'Not reported';
+const when = (value: string | undefined, format: DisplayFormatter) => value ? format.dateTime(value) : 'Not reported';
 
 export default function ZernioAccounts({ projectId, canManage, request, onAccountsChanged }: Props) {
+  const format = useDisplayFormat();
   const [accounts, setAccounts] = useState<Account[]>([]), [loaded, setLoaded] = useState(false), [selectedId, setSelectedId] = useState(''), [detail, setDetail] = useState<Health | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [authUrl, setAuthUrl] = useState(''), [confirming, setConfirming] = useState<Account>();
   const [draft, setDraft] = useState({ displayName: '', username: '', analytics: '', inbox: '' });
@@ -193,6 +195,7 @@ export default function ZernioAccounts({ projectId, canManage, request, onAccoun
     const values = languageText.split(',').map(value => value.trim());
     try {
       if (values.length < 1 || values.length > 3 || values.some(value => !value || value.length > 100)) throw new Error();
+      // Validates and canonicalizes language tags for the provider; nothing is displayed.
       const canonical = values.map(value => Intl.getCanonicalLocales(value)[0]);
       if (new Set(canonical).size !== values.length) throw new Error();
       return canonical;
@@ -281,10 +284,10 @@ export default function ZernioAccounts({ projectId, canManage, request, onAccoun
       <Inline justify="between" align="center"><Heading level={4} size="sm">{name(selected)}</Heading><Button variant="secondary" disabled={busy} onClick={() => action(checkSelected)}>Check detailed health</Button></Inline>
       {shown && <>
         <Text>Health: <Text as="strong">{shown.status}</Text> · Token valid: {yes(detail ? shown.tokenStatus?.valid : shown.tokenValid)} · Can publish: {yes(detail ? shown.permissions?.canPost : shown.canPost)} · Can read analytics: {yes(detail ? shown.permissions?.canFetchAnalytics : shown.canFetchAnalytics)}</Text>
-        {(shown.tokenStatus?.expiresAt || shown.tokenExpiresAt) && <Text tone="muted">Token expires: {when(shown.tokenStatus?.expiresAt || shown.tokenExpiresAt)}{shown.tokenStatus?.needsRefresh ? ' · Refresh required soon' : ''}</Text>}
-        {shown.analyticsSync && <Text>Analytics synchronization: <Text as="strong">{shown.analyticsSync.status.replaceAll('_', ' ')}</Text> · Last success: {when(shown.analyticsSync.lastSyncedAt)}</Text>}
-        {shown.platformConnection && <><Text>WhatsApp platform link: <Text as="strong">{shown.platformConnection.status}</Text> · Inbound webhook subscribed: {yes(shown.platformConnection.inboundWebhookSubscribed)}</Text><Text tone="muted">Checked {when(shown.platformConnection.checkedAt)}. A valid token alone does not confirm that the WhatsApp number can send or receive. Reconnect if the link is disconnected or the inbound webhook is missing.</Text></>}
-        {shown.messagingRestriction && <Alert tone="warning" role="note">Messaging restriction observed on a previous send: {shown.messagingRestriction.message || shown.messagingRestriction.code || shown.messagingRestriction.subcode || 'Provider restriction'}.{shown.messagingRestriction.pausedUntil && ` Retry paused until ${when(shown.messagingRestriction.pausedUntil)}.`} This is an observed restriction, not a new live send test.</Alert>}
+        {(shown.tokenStatus?.expiresAt || shown.tokenExpiresAt) && <Text tone="muted">Token expires: {when(shown.tokenStatus?.expiresAt || shown.tokenExpiresAt, format)}{shown.tokenStatus?.needsRefresh ? ' · Refresh required soon' : ''}</Text>}
+        {shown.analyticsSync && <Text>Analytics synchronization: <Text as="strong">{shown.analyticsSync.status.replaceAll('_', ' ')}</Text> · Last success: {when(shown.analyticsSync.lastSyncedAt, format)}</Text>}
+        {shown.platformConnection && <><Text>WhatsApp platform link: <Text as="strong">{shown.platformConnection.status}</Text> · Inbound webhook subscribed: {yes(shown.platformConnection.inboundWebhookSubscribed)}</Text><Text tone="muted">Checked {when(shown.platformConnection.checkedAt, format)}. A valid token alone does not confirm that the WhatsApp number can send or receive. Reconnect if the link is disconnected or the inbound webhook is missing.</Text></>}
+        {shown.messagingRestriction && <Alert tone="warning" role="note">Messaging restriction observed on a previous send: {shown.messagingRestriction.message || shown.messagingRestriction.code || shown.messagingRestriction.subcode || 'Provider restriction'}.{shown.messagingRestriction.pausedUntil && ` Retry paused until ${when(shown.messagingRestriction.pausedUntil, format)}.`} This is an observed restriction, not a new live send test.</Alert>}
         {shown.issues.length > 0 && <><Heading level={5} size="sm">Issues</Heading><List>{shown.issues.map((issue, index) => <ListItem key={index}>{issue}</ListItem>)}</List></>}
         {shown.recommendations.length > 0 && <><Heading level={5} size="sm">Recommended action</Heading><List>{shown.recommendations.map((item, index) => <ListItem key={index}>{item}</ListItem>)}</List></>}
         {shown.permissions && <Disclosure summary="Permission details"><Stack gap={3}>{shown.permissions.missingRequired.length > 0 && <Alert tone="warning" role="note">Missing required permissions: {shown.permissions.missingRequired.join(', ')}</Alert>}<DataTable searchable={false} sortable={false} pagination={false} ariaLabel="Permissions" rows={(['posting', 'analytics', 'optional'] as const).flatMap(kind => shown.permissions![kind].map(permission => ({ kind, permission })))} rowKey={row => row.kind + ':' + row.permission.scope} columns={[{ key: 'kind', header: 'Use', render: row => row.kind }, { key: 'scope', header: 'Permission', render: row => row.permission.scope }, { key: 'granted', header: 'Granted', render: row => yes(row.permission.granted) }, { key: 'required', header: 'Required', render: row => yes(row.permission.required) }]}/></Stack></Disclosure>}
@@ -371,6 +374,7 @@ function whatsappNumberInfo(value: any, accountId: string): WhatsAppNumberInfo {
 }
 
 export function WhatsAppNumberStatus({ projectId, account, canManage, request }: { projectId: string; account: Account; canManage: boolean; request: Props['request'] }) {
+  const format = useDisplayFormat();
   const [state, setState] = useState<{ snapshot: WhatsAppNumberInfo | null; busy: boolean; error: string }>({ snapshot: null, busy: false, error: '' });
   const target = `/projects/${encodeURIComponent(projectId)}/integrations/accounts/${encodeURIComponent(account._id)}/whatsapp-number-info`, accountSnapshot = JSON.stringify(account);
   const view = useMemo(() => ({ pending: false }), [target, canManage, account, accountSnapshot]), scope = useRef(view), mounted = useRef(true), reads = useRef(0), requester = useRef(request);
@@ -394,7 +398,7 @@ export function WhatsAppNumberStatus({ projectId, account, canManage, request }:
     <Stack gap={1}><Heading level={5} size="sm">WhatsApp number status</Heading><Text tone="muted">Read this number’s current quality, messaging tier and throughput from Meta.</Text></Stack>
     <FormActions><Button variant="secondary" disabled={state.busy} onClick={load}>{snapshot ? 'Refresh WhatsApp number status' : 'Load WhatsApp number status'}</Button></FormActions>
     {state.busy && <StatusLine busy>Loading WhatsApp number status…</StatusLine>}{state.error && <Alert tone="danger">{state.error}</Alert>}
-    {snapshot && <><Text>Connected account: <Text as="strong">{name(account)}</Text> · {snapshot.accountId}</Text><Text tone="muted">Snapshot loaded {when(snapshot.loadedAt)}.</Text><DescriptionList items={[
+    {snapshot && <><Text>Connected account: <Text as="strong">{name(account)}</Text> · {snapshot.accountId}</Text><Text tone="muted">Snapshot loaded {when(snapshot.loadedAt, format)}.</Text><DescriptionList items={[
       ...([['Display number', snapshot.phone?.display_phone_number], ['Verified display name', snapshot.phone?.verified_name], ['Display name approval', snapshot.phone?.name_status], ['Quality rating', snapshot.phone?.quality_rating], ['Messaging limit tier', snapshot.phone?.messaging_limit_tier], ['Throughput level', snapshot.phone?.throughput?.level], ['Number connection status', snapshot.phone?.status], ['Platform type', snapshot.phone?.platform_type], ['Business account name', snapshot.waba?.name], ['Business verification status', snapshot.waba?.business_verification_status], ['Meta timezone ID', snapshot.waba?.timezone_id]] as const).map(([label, value]) => ({ key: label, term: label, description: reported(value) })),
       { key: 'Official business account', term: 'Official business account', description: yes(snapshot.phone?.is_official_business_account) }
     ]}/></>}
