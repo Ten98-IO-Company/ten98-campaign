@@ -113,7 +113,7 @@ test('consent and contact changes leave an Activity entry naming who made them, 
       'Suppressed ' + ref(kept.id) + ' for email by ',
       'Contacts imported from CSV by ',
       'Deleted ' + ref(gone.id) + ' by ',
-      'Direct campaign cancelled by ',
+      'Direct campaign "' + draft.name + '" cancelled by ',
     ]) assert.ok(added.some(message => message.startsWith(expected)), expected + ' in ' + JSON.stringify(added));
     assert.ok(added.some(message => /^Permission changed for .+: SMS off\.$/.test(message)), 'The change lists the channel and its new state.');
     assert.equal(added.some(message => /kept@example|gone@example|imported@example|\+1202555|Asked to stop/.test(message)), false, 'No contact details or reasons in Activity.');
@@ -163,6 +163,119 @@ test('a draft refuses any foreign contact id: alone, swapped in on edit, and wit
     assert.equal((await f.request(f.path + '/contacts/' + other.id, 'DELETE')).status, 200);
     assert.equal((await f.request(f.path + '/campaigns/' + draft.id, 'PATCH', { name: 'Still editable' })).status, 200, 'Edits that leave the contacts alone still save.');
     assert.equal((await f.request(f.path + '/campaigns/' + draft.id, 'PATCH', { contactIds: [known.id] })).status, 200, 'The deleted contact can be cleared.');
+  } finally { await f.close(); }
+});
+
+test('a consent change and its Activity entry are stored together: when the entry cannot be written, nothing changes', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const kept = await f.person({ email: 'atomic@example.com', phone: '+12025550181' }), draft = await f.draft({ contactIds: [kept.id] });
+    const count = async () => Number((await pool.query('SELECT count(*)::int AS n FROM direct_contacts WHERE project_id = $1', [f.projectId])).rows[0].n), contacts = await count();
+    await pool.query("CREATE FUNCTION refuse_activity() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'activity unavailable'; END $$ LANGUAGE plpgsql");
+    await pool.query('CREATE TRIGGER refuse_activity BEFORE INSERT ON activity FOR EACH ROW EXECUTE FUNCTION refuse_activity()');
+    const refused = async (path, method, body) => { const response = await f.request(f.path + path, method, body); assert.ok(response.status >= 500, method + ' ' + path + ' ' + response.status); };
+    await refused('/contacts/' + kept.id, 'PATCH', { consents: { sms: false } });
+    await refused('/contacts/' + kept.id + '/suppress', 'POST', { channel: 'email', reason: 'Asked to stop' });
+    await refused('/contacts/import', 'POST', { csv: 'name,email\nNew Person,new-person@example.com\n', consents: { email: true }, consentSource: 'Signup sheet' });
+    await refused('/contacts/' + kept.id, 'DELETE');
+    await refused('/campaigns/' + draft.id + '/cancel', 'POST', {});
+    await pool.query('DROP TRIGGER refuse_activity ON activity');
+    const stored = (await f.request(f.path + '/contacts')).data.contacts.find(contact => contact.id === kept.id);
+    assert.ok(stored, 'The contact was not deleted.'); assert.equal(stored.consents.sms, true, 'SMS permission is unchanged.');
+    assert.equal(stored.suppression?.email, undefined, 'The contact was not suppressed.');
+    assert.equal(await count(), contacts, 'The import stored no contact.');
+    assert.equal((await f.request(f.path + '/campaigns/' + draft.id)).data.campaign.status, 'draft', 'The campaign was not cancelled.');
+  } finally { await f.close(); }
+});
+
+test('Activity records a consent or contact change only when one happened, and names what changed', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const messages = async () => (await pool.query('SELECT message FROM activity WHERE project_id = $1 ORDER BY seq', [f.projectId])).rows.map(row => row.message);
+    const kept = await f.person({ email: 'noop@example.com', phone: '+12025550182' }), draft = await f.draft({ name: 'Spring notice', contactIds: [kept.id] }), before = (await messages()).length;
+    // Adding a contact whose email already exists is refused, so it can neither withdraw permission nor log a change.
+    const again = await f.request(f.path + '/contacts', 'POST', { email: 'noop@example.com', consents: { email: false } });
+    assert.equal(again.status, 409);
+    assert.equal((await f.request(f.path + '/contacts')).data.contacts.find(contact => contact.id === kept.id).consents.email, true);
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id, 'PATCH', { consents: kept.consents })).status, 200);
+    for (let i = 0; i < 2; i++) assert.equal((await f.request(f.path + '/contacts/' + kept.id + '/suppress', 'POST', { channel: 'email', reason: 'Asked to stop' })).status, 200);
+    for (let i = 0; i < 2; i++) assert.equal((await f.request(f.path + '/campaigns/' + draft.id + '/cancel', 'POST', {})).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/import', 'POST', { csv: 'name,email\nListed,listed@example.com\n', consents: { email: true, sms: false }, consentSource: 'Signup sheet' })).status, 200);
+    const added = (await messages()).slice(before);
+    assert.equal(added.filter(message => message.startsWith('Suppressed ')).length, 1, 'A second suppression changes nothing: ' + JSON.stringify(added));
+    assert.equal(added.filter(message => message.startsWith('Direct campaign ')).length, 1, 'A second cancel changes nothing: ' + JSON.stringify(added));
+    assert.equal(added.some(message => message.startsWith('Permission ')), false, 'Neither the refused add nor an unchanged edit is logged.');
+    assert.ok(added.some(message => /^Direct campaign "Spring notice" cancelled by .+\.$/.test(message)), 'The cancel entry names the campaign: ' + JSON.stringify(added));
+    assert.ok(added.some(message => /^Contacts imported from CSV by .+: 1 created, 0 updated, 0 skipped\. Permission recorded for email\.$/.test(message)), 'The import entry names the permissions it recorded: ' + JSON.stringify(added));
+    assert.equal(added.some(message => /listed@example|Signup sheet/.test(message)), false, 'No contact details or free text in Activity.');
+  } finally { await f.close(); }
+});
+
+test('a contact of another project or another workspace cannot be chosen for a draft, in any position, on create or edit', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const workspaceId = (await pool.query('SELECT workspace_id FROM projects WHERE id = $1', [f.projectId])).rows[0].workspace_id;
+    const sameWorkspace = await f.request('/api/projects', 'POST', { name: 'Second brand', workspaceId }); assert.equal(sameWorkspace.status, 201, JSON.stringify(sameWorkspace.data));
+    const otherWorkspace = await f.request('/api/workspaces', 'POST', { name: 'Separate company' }); assert.ok(otherWorkspace.data.projectId, JSON.stringify(otherWorkspace.data));
+    const foreign = [];
+    for (const [projectId, email] of [[sameWorkspace.data.project.id, 'other-brand@example.com'], [otherWorkspace.data.projectId, 'other-company@example.com']]) {
+      const created = await f.request('/api/projects/' + projectId + '/direct/contacts', 'POST', { name: 'Foreign', email, consents: { sms: true }, consentSource: 'Signup sheet' });
+      assert.equal(created.status, 201, JSON.stringify(created.data)); foreign.push(created.data.contact.id);
+    }
+    const own = await f.person({ email: 'own-brand@example.com', phone: '+12025550191' }), second = await f.person({ email: 'own-second@example.com', phone: '+12025550192' });
+    const drafts = async () => Number((await pool.query('SELECT count(*)::int AS n FROM direct_campaigns WHERE project_id = $1', [f.projectId])).rows[0].n);
+    const draft = await f.draft({ contactIds: [own.id, second.id] }), before = await drafts();
+    for (const id of foreign) {
+      let response = await f.request(f.path + '/campaigns', 'POST', { name: 'Notice', channel: 'sms', text: 'Hello', contactIds: [id, own.id] });
+      assert.equal(response.status, 400, JSON.stringify(response.data)); assert.equal(response.data.error.code, 'CONTACT_NOT_FOUND');
+      // Same length as the stored list, the foreign id first.
+      response = await f.request(f.path + '/campaigns/' + draft.id, 'PATCH', { contactIds: [id, second.id] });
+      assert.equal(response.status, 400, JSON.stringify(response.data)); assert.equal(response.data.error.code, 'CONTACT_NOT_FOUND');
+    }
+    assert.equal(await drafts(), before, 'No refused draft is stored.');
+    assert.deepEqual((await f.request(f.path + '/campaigns/' + draft.id)).data.campaign.contactIds, [own.id, second.id], 'The stored contacts are unchanged.');
+  } finally { await f.close(); }
+});
+
+test('a contact deleted while it is being edited stays deleted', pg, async t => {
+  const f = await fixture(t);
+  try {
+    for (let round = 0; round < 10; round++) {
+      const contact = await f.person({ email: 'race' + round + '@example.com', phone: '+1202555' + String(3000 + round) });
+      const [edited, deleted] = await Promise.all([
+        f.request(f.path + '/contacts/' + contact.id, 'PATCH', round % 2 ? { name: 'Renamed' } : { consents: { email: true, sms: false } }),
+        f.request(f.path + '/contacts/' + contact.id, 'DELETE'),
+      ]);
+      assert.equal(deleted.status, 200);
+      assert.ok([200, 404].includes(edited.status), 'The edit either ran first or found the contact gone: ' + edited.status);
+      assert.equal((await f.request(f.path + '/contacts')).data.contacts.some(item => item.id === contact.id), false, 'Round ' + round + ': the deleted contact did not come back.');
+    }
+  } finally { await f.close(); }
+});
+
+test('a change that fails at commit leaves no Activity entry, and nothing that changed nothing is logged', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const messages = async () => (await pool.query('SELECT message FROM activity WHERE project_id = $1 ORDER BY seq', [f.projectId])).rows.map(row => row.message);
+    const kept = await f.person({ email: 'commit@example.com', phone: '+12025550241' }), draft = await f.draft({ contactIds: [kept.id] });
+    const before = (await messages()).length;
+    // A deferred check fails each change at commit, after its Activity entry was written in the same transaction.
+    await pool.query("CREATE FUNCTION refuse_at_commit() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'refused at commit'; END $$ LANGUAGE plpgsql");
+    for (const table of ['direct_contacts', 'direct_campaigns']) await pool.query('CREATE CONSTRAINT TRIGGER refuse_at_commit AFTER INSERT OR UPDATE OR DELETE ON ' + table + ' DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_at_commit()');
+    for (const [path, method, body] of [['/contacts/' + kept.id, 'PATCH', { consents: { sms: false } }], ['/contacts/' + kept.id + '/suppress', 'POST', { channel: 'email', reason: 'Asked to stop' }], ['/contacts/import', 'POST', { csv: 'name,email\nNew,new-commit@example.com\n', consents: { email: true }, consentSource: 'Sheet' }], ['/contacts/' + kept.id, 'DELETE'], ['/campaigns/' + draft.id + '/cancel', 'POST', {}]])
+      assert.ok((await f.request(f.path + path, method, body)).status >= 500, method + ' ' + path);
+    for (const table of ['direct_contacts', 'direct_campaigns']) await pool.query('DROP TRIGGER refuse_at_commit ON ' + table);
+    assert.deepEqual((await messages()).slice(before), [], 'No entry outlives its failed change.');
+    // Nothing removed, a dry run, nothing imported: no entry.
+    assert.equal((await f.request(f.path + '/contacts/no-such-contact', 'DELETE')).status, 404);
+    assert.equal((await f.request(f.path + '/contacts/import', 'POST', { csv: 'name,email\nDry,dry@example.com\n', dryRun: true })).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/import', 'POST', { csv: 'name,email\nBroken,not-an-email\n' })).status, 200);
+    assert.deepEqual((await messages()).slice(before), []);
+    // An opt-in imported onto a suppressed address is not stored, and the entry does not claim it was.
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id + '/suppress', 'POST', { channel: 'email', reason: 'Asked to stop' })).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/import', 'POST', { csv: 'name,email\nKept,commit@example.com\n', consents: { email: true }, consentSource: 'Sheet' })).status, 200);
+    const entry = (await messages()).find(message => message.startsWith('Contacts imported'));
+    assert.ok(entry && !entry.includes('Permission recorded for email'), entry);
   } finally { await f.close(); }
 });
 
