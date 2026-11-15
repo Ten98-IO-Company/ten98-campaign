@@ -93,6 +93,33 @@ test('SMS campaigns persist schedules, deduplicate sends, validate audiences, de
   } finally { await f.close(); }
 });
 
+test('consent and contact changes leave an Activity entry naming who made them, without the contact details', pg, async t => {
+  const f = await fixture(t), { pool } = f.app.database;
+  try {
+    const messages = async () => (await pool.query('SELECT message FROM activity WHERE project_id = $1', [f.projectId])).rows.map(row => row.message);
+    const before = new Set(await messages());
+    const kept = await f.person({ email: 'kept@example.com', phone: '+12025550151' });
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id, 'PATCH', { consents: { sms: false } })).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/' + kept.id + '/suppress', 'POST', { channel: 'email', reason: 'Asked to stop by phone' })).status, 200);
+    assert.equal((await f.request(f.path + '/contacts/import', 'POST', { csv: 'name,email\nImported,imported@example.com\n' })).status, 200);
+    const gone = await f.person({ email: 'gone@example.com', phone: '+12025550152' });
+    assert.equal((await f.request(f.path + '/contacts/' + gone.id, 'DELETE')).status, 200);
+    const draft = await f.draft({ contactIds: [kept.id] });
+    assert.equal((await f.request(f.path + '/campaigns/' + draft.id + '/cancel', 'POST', {})).status, 200);
+    const added = (await messages()).filter(message => !before.has(message)), ref = id => 'contact ' + id.slice(0, 8);
+    for (const expected of [
+      'Permission recorded for ' + ref(kept.id) + ' by ',
+      'Permission changed for ' + ref(kept.id) + ' by ',
+      'Suppressed ' + ref(kept.id) + ' for email by ',
+      'Contacts imported from CSV by ',
+      'Deleted ' + ref(gone.id) + ' by ',
+      'Direct campaign cancelled by ',
+    ]) assert.ok(added.some(message => message.startsWith(expected)), expected + ' in ' + JSON.stringify(added));
+    assert.ok(added.some(message => /^Permission changed for .+: SMS off\.$/.test(message)), 'The change lists the channel and its new state.');
+    assert.equal(added.some(message => /kept@example|gone@example|imported@example|\+1202555|Asked to stop/.test(message)), false, 'No contact details or reasons in Activity.');
+  } finally { await f.close(); }
+});
+
 test('scheduling a campaign re-checks its preview on the queuing transaction, without a second connection', pg, async t => {
   // One pool connection: a preview read through the pool inside the queuing transaction would time out. The sending
   // worker is left out because its lease transaction deliberately works on other connections.
