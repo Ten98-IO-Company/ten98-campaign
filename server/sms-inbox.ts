@@ -4,6 +4,7 @@ import { IntegrationError, fail, operation } from './provider-core.ts';
 import { sql } from 'drizzle-orm';
 import type { Database, Executor } from './database.ts';
 import { sendSmsReply } from './direct-providers.ts';
+import { consentOrigin } from './consent-history.ts';
 import { createContacts } from './contacts.ts';
 import { nextDeliveryStatus, smsStarted as started } from './direct-campaigns.ts';
 
@@ -61,8 +62,8 @@ export function createSmsInbox({ db, env, appUrl, contacts = createContacts({ db
       return { url: url.href, contentType, type: contentType.startsWith('image/') ? 'image' : contentType.startsWith('video/') ? 'video' : contentType.startsWith('audio/') ? 'audio' : 'file' };
     });
     // STOP takes effect even if retaining the optional conversation subsequently fails.
-    if (stopped(form)) await contacts.suppressSmsGlobally(recipient, 'Recipient opted out');
-    else if (started(form)) await contacts.liftSmsOptOut(recipient);
+    if (stopped(form)) await contacts.suppressSmsGlobally(recipient, 'Recipient opted out', consentOrigin.smsKeyword);
+    else if (started(form)) await contacts.liftSmsOptOut(recipient, consentOrigin.smsKeyword);
     const candidates = await resultRows(db.execute(sql`SELECT DISTINCT c.project_id FROM sms_conversations c JOIN sms_messages m ON m.conversation_id = c.id WHERE c.account_sid = ${accountSid} AND c.sender = ${sender} AND c.recipient = ${recipient} AND (${serviceSid}::text = '' OR c.service_sid = ${serviceSid}) AND m.provider_id IS NOT NULL AND m.data->>'direction' = 'outgoing' AND (${projectId || null}::text IS NULL OR c.project_id = ${projectId || null})`));
     return db.transaction(async tx => {
       const target = candidates.length === 1 ? candidates[0].project_id : null;
@@ -82,7 +83,7 @@ export function createSmsInbox({ db, env, appUrl, contacts = createContacts({ db
       if (record.direction !== 'outgoing' || form.get('AccountSid') !== row.account_sid || form.get('To') !== row.recipient || form.get('From') && form.get('From') !== row.sender || !sid(providerId, '(?:SM|MM)') || record.providerId && record.providerId !== providerId || !statuses.has(status as string)) fail(400, 'SMS_DELIVERY_MISMATCH', 'The SMS callback does not match this conversation.');
       record.providerId = providerId; record.status = nextDeliveryStatus(record.status, status); record.deliveryStatus = record.status; if (form.get('ErrorCode')) record.errorCode = form.get('ErrorCode')!.slice(0, 20);
     });
-    if (form.get('ErrorCode') === '21610') await contacts.suppressSmsGlobally(row.recipient, 'Recipient opted out');
+    if (form.get('ErrorCode') === '21610') await contacts.suppressSmsGlobally(row.recipient, 'Recipient opted out', consentOrigin.smsOptOut);
     return true;
   }
   const page = (url: URL) => { const cursor = url.searchParams.get('cursor'); if (cursor !== null && (!/^\d{1,16}$/.test(cursor) || !Number.isSafeInteger(Number(cursor)))) fail(400, 'INVALID_SMS_CURSOR', 'Choose a valid SMS page.'); return cursor === null ? Number.MAX_SAFE_INTEGER : Number(cursor); };
@@ -156,9 +157,9 @@ export function createSmsInbox({ db, env, appUrl, contacts = createContacts({ db
           if (latest.providerId && latest.providerId !== receipt.providerId) fail(502, 'SMS_DELIVERY_MISMATCH', 'The SMS acknowledgement conflicts with a signed callback.', true);
           latest.providerId = receipt.providerId; latest.status = nextDeliveryStatus(latest.status, receipt.status); latest.deliveryStatus = latest.status;
         });
-        if (receipt.errorCode === '21610') await contacts.suppressSmsGlobally(row.recipient, 'Recipient opted out');
+        if (receipt.errorCode === '21610') await contacts.suppressSmsGlobally(row.recipient, 'Recipient opted out', consentOrigin.smsOptOut);
         return { sent: true, conversation: await conversationView(await find(project.id, row.id)), message: latest };
-      } catch (error: any) { if (error.providerCode === 21610) await contacts.suppressSmsGlobally(row.recipient, 'Recipient opted out'); await changeMessage(id, latest => { if (latest.providerId) return false; latest.status = error.uncertain || !(error instanceof IntegrationError) ? 'uncertain' : 'failed'; latest.deliveryStatus = latest.status; }); throw error; }
+      } catch (error: any) { if (error.providerCode === 21610) await contacts.suppressSmsGlobally(row.recipient, 'Recipient opted out', consentOrigin.smsOptOut); await changeMessage(id, latest => { if (latest.providerId) return false; latest.status = error.uncertain || !(error instanceof IntegrationError) ? 'uncertain' : 'failed'; latest.deliveryStatus = latest.status; }); throw error; }
     });
     await context.assertIntegrationSettings(); send(outcome.status, outcome.data); return true;
   }

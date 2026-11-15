@@ -4,7 +4,7 @@ import type { Executor, Store } from './database.ts';
 import type { ProviderRecord } from './provider-core.ts';
 import { ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, activationTag, consentWording, type ActivationType } from '../shared/offline-activations.ts';
 
-type Contacts = { capture: (projectId: string, person: { name?: string; email?: string; phone?: string }, requested: string[], source: string, tag: string) => Promise<ProviderRecord> };
+type Contacts = { capture: (projectId: string, person: { name?: string; email?: string; phone?: string }, requested: string[], source: string, tag: string, userId?: string) => Promise<ProviderRecord> };
 type Context = { req: { method?: string }; url: URL; project: { id: string; name: string }; role: string; user: PublicUser; body: ProviderRecord; store: Store; db: Executor; send: (status: number, body: unknown) => void };
 function fail(status: number, message: string): never { throw new HttpError(status, message); }
 const optional = (value: unknown, label: string, max: number) => { if (value === undefined || value === '') return undefined; if (typeof value !== 'string' || value.length > max) fail(400, `${label} must be text of at most ${max} characters.`); return value.trim() || undefined; };
@@ -39,6 +39,6 @@ export async function handleActivations({ req, url, project, role, user, body, s
   // Dated when the lead is captured, not when the activation was planned to start.
   const capturedAt = new Date().toISOString();
   const source = `In person at ${ACTIVATION_TYPE_LABELS[activation.type as ActivationType]} “${activation.name}” on ${capturedAt.slice(0, 10)} ${capturedAt.slice(11, 16)} UTC, recorded by ${user.name}. Wording shown: “${consentWording(project.name, requested)}”`;
-  send(201, await contacts.capture(project.id, person, requested, source, activationTag(activation.id)));
+  send(201, await contacts.capture(project.id, person, requested, source, activationTag(activation.id), user.id));
   return true;
 }

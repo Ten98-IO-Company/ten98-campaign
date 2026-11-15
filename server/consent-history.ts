@@ -20,7 +20,38 @@ import { directConsentEvents, directConsentEvidence, directConsentLookupLimits, 
  */
 export const consentKeyLabel = 'ten98-campaign:consent-address:v1', consentKeyVersion = 1;
 export type ConsentAction = 'granted' | 'withdrawn' | 'suppressed' | 'suppression_ended' | 'contact_deleted';
-export type ConsentEvent = { contactId: string; channel: string; action: ConsentAction; source: string; actor: string; destination: string; evidence?: string };
+/** Where a consent or suppression change came from: a fixed vocabulary, assigned per path in `consentOrigin`. */
+export type ConsentSource = 'manual' | 'csv_import' | 'lead_capture' | 'provider_lead' | 'connected_settings' | 'unsubscribe_link' | 'sms_keyword' | 'provider_bounce' | 'provider_complaint' | 'provider_opt_out' | 'provider_hold';
+/** `actor` is `user:<id>` when a member acted, otherwise `system:<provider>`. */
+export type ConsentOrigin = { source: ConsentSource; actor: string };
+/** `contactId` is '' for an address that is no contact in the project; such an event keeps no evidence. */
+export type ConsentEvent = ConsentOrigin & { contactId: string; channel: string; action: ConsentAction; destination: string; evidence?: string };
+const member = (source: ConsentSource) => (userId: string): ConsentOrigin => ({ source, actor: 'user:' + userId });
+const system = (source: ConsentSource, provider: string): ConsentOrigin => ({ source, actor: 'system:' + provider });
+/** Every path that changes consent or suppression, with the origin its events record. Keep this the only such map. */
+export const consentOrigin = {
+  /** The contact form: add, edit, suppress or delete. */
+  manual: member('manual'),
+  csvImport: member('csv_import'),
+  /** In-person lead capture at an offline activation. */
+  leadCapture: member('lead_capture'),
+  /** A provider lead-form lead a member imports. */
+  providerLead: member('provider_lead'),
+  /** A member unsubscribing a connected contact. */
+  connectedSettings: member('connected_settings'),
+  /** The recipient's own click on Campaign's unsubscribe link. */
+  unsubscribeLink: system('unsubscribe_link', 'campaign'),
+  /** A signed Twilio STOP or START keyword. */
+  smsKeyword: system('sms_keyword', 'twilio'),
+  /** Twilio error 21610: the carrier reports that the recipient opted out. */
+  smsOptOut: system('provider_opt_out', 'twilio'),
+  /** An email provider's bounce or complaint, by the reason it reported or was classified as. */
+  emailFeedback: (provider: string, reason: string | undefined) => system(reason === 'complaint' ? 'provider_complaint' : 'provider_bounce', provider),
+  /** An email provider reporting that the recipient unsubscribed. */
+  emailOptOut: (provider: string) => system('provider_opt_out', provider),
+  /** A provider's temporary hold, which ends at its expiry. */
+  emailHold: (provider: string) => system('provider_hold', provider),
+};
 // Up to 60 lookups at once, refilled at one a minute (so up to 119 in the first hour, then 60 an hour).
 const lookupBurst = 60, lookupInterval = 60_000;
 
@@ -52,8 +83,9 @@ export function createConsentHistory({ db, secret }: { db: Database; secret: str
     const at = new Date().toISOString(), rows = kept.map(event => ({ ...event, id: randomUUID() }));
     const values = rows.map(event => ({ id: event.id, workspace_id: project.workspaceId, project_id: projectId, contact_id: event.contactId, channel: event.channel, action: event.action, source: event.source, actor: event.actor, destination_hash: event.destination ? addressHash(event.destination) : '', key_version: consentKeyVersion, created_at: at }));
     await quietly(async () => { for (let i = 0; i < values.length; i += batchSize) await ex.insert(directConsentEvents).values(values.slice(i, i + batchSize)); }, 'The consent history could not be written.');
-    // Evidence is optional free text; it is removed with the contact (foreign-key cascade), the event is not.
-    const evidence = rows.filter(event => event.evidence && event.action !== 'contact_deleted').map(event => ({ event_id: event.id, workspace_id: project.workspaceId, project_id: projectId, contact_id: event.contactId, evidence: event.evidence! }));
+    // Evidence is optional free text; it is removed with the contact (foreign-key cascade), the event is not. An address
+    // that is no contact has nowhere to keep it.
+    const evidence = rows.filter(event => event.evidence && event.contactId && event.action !== 'contact_deleted').map(event => ({ event_id: event.id, workspace_id: project.workspaceId, project_id: projectId, contact_id: event.contactId, evidence: event.evidence! }));
     await quietly(async () => { for (let i = 0; i < evidence.length; i += batchSize) await ex.insert(directConsentEvidence).values(evidence.slice(i, i + batchSize)); }, 'The consent history could not be written.');
   }
 
@@ -87,3 +119,4 @@ export function createConsentHistory({ db, secret }: { db: Database; secret: str
     },
   };
 }
+export type ConsentHistory = ReturnType<typeof createConsentHistory>;

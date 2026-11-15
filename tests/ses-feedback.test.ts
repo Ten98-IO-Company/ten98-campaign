@@ -187,6 +187,22 @@ test('a failed feedback write leaves nothing behind, so the redelivered message 
   assert.equal((await f.contact(full.id)).suppression.email.reason, 'repeated-transient-bounce');
 });
 
+// ten98-campaign#337: each SES outcome that suppresses records its history event once.
+test('SES feedback records provider_bounce, provider_complaint and provider_opt_out by system:ses, and a repeated bounce adds no second event', { skip: postgresSkip }, async t => {
+  const f = await fixture(t), people: Fields[] = [];
+  for (const email of ['hard@example.com', 'angry@example.com', 'left@example.com']) people.push(await f.person(email));
+  const { deliveries } = await f.send(people), id = Object.fromEntries(deliveries.map((row: Fields) => [row.recipient, row.providerId])), [hard, angry, left] = people;
+  // Two separate permanent bounces for one address (two SNS messages, two feedback IDs).
+  for (let index = 0; index < 2; index++) assert.equal((await f.sns(notification(bounce(id[hard.email], hard.email, 'Permanent', 'General')))).status, 200);
+  assert.equal((await f.sns(notification({ notificationType: 'Complaint', mail: { messageId: id[angry.email] }, complaint: { complainedRecipients: [{ emailAddress: angry.email }], complaintFeedbackType: 'abuse', feedbackId: randomUUID(), timestamp: new Date().toISOString() } }))).status, 200);
+  assert.equal((await f.sns(notification(bounce(id[left.email], left.email, 'Permanent', 'UnsubscribedRecipient')))).status, 200);
+  // After the manual grant each contact starts with.
+  const steps = async (contactId: string) => (await f.request(f.path + `/contacts/${contactId}/history`)).data.history.slice(1).map((event: Fields) => [event.channel, event.action, event.source, event.actor, event.evidence ?? null]);
+  assert.deepEqual(await steps(hard.id), [['email', 'suppressed', 'provider_bounce', 'system:ses', 'hard-bounce'], ['email', 'withdrawn', 'provider_bounce', 'system:ses', null]]);
+  assert.deepEqual(await steps(angry.id), [['email', 'suppressed', 'provider_complaint', 'system:ses', 'complaint'], ['email', 'withdrawn', 'provider_complaint', 'system:ses', null]]);
+  assert.deepEqual(await steps(left.id), [['email', 'suppressed', 'provider_opt_out', 'system:ses', 'Unsubscribed'], ['email', 'withdrawn', 'provider_opt_out', 'system:ses', null]]);
+});
+
 test('feedback for an earlier SES send still applies after the installation switches to Cloudflare', { skip: postgresSkip }, async t => {
   const f = await fixture(t), gone = await f.person('gone@example.com'), { deliveries } = await f.send([gone]);
   f.env.EMAIL_PROVIDER = 'cloudflare';
