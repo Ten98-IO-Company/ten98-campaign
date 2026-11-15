@@ -5,7 +5,7 @@ import { readdir, readFile } from 'node:fs/promises';
 // Since @ten98/ui 0.38.0 a non-danger ConfirmDialog opens with focus on Confirm, so a held or repeated Enter on the
 // button that opened it confirms at once. Every confirm here must therefore either be a plain `danger` dialog (which
 // opens on Cancel) or say where focus starts. Confirms that publish, send, spend or act publicly start on Cancel.
-const consequential = [
+const consequential: [string, string][] = [
   ['main.tsx', 'open={!!publishing}'], // publish now, schedule or queue a post
   ['AdDetails.tsx', 'open={confirmingEnable}'], // enable an ad that can spend
   ['NativeGoogleAds.tsx', "title={confirming?.title || ''}"], // Google campaign enable and budget changes
@@ -17,8 +17,8 @@ const consequential = [
   ['UnifiedInbox.tsx', "danger={confirming?.kind !== 'hide'}"], // hide a public comment
   ['CampaignLinks.tsx', 'open={!!archiving}'], // restore a public short link
 ];
-const confirms = async () => {
-  const files = (await readdir(new URL('../src/', import.meta.url))).filter(name => /\.tsx$/.test(name)), found = [];
+const confirms = async (): Promise<{ file: string; tag: string }[]> => {
+  const files = (await readdir(new URL('../src/', import.meta.url))).filter(name => /\.tsx$/.test(name)), found: { file: string; tag: string }[] = [];
   for (const file of files) {
     const source = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8');
     for (const match of source.matchAll(/<ConfirmDialog\b[^\n]*/g)) found.push({ file, tag: match[0] });
