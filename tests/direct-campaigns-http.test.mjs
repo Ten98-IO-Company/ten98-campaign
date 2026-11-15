@@ -132,6 +132,19 @@ test('adding a contact whose email already exists is refused and leaves the exis
   } finally { await f.close(); }
 });
 
+test('a draft is saved only with contacts of its own project', pg, async t => {
+  const f = await fixture(t);
+  try {
+    const known = await f.person({ phone: '+12025550141' });
+    let response = await f.request(f.path + '/campaigns', 'POST', { name: 'Notice', channel: 'sms', text: 'Hello', contactIds: [known.id, 'another-project-contact'] });
+    assert.equal(response.status, 400, JSON.stringify(response.data)); assert.equal(response.data.error.code, 'CONTACT_NOT_FOUND');
+    const draft = await f.draft({ contactIds: [known.id] });
+    response = await f.request(f.path + '/campaigns/' + draft.id, 'PATCH', { contactIds: [known.id, 'another-project-contact'] });
+    assert.equal(response.status, 400, JSON.stringify(response.data)); assert.equal(response.data.error.code, 'CONTACT_NOT_FOUND');
+    assert.equal((await f.request(f.path + '/campaigns/' + draft.id, 'PATCH', { name: 'Renamed' })).status, 200, 'An edit that leaves the contacts alone still saves.');
+  } finally { await f.close(); }
+});
+
 test('scheduling a campaign re-checks its preview on the queuing transaction, without a second connection', pg, async t => {
   // One pool connection: a preview read through the pool inside the queuing transaction would time out. The sending
   // worker is left out because its lease transaction deliberately works on other connections.

@@ -109,6 +109,12 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
   });
   // A message may name the planner campaign it belongs to; that campaign must be in the same project.
   const requireCampaign = async (projectId: string, campaignId: string, ex: Executor = db) => { if (campaignId && !await createStore(ex).get(projectId, 'campaigns', campaignId)) fail(400, 'INVALID_CAMPAIGN', 'Choose a campaign from this project.'); };
+  // Chosen contacts must be this project's when a draft is saved, as the audience check requires later.
+  const requireContacts = async (projectId: string, contactIds: string[], ex: Executor = db) => {
+    if (!contactIds.length) return;
+    const known = new Set((await contacts.list(projectId, ex)).map((contact: any) => contact.id));
+    if (contactIds.some(id => !known.has(id))) fail(400, 'CONTACT_NOT_FOUND', 'A selected contact does not belong to this project.');
+  };
   // Row lock: read-modify-write of the stored campaign, so a concurrent worker, refresh or cancellation write is not lost.
   const changeCampaign = (projectId: string, id: string, change: (campaign: any) => unknown) => db.transaction(async tx => {
     const campaign = await find(projectId, id, tx, true);
@@ -305,12 +311,12 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     }
     if (kind !== 'campaigns') return false;
     if (!id && method === 'GET') { const campaigns = []; for (const campaign of await campaignRows(project.id)) campaigns.push(await decorate(campaign)); send(200, { campaigns }); return true; }
-    if (!id && method === 'POST') { const timestamp = nowISO(), campaign = { ...validate(body), id: randomUUID(), projectId: project.id, status: 'draft', createdAt: timestamp, updatedAt: timestamp }; await requireCampaign(project.id, campaign.campaignId); await db.execute(sql`INSERT INTO direct_campaigns (id, project_id, data) VALUES (${campaign.id}, ${project.id}, ${JSON.stringify(campaign)})`); send(201, { campaign: await decorate(campaign) }); return true; }
+    if (!id && method === 'POST') { const timestamp = nowISO(), campaign = { ...validate(body), id: randomUUID(), projectId: project.id, status: 'draft', createdAt: timestamp, updatedAt: timestamp }; await requireCampaign(project.id, campaign.campaignId); await requireContacts(project.id, campaign.contactIds); await db.execute(sql`INSERT INTO direct_campaigns (id, project_id, data) VALUES (${campaign.id}, ${project.id}, ${JSON.stringify(campaign)})`); send(201, { campaign: await decorate(campaign) }); return true; }
     const campaign = await find(project.id, id);
     if (!action && method === 'GET') { send(200, { campaign: await decorate(campaign), deliveries: await deliveries(id) }); return true; }
     if (!action && method === 'PATCH') {
       // Row lock: the draft check and the edit commit together, so a concurrent send cannot be reverted to an edited draft.
-      const saved = await db.transaction(async tx => { const current = await find(project.id, id, tx, true); if (current.status !== 'draft') fail(409, 'CAMPAIGN_LOCKED', 'Only drafts can be edited. Create a new draft for another send.'); const fields = Object.fromEntries(['name', 'campaignId', 'channel', 'subject', 'text', 'html', 'emailPurpose', 'accountId', 'templateName', 'templateLanguage', 'templateComponents', 'contactIds', 'tags'].map(key => [key, current[key]])); const data = validate({ ...fields, ...body }); if (data.campaignId !== (current.campaignId || '')) await requireCampaign(project.id, data.campaignId, tx); Object.assign(current, data); return save(current, tx); });
+      const saved = await db.transaction(async tx => { const current = await find(project.id, id, tx, true); if (current.status !== 'draft') fail(409, 'CAMPAIGN_LOCKED', 'Only drafts can be edited. Create a new draft for another send.'); const fields = Object.fromEntries(['name', 'campaignId', 'channel', 'subject', 'text', 'html', 'emailPurpose', 'accountId', 'templateName', 'templateLanguage', 'templateComponents', 'contactIds', 'tags'].map(key => [key, current[key]])); const data = validate({ ...fields, ...body }); if (data.campaignId !== (current.campaignId || '')) await requireCampaign(project.id, data.campaignId, tx); if (JSON.stringify(data.contactIds) !== JSON.stringify(current.contactIds || [])) await requireContacts(project.id, data.contactIds, tx); Object.assign(current, data); return save(current, tx); });
       send(200, { campaign: await decorate(saved) }); return true;
     }
     if (method !== 'POST') return false;
