@@ -3,12 +3,12 @@ import { promisify } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, gt, sql } from 'drizzle-orm';
 import { clientLimitKey, parseTrustedProxies, resolveClientAddress } from '@ten98/runtime';
 import type { Database, Executor } from './database.ts';
 import { joinInvitation, lockInvitation } from './invitations.ts';
 import { advisoryLock, lockUser } from './locks.ts';
-import { users } from './schema.ts';
+import { loginLimits, users } from './schema.ts';
 
 export { advisoryLock, lockUser, lockWorkspace } from './locks.ts';
 
@@ -205,7 +205,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
         await tx.execute(sql`DELETE FROM login_limits WHERE key = ${clientAccount}`);
         // A successful sign-in gives back the one per-client attempt it used, so many people behind one address can sign
         // in; failed attempts keep counting in full, and a success refunds only itself. The account-wide count is kept.
-        await tx.execute(sql`UPDATE login_limits SET count = count - 1 WHERE key = ${client} AND count > 0`);
+        await tx.update(loginLimits).set({ count: sql`${loginLimits.count} - 1` }).where(and(eq(loginLimits.key, client), gt(loginLimits.count, 0)));
         await establish(res, found!.id, req, tx); return publicUser(found);
       });
     },
