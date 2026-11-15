@@ -55,7 +55,9 @@ const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ?
 const source = (asset: Row) => asset.source === 'google-drive' ? 'Drive' : asset.source === 'zernio' ? 'Uploaded' : asset.sample ? 'Sample' : 'Link';
 const sourceDetail = (asset: Row) => ({ Drive: 'Google Drive', Uploaded: 'Uploaded for publishing', Sample: 'Sample creative', Link: 'Linked file' })[source(asset)];
 const when = (format: DisplayFormatter, value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? format.dateTime(value) : '';
-const bytes = (size: unknown) => typeof size === 'number' && size > 0 ? size < 1024 * 1024 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / 1024 / 1024).toFixed(1)} MB` : '';
+// The shared file-size format ("1,023 B", "1.5 KB", "3 GB"). An unknown or empty size gives '' so the Size row is left
+// out rather than reading "Unavailable".
+export const assetSize = (format: DisplayFormatter, size: unknown) => typeof size === 'number' && size > 0 ? format.fileSize(size) : '';
 const approval = (asset: Row) => <AppBadge value={asset.approval || 'pending'} label={label(asset.approval || 'pending')}/>;
 
 export default function AssetLibrary({ projectId, assets, visibleAssets, busy, canWrite, drive, driveSyncReason, connected, tab, onTabChange, related, onSync, onAddLink, onUpload, request, onDeliverySaved, onOpen, onSetUpDrive, preview }: Props) {
@@ -123,7 +125,7 @@ export default function AssetLibrary({ projectId, assets, visibleAssets, busy, c
 
   const uses = selected ? assetUses(selected.id, related) : [], issue = selected ? assetDeliveryIssue(selected) : '';
   const details = selected && <AssetDetails assetId={selected.id} name={selected.name} kind={label(selected.kind)} preview={preview(selected)} source={sourceDetail(selected)}
-    metadata={[['Size', bytes(selected.size)], ['Dimensions', selected.width && selected.height ? `${selected.width} × ${selected.height}` : ''], ['Duration', typeof selected.duration === 'number' ? `${Math.round(selected.duration)} s` : ''], ['Modified', when(format, selected.modifiedTime)], ['Tags', selected.tags?.join(', ')], ['Description', selected.description]].filter(([, value]) => value).map(([term, value]) => ({ label: term, value }))}
+    metadata={[['Size', assetSize(format, selected.size)], ['Dimensions', selected.width && selected.height ? `${selected.width} × ${selected.height}` : ''], ['Duration', typeof selected.duration === 'number' ? `${Math.round(selected.duration)} s` : ''], ['Modified', when(format, selected.modifiedTime)], ['Tags', selected.tags?.join(', ')], ['Description', selected.description]].filter(([, value]) => value).map(([term, value]) => ({ label: term, value }))}
     original={selected.url ? <Link variant="standalone" href={selected.url} target="_blank" rel="noreferrer">Open original</Link> : undefined}
     delivery={selected.sample ? 'Not applicable' : selected.deliveryUrl ? <Link variant="standalone" href={selected.deliveryUrl} target="_blank" rel="noreferrer">Open publishing copy</Link> : 'Not prepared for publishing'}
     approvalStatus={approval(selected)} deliveryStatus={selected.sample ? 'Never sent to networks' : issue || (selected.deliveryUrl ? 'Publishing copy available' : 'Not prepared for publishing')}
