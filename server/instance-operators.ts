@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import type { Transaction } from './database.ts';
+import { lockUser } from './locks.ts';
 
 /**
  * Host/bootstrap callers supply provenance and own the surrounding transaction; the Transaction type keeps a
@@ -8,7 +9,7 @@ import type { Transaction } from './database.ts';
  */
 export async function setInstanceOperator(tx: Transaction, userId: string, enabled: boolean, source: 'bootstrap' | 'host' = 'host'): Promise<boolean> {
   if (typeof enabled !== 'boolean' || !['bootstrap', 'host'].includes(source) || source === 'bootstrap' && !enabled) throw new Error('Invalid operator change.');
-  if (!(await tx.execute(sql`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`)).rowCount) throw new Error('The account does not exist.');
+  if (!await lockUser(tx, userId)) throw new Error('The account does not exist.');
   const changed = (await tx.execute(enabled
     ? sql`INSERT INTO instance_operators (user_id) VALUES (${userId}) ON CONFLICT DO NOTHING`
     : sql`DELETE FROM instance_operators WHERE user_id = ${userId}`)).rowCount ?? 0;
