@@ -25,6 +25,23 @@ test('native ad credentials stay encrypted, masked and independent from shared D
   }
 });
 
+test('Google Shopping is configured and connection-tested from OAuth values alone, with no developer token', { skip: postgresSkip }, async t => {
+  const { db } = await testDatabase(t), env = {}, manager = await createIntegrationSettings({ db, env, secret }), originalFetch = globalThis.fetch, calls = [];
+  await manager.save('googleAdsNative', { clientId: 'oauth-client', clientSecret: 'oauth-secret', refreshToken: 'oauth-refresh' });
+  assert.equal(provider(manager, 'googleAdsNative').configured, true, 'Google retired developer tokens; the card does not wait for one.');
+  globalThis.fetch = async (target, options = {}) => {
+    const url = String(target); calls.push({ url, headers: options.headers || {} });
+    if (url.startsWith('https://oauth2.googleapis.com/')) return Response.json({ access_token: 'fixture-access', expires_in: 3600, token_type: 'Bearer' });
+    if (url.endsWith('/customers:listAccessibleCustomers')) return Response.json({ resourceNames: ['customers/1234567890'] });
+    throw new Error('Unexpected request ' + url);
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const result = await manager.test('googleAdsNative');
+  assert.equal(result.ok, true);
+  const ads = calls.find(call => call.url.endsWith('/customers:listAccessibleCustomers'));
+  assert.ok(ads); assert.equal(Object.hasOwn(ads.headers, 'developer-token'), false);
+});
+
 test('Amazon SES settings validate, stay encrypted and masked, and test the account with signed read-only calls', { skip: postgresSkip }, async t => {
   const { db, pool } = await testDatabase(t), env = {}, manager = await createIntegrationSettings({ db, env, secret }), originalFetch = globalThis.fetch;
   const fields = { region: 'eu-west-1', accessKeyId: 'AKIAFIXTUREKEY000000', secretAccessKey: 'fixture/secret/access/key/0000000000000A', fromAddress: 'receipts@example.com', configurationSet: 'campaign-feedback', snsTopicArn: 'arn:aws:sns:eu-west-1:123456789012:ses-feedback' };

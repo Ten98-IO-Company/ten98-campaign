@@ -9,13 +9,16 @@ type CurrentCheck = (() => void | Promise<void>) | undefined;
 type RefreshSaver = ((expected: string, next: string) => void | Promise<void>) | undefined;
 
 const BASE = 'https://googleads.googleapis.com/v25';
-const configured = (env: ProviderRecord) => ['GOOGLE_ADS_CLIENT_ID', 'GOOGLE_ADS_CLIENT_SECRET', 'GOOGLE_ADS_REFRESH_TOKEN', 'GOOGLE_ADS_DEVELOPER_TOKEN'].every(key => typeof env[key] === 'string' && Boolean(env[key].trim()));
+// Google sunset Google Ads API developer tokens on 2026-09-09: API access now comes from the Google Cloud project that owns
+// the OAuth client, and a future major API version rejects the developer-token header, so it is neither required nor sent.
+// https://developers.google.com/google-ads/api/docs/get-started/dev-token
+const configured = (env: ProviderRecord) => ['GOOGLE_ADS_CLIENT_ID', 'GOOGLE_ADS_CLIENT_SECRET', 'GOOGLE_ADS_REFRESH_TOKEN'].every(key => typeof env[key] === 'string' && Boolean(env[key].trim()));
 function customerId(value: any) { if (typeof value !== 'string' || !/^\d{10}$/.test(value)) fail(400, 'INVALID_GOOGLE_CUSTOMER', 'Enter the ten-digit Google Ads customer ID without hyphens.'); return value; }
 function fields(value: any, allowed: string[]) { if (!object(value) || Object.keys(value).some(key => !allowed.includes(key))) fail(400, 'UNSUPPORTED_GOOGLE_FIELD', 'Use only the supported Google Shopping fields.'); }
 function name(value: any, label = 'campaign name') { if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\u0000-\u001f]/.test(value)) fail(400, 'INVALID_GOOGLE_INPUT', `Enter a valid ${label} of at most 120 characters.`); return value.trim(); }
 async function current(check: CurrentCheck, uncertain = false) { try { await check?.(); } catch { throw new IntegrationError(409, 'NATIVE_GOOGLE_CONNECTION_CHANGED', 'The Google Ads authorization or project account changed. Refresh before continuing and review any unconfirmed provider outcome.', uncertain); } }
 async function googleToken(env: ProviderRecord, assertCurrent: CurrentCheck, persistRefresh: RefreshSaver) {
-  if (!configured(env)) fail(503, 'NATIVE_GOOGLE_NOT_CONFIGURED', 'Configure the native Google Ads OAuth credentials and developer token first.');
+  if (!configured(env)) fail(503, 'NATIVE_GOOGLE_NOT_CONFIGURED', 'Configure the native Google Ads OAuth credentials first.');
   if (env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) customerId(env.GOOGLE_ADS_LOGIN_CUSTOMER_ID);
   await current(assertCurrent);
   const result = await providerRequest('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: env.GOOGLE_ADS_CLIENT_ID, client_secret: env.GOOGLE_ADS_CLIENT_SECRET, refresh_token: env.GOOGLE_ADS_REFRESH_TOKEN, grant_type: 'refresh_token' }).toString() }, 'Google Ads authorization');
@@ -27,7 +30,7 @@ async function googleToken(env: ProviderRecord, assertCurrent: CurrentCheck, per
   }
   return result.access_token;
 }
-const headers = (env: ProviderRecord, token: string) => ({ Authorization: `Bearer ${token}`, 'developer-token': env.GOOGLE_ADS_DEVELOPER_TOKEN, ...(env.GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { 'login-customer-id': env.GOOGLE_ADS_LOGIN_CUSTOMER_ID } : {}) });
+const headers = (env: ProviderRecord, token: string) => ({ Authorization: `Bearer ${token}`, ...(env.GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { 'login-customer-id': env.GOOGLE_ADS_LOGIN_CUSTOMER_ID } : {}) });
 
 export async function testNativeGoogleAds(env: ProviderRecord, assertCurrent: CurrentCheck, persistRefresh: RefreshSaver) {
   const token = await googleToken(env, assertCurrent, persistRefresh);
