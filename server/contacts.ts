@@ -66,7 +66,6 @@ export function activeSuppression(contact: any, channel: string) {
   return entry && !(entry.expiresAt && Date.parse(entry.expiresAt) <= Date.now()) ? entry : null;
 }
 /** Runs inside the change's own transaction, after the change; a failure rolls the change back (the consent audit entry). */
-export type ContactAudit = (tx: Executor) => Promise<unknown>;
 
 export function createContacts({ db }: { db: Database }) {
   const hash = (target: string) => createHash('sha256').update(target).digest('hex');
@@ -209,14 +208,14 @@ export function createContacts({ db }: { db: Database }) {
       return record;
     });
   }
-  async function importCsv(projectId: string, options: any, { audit }: { audit?: (tx: Executor, result: ProviderRecord) => Promise<unknown> } = {}) {
+  async function importCsv(projectId: string, options: any, { audit }: { audit?: (tx: Executor, result: ProviderRecord, previous: Map<string, ProviderRecord>) => Promise<unknown> } = {}) {
     if (!object(options) || Object.keys(options).some(key => !['csv', 'dryRun', 'consents', 'consentSource'].includes(key)) || options.dryRun !== undefined && typeof options.dryRun !== 'boolean') fail(400, 'Use CSV text, optional consent evidence and an optional dry-run flag.');
     if (options.consents !== undefined && (!object(options.consents) || Object.entries(options.consents).some(([channel, granted]) => !consentKeys.includes(channel) || typeof granted !== 'boolean'))) fail(400, 'Use explicit channel consent flags.');
     if (Object.values(options.consents || {}).some(Boolean) && (!options.consentSource || !text(options.consentSource, 'consent source', 1000))) fail(400, 'Record the source of explicit consent before importing opt-ins.');
     const entries = parseCsv(options.csv);
     return db.transaction(async tx => {
       await lockContacts(tx, projectId);
-      const rows = new Map((await list(projectId, tx)).map(row => [row.id, row])), result: ProviderRecord = { imported: 0, created: 0, updated: 0, skipped: 0, contacts: [], errors: [], dryRun: options.dryRun === true };
+      const rows = new Map((await list(projectId, tx)).map(row => [row.id, row])), original = new Map(rows), result: ProviderRecord = { imported: 0, created: 0, updated: 0, skipped: 0, contacts: [], errors: [], dryRun: options.dryRun === true };
       for (const entry of entries) {
         try {
           if (!entry.values) fail(400, 'The number of fields does not match the CSV header.');
@@ -231,7 +230,7 @@ export function createContacts({ db }: { db: Database }) {
       }
       if (!result.dryRun) for (const record of new Map<string, ProviderRecord>(result.contacts.map((record: ProviderRecord): [string, ProviderRecord] => [record.id, record])).values()) await persist(tx, record);
       result.contacts = [...new Map(result.contacts.map((record: ProviderRecord): [string, ProviderRecord] => [record.id, record])).values()];
-      if (!result.dryRun) await audit?.(tx, result);
+      if (!result.dryRun) await audit?.(tx, result, original);
       return result;
     });
   }
@@ -248,14 +247,14 @@ export function createContacts({ db }: { db: Database }) {
     if (channel === 'email' && reason === 'hard-bounce') record.hardBounceAt ||= at;
     return persist(ex, record);
   }
-  async function suppress(projectId: string, id: string, channel: string, reason: any, { audit }: { audit?: ContactAudit } = {}) {
+  async function suppress(projectId: string, id: string, channel: string, reason: any, { audit }: { audit?: (tx: Executor, consentsBefore: Record<string, boolean>, record: ProviderRecord, reason: string) => Promise<unknown> } = {}) {
     reason = suppressionReason(channel, reason);
     return db.transaction(async tx => {
       await lockContacts(tx, projectId);
       const record = await get(projectId, id, tx); if (!record) fail(404, 'Contact not found in this project.');
       // Already permanently suppressed for this channel: nothing new to record.
-      const already = !!record.suppression[channel] && !record.suppression[channel].expiresAt, result = await suppressRecord(tx, record, channel, reason, new Date().toISOString());
-      if (!already) await audit?.(tx);
+      const already = !!record.suppression[channel] && !record.suppression[channel].expiresAt, consentsBefore = { ...record.consents }, result = await suppressRecord(tx, record, channel, reason, new Date().toISOString());
+      if (!already) await audit?.(tx, consentsBefore, result, reason);
       return result;
     });
   }
@@ -359,12 +358,13 @@ export function createContacts({ db }: { db: Database }) {
       return { checked: outcomes.size, contacts, notice: 'DNS checks describe domain mail records only. They do not verify that a mailbox exists or that a person consented.' };
     });
   }
-  return { list, get, byDestination, save, capture, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string, { audit }: { audit?: ContactAudit } = {}) {
+  return { list, get, byDestination, destination, save, capture, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string, { audit }: { audit?: (tx: Executor, record: ProviderRecord) => Promise<unknown> } = {}) {
     return db.transaction(async tx => {
       // Under the contacts lock, like every edit: an edit that read the contact before this delete cannot write it back.
       await lockContacts(tx, projectId);
+      const record = await get(projectId, id, tx);
       const removed = Boolean((await tx.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount);
-      if (removed) await audit?.(tx);
+      if (removed && record) await audit?.(tx, record);
       return removed;
     });
   } };
