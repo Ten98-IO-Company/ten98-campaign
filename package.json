@@ -2,6 +2,7 @@
   "name": "ten98-campaign",
   "version": "0.40.0",
   "private": true,
+  "packageManager": "pnpm@11.19.0",
   "type": "module",
   "engines": {
     "node": ">=24.22.1 <25"
@@ -9,10 +10,10 @@
   "scripts": {
     "dev": "node --env-file-if-exists=.env scripts/dev.mjs",
     "dev:server": "node --env-file-if-exists=.env --watch server/index.ts",
-    "build": "npm run check:architecture && tsc --noEmit && vite build",
+    "build": "pnpm run check:architecture && tsc --noEmit && vite build",
     "start": "node --env-file-if-exists=.env server/index.ts",
     "migrate": "node --env-file-if-exists=.env server/cli.ts migrate",
-    "test": "npm run check:architecture && tsc -p tsconfig.backend.json && node --test --test-timeout=120000 tests/*.test.mjs tests/*.test.ts",
+    "test": "pnpm run check:architecture && tsc -p tsconfig.backend.json && node --test --test-timeout=120000 tests/*.test.mjs tests/*.test.ts",
     "check:architecture": "node node_modules/@ten98/runtime/check.mjs ."
   },
   "dependencies": {
