@@ -25,10 +25,11 @@ BEGIN
 END $$;
 CREATE TRIGGER direct_consent_events_guard BEFORE UPDATE OR DELETE ON direct_consent_events FOR EACH ROW EXECUTE FUNCTION direct_consent_events_guard();
 CREATE TRIGGER direct_consent_events_no_truncate BEFORE TRUNCATE ON direct_consent_events FOR EACH STATEMENT EXECUTE FUNCTION direct_consent_events_guard();
--- Evidence is never updated; it goes only by cascade, when its contact or its event is gone.
+-- Evidence is never updated; it goes only by cascade, when its contact, its event, or its project or workspace is gone
+-- (accepting any of them keeps a project delete working whatever order its cascades fire in).
 CREATE FUNCTION direct_consent_evidence_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 AND (NOT EXISTS (SELECT 1 FROM direct_contacts WHERE id = OLD.contact_id) OR NOT EXISTS (SELECT 1 FROM direct_consent_events WHERE id = OLD.event_id)) THEN RETURN OLD; END IF;
+  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 AND (NOT EXISTS (SELECT 1 FROM direct_contacts WHERE id = OLD.contact_id) OR NOT EXISTS (SELECT 1 FROM direct_consent_events WHERE id = OLD.event_id) OR NOT EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id) OR NOT EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id)) THEN RETURN OLD; END IF;
   RAISE EXCEPTION 'direct_consent_evidence is removed only with its contact or event (%)', TG_OP USING ERRCODE = 'restrict_violation';
 END $$;
 CREATE TRIGGER direct_consent_evidence_guard BEFORE UPDATE OR DELETE ON direct_consent_evidence FOR EACH ROW EXECUTE FUNCTION direct_consent_evidence_guard();
