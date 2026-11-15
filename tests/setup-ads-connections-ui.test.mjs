@@ -57,13 +57,17 @@ function view(Component, initialProps) {
   return instance;
 }
 
+// Both provider pages render the real shared frame.
+const frameSource = await readFile(new URL('../src/AdProviderFrame.tsx', import.meta.url), 'utf8');
+const { code: frameCode } = await transformWithOxc(frameSource.replace(/^import .*;\r?$/gm, '').replace('export default function', 'function'), 'AdProviderFrame.tsx', { jsx: { runtime: 'classic' } });
+const AdProviderFrame = new Function('React', ...Object.keys(ui), `${frameCode}; return AdProviderFrame;`)(React, ...Object.values(ui));
 const variants = await Promise.all([
   { name: 'NativeGoogleAds', endpoint: 'native-google-ads', status: { configured: true, mapped: true, customerId: '1234567890' } },
   { name: 'MicrosoftAds', endpoint: 'microsoft-ads', status: { configured: true, mapping: { customerId: '42', accountId: '314', name: 'QA Microsoft account', currency: 'AED' }, latestReport: { id: 'saved-report', status: 'Pending' } } },
 ].map(async variant => {
   const source = await readFile(new URL(`../src/${variant.name}.tsx`, import.meta.url), 'utf8');
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace('export default function', 'function'), `${variant.name}.tsx`, { jsx: { runtime: 'classic' } });
-  const Component = new Function('React', ...Object.keys(hooks), ...Object.keys(ui), 'FormData', 'window', `${code}; return ${variant.name};`)(React, ...Object.values(hooks), ...Object.values(ui), FormValues, browser);
+  const Component = new Function('React', ...Object.keys(hooks), ...Object.keys(ui), 'FormData', 'window', 'AdProviderFrame', `${code}; return ${variant.name};`)(React, ...Object.values(hooks), ...Object.values(ui), FormValues, browser, AdProviderFrame);
   return { ...variant, Component };
 }));
 const props = request => ({ projectId: 'project / exact', canWrite: true, isOperator: true, canManageProject: true, role: 'owner', request });

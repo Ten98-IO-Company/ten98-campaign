@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Card, Checkbox, ConfirmDialog, DataTable, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, type DataColumn } from '@ten98/ui';
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, type DataColumn } from '@ten98/ui';
 import { adSpendBlock, type AdSpendBlock } from './approval-status';
+import AdProviderFrame from './AdProviderFrame';
 import AdSpendNotice from './AdSpendNotice';
 import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
 
@@ -17,10 +18,6 @@ const reportColumns = (currency: string, digits: number): DataColumn<any>[] => [
   { key: 'conversions', header: 'Conversions', numeric: true, render: row => number(row.metrics.conversions) },
 ];
 // Connection mode sits inside the Integrations provider card, which already names the provider.
-function Frame({ connection, title, description, actions, children }: { connection: boolean; title: string; description: string; actions: React.ReactNode; children: React.ReactNode }) {
-  return connection ? <Stack gap={3}><Inline justify="between" align="center"><Text tone="muted">{description}</Text>{actions}</Inline>{children}</Stack> : <Card as="section" headingLevel={2} title={title} description={description} actions={actions}><Stack gap={4}>{children}</Stack></Card>;
-}
-
 export default function NativeGoogleAds({ projectId, canWrite, isOperator, canManageProject, request, onChanged, mode = 'workflow', onOpenIntegrations, onOpenApprovals, onCreateCampaign, createIntent, onCreateHandled, onGuardChange }: Props) {
   const path = `/projects/${encodeURIComponent(projectId)}/native-google-ads`, active = useRef(true), currentPath = useRef(path); currentPath.current = path;
   const [status, setStatus] = useState<any>(null), [error, setError] = useState(''), [busy, setBusy] = useState(false), [refresh, setRefresh] = useState(0), [confirming, setConfirming] = useState(false);
@@ -31,7 +28,7 @@ export default function NativeGoogleAds({ projectId, canWrite, isOperator, canMa
     catch (failure) { if (active.current && currentPath.current === path) setError((failure as Error).message); }
     finally { if (active.current && currentPath.current === path) setBusy(false); }
   }
-  return <Frame connection={mode === 'connection'} title="Google Shopping" description={mode === 'connection' ? 'Choose the advertising customer used by this project.' : 'Campaigns, budgets, product bids and performance.'} actions={<Button variant="secondary" disabled={busy} onClick={() => setRefresh(value => value + 1)}>Refresh Google Shopping</Button>}>
+  return <AdProviderFrame connection={mode === 'connection'} title="Google Shopping" description={mode === 'connection' ? 'Choose the advertising customer used by this project.' : 'Campaigns, budgets, product bids and performance.'} actions={<Button variant="secondary" disabled={busy} onClick={() => setRefresh(value => value + 1)}>Refresh Google Shopping</Button>}>
     {error && <Alert tone="danger">{error}</Alert>}{!status && !error && <StatusLine busy>Loading Google Shopping…</StatusLine>}
     {status && <Text tone="muted">{status.configured ? 'Credentials configured.' : 'Google Shopping credentials are not configured.'} {status.mapped ? `Advertising customer ${status.customerId}.` : 'No advertising customer is mapped to this project.'}</Text>}
     {mode === 'workflow' && onOpenIntegrations && <Inline><Button variant="secondary" type="button" disabled={busy} onClick={onOpenIntegrations}>Open Connections</Button></Inline>}
@@ -40,7 +37,7 @@ export default function NativeGoogleAds({ projectId, canWrite, isOperator, canMa
     {mode === 'connection' && status && !status.mapped && !isOperator && <Text tone="muted">Ask your admin to link this project’s Google Ads account.</Text>}
     {mode === 'workflow' && status?.configured && status.mapped && <ShoppingAccount key={projectId + ':' + status.customerId} projectId={projectId} path={path} customerId={status.customerId} canWrite={canWrite} request={request} onChanged={onChanged} onOpenApprovals={onOpenApprovals} onCreateCampaign={onCreateCampaign} createIntent={createIntent} onCreateHandled={onCreateHandled} onGuardChange={onGuardChange}/>}
     {mode === 'workflow' && <Text tone="muted">Standard Video campaigns are read-only here. Create Demand Gen video ads from the Campaigns view. <Link href="https://developers.google.com/google-ads/api/docs/video/overview" target="_blank" rel="noreferrer">Google’s Video API limits</Link></Text>}
-  </Frame>;
+  </AdProviderFrame>;
 }
 
 function ShoppingAccount({ projectId, path, customerId, canWrite, request, onChanged, onOpenApprovals, onCreateCampaign, createIntent, onCreateHandled, onGuardChange }: Pick<Props, 'projectId' | 'canWrite' | 'request' | 'onChanged' | 'onOpenApprovals' | 'onCreateCampaign' | 'createIntent' | 'onCreateHandled' | 'onGuardChange'> & { path: string; customerId: string }) {

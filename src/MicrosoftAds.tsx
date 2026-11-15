@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Card, Checkbox, ConfirmDialog, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, Textarea } from '@ten98/ui';
 import { adSpendBlock, type AdSpendBlock } from './approval-status';
+import AdProviderFrame from './AdProviderFrame';
 import AdSpendNotice from './AdSpendNotice';
 import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
 
@@ -79,7 +80,7 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
     await action(async () => { const result = await requester.current(path + '/reports', 'POST', { fromDate: values.get('fromDate'), toDate: values.get('toDate') }); if (active.current) { setReport(result.report); setNotice('Microsoft is preparing the performance export. Check its status below.'); } });
   }
   async function refreshReport() { if (!report) return; await action(async () => { const result = await requester.current(path + '/reports/' + encodeURIComponent(report.id)); if (active.current) setReport(result.report); }); }
-  return <Frame connection={mode === 'connection'} title="Microsoft Advertising" description={mode === 'connection' ? 'Choose the advertising account used by this project.' : 'Search campaigns, budgets and performance exports.'} actions={<Button type="button" variant="secondary" disabled={busy} onClick={() => action(load)}>Refresh Microsoft account</Button>}>
+  return <AdProviderFrame connection={mode === 'connection'} title="Microsoft Advertising" description={mode === 'connection' ? 'Choose the advertising account used by this project.' : 'Search campaigns, budgets and performance exports.'} actions={<Button type="button" variant="secondary" disabled={busy} onClick={() => action(load)}>Refresh Microsoft account</Button>}>
     {mode === 'workflow' && <Text tone="muted">Campaigns start paused, in English, with a CPC cap. Copilot placement depends on Microsoft eligibility. Advanced targeting is available in <Link href="https://ads.microsoft.com/" target="_blank" rel="noreferrer">Microsoft Advertising</Link>.</Text>}
     {error && <Alert tone="danger">{error}</Alert>}{spendBlock && <AdSpendNotice block={spendBlock} onOpenApprovals={onOpenApprovals}/>}{notice && <StatusLine>{notice}</StatusLine>}{busy && <StatusLine busy>Checking Microsoft Advertising…</StatusLine>}
     {status && <Text tone="muted">{status.configured ? 'Credentials configured.' : 'Microsoft Advertising credentials are not configured.'} {status.mapping ? `${status.mapping.name} · ${status.mapping.accountId} · ${status.mapping.currency}` : 'No advertising account is mapped to this project.'}</Text>}
@@ -104,10 +105,7 @@ export default function MicrosoftAds({ projectId, role, isOperator, request, onC
       <Stack as="form" onSubmit={requestReport}><Stack as="fieldset" gap={3} disabled={busy || !canWrite}><FormGrid><Field label="From date *"><Input name="fromDate" type="date" required max={today()}/></Field><Field label="To date *"><Input name="toDate" type="date" required max={today()} defaultValue={today()}/></Field></FormGrid><FormActions><Button variant="secondary" type="submit">Request performance export</Button></FormActions></Stack></Stack>
       {report && <Card><Stack gap={3}><Text>Report {report.fromDate} to {report.toDate} · {report.status}</Text>{report.status === 'Error' && <Alert tone="danger">Microsoft could not prepare this report. Request another report or check the native dashboard.</Alert>}{report.empty && <Text>No report rows were returned.</Text>}{report.downloadUrl ? <Link variant="standalone" href={report.downloadUrl} target="_blank" rel="noreferrer">Download Microsoft report ZIP</Link> : report.status === 'Pending' && <Inline><Button variant="secondary" type="button" disabled={busy} onClick={refreshReport}>Check report status</Button></Inline>}<Text tone="muted">Microsoft report requests expire after one day. Request a fresh export if its download has expired.</Text></Stack></Card>}</Stack>
     </>}
-  </Frame>;
+  </AdProviderFrame>;
 }
 
 // Connection mode sits inside the Integrations provider card, which already names the provider.
-function Frame({ connection, title, description, actions, children }: { connection: boolean; title: string; description: string; actions: React.ReactNode; children: React.ReactNode }) {
-  return connection ? <Stack gap={3}><Inline justify="between" align="center"><Text tone="muted">{description}</Text>{actions}</Inline>{children}</Stack> : <Card as="section" headingLevel={2} title={title} description={description} actions={actions}><Stack gap={4}>{children}</Stack></Card>;
-}
