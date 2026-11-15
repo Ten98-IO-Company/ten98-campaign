@@ -87,14 +87,14 @@ test('hide amounts masks money, persists per browser and tolerates blocked stora
   const columns = (await campaignColumns(true))(rows);
   assert.equal(cell(columns, 'spend', rows[0]), '••••');
   assert.equal(cell(columns, 'impressions', rows[0]), '9K');
-  assert.deepEqual(adsView.adMetricCells({ spend: 5, cpc: 0.4, clicks: 12 }, 'USD', true), [{ label: 'Spend', value: '••••' }, { label: 'Clicks', value: '12' }, { label: 'CPC', value: '••••' }]);
+  assert.deepEqual(adsView.adMetricCells({ spend: 5, cpc: 0.4, clicks: 12 }, 'USD', true, testDisplayFormat), [{ label: 'Spend', value: '••••' }, { label: 'Clicks', value: '12' }, { label: 'CPC', value: '••••' }]);
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, get() { throw new DOMException('Blocked', 'SecurityError'); } });
   assert.equal(adsView.readHideAmounts(), false);
   assert.doesNotThrow(() => adsView.saveHideAmounts(true));
 });
 
 const { code: insightCode } = await transformWithOxc(details.match(/function AdInsight\([\s\S]*?\n\}\n/)[0] + 'return AdInsight;', 'AdInsight.tsx', { jsx: { runtime: 'classic' } });
-const AdInsight = new Function('React', 'Card', 'Image', 'Link', 'MetricCard', 'MetricGrid', 'Stack', 'Text', 'adCreativeView', 'adMetricCells', 'readHideAmounts', insightCode)(React, designSystem.Card, designSystem.Image, designSystem.Link, designSystem.MetricCard, designSystem.MetricGrid, designSystem.Stack, designSystem.Text, adsView.adCreativeView, adsView.adMetricCells, () => false);
+const AdInsight = new Function('React', 'Card', 'Image', 'Link', 'MetricCard', 'MetricGrid', 'Stack', 'Text', 'adCreativeView', 'adMetricCells', 'readHideAmounts', insightCode)(React, designSystem.Card, designSystem.Image, designSystem.Link, designSystem.MetricCard, designSystem.MetricGrid, designSystem.Stack, designSystem.Text, adsView.adCreativeView, (metrics, currency, hidden) => adsView.adMetricCells(metrics, currency, hidden, testDisplayFormat), () => false);
 const insight = props => renderToStaticMarkup(React.createElement(AdInsight, props));
 
 test('the creative pane renders safe creative fields or an empty note', () => {
@@ -112,7 +112,7 @@ test('the creative pane renders safe creative fields or an empty note', () => {
 });
 
 test('the metrics grid shows only reported metrics, preferring the listed date-scoped figures', () => {
-  assert.deepEqual(adsView.adMetricCells({ spend: 1234.5, impressions: 15400, ctr: 1.234, roas: 2.5 }, 'USD').map(item => [item.label, item.value]), [['Spend', '$1,235'], ['Impressions', '15.4K'], ['CTR', '1.23%'], ['ROAS', '2.5×']]);
+  assert.deepEqual(adsView.adMetricCells({ spend: 1234.5, impressions: 15400, ctr: 1.234, roas: 2.5 }, 'USD', false, testDisplayFormat).map(item => [item.label, item.value]), [['Spend', '$1,235'], ['Impressions', '15.4K'], ['CTR', '1.23%'], ['ROAS', '2.5×']]);
   assert.deepEqual(adsView.adMetricCells({ videoPlayActions: 900, videoP25WatchedActions: 400, videoP100WatchedActions: 50 }).map(item => item.label), ['Video plays', '25% watched', '100% watched']);
   assert.deepEqual(adsView.adMetricCells({ videoP25WatchedActions: 400 }), [], 'The video funnel needs reported plays.');
   assert.deepEqual(adsView.adMetricCells(undefined), []);

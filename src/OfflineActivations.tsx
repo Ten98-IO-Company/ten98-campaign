@@ -17,10 +17,13 @@ const instant = (local: string) => local ? new Date(local).toISOString() : '';
 const amount = (value: string, label: string, whole = false) => { const number = value.trim() === '' ? 0 : Number(value); if (!Number.isFinite(number) || number < 0 || whole && !Number.isInteger(number)) throw new Error(`${label} must be ${whole ? 'a whole number' : 'a number'} of zero or more.`); return number; };
 // Field budgets and spend are shown in whole currency units; the stored amounts are unchanged.
 export const money = (format: DisplayFormatter, value: number, currency = 'AED') => format.currency(value || 0, currency, { wholeUnits: true });
-export function when(format: DisplayFormatter, activation: Row) {
+// The shared formatter has no time-only part, so a same-day end time uses the browser's locale and zone, as the provider does.
+const browserClock = new Intl.DateTimeFormat(undefined, { timeStyle: 'short' });
+// A same-day activation shows its date once ("Oct 3, 2026, 10:00 AM – 2:00 PM"); one over several days shows both in full.
+export function when(format: DisplayFormatter, activation: Row, clock = browserClock) {
   const start = new Date(activation.startAt), end = new Date(activation.endAt);
   if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return 'Not scheduled';
-  return `${format.dateTime(start)} – ${format.dateTime(end)}`;
+  return `${format.dateTime(start)} – ${format.date(start) === format.date(end) ? clock.format(end) : format.dateTime(end)}`;
 }
 // The landing page with UTM tags naming the activation, so web analytics and the short link agree on the source.
 export function trackingDestination(landing: string, activation: Row, campaignName = '') {
@@ -194,7 +197,7 @@ export default function OfflineActivations({ projectId, brand, campaigns, activa
         emptyState={<EmptyState title={campaigns.length ? 'No field activity planned' : 'Create a campaign first'} description={campaigns.length ? 'Plan a roadshow stop, door-to-door area, event, street team or sampling shift.' : 'Activations belong to a campaign, so their spend and leads roll up into it.'}/>}
         columns={[
           { key: 'name', header: 'Activation', rowHeader: true, render: activation => <Stack gap={0}><Text as="strong" weight="semibold">{activation.name}</Text><Text tone="muted" size="sm">{ACTIVATION_TYPE_LABELS[activation.type as ActivationType] || activation.type}{filter ? '' : ' · ' + (campaignOf(activation.campaignId)?.name || 'Campaign removed')}</Text></Stack> },
-          { key: 'startAt', header: 'When', render: activation => when(format, activation) },
+          { key: 'startAt', header: 'When', wrap: true, render: activation => when(format, activation) },
           { key: 'location', header: 'Where', wrap: true, minWidth: 'sm', render: activation => activation.location },
           { key: 'spent', header: 'Spend', numeric: true, render: activation => { const currency = campaignOf(activation.campaignId)?.currency || 'AED'; return `${money(format, activation.spent, currency)} of ${money(format, activation.budget, currency)}`; } },
           { key: 'results', header: 'Leads', numeric: true, render: activation => results?.[activation.id] ? format.number(results[activation.id].leads) : '—' },
