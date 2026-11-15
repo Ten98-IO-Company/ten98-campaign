@@ -5,7 +5,7 @@ type Props = { projectId: string; role: string; request: (path: string, method?:
 
 function AdSpendPolicySwitch({ label, checked, disabled, onCheckedChange }: { label: string; checked: boolean; disabled: boolean; onCheckedChange: (checked: boolean) => void }) {
   const [confirm, dialog] = useConfirmDialog();
-  return <>{dialog}<Switch label={label} checked={checked} disabled={disabled} onCheckedChange={async next => { if (await confirm({ title: next ? 'Require ad spend approval?' : 'Stop requiring ad spend approval?', description: 'Changing this setting voids every unused ad spend approval and pending ad spend request in this project. They stay listed as rejected.', confirmLabel: next ? 'Require approval' : 'Stop requiring approval' })) onCheckedChange(next); }}/></>;
+  return <>{dialog}<Switch label={label} checked={checked} disabled={disabled} onCheckedChange={async next => { if (await confirm({ title: next ? 'Require ad spend approval?' : 'Stop requiring ad spend approval?', description: 'Changing this setting voids every unused ad spend approval and pending ad spend request in this project. They stay listed as rejected.', confirmLabel: next ? 'Require approval' : 'Stop requiring approval', initialFocus: 'cancel' })) onCheckedChange(next); }}/></>;
 }
 // Settings › Approvals: the project's approval policy, apart from the review queue.
 export default function ApprovalPolicy({ projectId, role, request, onChanged }: Props) {
