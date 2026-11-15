@@ -119,9 +119,9 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     if (found.length !== wanted.length) fail(400, 'CONTACT_NOT_FOUND', 'A selected contact does not belong to this project.');
   };
   // Row lock: read-modify-write of the stored campaign, so a concurrent worker, refresh or cancellation write is not lost.
-  const changeCampaign = (projectId: string, id: string, change: (campaign: any) => unknown) => db.transaction(async tx => {
+  const changeCampaign = (projectId: string, id: string, change: (campaign: any, tx: Transaction) => unknown) => db.transaction(async tx => {
     const campaign = await find(projectId, id, tx, true);
-    return await change(campaign) === false ? campaign : save(campaign, tx);
+    return await change(campaign, tx) === false ? campaign : save(campaign, tx);
   });
   const deliveries = async (id: string, ex: Executor = db) => (await resultRows(ex.execute(sql`SELECT data FROM direct_deliveries WHERE campaign_id = ${id} ORDER BY seq`))).map(row => row.data);
   const putDelivery = async (delivery: any, ex: Executor = db) => { delivery.updatedAt = nowISO(); await ex.execute(sql`UPDATE direct_deliveries SET data = ${JSON.stringify(delivery)} WHERE id = ${delivery.id}`); return delivery; };
@@ -300,15 +300,16 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     if (kind === 'contacts') {
       // Consent evidence: who changed a contact's permissions, suppressed, imported or deleted contacts. The entry names the
       // actor and a short contact reference, never the contact's name, address or number.
-      const actor = user.name || user.id, log = (message: string) => createStore(db).activity(project.id, message), ref = (contactId: string) => 'contact ' + contactId.slice(0, 8);
+      const actor = user.name || user.id, log = (tx: Executor, message: string) => createStore(tx).activity(project.id, message), ref = (contactId: string) => 'contact ' + contactId.slice(0, 8);
+      const granted = (consents: any) => { const labels = Object.entries(consentLabels).filter(([channel]) => consents?.[channel] === true).map(([, label]) => label); return labels.length ? ` Permission recorded for ${labels.join(', ')}.` : ''; };
       const permissions = (before: any, after: any) => Object.entries(consentLabels).filter(([channel]) => !!before?.consents?.[channel] !== !!after?.consents?.[channel]).map(([channel, label]) => `${label} ${after?.consents?.[channel] ? 'on' : 'off'}`).join(', ');
       if (!id && method === 'GET') send(200, { contacts: await contacts.list(project.id) });
-      else if (!id && method === 'POST') { const contact = await contacts.save(project.id, body, undefined, { create: true }), changed = permissions(undefined, contact); if (changed) await log(`Permission recorded for ${ref(contact.id)} by ${actor}: ${changed}.`); send(201, { contact }); }
-      else if (id === 'import' && method === 'POST') { const result = await contacts.import(project.id, body); if (!result.dryRun && result.imported) await log(`Contacts imported from CSV by ${actor}: ${result.created} created, ${result.updated} updated, ${result.skipped} skipped.`); send(200, result); }
+      else if (!id && method === 'POST') { const contact = await contacts.save(project.id, body, undefined, { create: true, audit: async (tx, _previous, record) => { const changed = permissions(undefined, record); if (changed) await log(tx, `Permission recorded for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(201, { contact }); }
+      else if (id === 'import' && method === 'POST') { const result = await contacts.import(project.id, body, { audit: async (tx, imported) => { if (imported.imported) await log(tx, `Contacts imported from CSV by ${actor}: ${imported.created} created, ${imported.updated} updated, ${imported.skipped} skipped.${granted(body?.consents)}`); } }); send(200, result); }
       else if (id === 'assess-dns' && method === 'POST') { const result = await contacts.assessDNS(project.id, body.ids, { assertAccess: context.assertIntegrationSettings }); await context.assertIntegrationSettings(); send(200, result); }
-      else if (id && !action && method === 'PATCH') { const before = await contacts.get(project.id, id), contact = await contacts.save(project.id, body, id), changed = permissions(before, contact); if (changed) await log(`Permission changed for ${ref(contact.id)} by ${actor}: ${changed}.`); send(200, { contact }); }
-      else if (id && !action && method === 'DELETE') { if (!await contacts.remove(project.id, id)) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); await log(`Deleted ${ref(id)} by ${actor}. Its suppressions are kept.`); send(200, { removed: true }); }
-      else if (id && action === 'suppress' && method === 'POST') { const contact = await contacts.suppress(project.id, id, body.channel, body.reason); await log(`Suppressed ${ref(id)} for ${consentLabels[body.channel as keyof typeof consentLabels] || body.channel} by ${actor}.`); send(200, { contact }); }
+      else if (id && !action && method === 'PATCH') { const contact = await contacts.save(project.id, body, id, { audit: async (tx, before, record) => { const changed = permissions(before, record); if (changed) await log(tx, `Permission changed for ${ref(record.id)} by ${actor}: ${changed}.`); } }); send(200, { contact }); }
+      else if (id && !action && method === 'DELETE') { if (!await contacts.remove(project.id, id, { audit: tx => log(tx, `Deleted ${ref(id)} by ${actor}. Its suppressions are kept.`) })) fail(404, 'CONTACT_NOT_FOUND', 'Contact not found.'); send(200, { removed: true }); }
+      else if (id && action === 'suppress' && method === 'POST') { const contact = await contacts.suppress(project.id, id, body.channel, body.reason, { audit: tx => log(tx, `Suppressed ${ref(id)} for ${consentLabels[body.channel as keyof typeof consentLabels] || body.channel} by ${actor}.`) }); send(200, { contact }); }
       else return false;
       return true;
     }
@@ -377,8 +378,12 @@ export function createDirectCampaigns({ db, env, appUrl, secret }: { db: Databas
     }
     if (action === 'cancel') {
       // Cancel the stored campaign under its row lock rather than the copy read at the start of this request.
-      Object.assign(campaign, await changeCampaign(project.id, id, latest => { latest.status = 'cancelled'; }));
-      await createStore(db).activity(project.id, `Direct campaign cancelled by ${user.name || user.id}.`);
+      // A campaign that is already cancelled is left as it is and logged once; the steps below still retry provider cancellation.
+      Object.assign(campaign, await changeCampaign(project.id, id, async (latest, tx) => {
+        if (latest.status === 'cancelled') return false;
+        latest.status = 'cancelled';
+        await createStore(tx).activity(project.id, `Direct campaign "${latest.name}" cancelled by ${user.name || user.id}.`);
+      }));
       for (const delivery of await deliveries(id)) if (delivery.status === 'pending') await changeDelivery(delivery.id, current => { if (current.status !== 'pending') return false; current.status = 'cancelled'; });
       if (campaign.channel === 'whatsapp' && campaign.providerId && campaign.providerStatus !== 'cancelled') {
         const assertMapping = async () => { await context.assertIntegrationSettings(); await guard(campaign, false); };
