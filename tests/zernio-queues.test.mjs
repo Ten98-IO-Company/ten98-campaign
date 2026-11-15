@@ -239,7 +239,7 @@ test('queue enqueue requires inline review of the exact saved post and queue sna
   function render(loaded = true, localPosts = [item]) { const context = { React, ...designSystem, loaded, localPosts, queues: [queue], approvalRequired, enqueueReviewKey, enqueueReviews, setEnqueueReviews: review, canWrite: true, busy: false, onOpenApprovals: null, onEditPost: null, enqueue() {} }; return new Function(...Object.keys(context), code + ';return render();')(...Object.values(context)); }
   const all = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(all)];
   const submit = async () => {
-    const context = { canWrite: true, queues: [queue], approvalRequired, enqueueReviews, enqueueReviewKey, projectPath, action: async run => run(), write: async () => { calls++; return { post: { scheduledAt: '2070-01-01T09:00:00Z' } }; }, current: () => true, setPosts() {}, setNotice() {}, setError() {}, onChanged: null, load: async () => {} };
+    const context = { canWrite: true, queues: [queue], approvalRequired, enqueueReviews, enqueueReviewKey, projectPath, format: useTestDisplayFormat(), action: async run => run(), write: async () => { calls++; return { post: { scheduledAt: '2070-01-01T09:00:00Z' } }; }, current: () => true, setPosts() {}, setNotice() {}, setError() {}, onChanged: null, load: async () => {} };
     return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(enqueueStart, enqueueEnd))});`)(...Object.values(context))(item);
   };
   assert.doesNotMatch(renderToStaticMarkup(render(false, [])), /No unsent local posts/); assert.match(renderToStaticMarkup(render(true, [])), /No unsent local posts/);

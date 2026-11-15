@@ -6,6 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as library from '@ten98/ui';
+import { testDisplayFormat as format } from './display-format.ts';
 
 const source = await readFile(new URL('../src/ZernioQueues.tsx', import.meta.url), 'utf8');
 const section = (start, end) => { const from = source.indexOf(start), to = source.indexOf(end, from); assert.ok(from >= 0 && to > from); return stripTypeScriptTypes(source.slice(from, to)); };
@@ -17,7 +18,7 @@ const { code: renderCode } = await transformWithOxc(`const render = () => { ${lo
 function ui(read) {
   const state = { loaded: false, queues: [], listVersion: '', posts: [], approvalRequired: false, enqueueReviews: {}, error: '', notice: '', busy: false };
   const set = name => value => { state[name] = typeof value === 'function' ? value(state[name]) : value; };
-  const context = { path: '/projects/one/integrations/queues', projectPath: '/projects/one', current: () => true, busyRef: { current: false }, requester: { current: read }, ...Object.fromEntries(Object.keys(state).map(name => ['set' + name[0].toUpperCase() + name.slice(1), set(name)])) };
+  const context = { path: '/projects/one/integrations/queues', projectPath: '/projects/one', format, current: () => true, busyRef: { current: false }, requester: { current: read }, ...Object.fromEntries(Object.keys(state).map(name => ['set' + name[0].toUpperCase() + name.slice(1), set(name)])) };
   const load = compile(loadCode, context), action = compile(actionCode, context);
   const html = () => { const values = { React, ...library, ...state }; return renderToStaticMarkup(new Function(...Object.keys(values), renderCode + '; return render();')(...Object.values(values))); };
   return { state, context, load, action, html };
@@ -59,7 +60,7 @@ test('confirmed enqueue keeps refresh diagnostics and its confirmed-write warnin
     const enqueue = compile(section('async function enqueue(', '  const localPosts ='), { ...view.context, canWrite: true, queues: [queue], approvalRequired: false, enqueueReviews: { 'post-one': 'reviewed' }, enqueueReviewKey: () => 'reviewed', action: view.action, load: view.load, onChanged: failureAt === 'onChanged' ? async () => { throw new Error('Project refresh unavailable'); } : null, write: async () => { writes++; return { post: { scheduledAt: '2070-01-01T09:00:00Z' } }; } });
     await enqueue(item);
     assert.equal(writes, 1); assert.equal(view.state.posts.length, 0); assert.equal(view.state.loaded, failureAt === 'onChanged');
-    assert.match(view.state.notice, /Post assigned to the provider queue/);
+    assert.equal(view.state.notice, 'Post assigned to the provider queue for Jan 1, 2070, 9:00 AM.');
     const diagnostic = failureAt === 'onChanged' ? 'Project refresh unavailable' : 'Could not load publishing queues. Gateway unavailable';
     assert.equal(view.state.error, 'The queue submission was confirmed, but the latest local list could not be refreshed. Refresh before another action. ' + diagnostic);
     if (failureAt === 'load') assert.doesNotMatch(view.html(), /No unsent local posts/);
@@ -94,4 +95,14 @@ test('queue row actions keep short visible labels, full accessible identities an
   assert.equal(toggle(queue, { selected: queue, editing: false }).props.disabled, false);
   assert.equal(toggle(queue, { selected: { ...queue, _id: 'other' }, editing: true }).props.disabled, false, 'Edits to another queue do not block this row.');
   assert.equal(toggle({ ...queue, active: false, slots: [] }, { selected: null, editing: false }).props.disabled, true, 'A paused queue without slots cannot be activated.');
+});
+
+test('upcoming slot previews read in the queue’s own time zone, not the viewer’s', async () => {
+  const line = source.match(/^ {4}\{preview && <Alert[^\n]+$/m)?.[0]; assert.ok(line);
+  const { code } = await transformWithOxc(`const render = preview => (${line.trim().slice(1, -1)});`, 'QueuePreview.tsx', { jsx: { runtime: 'classic' } });
+  const render = new Function('React', ...Object.keys(library), code + '; return render;')(React, ...Object.values(library));
+  const slot = '2026-11-16T05:00:00Z', html = renderToStaticMarkup(render({ queue: { name: 'Gulf mornings', timezone: 'Asia/Dubai' }, slots: [slot] }));
+  const inZone = library.createDisplayFormatter({ timeZone: 'Asia/Dubai' }).dateTime(slot), inUtc = library.createDisplayFormatter({ timeZone: 'UTC' }).dateTime(slot);
+  assert.notEqual(inZone, inUtc); assert.ok(html.includes(`>${inZone}</li>`), html); assert.ok(!html.includes(inUtc));
+  assert.match(html, /Asia\/Dubai\. These times are previews/);
 });

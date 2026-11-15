@@ -5,6 +5,9 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
+import * as googleMicros from '../src/google-micros.ts';
+const hooklessUi = withTestDisplayFormat(ui);
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const elements = node => Array.isArray(node) ? node.flatMap(elements) : React.isValidElement(node) ? [node, ...elements(node.props.children), ...elements(node.props.actions)] : [];
@@ -67,7 +70,7 @@ const variants = await Promise.all([
 ].map(async variant => {
   const source = await readFile(new URL(`../src/${variant.name}.tsx`, import.meta.url), 'utf8');
   const { code } = await transformWithOxc(source.replace(/^import .*;\r?$/gm, '').replace('export default function', 'function'), `${variant.name}.tsx`, { jsx: { runtime: 'classic' } });
-  const Component = new Function('React', ...Object.keys(hooks), ...Object.keys(ui), 'FormData', 'window', 'AdProviderFrame', `${code}; return ${variant.name};`)(React, ...Object.values(hooks), ...Object.values(ui), FormValues, browser, AdProviderFrame);
+  const Component = new Function('React', ...Object.keys(hooks), ...Object.keys(hooklessUi), ...Object.keys(googleMicros), 'FormData', 'window', 'AdProviderFrame', `${code}; return ${variant.name};`)(React, ...Object.values(hooks), ...Object.values(hooklessUi), ...Object.values(googleMicros), FormValues, browser, AdProviderFrame);
   return { ...variant, Component };
 }));
 const props = request => ({ projectId: 'project / exact', canWrite: true, isOperator: true, canManageProject: true, role: 'owner', request });

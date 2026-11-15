@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
-import * as design from '@ten98/ui';
+import * as designExports from '@ten98/ui';
+import { testDisplayFormat as format, withTestDisplayFormat } from './display-format.ts';
+const design = withTestDisplayFormat(designExports);
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import { readText } from './read-text.ts';
@@ -527,7 +529,7 @@ test('rendered health controls show WhatsApp link and permission evidence, hide 
   const shown = { status: 'error', tokenStatus: { valid: true }, issues: ['WhatsApp channel disconnected'], recommendations: ['Reconnect the number'], permissions: { canPost: false, canFetchAnalytics: false, posting: [{ scope: 'messages', granted: false, required: true }], analytics: [], optional: [], missingRequired: ['messages'] }, platformConnection: { status: 'disconnected', inboundWebhookSubscribed: false } };
   function render(canManage, busy = false) {
     let chosen;
-    const context = { React, ...design, confirming: undefined, setConfirming() {}, disconnectSelected() {}, projectId: 'project-a', request() {}, WhatsAppNumberStatus() { return null; }, busy, loaded: true, accounts: [selected], selected, selectedId: selected._id, detail: shown, shown, draft: { displayName: '', username: '', analytics: '', inbox: '' }, error: '', notice: '', authUrl: '', canManage, action() {}, loadAccounts() {}, choose: account => { chosen = account; }, checkSelected() {}, reconnect() {}, disconnect() {}, save() {}, setDraft() {}, name: row => row.displayName, yes: value => value == null ? 'Not reported' : value ? 'Yes' : 'No', when: () => 'Not reported' };
+    const context = { React, ...design, format, confirming: undefined, setConfirming() {}, disconnectSelected() {}, projectId: 'project-a', request() {}, WhatsAppNumberStatus() { return null; }, busy, loaded: true, accounts: [selected], selected, selectedId: selected._id, detail: shown, shown, draft: { displayName: '', username: '', analytics: '', inbox: '' }, error: '', notice: '', authUrl: '', canManage, action() {}, loadAccounts() {}, choose: account => { chosen = account; }, checkSelected() {}, reconnect() {}, disconnect() {}, save() {}, setDraft() {}, name: row => row.displayName, yes: value => value == null ? 'Not reported' : value ? 'Yes' : 'No', when: () => 'Not reported' };
     const tree = new Function(...Object.keys(context), code + '; return render;')(...Object.values(context))(), nodes = node => !node || typeof node !== 'object' ? [] : [node, ...React.Children.toArray(node.props?.children).flatMap(nodes), ...(node.type === design.DataTable ? node.props.rows.flatMap(row => [...node.props.columns.map(column => column.render?.(row)), node.props.rowActions?.(row)]).flatMap(nodes) : [])];
     const manage = nodes(tree).find(node => node.type === design.Button && node.props['aria-label'] === 'Manage Support number');
     assert.ok(manage); assert.equal(manage.props.children, 'Manage'); assert.equal(manage.props.pressed, true); assert.equal(manage.props.disabled, busy);

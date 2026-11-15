@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
+import { useTestDisplayFormat } from './display-format.ts';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { assertNoMarkup, readText } from './read-text.ts';
 
@@ -25,7 +26,7 @@ function mount(name: string, globals: Record<string, unknown> = {}) {
   const useRef = (initial: any) => refs[refIndex++] ||= { current: initial };
   const useEffect = (callback: () => any, deps: any[]) => { const index = effectIndex++, previous = effects[index]; if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) effects[index] = { deps, callback, cleanup: previous?.cleanup }; };
   const window = { addEventListener() {}, removeEventListener() {}, setInterval: () => 1, clearInterval() {} };
-  const scope = { React, useState, useRef, useEffect, useLayoutEffect: (callback: () => void) => { callback(); }, WhatsAppTemplate: () => null, templateRestriction: () => '', validPostInstant: (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)), window, document: undefined, ...globals, ...ui, useFocusReturn: () => () => {} };
+  const scope = { React, useState, useRef, useEffect, useLayoutEffect: (callback: () => void) => { callback(); }, WhatsAppTemplate: () => null, templateRestriction: () => '', validPostInstant: (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)), window, document: undefined, ...globals, ...ui, useFocusReturn: () => () => {}, useDisplayFormat: useTestDisplayFormat };
   const Component = new Function(...Object.keys(scope), code + '; return ' + name + ';')(...Object.values(scope));
   return {
     render(props: any) { stateIndex = refIndex = effectIndex = 0; return Component(props); },
