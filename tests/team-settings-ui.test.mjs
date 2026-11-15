@@ -13,13 +13,13 @@ const { code } = await transformWithOxc(source.replace(/^import .*?;\r?\n/gm, ''
 const members = [{ id: 'owner-1', name: 'Olive Owner', email: 'olive@example.test', role: 'owner' }, { id: 'admin-1', name: 'Ada Admin', email: 'ada@example.test', role: 'admin' }, { id: 'editor-1', name: 'Eli Editor', email: 'eli@example.test', role: 'editor' }];
 const invitations = [{ id: 'invite-1', email: 'new@example.test', role: 'viewer', expiresAt: '2026-10-28T00:00:00.000Z', status: 'pending' }];
 
-function view(role, currentUserId, calls = [], focusMarks = []) {
+function view(role, currentUserId, calls = [], focusMarks = [], refuse) {
   const state = [members, invitations]; let index = 0;
   const useState = value => { const slot = index++; if (!(slot in state)) state[slot] = value; return [state[slot], next => { state[slot] = typeof next === 'function' ? next(state[slot]) : next; }]; };
   // useFocusReturn is the app hook from src/focus-return.ts; here it records when an action remembers the focused control.
   const useFocusReturn = busy => () => focusMarks.push(busy);
   const TeamSettings = new Function('React', 'useState', 'useRef', 'useEffect', 'TeamFlow', 'workspaceRoles', 'useFocusReturn', code + '; return TeamSettings;')(React, useState, value => ({ current: value }), () => {}, TeamFlow, workspaceRoles, useFocusReturn);
-  const request = async (path, method, body) => { calls.push([path, method, body]); return method === 'POST' ? { invitation: { id: 'invite-2' }, url: 'https://campaign.example.test/?invite=token' } : path.endsWith('/members') ? { members } : { invitations }; };
+  const request = async (path, method, body) => { calls.push([path, method, body]); if (refuse && method === 'PATCH') throw new Error(refuse); return method === 'POST' ? { invitation: { id: 'invite-2' }, url: 'https://campaign.example.test/?invite=token' } : path.endsWith('/members') ? { members } : { invitations }; };
   const render = () => { index = 0; return TeamSettings({ workspaceId: 'workspace-1', role, currentUserId, request }); };
   return { render, state, calls, focusMarks };
 }
@@ -64,4 +64,21 @@ test('revoked invitations stay listed as revoked and only pending ones offer Rev
   const html = renderToStaticMarkup(ui.render());
   assert.match(html, /t98-tone--neutral[^>]*>Revoked</, 'The server status is shown with the neutral revoked tone.');
   assert.match(html, /aria-label="[^"]*: new@example\.test"/); assert.doesNotMatch(html, /aria-label="[^"]*: gone@example\.test"/, 'A revoked invitation cannot be revoked again.');
+});
+
+// TeamFlow confirms a role change and announces success whenever onRoleChange resolves, so a refusal must reject and
+// Campaign neither repeats the error beside the control nor adds its own "Role updated." notice.
+test('a refused role change rejects with the server message and Campaign shows no second error', async () => {
+  const ui = view('owner', 'owner-1', [], [], 'Only an owner can make someone an owner.');
+  await assert.rejects(ui.render().props.onRoleChange({ id: 'editor-1', role: 'owner' }), { message: 'Only an owner can make someone an owner.' });
+  assert.equal(ui.state[4], '', 'TeamFlow shows the rejection; the adapter does not set its own error.');
+  assert.equal(ui.state[5], undefined); assert.equal(ui.state[3], false, 'The flow is not left busy.');
+});
+
+test('a saved role change resolves without a Campaign notice and refreshes the team', async () => {
+  const ui = view('owner', 'owner-1');
+  await ui.render().props.onRoleChange({ id: 'editor-1', role: 'admin' });
+  assert.deepEqual(ui.calls[0], ['/workspaces/workspace-1/members/editor-1', 'PATCH', { role: 'admin' }]);
+  assert.equal(ui.state[5], undefined, 'TeamFlow announces the change; Campaign adds no "Role updated." notice.');
+  assert.equal(ui.calls.length, 3, 'The members and invitations are read again.');
 });
