@@ -18,11 +18,13 @@ async function owners(t) {
     return { status: response.status, data: await response.json(), cookie: response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ') };
   };
   const password = 'team race fixture password';
-  const setup = await request('/auth/setup', { method: 'POST', body: { name: 'First', email: 'first@example.test', password } }); setup.data.projectId = await firstProject(app, setup);
-  const workspaceId = (await request('/state', { cookie: setup.cookie })).data.workspaces[0].id;
+  // A failed setup step (for example a 503 under load) is reported as such, not as a TypeError inside the race test.
+  const ready = (step, response, status = 200) => { assert.equal(response.status, status, `setup ${step} returned ${response.status}`); return response; };
+  const setup = ready('/auth/setup', await request('/auth/setup', { method: 'POST', body: { name: 'First', email: 'first@example.test', password } }), 201); setup.data.projectId = await firstProject(app, setup);
+  const workspaceId = ready('/state', await request('/state', { cookie: setup.cookie })).data.workspaces[0].id;
   await addUsers(pool, [{ id: 'second', name: 'Second', email: 'second@example.test', password: await hashPassword(password) }]);
   await addMemberships(pool, [[workspaceId, 'second', 'owner']]);
-  const second = await request('/auth/login', { method: 'POST', body: { email: 'second@example.test', password } });
+  const second = ready('/auth/login', await request('/auth/login', { method: 'POST', body: { email: 'second@example.test', password } }));
   return { pool, request, workspaceId, first: { id: setup.data.user.id, cookie: setup.cookie }, second: { id: 'second', cookie: second.cookie } };
 }
 const ownerCount = async (pool, workspaceId) => (await pool.query("SELECT count(*) AS count FROM memberships WHERE workspace_id = $1 AND role = 'owner'", [workspaceId])).rows[0].count;
