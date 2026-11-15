@@ -175,6 +175,6 @@ export default function PostManagement({ request, post, canWrite, assets = [], c
         {removePlatforms.includes(item.platform) && <FormActions><Button variant="danger" type="button" disabled={busy} onClick={() => setConfirming({ title: 'Permanently remove this published ' + item.platform + ' copy?', description: 'This removes the live post and its engagement. YouTube deletion is permanent.', confirmLabel: 'Remove live copy', danger: true, run: () => act('social/unpublish', { postId: post.id, accountId: accountId(item), confirmRemoval: true }, 'Published copy removed.') })}>Remove live copy</Button></FormActions>}
       </Stack></Disclosure>)}
     </>}
-    {canWrite && <ConfirmDialog initialFocus="cancel" open={!!confirming} onOpenChange={open => { if (!open) setConfirming(undefined); }} title={confirming?.title || ''} description={confirming?.description || ''} confirmLabel={confirming?.confirmLabel} danger={confirming?.danger} onConfirm={() => confirming!.run()}/>}
+    {canWrite && <ConfirmDialog open={!!confirming} initialFocus="cancel" onOpenChange={open => { if (!open) setConfirming(undefined); }} title={confirming?.title || ''} description={confirming?.description || ''} confirmLabel={confirming?.confirmLabel} danger={confirming?.danger} onConfirm={() => confirming!.run()}/>}
   </Stack></Card>;
 }
