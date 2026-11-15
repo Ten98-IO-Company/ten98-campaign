@@ -12,9 +12,16 @@ const migrationSql = async () => (await migrationSources()).map(migration => mig
 
 test('every Drizzle table and column is created by the SQL migrations', async () => {
   const sql = await migrationSql(), type = '(?:text|bigint|integer|boolean|json|bytea)\\b';
-  const created = new Map([...sql.matchAll(/^CREATE TABLE (\w+) \((.*)\);$/gm)].map(([, name, body]) => [name, [...body.matchAll(new RegExp(`(?:^|, )(\\w+) ${type}`, 'g'))].map(match => match[1])]));
-  for (const [, name, column] of sql.matchAll(new RegExp(`^ALTER TABLE (\\w+) ADD COLUMN (\\w+) ${type}`, 'gm'))) created.get(name).push(column);
-  assert.equal(tables.length, 87);
+  // Statements apply in order, so a table or column a later migration drops (or drops and recreates) is tracked.
+  const created = new Map();
+  for (const [statement, table, body, added, addedColumn, altered, droppedColumn, dropped] of sql.matchAll(new RegExp(`^CREATE TABLE (\\w+) \\((.*)\\);$|^ALTER TABLE (\\w+) ADD COLUMN (\\w+) ${type}|^ALTER TABLE (\\w+) DROP COLUMN (\\w+);$|^DROP TABLE (\\w+);$`, 'gm'))) {
+    if (table) created.set(table, [...body.matchAll(new RegExp(`(?:^|, )(\\w+) ${type}`, 'g'))].map(match => match[1]));
+    else if (added) created.get(added).push(addedColumn);
+    else if (altered) created.set(altered, created.get(altered).filter(column => column !== droppedColumn));
+    else if (dropped) created.delete(dropped);
+    else assert.fail(statement);
+  }
+  assert.equal(tables.length, 89);
   assert.deepEqual(tables.map(table => table.name).sort(), [...created.keys()].sort());
   for (const table of tables) assert.deepEqual(table.columns.map(column => column.name), created.get(table.name), table.name);
 });

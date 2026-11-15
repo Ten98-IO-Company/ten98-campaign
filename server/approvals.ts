@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
+import { users } from './schema.ts';
 import { createStore, type Executor } from './database.ts';
 import { fail, IntegrationError, postRestrictions, targetConfiguration, zernioClient, type OperationContext, type ProviderRecord } from './provider-core.ts';
 import { buildPlatformEntry, normalizeAccountVariants, normalizePostTags, resolveVariant } from '../shared/social-posts.ts';
@@ -108,7 +109,7 @@ function approvalAccounts(post: ProviderRecord) {
 }
 async function publicReview(db: Executor, row: ProviderRecord | undefined) {
   if (!row) return null;
-  const actor = async (id: string) => id ? await first(db.execute(sql`SELECT id,name FROM users WHERE id=${id}`)) || { id, name: 'Former team member' } : null;
+  const actor = async (id: string) => id ? await first(db.execute(sql`SELECT id,name FROM ${users} WHERE id=${id}`)) || { id, name: 'Former team member' } : null;
   return { id: row.id, status: row.status, requestedBy: await actor(row.requested_by), requestedAt: row.requested_at, reviewedBy: await actor(row.reviewed_by), reviewedAt: row.reviewed_at, note: row.note, selfApproved: Boolean(row.self_approved), snapshot: JSON.parse(row.snapshot) };
 }
 function fields(body: any, allowed: string[]) {
@@ -145,7 +146,7 @@ async function lockReviewer(tx: Executor, projectId: string, userId: string) {
 // Council decision ten98-code-system#30: with approval required, a requester may approve their own review only while
 // they are the project's single active owner or administrator (by count, not role). Runs under lockReviewer.
 async function assertSelfApprovalAllowed(tx: Executor, projectId: string, userId: string) {
-  const reviewers = (await tx.execute(sql`SELECT u.id,u.name FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id JOIN users u ON u.id=m.user_id WHERE p.id=${projectId} AND m.role IN ('owner','admin')`)).rows as ProviderRecord[];
+  const reviewers = (await tx.execute(sql`SELECT u.id,u.name FROM projects p JOIN memberships m ON m.workspace_id=p.workspace_id JOIN ${users} u ON u.id=m.user_id WHERE p.id=${projectId} AND m.role IN ('owner','admin')`)).rows as ProviderRecord[];
   if (reviewers.length === 1 && reviewers[0].id === userId) return;
   const others = reviewers.filter(row => row.id !== userId).map(row => String(row.name)).sort((a, b) => a.localeCompare(b));
   fail(403, 'APPROVAL_SELF_REVIEW', `You requested this review, so another owner or administrator must approve it${others.length ? `: ${others.join(', ')}` : ''}.`);

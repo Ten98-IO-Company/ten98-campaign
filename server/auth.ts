@@ -3,9 +3,10 @@ import { promisify } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { clientLimitKey, parseTrustedProxies, resolveClientAddress } from '@ten98/runtime';
 import type { Database, Executor } from './database.ts';
+import { users } from './schema.ts';
 import { joinInvitation, lockInvitation } from './invitations.ts';
 
 export interface AuthConfig { appUrl: string; sessionSecret: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[]; trustedProxies?: string | string[] }
@@ -48,7 +49,12 @@ export function cookies(req: IncomingMessage): Record<string, string> {
 const first = async <T>(query: Promise<{ rows: unknown[] }>): Promise<T | undefined> => (await query).rows[0] as T | undefined;
 // Lock order (issue #25): installation → workspaces → invitations → advisory (email:, oidc:) → users row.
 export const advisoryLock = (tx: Executor, key: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
-export const lockUser = (tx: Executor, userId: string) => first<{ id: string; password: string | null }>(tx.execute(sql`SELECT id, password FROM users WHERE id = ${userId} FOR UPDATE`));
+/** Locks the account row; every credential, session and operator change takes it first. Undefined when there is no account. */
+export const lockUser = (tx: Executor, userId: string) => first<{ id: string }>(tx.execute(sql`SELECT id FROM ${users} WHERE id = ${userId} FOR UPDATE`));
+/** The account with this (normalised) email, with whether it holds instance operator authority. */
+export const accountByEmail = (executor: Executor, email: string) => first<{ id: string; name: string; email: string; isOperator: boolean }>(executor.execute(sql`SELECT id, name, email, EXISTS (SELECT 1 FROM instance_operators o WHERE o.user_id = ${users}.id) AS "isOperator" FROM ${users} WHERE email = ${email}`));
+export const hasAnyAccount = async (executor: Executor) => (await executor.select({ id: users.id }).from(users).limit(1)).length > 0;
+export const updateDisplayName = (executor: Executor, userId: string, name: string) => executor.update(users).set({ name, updatedAt: new Date() }).where(eq(users.id, userId));
 /** Per-workspace mutex for membership, ownership and invitation changes; returns false when the workspace is gone. */
 export const lockWorkspace = async (tx: Executor, workspaceId: string) => Boolean((await tx.execute(sql`SELECT id FROM workspaces WHERE id = ${workspaceId} FOR UPDATE`)).rowCount);
 export const memberRole = async (executor: Executor, workspaceId: string, userId: string) => (await first<{ role: string }>(executor.execute(sql`SELECT role FROM memberships WHERE workspace_id = ${workspaceId} AND user_id = ${userId}`)))?.role;

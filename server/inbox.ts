@@ -3,6 +3,7 @@ import { IntegrationError, assertProviderPath, fail, reportObject as plain, oper
 import type { OperationContext, ProviderRecord, ZernioApi } from './provider-core.ts';
 import { sql } from 'drizzle-orm';
 import { advisoryLock } from './auth.ts';
+import { users } from './schema.ts';
 import { listWhatsAppTemplates, validateWhatsAppTemplate } from './direct-providers.ts';
 import { publicMediaUrl, assetDeliveryIssue, validPostInstant as iso } from '../shared/social-posts.ts';
 import type { Executor } from './database.ts';
@@ -692,7 +693,7 @@ async function itemNotes(context: ProviderRecord, noteId?: string): Promise<void
     const accountId = id(url.searchParams.get('accountId')), kind = kindOf(url.searchParams.get('kind')), resourceId = id(url.searchParams.get('resourceId'));
     await context.assertProjectMapping(profileId);
     // The newest 500, returned oldest first; `truncated` says older notes exist beyond them.
-    const rows = (await context.db.execute(sql`SELECT n.id,n.author_id,u.name AS author_name,n.body,n.created_at FROM inbox_item_notes n LEFT JOIN users u ON u.id=n.author_id
+    const rows = (await context.db.execute(sql`SELECT n.id,n.author_id,u.name AS author_name,n.body,n.created_at FROM inbox_item_notes n LEFT JOIN ${users} u ON u.id=n.author_id
       WHERE n.project_id=${project.id} AND n.profile_id=${profileId} AND n.account_id=${accountId} AND n.kind=${kind} AND n.resource_id=${resourceId} ORDER BY n.created_at DESC, n.id DESC LIMIT 501`)).rows as ProviderRecord[];
     send(200, { notes: rows.slice(0, 500).reverse().map(view), truncated: rows.length > 500 }); return;
   }
@@ -708,7 +709,7 @@ async function itemNotes(context: ProviderRecord, noteId?: string): Promise<void
   const inserted = await context.db.execute(sql`INSERT INTO inbox_item_notes(id,project_id,profile_id,account_id,kind,resource_id,author_id,body,created_at) VALUES(${note.id},${project.id},${profileId},${note.accountId},${note.kind},${note.resourceId},${user.id},${text},${note.createdAt}) ON CONFLICT (id) DO NOTHING`);
   if (!inserted.rowCount) {
     // The same request again returns the saved note; any other use of the id is refused.
-    const saved = (await context.db.execute(sql`SELECT n.id,n.author_id,u.name AS author_name,n.body,n.created_at FROM inbox_item_notes n LEFT JOIN users u ON u.id=n.author_id
+    const saved = (await context.db.execute(sql`SELECT n.id,n.author_id,u.name AS author_name,n.body,n.created_at FROM inbox_item_notes n LEFT JOIN ${users} u ON u.id=n.author_id
       WHERE n.id=${note.id} AND n.project_id=${project.id} AND n.profile_id=${profileId} AND n.account_id=${note.accountId} AND n.kind=${note.kind} AND n.resource_id=${note.resourceId} AND n.author_id=${user.id} AND n.body=${text}`)).rows[0] as ProviderRecord | undefined;
     if (!saved) fail(409, 'INBOX_NOTE_CONFLICT', 'This note id is already used by a different note. Retry with a new id.');
     send(200, { note: view(saved!) }); return;
