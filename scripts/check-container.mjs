@@ -24,9 +24,9 @@ try {
   assert.equal(home.status, 200); assert.match(html, /<script nonce="[^"]+"[^>]+src="\/assets\//);
   const bundle = html.match(/src="(\/assets\/[^\"]+\.js)"/)[1];
   assert.equal((await fetch(base + bundle)).status, 200);
-  assert.match(html, /<script nonce="[^"]+" src="\/theme\.js"><\/script>/);
-  const appearance = await fetch(base + '/theme.js');
-  assert.equal(appearance.status, 200); assert.match(appearance.headers.get('content-type'), /^text\/javascript/);
-  assert.match(await appearance.text(), /ten98-campaign-theme/);
+  // The appearance boot is @ten98/ui's inline head script; the server's nonce lets it run under the CSP.
+  const appearance = html.match(/<script nonce="[^"]+">([^<]*ten98-campaign-theme[^<]*)<\/script>/);
+  assert.ok(appearance, 'The nonced inline appearance script is served.');
+  assert.ok(html.indexOf(appearance[0]) < html.indexOf('type="module"'), 'Appearance applies before the application module.');
   console.log('Container imports, non-root startup, database, auth boundary, frontend bundle and appearance bootstrap passed.');
 } finally { await app.close(); await closeDatabase(); await rm(dataDir, { recursive: true, force: true }); }
