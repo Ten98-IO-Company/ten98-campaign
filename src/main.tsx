@@ -2,7 +2,7 @@ import React, { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useR
 import { createRoot } from 'react-dom/client';
 import { AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppStat as Stat, AppSelect } from '@ten98/ui/app';
 import { ActivityFeed, Avatar, Badge as UiBadge, Icon as UiIcon, BarList, Image, DataTable, type DataColumn, Grid, Meter, ProportionBar, SegmentedControl, Select as UiSelect, SelectableList, Skeleton, Stack, Text } from '@ten98/ui';
-import { AccountMenu, SettingsLayout, type SettingsNavItem, type NavLinkComponent, Alert, Card, EmptyState, PageHeader, Progress, SectionNav, ToastProvider, useToast, DisplayFormatProvider, useDisplayFormat, useFocusReturn, ShortcutProvider, useCommand, saveFile, useTheme, ConfirmDialog, useConfirmDialog, Dialog, Disclosure, FormGrid, Link, AppShell, AppStateScreen, AppTopbar, AuthErrorBoundary, AuthFrameProvider, Button, DangerZoneFlow, FirstUserSetupFlow, FormActions, type IconName, Inline, OidcProviderButtons, ProjectCreateFlow, SearchField, SidebarNav, type SidebarNavItem, SidebarStatus, SignInFlow, StatusLine, WorkspaceCreateFlow, WorkspaceOnboarding, WorkspaceProjectSwitcher } from '@ten98/ui';
+import { AccountMenu, SettingsLayout, type SettingsNavItem, type NavLinkComponent, Alert, Card, EmptyState, PageHeader, Progress, SectionNav, ToastProvider, useToast, DisplayFormatProvider, useDisplayFormat, useFocusReturn, ShortcutProvider, useCommand, saveFile, ConfirmDialog, useConfirmDialog, useLeaveGuard, useTheme, Dialog, Disclosure, FormGrid, Link, AppShell, AppStateScreen, AppTopbar, AuthErrorBoundary, AuthFrameProvider, Button, DangerZoneFlow, FirstUserSetupFlow, FormActions, type IconName, Inline, OidcProviderButtons, ProjectCreateFlow, SearchField, SidebarNav, type SidebarNavItem, SidebarStatus, SignInFlow, StatusLine, WorkspaceCreateFlow, WorkspaceOnboarding, WorkspaceProjectSwitcher } from '@ten98/ui';
 // Library sheets only: @ten98/ui owns the page base, tables, fields and the sign-in card.
 import '@ten98/ui/app-tokens.css';
 import '@ten98/ui/app.css';
@@ -186,10 +186,11 @@ function App() {
   const [addIntent, setAddIntent] = useState<{ page: Page; campaignId: string } | null>(null);
   useEffect(() => { if (addIntent && addIntent.page !== navigation.page) setAddIntent(null); }, [navigation.page]);
   const modalRef = useRef(modal); modalRef.current = modal;
-  const [draftDirty, setDraftDirty] = useState(false), [discardPrompt, setDiscardPrompt] = useState(false);
+  const [draftDirty, setDraftDirty] = useState(false);
   const [inboxDirty, setInboxDirty] = useState(false), inboxDraft = useRef({ dirty: false, revision: 0 });
-  const discardSwitch = useRef(false);
-  const discardAction = useRef<(() => void) | null>(null), dirtyScopes = useRef(new Map<Element, number>());
+  // The shared discard prompt and unload warning. Campaign's router is its own, so its exits call leaveGuard.leave themselves.
+  const leaveGuard = useLeaveGuard((draftDirty && !!modal) || inboxDirty || campaignDirty);
+  const discardSwitch = useRef(false), dirtyScopes = useRef(new Map<Element, number>());
   const [inboxTarget, setInboxTarget] = useState<{ channel: 'sms' | 'whatsapp'; accountId?: string; search?: string; projectId: string } | null>(null);
   const [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [notice, setNotice] = useState(''), [error, setError] = useState(''), [signInInstead, setSignInInstead] = useState<{ offered: boolean; email: string }>({ offered: false, email: '' }), [accountOpen, setAccountOpen] = useState(false), [recovery, setRecovery] = useState<PasswordRecoveryState | null>(startupReset), [authUnconfirmed, setAuthUnconfirmed] = useState('');
   const rememberFocus = useFocusReturn(busy); // A failed owner setup or sign-in returns focus to the control that submitted it.
@@ -302,27 +303,22 @@ function App() {
   function leaveEditor(action: () => void, includeInbox = false, discardCampaign = false) {
     const guard = includeInbox ? campaignEditor.current : null;
     if (guard?.busy) { setNotice('Wait for the current campaign operation to finish before leaving.'); return; }
-    const proceed = () => {
+    const proceed = (discarded = false) => {
       if (includeInbox && campaignEditor.current?.busy) { setNotice('Wait for the current campaign operation to finish before leaving.'); return; }
+      if (discarded) { dirtyScopes.current.clear(); setDraftDirty(false); }
       if (guard?.dirty) {
         if (campaignEditor.current?.revision !== guard.revision) { setNotice('Your campaign draft changed. Try the action again to review discarding it.'); return; }
         if (discardCampaign) { campaignEditor.current.discard(); campaignGuardChanged(null); }
       }
       action();
     };
-    if (modalRef.current && draftDirty || includeInbox && inboxDraft.current.dirty || guard?.dirty) { discardSwitch.current = includeInbox; discardAction.current = proceed; setDiscardPrompt(true); }
+    if (modalRef.current && draftDirty || includeInbox && inboxDraft.current.dirty || guard?.dirty) { discardSwitch.current = includeInbox; void leaveGuard.leave(() => proceed(true), includeInbox ? { confirmLabel: 'Discard and switch' } : undefined); }
     else proceed();
   }
   // The discard prompt is a second modal dialog, so the editor's native focus return lands on a closed dialog; refocus its opener.
   function closeEditor() { leaveEditor(() => { const trigger = triggerRef.current; setModal(null); setTimeout(() => { if (trigger?.isConnected && !modalRef.current) trigger.focus(); }, 0); }); }
-  function keepEditing() { discardAction.current = null; setDiscardPrompt(false); }
-  function discardChanges() {
-    if (discardSwitch.current && campaignEditor.current?.busy) { setNotice('Wait for the current campaign operation to finish before leaving.'); return; }
-    const action = discardAction.current; discardAction.current = null;
-    dirtyScopes.current.clear(); setDraftDirty(false); setDiscardPrompt(false); action?.();
-  }
   function cancelEditor(event?: { preventDefault(): void }) {
-    event?.preventDefault(); if (discardPrompt) keepEditing(); else closeEditor();
+    event?.preventDefault(); if (leaveGuard.pending) leaveGuard.cancel(); else closeEditor();
   }
   function navigate(next: Navigation, mode: 'push' | 'replace' | 'pop' = 'push', popDelta = 0, discardConfirmed = false) {
     if (next.page === navigationRef.current.page && next.section === navigationRef.current.section && next.projectId === navigationRef.current.projectId && (next.item || '') === (navigationRef.current.item || '')) {
@@ -347,7 +343,7 @@ function App() {
         }
       });
     };
-    if (discardConfirmed) action(); else leaveEditor(action, true);
+    if (discardConfirmed) leaveGuard.pass(action); else leaveEditor(action, true);
   }
   function clearSignedInState() {
     ++loadVersion.current; activeProject.current = ''; pendingKeys.current.clear(); signedOutFocus.current = true;
@@ -367,7 +363,7 @@ function App() {
   // 401 hook with a closure from the last session change, so it reads the draft refs rather than draftDirty.
   function sessionExpired() {
     const unsavedChangesLost = !!modalRef.current && dirtyScopes.current.size > 0 || inboxDraft.current.dirty || campaignEditor.current?.dirty;
-    clearSignedInState(); discardAction.current = null; setDiscardPrompt(false); setPublishing(null); setError('');
+    clearSignedInState(); leaveGuard.cancel(); setPublishing(null); setError('');
     setSession((current: any) => ({ ...current, user: null, sessionEnded: true, ...(unsavedChangesLost ? { unsavedChangesLost } : {}) }));
   }
   function setPage(next: Page, nextSection = pageSections[next]?.[0] || '') { navigate({ page: next, section: nextSection, projectId: state?.projectId || '' }); }
@@ -433,7 +429,7 @@ function App() {
     const dialog = dialogRef.current;
     if (!dialog) return;
     dirtyScopes.current.clear(); setDraftDirty(false);
-    if (!(discardPrompt && discardSwitch.current)) { setDiscardPrompt(false); discardAction.current = null; }
+    if (!(leaveGuard.pending && discardSwitch.current)) leaveGuard.cancel();
     const onSaved = (event: Event) => {
       const form = (event as CustomEvent).detail?.form;
       if (form instanceof HTMLFormElement && (dialog.contains(form) || dirtyScopes.current.has(form))) editorSaved(form);
@@ -441,11 +437,6 @@ function App() {
     dialog.addEventListener('campaign:editor-saved', onSaved);
     return () => dialog.removeEventListener('campaign:editor-saved', onSaved);
   }, [modal]);
-  useEffect(() => {
-    if (!(draftDirty && modal) && !inboxDirty && !campaignDirty) return;
-    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
-    window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn);
-  }, [draftDirty, modal, inboxDirty, campaignDirty]);
   useEffect(() => {
     const onPop = () => {
       if (restoringPop.current) { const restored = restoringPop.current; restoringPop.current = null; restored(); return; }
@@ -730,7 +721,7 @@ function App() {
     {/* Publishing goes to real accounts, so the card asks once and names every destination (Mixpost's publish confirmation, #39). */}
     <ConfirmDialog open={!!publishing} initialFocus="cancel" onOpenChange={open => { if (!open) setPublishing(null); }} title={publishing?.queueId ? 'Add this post to its queue?' : publishing?.status === 'scheduled' ? 'Schedule this post?' : 'Publish this post now?'} description={publishing?.queueId ? 'Zernio reserves the next free slot in the selected queue and publishes the post then.' : publishing?.status === 'scheduled' ? 'Zernio publishes the post at its planned time to every account below.' : 'Zernio publishes the post immediately to every account below.'} confirmLabel={publishing?.queueId ? 'Add to queue' : publishing?.status === 'scheduled' ? 'Schedule post' : 'Publish now'} onConfirm={async () => { const post = publishing; if (post) await publish(post); setPublishing(null); }}>{publishing && <Stack gap={1}><Text size="sm"><Text as="strong">Accounts:</Text> {postRecipients(publishing, remote.accounts?.accounts || [])}</Text>{publishing.scheduledAt && !publishing.queueId && <Text size="sm"><Text as="strong">Planned time:</Text> {format.dateTime(publishing.scheduledAt)}</Text>}</Stack>}</ConfirmDialog>
     {confirmDialog}
-    <ConfirmDialog open={discardPrompt} onOpenChange={open => { if (!open) keepEditing(); }} danger title="Discard unsaved changes?" description="Your edits will be lost." confirmLabel={discardSwitch.current ? 'Discard and switch' : 'Discard changes'} cancelLabel="Keep editing" onConfirm={discardChanges}/>
+    {leaveGuard.dialog}
   </>;
 }
 function Select({ label, name, value, options }: { label: string; name: string; value: string; options: (string | string[])[] }) { return <AppSelect label={label} name={name} value={value} options={options.map(o => typeof o === 'string' ? [o, title(o)] : [o[0], o[1]])}/>; }

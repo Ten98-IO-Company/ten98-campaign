@@ -37,8 +37,23 @@ test('consequential confirms open with focus on Cancel', async () => {
 
 test('every confirm is a plain danger dialog or declares where focus starts', async () => {
   const all = await confirms();
-  assert.ok(all.length >= 20, `found ${all.length} confirms`);
+  // main.tsx's discard prompt is now useLeaveGuard's own ConfirmDialog, checked in the leave-guard test below.
+  assert.ok(all.length >= 19, `found ${all.length} confirms`);
   for (const { file, tag } of all) assert.ok(/\sdanger(?=[\s/>])(?!=)/.test(tag) || /\binitialFocus="(cancel|confirm)"/.test(tag), `${file}: ${tag.slice(0, 120)}`);
+});
+
+// useLeaveGuard renders a danger ConfirmDialog by default, so it opens on Keep editing. No guard in src/ or exit it asks for
+// may turn that off; a per-exit prompt only renames the discard button.
+test('leave-guard prompts stay danger questions that open on Keep editing', async () => {
+  const guard = await readFile(new URL('../node_modules/@ten98/ui/dist/leave-guard.js', import.meta.url), 'utf8');
+  assert.match(guard, /const leavePrompt = \{[^}]*\bdanger: true\b[^}]*\}/); assert.doesNotMatch(guard.match(/const leavePrompt = \{[^}]*\}/)![0], /initialFocus/);
+  const files = (await readdir(new URL('../src/', import.meta.url))).filter(name => /\.tsx$/.test(name)), calls: string[] = [];
+  for (const file of files) {
+    const source = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8');
+    for (const match of source.matchAll(/\buseLeaveGuard\([^\n]*?\);|\bleaveGuard\.leave\([^\n]*?\);/g)) calls.push(`${file}: ${match[0]}`);
+  }
+  assert.ok(calls.some(call => call.startsWith('main.tsx: useLeaveGuard(')), 'main.tsx uses the shared leave guard');
+  for (const call of calls) assert.doesNotMatch(call, /danger: false|initialFocus: 'confirm'|confirm: /, call.slice(0, 160));
 });
 
 // The imperative useConfirmDialog() renders the same ConfirmDialog, so its questions follow the same rule: the hook's

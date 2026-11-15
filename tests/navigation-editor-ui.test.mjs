@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
+import { jsx } from 'react/jsx-runtime';
+import { ConfirmDialog } from '@ten98/ui';
 import { campaignCreationRoute } from '../src/campaign-creation.ts';
 
 const source = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
@@ -126,6 +128,23 @@ function declaration(name) {
   // Several tiny handlers occupy one line; larger handlers end at the outer two-space brace.
   return source.slice(start, source.indexOf('\n', start) < end && source.slice(start, source.indexOf('\n', start)).trimEnd().endsWith(' }') ? source.indexOf('\n', start) : end).trim();
 }
+// @ten98/ui's own useLeaveGuard, run outside React against the test window: hook slots persist across renders, callbacks keep
+// their identity while their dependencies hold, and an effect's cleanup runs before it re-runs, as after a React commit.
+const leaveGuardSource = readFileSync(new URL('../node_modules/@ten98/ui/dist/leave-guard.js', import.meta.url), 'utf8').replace(/^(?:'use client';|import .+;)\r?\n/gm, '').replace(/^export /gm, '');
+function leaveGuardRuntime(window) {
+  const slots = []; let next = 0, effects = [];
+  const changed = (before, deps) => !before || !deps || deps.some((value, index) => !Object.is(value, before[index]));
+  const useState = initial => { const index = next++; return slots[index] ||= [initial, value => { slots[index][0] = typeof value === 'function' ? value(slots[index][0]) : value; }]; };
+  const useRef = current => slots[next++] ||= { current };
+  const useCallback = (callback, deps) => { const index = next++; if (changed(slots[index]?.deps, deps)) slots[index] = { callback, deps }; return slots[index].callback; };
+  const useEffect = (run, deps) => {
+    const index = next++, before = slots[index];
+    if (changed(before?.deps, deps)) { slots[index] = { deps, cleanup: before?.cleanup }; effects.push(() => { slots[index].cleanup?.(); slots[index].cleanup = run(); }); }
+  };
+  const useLeaveGuard = new Function('useCallback', 'useEffect', 'useRef', 'useState', '_jsx', 'ConfirmDialog', 'window', leaveGuardSource + '; return useLeaveGuard;')(useCallback, useEffect, useRef, useState, jsx, ConfirmDialog, window);
+  return dirty => { next = 0; effects = []; const guard = useLeaveGuard(dirty); for (const run of effects) run(); return guard; };
+}
+const leaveGuardDirty = new Function('draftDirty', 'modal', 'inboxDirty', 'campaignDirty', `return ${source.match(/^  const leaveGuard = useLeaveGuard\((.+)\);$/m)[1]};`);
 const stateFor = projectId => ({ projectId, projects: [{ id: 'a' }, { id: 'b' }] });
 function app(href = 'https://campaign.example/?view=overview&project=a', initial = stateFor('a')) {
   const listeners = new Map(), entries = [{ url: new URL(href), state: { campaignIndex: 0 } }]; let index = 0;
@@ -137,24 +156,32 @@ function app(href = 'https://campaign.example/?view=overview&project=a', initial
   const dialog = { contains: () => true, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {}, close() { this.open = false; }, showModal() { this.open = true; } }, context = {
     window, document: { activeElement: null }, pageSections, navigationUrl, readNavigation, editorValues, campaignCreationRoute, DOMException, setTimeout,
     state: initial, navigationRef: { current: readNavigation(window.location.search) }, historyIndex: { current: 0 }, restoringPop: { current: null },
-    modal: null, modalRef: { current: null }, dialogRef: { current: dialog }, triggerRef: { current: null }, signedOutFocus: { current: false }, draftDirty: false, discardPrompt: false, discardAction: { current: null }, dirtyScopes: { current: new Map() },
+    modal: null, modalRef: { current: null }, dialogRef: { current: dialog }, triggerRef: { current: null }, signedOutFocus: { current: false }, draftDirty: false, dirtyScopes: { current: new Map() },
     inboxDirty: false, inboxDraft: { current: { dirty: false, revision: 0 } }, discardSwitch: { current: false }, pendingKeys: { current: new Map() },
     campaignEditor: { current: null }, campaignDirty: false, creationIntent: null, addIntent: null, creationSerial: { current: 0 }, canWrite: true, busy: false,
     loadVersion: { current: 0 }, activeProject: { current: initial?.projectId || '' }, workspace: { id: 'workspace-a' }, FormData: class { constructor(form) { return new Map(Object.entries(form)); } }, error: '', calls: [],
     api: async path => { context.calls.push(path); return stateFor(path.includes('projectId=b') ? 'b' : 'a'); },
     setState: value => { context.state = value; }, setNavigation: value => { context.navigation = value; }, setLoading: value => { context.loading = value; },
-    setDraftDirty: value => { context.draftDirty = value; }, setInboxDirty: value => { context.inboxDirty = value; }, setDiscardPrompt: value => { context.discardPrompt = value; }, setModal: value => { context.modal = value; context.modalRef.current = value; }, setError: value => { context.error = value; }, setNotice: value => { context.notice = value; }, setRemote: () => {}, setSession: value => { context.session = typeof value === 'function' ? value(context.session) : value; }, setPublishing: value => { context.publishing = value; },
+    setDraftDirty: value => { context.draftDirty = value; }, setInboxDirty: value => { context.inboxDirty = value; }, setModal: value => { context.modal = value; context.modalRef.current = value; }, setError: value => { context.error = value; }, setNotice: value => { context.notice = value; }, setRemote: () => {}, setSession: value => { context.session = typeof value === 'function' ? value(context.session) : value; }, setPublishing: value => { context.publishing = value; },
     setCampaignDirty: value => { context.campaignDirty = value; }, setCreationIntent: value => { context.creationIntent = typeof value === 'function' ? value(context.creationIntent) : value; }, setAddIntent: value => { context.addIntent = value; },
     run: async work => { try { return await work(); } catch (error) { if (error.name !== 'AbortError') context.error = error.message; } },
   };
+  // Each read renders the guard with main.tsx's own dirty condition (modal is the open editor), so it sees the current state.
+  const renderLeaveGuard = leaveGuardRuntime(window);
+  Object.defineProperty(context, 'leaveGuard', { enumerable: true, get: () => renderLeaveGuard(leaveGuardDirty(context.draftDirty, context.modalRef.current, context.inboxDirty, context.campaignDirty)) });
+  // The guard's open prompt and its two answers, for the test only; an answer waits until the guard settles, as a later click would.
+  Object.defineProperties(context, {
+    prompt: { get: () => context.leaveGuard.dialog?.props || null },
+    discardPrompt: { get: () => !!context.leaveGuard.dialog },
+    keepEditing: { value: () => { context.prompt.onOpenChange(false); return tick(); } },
+    discardChanges: { value: () => { context.prompt.onConfirm(); return tick(); } },
+  });
   const guardCallback = source.match(/^  const campaignGuardChanged = (.+)$/m)[1];
   context.campaignGuardChanged = new Function(...Object.keys(context), 'useCallback', stripTypeScriptTypes('const callback = ' + guardCallback) + '; return callback;')(...Object.values(context), callback => callback);
   const invoke = (name, ...args) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(declaration(name))});`)(...Object.values(context))(...args);
-  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'keepEditing', 'discardChanges', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'clearSignedInState', 'signOut', 'sessionExpired', 'submitForm', 'saveEditor', 'startCampaignCreation', 'continueCampaignCreation', 'creationHandled', 'addToCampaign']) context[name] = (...args) => invoke(name, ...args);
+  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'clearSignedInState', 'signOut', 'sessionExpired', 'submitForm', 'saveEditor', 'startCampaignCreation', 'continueCampaignCreation', 'creationHandled', 'addToCampaign']) context[name] = (...args) => invoke(name, ...args);
   const popStart = source.indexOf('    const onPop = () =>'), popEnd = source.indexOf('\n  }, [state, draftDirty]);', popStart);
   context.listen = () => new Function(...Object.keys(context), `return (${stripTypeScriptTypes('function listen(){' + source.slice(popStart, popEnd) + '}')})();`)(...Object.values(context));
-  const unloadStart = source.indexOf('    if (!(draftDirty && modal) && !inboxDirty && !campaignDirty) return;'), unloadEnd = source.indexOf('\n  }, [draftDirty, modal, inboxDirty, campaignDirty]);', unloadStart);
-  context.warnOnUnload = () => new Function(...Object.keys(context), 'modal', `return (${stripTypeScriptTypes('function listen(){' + source.slice(unloadStart, unloadEnd) + '}')})();`)(...Object.values(context), context.modalRef.current);
   context.unload = event => listeners.get('beforeunload')?.(event);
   const modalStart = source.indexOf('    const dialog = dialogRef.current;'), modalEnd = source.indexOf('\n  }, [modal]);', modalStart);
   context.syncModal = () => new Function(...Object.keys(context), `return (${stripTypeScriptTypes('function sync(){' + source.slice(modalStart, modalEnd) + '}')})();`)(...Object.values(context));
@@ -207,14 +234,14 @@ function campaignGuard(ui, revision = 'first edit', busy = false) {
   ui.campaignGuardChanged(result.guard); return result;
 }
 
-test('campaign drafts guard navigation and the shared launcher, retaining edits on Keep editing and changed revisions', () => {
+test('campaign drafts guard navigation and the shared launcher, retaining edits on Keep editing and changed revisions', async () => {
   const ui = app('https://campaign.example/?view=direct&project=a'), draft = campaignGuard(ui);
   ui.startCampaignCreation('sms'); assert.equal(ui.discardPrompt, true); assert.equal(ui.modalRef.current, null);
-  ui.keepEditing(); assert.equal(draft.discarded, 0); assert.equal(ui.campaignDirty, true);
+  await ui.keepEditing(); assert.equal(draft.discarded, 0); assert.equal(ui.campaignDirty, true);
   ui.setPage('Calendar'); assert.equal(ui.discardPrompt, true);
-  campaignGuard(ui, 'a newer edit'); ui.discardChanges();
+  campaignGuard(ui, 'a newer edit'); await ui.discardChanges();
   assert.equal(draft.discarded, 0); assert.equal(ui.navigationRef.current.page, 'Direct campaigns'); assert.match(ui.notice, /draft changed/);
-  ui.startCampaignCreation('whatsapp'); ui.discardChanges();
+  ui.startCampaignCreation('whatsapp'); await ui.discardChanges();
   assert.equal(ui.modalRef.current.type, 'campaign-start'); assert.equal(ui.modalRef.current.campaignKind, 'whatsapp'); assert.equal(ui.campaignEditor.current, null);
 });
 
@@ -225,22 +252,22 @@ test('pending campaign work blocks navigation and creation until it finishes, in
   ui.window.history.go(-1); await tick();
   assert.equal(ui.navigationRef.current.page, 'Direct campaigns'); assert.equal(new URL(ui.window.location.href).searchParams.get('view'), 'direct'); assert.equal(ui.discardPrompt, false);
   ui.campaignGuardChanged({ ...draft.guard, busy: false }); ui.window.history.go(-1); await tick();
-  assert.equal(ui.discardPrompt, true); ui.keepEditing(); assert.equal(draft.discarded, 0);
-  ui.window.history.go(-1); await tick(); ui.discardChanges(); await tick();
+  assert.equal(ui.discardPrompt, true); await ui.keepEditing(); assert.equal(draft.discarded, 0);
+  ui.window.history.go(-1); await tick(); await ui.discardChanges(); await tick();
   assert.equal(ui.navigationRef.current.page, 'Overview'); assert.equal(draft.discarded, 1);
 });
 
-test('a campaign operation starting while discard is open cannot be discarded or navigated away', () => {
+test('a campaign operation starting while discard is open cannot be discarded or navigated away', async () => {
   const ui = app('https://campaign.example/?view=direct&project=a'), draft = campaignGuard(ui);
   ui.setPage('Calendar'); assert.equal(ui.discardPrompt, true);
-  ui.campaignGuardChanged({ ...draft.guard, busy: true }); ui.discardChanges();
+  ui.campaignGuardChanged({ ...draft.guard, busy: true }); await ui.discardChanges();
   assert.equal(ui.navigationRef.current.page, 'Direct campaigns'); assert.equal(draft.discarded, 0); assert.match(ui.notice, /operation to finish/);
 });
 
-test('accepted section navigation discards a campaign even when its editor component stays mounted', () => {
+test('accepted section navigation discards a campaign even when its editor component stays mounted', async () => {
   const ui = app('https://campaign.example/?view=direct&section=campaigns&project=a'), draft = campaignGuard(ui);
   ui.setPage('Direct campaigns', 'people'); assert.equal(ui.discardPrompt, true); assert.equal(draft.discarded, 0);
-  ui.discardChanges();
+  await ui.discardChanges();
   assert.equal(ui.navigationRef.current.page, 'Direct campaigns'); assert.equal(ui.navigationRef.current.section, 'people');
   assert.equal(draft.discarded, 1); assert.equal(ui.campaignEditor.current, null); assert.equal(ui.campaignDirty, false);
 });
@@ -249,7 +276,7 @@ test('project switching retains campaign drafts through failed, obsolete and new
   for (const outcome of ['success', 'failure', 'obsolete', 'edited', 'busy']) {
     const ui = app('https://campaign.example/?view=direct&project=a'), response = deferred(), draft = campaignGuard(ui);
     ui.api = async path => { ui.calls.push(path); return response.promise; };
-    ui.changeProject('b'); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []); ui.discardChanges();
+    ui.changeProject('b'); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []); await ui.discardChanges();
     assert.equal(draft.discarded, 0, 'The original campaign draft remains until the new project is verified.');
     if (outcome === 'obsolete') ui.setPage('Direct campaigns');
     if (outcome === 'edited') campaignGuard(ui, 'edited while loading');
@@ -267,8 +294,8 @@ test('project switching retains campaign drafts through failed, obsolete and new
 
 test('campaign-only edits protect browser unload and an expired session reports their loss', () => {
   const ui = app('https://campaign.example/?view=direct&project=a'); campaignGuard(ui);
-  const cleanup = ui.warnOnUnload(); let prevented = 0; const event = { preventDefault() { prevented++; } };
-  ui.unload(event); assert.equal(prevented, 1); assert.equal(event.returnValue, ''); cleanup();
+  ui.leaveGuard; let prevented = 0; const event = { preventDefault() { prevented++; } };
+  ui.unload(event); assert.equal(prevented, 1); assert.equal(event.returnValue, true);
   ui.session = { user: { id: 'u' } }; ui.sessionExpired();
   assert.equal(ui.session.unsavedChangesLost, true); assert.equal(ui.campaignEditor.current, null); assert.equal(ui.campaignDirty, false);
 });
@@ -388,10 +415,10 @@ test('Escape, closing, and project navigation preserve edits until explicit disc
   assert.equal(ui.dirtyScopes.current.size, 2, 'A late save cannot clear edits made after it began.');
   ui.editorSaved(first); assert.equal(ui.draftDirty, true, 'Another form still has unsaved changes.');
   ui.closeEditor(); assert.equal(ui.discardPrompt, true); assert.ok(ui.modalRef.current);
-  ui.keepEditing(); assert.equal(ui.discardPrompt, false); assert.equal(ui.draftDirty, true); assert.ok(ui.modalRef.current);
+  await ui.keepEditing(); assert.equal(ui.discardPrompt, false); assert.equal(ui.draftDirty, true); assert.ok(ui.modalRef.current);
   let prevented = 0; ui.cancelEditor({ preventDefault() { prevented++; } }); assert.equal(prevented, 1); assert.equal(ui.discardPrompt, true);
-  ui.cancelEditor({ preventDefault() { prevented++; } }); assert.equal(ui.discardPrompt, false); assert.equal(ui.draftDirty, true);
-  ui.changeProject('b'); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []); ui.discardChanges(); await tick();
+  ui.cancelEditor({ preventDefault() { prevented++; } }); assert.equal(ui.discardPrompt, false); assert.equal(ui.draftDirty, true); await tick();
+  ui.changeProject('b'); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []); await ui.discardChanges(); await tick();
   assert.equal(ui.state.projectId, 'b'); assert.equal(ui.draftDirty, false); assert.equal(ui.modalRef.current, null);
 });
 
@@ -399,7 +426,7 @@ test('unsaved Back restores the current entry while Keep editing preserves Forwa
   const ui = app(); ui.setPage('Campaigns'); ui.setPage('Publishing', 'posts');
   ui.modalRef.current = { type: 'post' }; ui.draftDirty = true; ui.listen();
   ui.window.history.go(-1); await tick(); assert.equal(ui.navigation.page, 'Publishing'); assert.equal(new URL(ui.window.location.href).searchParams.get('view'), 'publishing'); assert.equal(ui.discardPrompt, true);
-  ui.keepEditing(); ui.window.history.go(-1); await tick(); assert.equal(ui.discardPrompt, true); ui.discardChanges(); ui.listen(); await tick();
+  await ui.keepEditing(); ui.window.history.go(-1); await tick(); assert.equal(ui.discardPrompt, true); await ui.discardChanges(); ui.listen(); await tick();
   assert.equal(ui.navigation.page, 'Campaigns'); ui.window.history.go(1); await tick(); assert.equal(ui.navigation.page, 'Publishing');
 });
 
@@ -412,22 +439,22 @@ test('button-based edits are detected while preview and platform-tab buttons lea
   ui.watchEditorButtons(click(null)); values.pop(); await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(ui.draftDirty, true);
 });
 
-test('inbox drafts guard page exits without a modal and leave same-route and unrelated modal closes intact', () => {
+test('inbox drafts guard page exits without a modal and leave same-route and unrelated modal closes intact', async () => {
   const ui = app('https://campaign.example/?view=inbox&project=a'); ui.inboxDraftChanged(true);
   ui.setPage('Unified inbox'); assert.equal(ui.discardPrompt, false); assert.equal(ui.inboxDirty, true);
   ui.modalRef.current = { type: 'project' }; ui.closeEditor(); assert.equal(ui.modalRef.current, null); assert.equal(ui.inboxDirty, true); assert.equal(ui.discardPrompt, false);
-  ui.modalRef.current = { type: 'project' }; ui.draftDirty = true; ui.closeEditor(); ui.discardChanges();
+  ui.modalRef.current = { type: 'project' }; ui.draftDirty = true; ui.closeEditor(); await ui.discardChanges();
   assert.equal(ui.modalRef.current, null); assert.equal(ui.inboxDirty, true, 'Discarding another editor does not discard the inbox.');
   ui.setPage('Calendar'); assert.equal(ui.discardPrompt, true); assert.equal(ui.discardSwitch.current, true); assert.equal(ui.navigationRef.current.page, 'Unified inbox');
-  ui.keepEditing(); assert.equal(ui.inboxDirty, true); assert.equal(ui.discardPrompt, false);
-  ui.setPage('Calendar'); ui.discardChanges(); assert.equal(ui.navigationRef.current.page, 'Calendar'); assert.equal(ui.inboxDirty, false);
+  await ui.keepEditing(); assert.equal(ui.inboxDirty, true); assert.equal(ui.discardPrompt, false);
+  ui.setPage('Calendar'); await ui.discardChanges(); assert.equal(ui.navigationRef.current.page, 'Calendar'); assert.equal(ui.inboxDirty, false);
 });
 
 test('discarded project navigation keeps inbox protection through failed, obsolete and newly edited loads', async () => {
   for (const outcome of ['success', 'failure', 'obsolete', 'edited']) {
     const ui = app('https://campaign.example/?view=inbox&project=a'), response = deferred(); ui.inboxDraftChanged(true);
     ui.api = async path => { ui.calls.push(path); return response.promise; };
-    ui.changeProject('b'); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []); ui.discardChanges();
+    ui.changeProject('b'); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []); await ui.discardChanges();
     assert.equal(ui.inboxDirty, true, 'The original inbox remains protected until the switch commits.');
     if (outcome === 'obsolete') ui.setPage('Unified inbox');
     if (outcome === 'edited') ui.inboxDraftChanged(true);
@@ -443,24 +470,25 @@ test('discarded project navigation keeps inbox protection through failed, obsole
 test('inbox Back and Forward require explicit discard, preserve history on Keep editing, and retain drafts on project-load failure', async () => {
   const ui = app(); ui.setPage('Unified inbox'); ui.inboxDraftChanged(true); ui.listen();
   ui.window.history.go(-1); await tick(); assert.equal(ui.navigationRef.current.page, 'Unified inbox'); assert.equal(ui.discardPrompt, true); assert.equal(new URL(ui.window.location.href).searchParams.get('view'), 'inbox');
-  ui.keepEditing(); ui.window.history.go(-1); await tick(); ui.discardChanges(); await tick();
+  await ui.keepEditing(); ui.window.history.go(-1); await tick(); await ui.discardChanges(); await tick();
   assert.equal(ui.navigationRef.current.page, 'Overview'); assert.equal(ui.inboxDirty, false);
   ui.window.history.go(1); await tick(); assert.equal(ui.navigationRef.current.page, 'Unified inbox');
   ui.changeProject('b'); await tick(); ui.inboxDraftChanged(true); ui.listen(); ui.api = async () => { throw new Error('Offline'); };
-  ui.window.history.go(-1); await tick(); ui.discardChanges(); await tick();
+  ui.window.history.go(-1); await tick(); await ui.discardChanges(); await tick();
   assert.equal(ui.state.projectId, 'b'); assert.equal(ui.inboxDirty, true); assert.equal(ui.error, 'Offline'); assert.equal(new URL(ui.window.location.href).searchParams.get('project'), 'b');
 });
 
 test('inbox-only drafts register native unload protection, show an accessible confirmation, and guard sign-out', async () => {
   const ui = app('https://campaign.example/?view=inbox&project=a'); ui.inboxDraftChanged(true);
-  const cleanup = ui.warnOnUnload(); let prevented = 0; const event = { preventDefault() { prevented++; } }; ui.unload(event);
-  assert.equal(prevented, 1); assert.equal(event.returnValue, ''); cleanup(); ui.unload(event); assert.equal(prevented, 1);
+  ui.leaveGuard; let prevented = 0; const event = { preventDefault() { prevented++; } }; ui.unload(event);
+  assert.equal(prevented, 1); assert.equal(event.returnValue, true);
+  ui.inboxDraftChanged(false); ui.leaveGuard; ui.unload(event); assert.equal(prevented, 1, 'A clean screen has no unload warning.'); ui.inboxDraftChanged(true);
   ui.signOut(); assert.equal(ui.discardPrompt, true); assert.deepEqual(ui.calls, []);
-  ui.keepEditing(); assert.equal(ui.discardPrompt, false); assert.equal(ui.inboxDirty, true);
-  ui.api = async path => { ui.calls.push(path); return { user: null }; }; ui.signOut(); ui.discardChanges(); await tick();
+  await ui.keepEditing(); assert.equal(ui.discardPrompt, false); assert.equal(ui.inboxDirty, true);
+  ui.api = async path => { ui.calls.push(path); return { user: null }; }; ui.signOut(); await ui.discardChanges(); await tick();
   assert.deepEqual(ui.calls, ['/auth/logout', '/session']); assert.equal(ui.inboxDirty, false); assert.equal(ui.state, null);
-  // The prompt is the library's accessible ConfirmDialog, opened by discardPrompt and cancelled into keepEditing.
-  assert.match(source, /<ConfirmDialog open=\{discardPrompt\} onOpenChange=\{open => \{ if \(!open\) keepEditing\(\); \}\} danger title="Discard unsaved changes\?"[^>]*cancelLabel="Keep editing" onConfirm=\{discardChanges\}/);
+  // The prompt is the library's accessible ConfirmDialog: Campaign renders useLeaveGuard's own dialog once, without its own confirm.
+  assert.equal(source.match(/\{leaveGuard\.dialog\}/g).length, 1); assert.match(source, /^  const leaveGuard = useLeaveGuard\(\(draftDirty && !!modal\) \|\| inboxDirty \|\| campaignDirty\);$/m);
   // The post editor is wide and its composer renders Save and Cancel into the Dialog's always-visible footer.
   assert.match(source, /<Dialog open=\{!!modal\} size=\{modal\?\.type === 'post' \? 'wide' : 'default'\} footer=\{modal\?\.type === 'post' && !modal\.item\?\.externalId \? <Inline ref=\{setComposerActions\} gap=\{2\}\/> : undefined\}/);
   assert.match(source, /<PostComposer key=[^\n]+? actionsHost=\{composerActions\}/); assert.match(source, /<Stack ref=\{dialogRef\} gap=\{4\}/);
@@ -479,9 +507,9 @@ test('sign-out clears the page and project from the address and asks for sign-in
   assert.match(source, /signOut=\{\{ onClick: signOut \}\}/, 'Signing out without project access uses the same path.');
 });
 
-test('an ended session returns to sign-in, keeps the deep link and clears the signed-in state', () => {
+test('an ended session returns to sign-in, keeps the deep link and clears the signed-in state', async () => {
   const ui = app('https://campaign.example/?view=approvals&project=a'); ui.session = { user: { id: 'u' }, oidcEnabled: true };
-  ui.pendingKeys.current.set('operation', 'key'); ui.modalRef.current = { type: 'campaign' }; ui.publishing = { id: 'post' }; ui.discardPrompt = true; ui.error = 'Sign in to continue.';
+  ui.pendingKeys.current.set('operation', 'key'); ui.modalRef.current = { type: 'campaign' }; ui.publishing = { id: 'post' }; ui.draftDirty = true; ui.closeEditor(); assert.equal(ui.discardPrompt, true); ui.error = 'Sign in to continue.';
   ui.sessionExpired();
   assert.deepEqual(ui.session, { user: null, oidcEnabled: true, sessionEnded: true });
   assert.equal(ui.state, null); assert.equal(ui.modalRef.current, null); assert.equal(ui.publishing, null); assert.equal(ui.discardPrompt, false); assert.equal(ui.error, '');
@@ -489,6 +517,28 @@ test('an ended session returns to sign-in, keeps the deep link and clears the si
   const url = new URL(ui.window.location.href); assert.equal(url.searchParams.get('view'), 'approvals'); assert.equal(url.searchParams.get('project'), 'a');
   assert.equal(ui.navigationRef.current.page, 'Approvals', 'Signing in again reloads the same page and project.');
   assert.match(source, /useEffect\(\(\) => \{ if \(!session\?\.user\) return; endSession = sessionExpired; return \(\) => \{ endSession = null; \}; \}, \[session\]\);/);
+});
+
+test('an ended session cancels an open discard prompt as Keep editing, so the exit it held never runs', async () => {
+  const ui = app(), focused = []; ui.session = { user: { id: 'u' } }; ui.triggerRef.current = { isConnected: true, focus() { focused.push('trigger'); } };
+  ui.setModal({ type: 'campaign', item: { id: 'c' } }); ui.draftDirty = true; ui.closeEditor(); assert.equal(ui.discardPrompt, true);
+  let exits = 0; const waiting = ui.leaveGuard.leave(() => { exits++; });
+  ui.sessionExpired(); assert.equal(ui.discardPrompt, false);
+  assert.equal(await waiting, false, 'The waiting exit resolves as staying.'); await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(exits, 0); assert.deepEqual(focused, [], 'The editor close never ran, so its opener is not refocused.'); assert.equal(ui.leaveGuard.pending, false);
+});
+
+test('a section switch asks to Discard and switch, closing the editor asks to Discard changes, both on the shared danger prompt', async () => {
+  const ui = app('https://campaign.example/?view=direct&section=campaigns&project=a'), draft = campaignGuard(ui);
+  ui.setPage('Direct campaigns', 'people');
+  const { type, props } = ui.leaveGuard.dialog, shown = ({ title, description, confirmLabel, cancelLabel, danger, initialFocus }) => ({ title, description, confirmLabel, cancelLabel, danger, initialFocus });
+  assert.equal(type, ConfirmDialog);
+  // A danger ConfirmDialog without initialFocus opens on its cancel button, Keep editing.
+  assert.deepEqual(shown(props), { title: 'Discard unsaved changes?', description: 'Your changes have not been saved.', confirmLabel: 'Discard and switch', cancelLabel: 'Keep editing', danger: true, initialFocus: undefined });
+  await ui.keepEditing(); assert.equal(ui.navigationRef.current.section, 'campaigns'); assert.equal(draft.discarded, 0);
+  ui.campaignGuardChanged(null); ui.setModal({ type: 'post' }); ui.syncModal(); ui.draftDirty = true; ui.closeEditor();
+  assert.deepEqual(shown(ui.prompt), { ...shown(props), confirmLabel: 'Discard changes' });
+  ui.setModal({ type: 'campaign' }); ui.syncModal(); assert.equal(ui.discardPrompt, false, 'Replacing the editor closes a prompt that was not for a switch.');
 });
 
 test('an ended session with an unsaved editor or inbox draft tells the sign-in screen that the changes were lost', () => {
@@ -508,7 +558,7 @@ test('an ended session with an unsaved editor or inbox draft tells the sign-in s
 test('discarding editor changes returns focus to the control that opened the editor', async () => {
   const ui = app(), focused = []; ui.triggerRef.current = { isConnected: true, focus() { focused.push('trigger'); } };
   ui.setModal({ type: 'campaign', item: { id: 'c' } }); ui.draftDirty = true; ui.closeEditor(); assert.equal(ui.discardPrompt, true);
-  ui.discardChanges(); assert.equal(ui.modalRef.current, null); await new Promise(resolve => setTimeout(resolve, 5));
+  await ui.discardChanges(); assert.equal(ui.modalRef.current, null); await new Promise(resolve => setTimeout(resolve, 5));
   assert.deepEqual(focused, ['trigger']);
   ui.triggerRef.current = { isConnected: false, focus() { focused.push('removed'); } }; ui.setModal({ type: 'placement', item: { id: 'p' } }); ui.closeEditor();
   await new Promise(resolve => setTimeout(resolve, 5)); assert.deepEqual(focused, ['trigger'], 'A trigger that left the page is not focused.');
@@ -519,7 +569,7 @@ test('Forward protects the mounted inbox and unavailable historical projects nev
   const ui = app(); ui.setPage('Unified inbox'); ui.setPage('Calendar'); ui.listen(); ui.window.history.go(-1); await tick();
   ui.inboxDraftChanged(true); ui.window.history.go(1); await tick();
   assert.equal(ui.discardPrompt, true); assert.equal(new URL(ui.window.location.href).searchParams.get('view'), 'inbox');
-  ui.keepEditing(); ui.window.history.go(1); await tick(); ui.discardChanges(); await tick();
+  await ui.keepEditing(); ui.window.history.go(1); await tick(); await ui.discardChanges(); await tick();
   assert.equal(ui.navigationRef.current.page, 'Calendar'); assert.equal(ui.inboxDirty, false);
   ui.setPage('Unified inbox'); ui.inboxDraftChanged(true); ui.state.projects = [{ id: 'a' }];
   ui.window.history.pushState({ campaignIndex: ui.historyIndex.current + 1 }, '', '?view=inbox&project=foreign'); ui.window.history.go(-1); await tick(); ui.window.history.go(1); await tick();
@@ -541,8 +591,8 @@ test('actual project and workspace creation completion guards inbox drafts befor
     creation.resolve(kind === 'project' ? { project: { id: 'new' } } : { projectId: 'new' }); await saving;
     ui.syncModal(); assert.equal(ui.modalRef.current, null); assert.equal(ui.discardPrompt, true, 'Closing the saved creation modal must retain the switch confirmation.');
     assert.deepEqual(ui.calls, [[kind === 'project' ? '/projects' : '/workspaces', 'POST']]); assert.equal(ui.state.projectId, 'a'); assert.equal(ui.inboxDirty, true);
-    if (outcome === 'keep') { ui.keepEditing(); assert.equal(ui.state.projectId, 'a'); assert.equal(ui.inboxDirty, true); continue; }
-    ui.discardChanges(); await tick(); if (outcome === 'edited') ui.inboxDraftChanged(true); scoped.resolve(created); await tick();
+    if (outcome === 'keep') { await ui.keepEditing(); assert.equal(ui.state.projectId, 'a'); assert.equal(ui.inboxDirty, true); continue; }
+    await ui.discardChanges(); await tick(); if (outcome === 'edited') ui.inboxDraftChanged(true); scoped.resolve(created); await tick();
     assert.equal(ui.state.projectId, ['failure', 'edited'].includes(outcome) ? 'a' : 'new'); assert.equal(ui.inboxDirty, ['failure', 'edited'].includes(outcome));
     if (outcome === 'failure') assert.equal(ui.error, 'Created project read failed');
     if (outcome === 'edited') assert.match(ui.error, /draft changed/);
