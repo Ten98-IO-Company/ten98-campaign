@@ -27,6 +27,13 @@ export async function addUsers(db: Db, users: SeedUser[]): Promise<void> {
     if (user.password) await exec(db, "INSERT INTO account (id, \"accountId\", \"providerId\", \"userId\", password) VALUES ($1, $2, 'credential', $3, $4)", ['credential-' + user.id, user.id, user.id, user.password]);
   }
 }
+/** Links an OIDC issuer and subject to a user, as server/auth.ts stores it: a Better Auth account row with no tokens. */
+export async function addOidcIdentity(db: Db, issuer: string, subject: string, userId: string): Promise<void> {
+  await exec(db, 'INSERT INTO account (id, "accountId", "providerId", "userId") VALUES ($1, $2, $3, $4)', ['oidc-' + userId + '-' + subject, subject, 'oidc:' + issuer, userId]);
+}
+/** Stored OIDC identities as { issuer, subject, user_id } rows, for assertions. */
+export const oidcIdentitiesSql = "SELECT substr(\"providerId\", 6) AS issuer, \"accountId\" AS subject, \"userId\" AS user_id, \"accessToken\" AS access_token, \"refreshToken\" AS refresh_token, \"idToken\" AS id_token FROM account WHERE \"providerId\" LIKE 'oidc:%'";
+
 export async function addWorkspaces(db: Db, workspaces: { id: string; name: string }[]): Promise<void> {
   for (const workspace of workspaces) await exec(db, 'INSERT INTO workspaces (id, name) VALUES ($1, $2)', [workspace.id, workspace.name]);
 }

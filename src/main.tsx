@@ -740,6 +740,7 @@ const oidcSignInErrors: Record<string, string> = {
   OIDC_EMAIL_UNVERIFIED: 'Your identity provider has not verified this email address. Verify it there, then sign in again.',
   OIDC_ACCOUNT_EXISTS: 'An account already uses this email address, and single sign-on is not linked to it automatically. Sign in with your email and password.',
   OIDC_RATE_LIMITED: 'Too many sign-in attempts. Wait a few minutes, then try again.',
+  OIDC_TWO_FACTOR_UNAVAILABLE: 'This account uses two-factor sign-in, which Campaign does not offer yet. Ask your admin for help.',
   OIDC_SIGN_IN_FAILED: 'Single sign-on could not be completed. It may have expired or already been used. Start again.',
 };
 function takeAuthError(location: Pick<Location, 'pathname' | 'search' | 'hash'>, history: Pick<History, 'state' | 'replaceState'>) {

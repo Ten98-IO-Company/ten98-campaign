@@ -23,7 +23,7 @@ test('every Drizzle table and column is created by the SQL migrations', async ()
     else if (renamed) { created.set(renamedTo, created.get(renamed)); created.delete(renamed); }
     else assert.fail(statement);
   }
-  assert.equal(tables.length, 89);
+  assert.equal(tables.length, 88);
   assert.deepEqual(tables.map(table => table.name).sort(), [...created.keys()].sort());
   for (const table of tables) assert.deepEqual(table.columns.map(column => column.name), created.get(table.name), table.name);
 });
