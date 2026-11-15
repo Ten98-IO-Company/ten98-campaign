@@ -120,7 +120,6 @@ test('a session token is never stored as the raw cookie token', pg, async t => {
   const setup = await request('/auth/setup', { body: { name: 'Owner', email: 'owner@example.test', password: 'owner identity fixture password' } });
   const raw = decodeURIComponent(setup.cookie.split('=')[1]).split('.')[0];
   assert.equal((await app.database.pool.query('SELECT count(*)::int AS n FROM session')).rows[0].n, 1);
-  // Expected to fail until runtime #131 (keyed-hash session tokens): Better Auth 1.7.7 stores the token itself.
   assert.equal((await app.database.pool.query('SELECT count(*)::int AS n FROM session WHERE token = $1', [raw])).rows[0].n, 0, 'Only a keyed hash of the session token is stored.');
 });
 
@@ -162,9 +161,13 @@ test('emails are stored lower-case and unique ignoring case, and the preset find
   await addUsers(pool, [{ id: 'case-lower', name: 'Lower', email: 'case@example.test' }]);
   await assert.rejects(addUsers(pool, [{ id: 'case-upper', name: 'Upper', email: 'Case@Example.test' }]), (error: { code?: string; constraint?: string }) => error.code === '23514' && error.constraint === 'user_email_lowercase');
   await assert.rejects(addUsers(pool, [{ id: 'case-again', name: 'Again', email: 'case@example.test' }]), (error: { code?: string }) => error.code === '23505');
-  // The definition the preset's assertEmailIndex (code-system e428dce src/auth.mts:740) requires on "user".
-  const { rows: [index] } = await pool.query(`SELECT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = to_regclass('"user"') AND i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indnatts = 1 AND pg_get_expr(i.indexprs, i.indrelid) = 'lower(email)') AS indexed`);
-  assert.equal(index.indexed, true);
+  // The preset's own start-up checks pass on Campaign's schema, and the email index check fails loudly without the index.
+  const { hostAuth } = await import('../server/auth.ts');
+  await hostAuth(app.database.db).assertSchema(app.database.db);
+  await pool.query('DROP INDEX user_email_normalized_idx');
+  // A passed check is kept per Drizzle instance, so a fresh one over the same pool runs it again.
+  const { drizzle } = await import('drizzle-orm/node-postgres'), fresh = drizzle(pool);
+  await assert.rejects(hostAuth(app.database.db).assertEmailIndex(fresh),(error: { code?: string }) => error.code === 'MISSING_EMAIL_INDEX');
 });
 
 // A database at 0012, as an installation from before the move, seeded with `seed` and then migrated by the ledger.
@@ -172,9 +175,9 @@ async function premove(t: TestContext, seed: string) {
   const { testDatabase } = await import('./postgres.mjs'), { migrate, migrationSources } = await import('../server/database.ts');
   const database = await testDatabase(t), { pool } = database, sources = await migrationSources();
   await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');
-  for (const source of sources.filter(source => source.version < '0013')) await pool.query(source.sql);
+  for (const source of sources.filter(source => source.version < '0014')) await pool.query(source.sql);
   await pool.query('CREATE TABLE schema_version (version text PRIMARY KEY, checksum text NOT NULL)');
-  for (const source of sources.filter(source => source.version < '0013')) await pool.query('INSERT INTO schema_version VALUES ($1, $2)', [source.version, source.checksum]);
+  for (const source of sources.filter(source => source.version < '0014')) await pool.query('INSERT INTO schema_version VALUES ($1, $2)', [source.version, source.checksum]);
   await pool.query(seed);
   return { database, migrate: () => migrate(pool) };
 }
@@ -185,7 +188,7 @@ const legacyHash = async (password: string) => {
 };
 const exists = async (pool: { query(text: string): Promise<{ rows: { name: string | null }[] }> }, name: string) => (await pool.query(`SELECT to_regclass('${name}')::text AS name`)).rows[0].name !== null;
 
-test('migration 0013 stops on accounts whose email differs only in case, lists their ids, and changes nothing', pg, async t => {
+test('migration 0014 stops on accounts whose email differs only in case, lists their ids, and changes nothing', pg, async t => {
   const { database, migrate } = await premove(t, "INSERT INTO users VALUES ('a1', 'A', 'twin@example.test', NULL), ('a2', 'B', 'Twin@Example.test', NULL), ('b1', 'C', 'pair@example.test', NULL), ('b2', 'D', 'PAIR@example.test', NULL), ('solo', 'E', 'Solo@Example.test', NULL)");
   await assert.rejects(migrate(), (error: Error) => error.message === 'user_email_lowercase: 2 email address(es) belong to more than one user when case is ignored (accounts: [a1, a2], [b1, b2]); resolve them before this migration');
   const { pool } = database;
@@ -194,7 +197,7 @@ test('migration 0013 stops on accounts whose email differs only in case, lists t
   assert.equal((await pool.query("SELECT max(version) AS v FROM schema_version")).rows[0].v, '0012');
 });
 
-test('after 0013 a pre-move account with a mixed-case email and an old password signs in, its hash is upgraded exactly once, and an OIDC account counts as verified', pg, async t => {
+test('after 0014 a pre-move account with a mixed-case email and an old password signs in, its hash is upgraded exactly once, and an OIDC account counts as verified', pg, async t => {
   const password = 'pre-move member fixture password';
   const { database, migrate } = await premove(t, `INSERT INTO installation VALUES (1, true) ON CONFLICT (id) DO UPDATE SET claimed = true; INSERT INTO users VALUES ('mixed', 'Mixed', 'Mixed.Case@Example.test', '${await legacyHash(password)}'), ('sso', 'SSO', 'sso@example.test', NULL); INSERT INTO oidc_identities VALUES ('https://auth.example/application/o/campaign/', 'subject-1', 'sso'); INSERT INTO sessions VALUES ('old-session', 'mixed', 9999999999999); INSERT INTO password_resets VALUES ('old-reset', 'mixed', 9999999999999, 0)`);
   await migrate();
@@ -202,7 +205,7 @@ test('after 0013 a pre-move account with a mixed-case email and an old password 
   assert.deepEqual((await pool.query('SELECT id, email, "emailVerified" FROM "user" ORDER BY id')).rows, [{ id: 'mixed', email: 'mixed.case@example.test', emailVerified: false }, { id: 'sso', email: 'sso@example.test', emailVerified: true }]);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM session')).rows[0].n, 0, 'Every session ends at the move.');
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM verification')).rows[0].n, 0, 'Pending reset links end at the move.');
-  assert.equal((await pool.query('SELECT count(*)::int AS n FROM "twoFactor"')).rows[0].n, 0, 'Campaign had no second factors before 0013.');
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM "twoFactor"')).rows[0].n, 0, 'Campaign had no second factors before 0014.');
   const { createApp } = await import('../server/index.ts'), dataDir = await mkdtemp(join(tmpdir(), 'campaign-premove-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const app = await createApp({ dataDir, env: {}, appUrl: origin, directScheduler: false, database: { pool, db } });
@@ -218,7 +221,7 @@ test('after 0013 a pre-move account with a mixed-case email and an old password 
   assert.deepEqual(await stored(), upgraded, 'The second sign-in did not rehash it again.');
 });
 
-test('migration 0013 can be reversed in development and applied again to the same schema', pg, async t => {
+test('migration 0014 can be reversed in development and applied again to the same schema', pg, async t => {
   const { database, migrate } = await premove(t, "INSERT INTO users VALUES ('local', 'Local', 'local@example.test', 'scrypt$fixture')");
   const { pool } = database;
   const shape = async () => ({
@@ -227,11 +230,11 @@ test('migration 0013 can be reversed in development and applied again to the sam
     indexes: (await pool.query("SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' ORDER BY 1, 2")).rows,
   });
   const before = await shape();
-  assert.deepEqual(await migrate(), ['0013']); const applied = await shape();
-  await pool.query(await readFile(new URL('../migrations/dev/0013_better_auth.down.sql', import.meta.url), 'utf8'));
+  assert.deepEqual(await migrate(), ['0014']); const applied = await shape();
+  await pool.query(await readFile(new URL('../migrations/dev/0014_better_auth.down.sql', import.meta.url), 'utf8'));
   assert.deepEqual(await shape(), before, 'The reverse restores the pre-move schema.');
   assert.deepEqual((await pool.query("SELECT id, email, password FROM users")).rows, [{ id: 'local', email: 'local@example.test', password: 'scrypt$fixture' }]);
-  assert.deepEqual(await migrate(), ['0013']); assert.deepEqual(await shape(), applied, 'Applied again, the schema is the same.');
+  assert.deepEqual(await migrate(), ['0014']); assert.deepEqual(await shape(), applied, 'Applied again, the schema is the same.');
   assert.deepEqual(await migrate(), [], 'The ledger never applies it twice.');
 });
 
@@ -280,18 +283,32 @@ test('an SSO-only account never gains a password through a reset link', pg, asyn
   assert.equal((await pool.query("SELECT count(*)::int AS n FROM account WHERE \"userId\" = 'sso-only'")).rows[0].n, 0, 'No credential was created.');
 });
 
-test('the sign-in pre-check runs the legacy and the modern verifier once for unknown, legacy and modern accounts alike', async () => {
-  const { verifyStoredPassword } = await import('../server/locked-auth.ts');
-  const legacyHash = `scrypt$${'a'.repeat(32)}$${'b'.repeat(128)}`, modernHash = `${'c'.repeat(32)}:${'d'.repeat(128)}`;
-  const cases = [[undefined, true, true, false], [null, true, true, false], [legacyHash, true, false, true], [legacyHash, false, true, false], [modernHash, false, true, true], [modernHash, true, false, false]] as const;
-  for (const [stored, legacyMatches, modernMatches, expected] of cases) {
-    const calls: string[] = [];
-    const verifiers = {
-      legacy: async (hash: string) => { calls.push('legacy:' + (hash === legacyHash ? 'stored' : 'dummy')); return legacyMatches; },
-      modern: async ({ hash }: { hash: string }) => { calls.push('modern:' + (hash === modernHash ? 'stored' : 'dummy')); return modernMatches; },
-    };
-    assert.equal(await verifyStoredPassword(stored, 'fixture password', verifiers), expected, String(stored));
-    assert.deepEqual(calls.map(call => call.split(':')[0]).sort(), ['legacy', 'modern'], 'Both derives run, whatever is stored.');
-    if (!stored) assert.deepEqual(calls.sort(), ['legacy:dummy', 'modern:dummy'], 'With no account both run on dummy hashes, and sign-in never succeeds.');
-  }
+test('migration 0014 runs the preset token-storage upgrade verbatim, and a password session has no provider', pg, async t => {
+  const { tokenStorageUpgradeStatements } = await import('@ten98/runtime/auth');
+  const migration = await readFile(new URL('../migrations/0014_better_auth.sql', import.meta.url), 'utf8');
+  assert.ok(migration.replaceAll('\r\n', '\n').includes(tokenStorageUpgradeStatements), 'The upgrade statements appear unchanged.');
+  const { app, request } = await fixture(t);
+  assert.equal((await request('/auth/setup', { body: { name: 'Owner', email: 'owner@example.test', password: 'owner identity fixture password' } })).status, 201);
+  assert.deepEqual((await app.database.pool.query('SELECT "oidcProvider" FROM session')).rows, [{ oidcProvider: null }]);
+});
+
+test('a browser that signed in to an account before skips only the account-wide limit', pg, async t => {
+  const { app, request, signIn } = await fixture(t), { pool } = app.database;
+  const email = 'owner@example.test', password = 'owner identity fixture password';
+  assert.equal((await request('/auth/setup', { body: { name: 'Owner', email, password } })).status, 201);
+  // The preset's known-device cookie, set by a completed sign-in.
+  const port = (app.server.address() as { port: number }).port;
+  const known = (await fetch(`http://127.0.0.1:${port}/api/auth/login`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) })).headers.getSetCookie().find(value => /\.known_device=[^;]/.test(value))?.split(';')[0];
+  assert.ok(known, 'A completed sign-in marks the browser as a known device.');
+  // Fill the account-wide bucket, as failures from many other clients would.
+  const { createHmac } = await import('node:crypto');
+  const accountKey = 'email:' + createHmac('sha256', app.config.sessionSecret).update(email).digest('hex');
+  await pool.query('INSERT INTO login_limits VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET count = EXCLUDED.count', [accountKey, 50, Date.now() + 900000]);
+  assert.equal((await signIn(email, password)).status, 429, 'A new browser meets the full account-wide bucket.');
+  const fromKnown = await fetch(`http://127.0.0.1:${port}/api/auth/login`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', Cookie: known }, body: JSON.stringify({ email, password }) });
+  assert.equal(fromKnown.status, 200, 'The known device signs in.');
+  // The per-client bucket still applies to it.
+  await pool.query("UPDATE login_limits SET count = 30 WHERE key NOT LIKE 'email:%' AND key NOT LIKE 'client-email:%'");
+  const throttled = await fetch(`http://127.0.0.1:${port}/api/auth/login`, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', Cookie: known }, body: JSON.stringify({ email, password }) });
+  assert.equal(throttled.status, 429, 'The per-client bucket refuses a known device too.');
 });

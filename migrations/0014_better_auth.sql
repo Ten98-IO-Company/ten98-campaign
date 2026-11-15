@@ -7,26 +7,6 @@
 ALTER TABLE users RENAME TO "user";
 ALTER INDEX users_pkey RENAME TO user_pkey;
 ALTER TABLE "user" RENAME CONSTRAINT users_email_key TO user_email_key;
--- Statements 1-3 are code-system's, verbatim (ten98-code-system#143, comment 6891409340).
--- 1. Pre-check: stop, and never rewrite, when two users share an email ignoring case.
-DO $$
-DECLARE twins integer; listed text;
-BEGIN
-  SELECT count(*), string_agg(ids, ', ' ORDER BY first) FILTER (WHERE n <= 20)
-    INTO twins, listed
-    FROM (SELECT '[' || string_agg(id, ', ' ORDER BY id) || ']' AS ids, min(id) AS first, row_number() OVER (ORDER BY min(id)) AS n
-          FROM "user" GROUP BY lower(email) HAVING count(*) > 1) shared;
-  IF twins > 0 THEN
-    RAISE EXCEPTION 'user_email_lowercase: % email address(es) belong to more than one user when case is ignored (accounts: %); resolve them before this migration',
-      twins, listed || CASE WHEN twins > 20 THEN ', …' ELSE '' END;
-  END IF;
-END
-$$;
--- 2. Store every email lower-case.
-UPDATE "user" SET email = lower(email) WHERE email <> lower(email);
--- 3. Keep it that way.
-ALTER TABLE "user" ADD CONSTRAINT user_email_lowercase CHECK (email = lower(email));
-CREATE UNIQUE INDEX user_email_normalized_idx ON "user" (lower(email));
 ALTER TABLE "user" ADD COLUMN "emailVerified" boolean NOT NULL DEFAULT false;
 ALTER TABLE "user" ADD COLUMN image text;
 ALTER TABLE "user" ADD COLUMN "createdAt" timestamptz NOT NULL DEFAULT now();
@@ -47,3 +27,40 @@ DROP TABLE password_resets;
 CREATE TABLE verification (id text PRIMARY KEY, identifier text NOT NULL, value text NOT NULL, "expiresAt" timestamptz NOT NULL, "createdAt" timestamptz NOT NULL DEFAULT now(), "updatedAt" timestamptz NOT NULL DEFAULT now());
 CREATE INDEX verification_identifier_idx ON verification (identifier);
 CREATE TABLE "twoFactor" (id text PRIMARY KEY, "userId" text NOT NULL CONSTRAINT "twoFactor_userId_key" UNIQUE CONSTRAINT "twoFactor_userId_fkey" REFERENCES "user"(id) ON DELETE CASCADE, secret text NOT NULL, "backupCodes" text NOT NULL, verified boolean NOT NULL DEFAULT true, "failedVerificationCount" integer NOT NULL DEFAULT 0, "lockedUntil" timestamptz);
+-- The preset's token-storage upgrade, verbatim (tokenStorageUpgradeStatements, @ten98/runtime/auth; the identity test holds
+-- this file to the export): it ends sessions and pending links (none are left here), adds session."oidcProvider", and
+-- stores emails lower-case after the #143 pre-check, which stops the migration while two accounts share an email ignoring
+-- case.
+DELETE FROM "session";
+--> statement-breakpoint
+DELETE FROM verification WHERE identifier LIKE 'reset-password:%' OR identifier LIKE 'trust-device-%' OR identifier LIKE '2fa-%';
+--> statement-breakpoint
+ALTER TABLE "session" ADD COLUMN IF NOT EXISTS "oidcProvider" text;
+--> statement-breakpoint
+DO $$
+DECLARE twins integer; listed text;
+BEGIN
+  SELECT count(*), string_agg(ids, ', ' ORDER BY first) FILTER (WHERE n <= 20)
+    INTO twins, listed
+    FROM (SELECT '[' || string_agg(id, ', ' ORDER BY id) || ']' AS ids, min(id) AS first, row_number() OVER (ORDER BY min(id)) AS n
+          FROM "user" GROUP BY lower(email) HAVING count(*) > 1) shared;
+  IF twins > 0 THEN
+    RAISE EXCEPTION 'user_email_lowercase: % email address(es) belong to more than one user when case is ignored (accounts: %); resolve them before this migration',
+      twins, listed || CASE WHEN twins > 20 THEN ', …' ELSE '' END;
+  END IF;
+END
+$$;
+--> statement-breakpoint
+UPDATE "user" SET email = lower(email) WHERE email <> lower(email);
+--> statement-breakpoint
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_email_lowercase' AND conrelid = '"user"'::regclass) THEN
+    ALTER TABLE "user" ADD CONSTRAINT user_email_lowercase CHECK (email = lower(email)) NOT VALID;
+  END IF;
+END
+$$;
+--> statement-breakpoint
+ALTER TABLE "user" VALIDATE CONSTRAINT user_email_lowercase;
+-- The locked lookups find one account per email through this index (assertEmailIndex).
+CREATE UNIQUE INDEX user_email_normalized_idx ON "user" (lower(email));

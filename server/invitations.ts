@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
-import { accountByEmail, advisoryLock, hashPassword, HttpError, insertAccount, lockWorkspace, memberRole, publicUser, type Credential } from './auth.ts';
+import { accountByEmail, hashPassword, lockEmail, HttpError, insertAccount, lockWorkspace, memberRole, publicUser, type Credential } from './auth.ts';
 import type { Database, Executor } from './database.ts';
 import type { ProviderRecord } from './provider-core.ts';
 import { users } from './schema.ts';
@@ -96,7 +96,7 @@ export async function handleInvitations(context: ProviderRecord) {
     // Lock order: workspace → invitation → email; the invitation row lock makes acceptance single use.
     const accepted = await db.transaction(async tx => {
       const current = await lockInvitation(tx, token, invite.workspace_id);
-      await advisoryLock(tx, 'email:' + current.email);
+      await lockEmail(tx, current.email);
       const target = await account(tx, current.email);
       if ((!existing && target) || (existing && (!target || target.id !== existing.id))) fail(409, 'The invited account changed. Sign in with that account and open the invitation again.');
       const joined = target || { id: randomUUID(), name: name!, email: current.email, isOperator: false };

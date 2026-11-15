@@ -59,6 +59,8 @@ export const sessions = pgTable('session', {
   userAgent: text('userAgent'),
   createdAt: at('createdAt').notNull().defaultNow(),
   updatedAt: at('updatedAt').notNull().defaultNow(),
+  // The provider configuration a session began through (completeOidcSession), so revokeProviderSessions can end it.
+  oidcProvider: text('oidcProvider'),
 }, t => [
   index('session_user_idx').on(t.userId),
 ]);

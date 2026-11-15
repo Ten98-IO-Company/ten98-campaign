@@ -3,20 +3,21 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { and, count, eq, gt, isNotNull, sql } from 'drizzle-orm';
+import { and, count, eq, gt, isNotNull, like, sql } from 'drizzle-orm';
 import { hashPassword as hashWithBetterAuth } from 'better-auth/crypto';
-import type { ResetPasswordMessage, Ten98Auth, Ten98AuthSession } from '@ten98/runtime/auth';
+import { drizzleAdapter } from 'better-auth/adapters/drizzle';
+import { createTen98Auth, LockedAuthUserNotFoundError, type PasswordLimitAnswer, type PasswordSignInLimits, type ResetPasswordMessage, type Ten98Auth, type Ten98AuthSession } from '@ten98/runtime/auth';
+import { readEnvironment } from '@ten98/runtime/config';
 import { clientLimitKey, parseTrustedProxies, resolveClientAddress } from '@ten98/runtime';
 import type { Database, Executor } from './database.ts';
 import { joinInvitation, lockInvitation } from './invitations.ts';
-import { advisoryLock } from './locks.ts';
-import { authDatabase, createCampaignAuth, LockedAuthUserNotFoundError, retireResetLinks, type CampaignAuth, type SignInLimit } from './locked-auth.ts';
-import { accounts, instanceOperators, sessions, users, verifications } from './schema.ts';
+import { advisoryLock, lockEmail } from './locks.ts';
+import { accounts, instanceOperators, sessions, twoFactors, users, verifications } from './schema.ts';
 
-export { advisoryLock, lockUser, lockWorkspace } from './locks.ts';
+export { advisoryLock, lockEmail, lockUser, lockWorkspace } from './locks.ts';
 
-// Identity runs on Better Auth through the shared preset @ten98/runtime/auth (ten98-code-system#97), bound per locked
-// transaction by server/locked-auth.ts. Campaign keeps its routes and wording, its rate limits, the first-sign-up claim,
+// Identity runs on Better Auth through the shared preset @ten98/runtime/auth (ten98-code-system#97): its locked
+// transactions, password sign-in and keyed-hash token storage. Campaign keeps its routes and wording, its rate limits, the first-sign-up claim,
 // the OIDC protocol and invitations. This is the only module that writes the users, accounts and sessions tables.
 export interface AuthConfig { appUrl: string; sessionSecret: string; authSecret: string; oidcEnabled?: boolean; oidcIssuer: string; oidcClientId: string; oidcClientSecret?: string; oidcAllowedEmails: string[]; trustedProxies?: string | string[] }
 export interface PublicUser { id: string; name: string; email: string; isOperator: boolean }
@@ -24,6 +25,8 @@ type UserRow = { id: string; name: string; email: string; isOperator?: unknown }
 type OidcFlow = { state: string; verifier: string; nonce: string; invite_hash: string | null };
 
 const oidcWindow = 600, callbackPath = '/api/auth/oidc/callback';
+// The key of Campaign's one OIDC provider configuration (OIDC_ISSUER), stored on its sessions as "oidcProvider".
+const deploymentProvider = 'deployment';
 // Password sign-in attempts per 15 minutes. One client reaches at most 10 attempts per account in a window (20 across two
 // overlapping windows), so only failures from several clients can reach the account-wide limit.
 export const signInLimits = { client: 30, clientAccount: 10, account: 50 };
@@ -43,18 +46,26 @@ function storedSecret(dataDir: string, provided: string | undefined, filename: s
 /** Keys saved integration credentials, direct-campaign secrets, rate-limit keys and OIDC flow digests. Never changes here. */
 export const sessionSecret = (dataDir: string, provided?: string) => storedSecret(dataDir, provided, 'session-secret', 'SESSION_SECRET');
 /**
- * Better Auth's own secret (session cookie signatures, two-factor secrets): AUTH_SECRET, or the file AUTH_SECRET_FILE
- * names, or DATA_DIR/auth-secret generated on first start like session-secret. Rotating it ends every session, reset
- * link and enrolled second factor. Local stand-in for the runtime's readSecret('AUTH_SECRET') (#131), which is not in
- * runtime 0.27.1; the generation stays here either way.
+ * Better Auth's own secret (session cookie signatures, token hashes, two-factor secrets): AUTH_SECRET, or the file
+ * AUTH_SECRET_FILE names (the runtime's readEnvironment), or DATA_DIR/auth-secret generated on first start like
+ * session-secret. Rotating it ends every session, reset link and enrolled second factor. The runtime's readSecret refuses
+ * an unset secret, so the generation stays here.
  */
 export function authSecret(dataDir: string, env: { AUTH_SECRET?: string; AUTH_SECRET_FILE?: string } = {}): string {
   if (env.AUTH_SECRET && env.AUTH_SECRET_FILE) throw new Error('Set AUTH_SECRET or AUTH_SECRET_FILE, not both.');
+  const provided = readEnvironment('AUTH_SECRET', env);
   // A named file must hold the secret: falling back to a generated one would split the secret across replicas silently.
-  const fromFile = env.AUTH_SECRET_FILE ? readFileSync(env.AUTH_SECRET_FILE, 'utf8').trim() : undefined;
-  if (fromFile !== undefined && fromFile.length < 32) throw new Error('The file AUTH_SECRET_FILE names must hold at least 32 characters.');
-  return storedSecret(dataDir, env.AUTH_SECRET || fromFile, 'auth-secret', 'AUTH_SECRET');
+  if (env.AUTH_SECRET_FILE && (provided ?? '').length < 32) throw new Error('The file AUTH_SECRET_FILE names must hold at least 32 characters.');
+  return storedSecret(dataDir, provided || undefined, 'auth-secret', 'AUTH_SECRET');
 }
+/** Better Auth's models over Campaign's tables (migrations/0014_better_auth.sql), in the common identity schema. */
+export const authSchema = { user: users, account: accounts, session: sessions, verification: verifications, twoFactor: twoFactors };
+export const authDatabase = (executor: Parameters<typeof drizzleAdapter>[0]) => drizzleAdapter(executor, { provider: 'pg', schema: authSchema });
+/** Retires every outstanding reset link of the account: the identifier prefix the preset keeps and the account, never the token. */
+export const retireResetLinks = (tx: Executor, userId: string) => tx.delete(verifications).where(and(like(verifications.identifier, 'reset-password:%'), eq(verifications.value, userId)));
+/** The preset over Campaign's tables, with Campaign's legacy hashes accepted and upgraded on first sign-in. */
+const campaignAuth = (db: Database, options: { appUrl: string; secret: string; cookiePrefix?: string; sendResetPassword?: (message: ResetPasswordMessage) => void }) =>
+  createTen98Auth({ database: authDatabase(db), transactionDatabase: authDatabase, appName: 'ten98 Campaign', legacyPasswords: true, ...options });
 declare const credentialBrand: unique symbol;
 /** A password hash that only hashPassword makes; account writes accept nothing else, so this module owns the hash format. */
 export type Credential = string & { readonly [credentialBrand]: true };
@@ -82,7 +93,7 @@ export const updateDisplayName = (executor: Executor, userId: string, name: stri
 const credentialOf = (userId: string) => and(eq(accounts.userId, userId), eq(accounts.providerId, 'credential'));
 export const hasLocalPassword = async (executor: Executor, userId: string) => (await executor.select({ id: accounts.id }).from(accounts).where(and(credentialOf(userId), isNotNull(accounts.password))).limit(1)).length > 0;
 /** Host recovery (CLI reset-password): under the user lock, replaces the local password, retires every reset link and ends every session. */
-export function setLocalPassword(identity: CampaignAuth, db: Database, userId: string, passwordHash: Credential): Promise<void> {
+export function setLocalPassword(identity: Ten98Auth, db: Database, userId: string, passwordHash: Credential): Promise<void> {
   return identity.withLockedAuth(db, userId, async (auth, tx) => {
     await tx.update(accounts).set({ password: passwordHash, updatedAt: new Date() }).where(credentialOf(userId));
     await retireResetLinks(tx, userId);
@@ -93,7 +104,7 @@ export function setLocalPassword(identity: CampaignAuth, db: Database, userId: s
  * The host CLI's Better Auth instance. It ends sessions but never issues a cookie, so it needs neither the app URL nor
  * the app's auth secret; a throwaway secret satisfies the preset.
  */
-export const hostAuth = (db: Database) => createCampaignAuth({ database: authDatabase(db), transactionDatabase: authDatabase, appUrl: 'http://127.0.0.1', secret: randomBytes(32).toString('hex'), appName: 'ten98 Campaign', legacyPasswords: true });
+export const hostAuth = (db: Database) => campaignAuth(db, { appUrl: 'http://127.0.0.1', secret: randomBytes(32).toString('hex') });
 /** A reset link to email, handed to the sendResetPassword seam only after the transaction that created it committed. */
 export type ResetLinkMessage = { email: string; token: string };
 // Collects the reset token Better Auth hands to the preset's sendResetPassword during one request's locked transaction.
@@ -118,10 +129,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   // reset). The unscoped `ten98_session` is left alone: any instance on this host may have set it, and with the old
   // sessions table gone this one can no longer tell whether it is its own.
   const prefix = 'ten98-campaign-' + scope, sessionCookie = `${secure ? '__Secure-' : ''}${prefix}.session_token`, retiredCookies = ['ten98_session_' + scope];
-  const identity = createCampaignAuth({
-    database: authDatabase(db), transactionDatabase: authDatabase, appUrl: config.appUrl, secret: config.authSecret, appName: 'ten98 Campaign',
-    cookiePrefix: prefix, legacyPasswords: true, sendResetPassword: message => { resetCapture.getStore()?.push(message); },
-  });
+  const identity = campaignAuth(db, { appUrl: config.appUrl, secret: config.authSecret, cookiePrefix: prefix, sendResetPassword: message => { resetCapture.getStore()?.push(message); } });
   function cookie(name: string, value: string, age: number, path = '/') {
     return `${name}=${value}; Path=${path}; HttpOnly; SameSite=Lax; Max-Age=${age}${secure ? '; Secure' : ''}`;
   }
@@ -130,14 +138,19 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     const values = [value, ...(Array.isArray(previous) ? previous : previous ? [previous] : []).map(String).filter(item => !item.startsWith(name + '='))];
     res.setHeader('Set-Cookie', values.length === 1 ? values[0] : values);
   }
-  const forward = (res: ServerResponse | undefined, response: Response) => { if (res) for (const value of response.headers.getSetCookie()) setCookie(res, value); };
+  // setCookie puts each value first, so the session cookie is forwarded last: it stays the first Set-Cookie, ahead of the
+  // preset's known-device cookie, for clients that read only the first.
+  const forward = (res: ServerResponse | undefined, response: Response) => {
+    const values = response.headers.getSetCookie(), session = (value: string) => value.startsWith(sessionCookie + '=');
+    if (res) for (const value of [...values.filter(value => !session(value)), ...values.filter(session)]) setCookie(res, value);
+  };
   const headers = (req?: IncomingMessage) => {
     const values = new Headers({ origin, 'content-type': 'application/json' });
     if (req?.headers.cookie) values.set('cookie', req.headers.cookie);
     return values;
   };
   /** A Better Auth endpoint, called on the server through the handler; only the paths named in this module are reached. */
-  const call = (auth: Ten98Auth, path: string, req: IncomingMessage | undefined, body?: unknown) => auth.handler(new Request(origin + '/api/auth' + path, { method: body === undefined ? 'GET' : 'POST', headers: headers(req), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
+  const call = (auth: Pick<Ten98Auth, 'handler'>, path: string, req: IncomingMessage | undefined, body?: unknown) => auth.handler(new Request(origin + '/api/auth' + path, { method: body === undefined ? 'GET' : 'POST', headers: headers(req), ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
   const errorCode = async (response: Response) => ((await response.json().catch(() => ({}))) as { code?: string }).code;
   const isOperator = async (executor: Executor, userId: string) => (await executor.select({ id: instanceOperators.user_id }).from(instanceOperators).where(eq(instanceOperators.user_id, userId))).length > 0;
   // The session each request resolved, so a guard can re-check it inside its own transaction.
@@ -152,6 +165,10 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     resolved.set(req, found.session.token);
     return { id: found.user.id, name: found.user.name, email: found.user.email, isOperator: await isOperator(db, found.user.id) };
   }
+  /** A limiter step's answer: false when one of its buckets is full. */
+  async function counted(run: () => Promise<void>): Promise<PasswordLimitAnswer> {
+    try { await run(); return true; } catch (error) { if (error instanceof HttpError && error.status === 429) return false; throw error; }
+  }
   // One conditional upsert: parallel attempts cannot all pass a separate read before any of them increments.
   async function limit(key: string, maximum = 10): Promise<void> {
     const now = Date.now();
@@ -161,11 +178,11 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   }
   /**
    * Signs in with a password through the preset's signInWithPassword (verified outside any transaction, then again under
-   * the account lock, where the session is created); null when the email or password is wrong. `allow` is the attempt's
-   * rate limit.
+   * the account lock, where the session is created); null when the email or password is wrong. `limits` are the
+   * attempt's rate limits, keyed by the client's trusted address.
    */
-  async function signIn(req: IncomingMessage, res: ServerResponse, email: string, password: string, allow: SignInLimit): Promise<PublicUser | null> {
-    const response = await identity.signInWithPassword(db, { email, password, headers: headers(req) }, allow);
+  async function signIn(req: IncomingMessage, res: ServerResponse, email: string, password: string, limits: PasswordSignInLimits): Promise<PublicUser | null> {
+    const response = await identity.signInWithPassword(db, { email, password, source: clientKey(req, 'ip'), headers: headers(req) }, limits);
     if (response.status === 429) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
     if (response.status === 503) throw new HttpError(503, 'Sign-in is busy. Try again shortly.');
     if (!response.ok) return null;
@@ -183,7 +200,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   }
   /** Issues a session for an account the OIDC flow verified (after its transaction committed). */
   async function signInVerified(req: IncomingMessage, res: ServerResponse, userId: string): Promise<void> {
-    const response = await identity.withLockedAuth(db, userId, auth => auth.api.completeOidcSession({ body: { oidcUserId: userId }, headers: headers(req), asResponse: true }));
+    const response = await identity.withLockedAuth(db, userId, auth => auth.api.completeOidcSession({ body: { oidcUserId: userId, provider: deploymentProvider }, headers: headers(req), asResponse: true }));
     if (!response.ok) throw new HttpError(400, 'Identity sign-in could not be completed. Start again.');
     forward(res, response);
   }
@@ -206,8 +223,10 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
   }
   return {
     user, limit, clientKey,
+    /** The preset's start-up check of the identity tables, columns and the lower(email) index. */
+    assertSchema: () => identity.assertSchema(db),
     /** Signs in an account that setup or invitation acceptance has just created and committed; no sign-in limit applies. */
-    signInNewAccount: (req: IncomingMessage, res: ServerResponse, email: string, password: string) => signIn(req, res, email, password, () => true),
+    signInNewAccount: (req: IncomingMessage, res: ServerResponse, email: string, password: string) => signIn(req, res, email, password, { source: () => true, account: () => true }),
     /** Whether the request carries a session cookie of this installation, current or retired, so an ended session can be reported once. */
     carriesSession: (req: IncomingMessage) => /^[A-Za-z0-9]+\./.test(sessionCookieValue(req)) || retiredCookies.some(name => Object.hasOwn(cookies(req), name)),
     /** A SQL condition that holds while the session this request resolved is live for `userId`, for guards that read it with other state in one statement. */
@@ -276,20 +295,20 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       });
     },
     async login(req: IncomingMessage, res: ServerResponse, body: { email: string; password: string }): Promise<PublicUser | null> {
-      const client = clientKey(req, 'ip');
       let clientAccount = '';
-      // Campaign's three buckets, which the preset counts before any read or hash; the first one that is full refuses (429).
-      const allow: SignInLimit = async ({ email }) => {
-        clientAccount = 'client-email:' + digest(JSON.stringify([client, email]));
-        try {
-          await limit(client, signInLimits.client);
+      // Campaign's three buckets, which the preset asks for before any read or hash; the first one that is full refuses
+      // (429). The client and client-and-account buckets come before the known-device check; a browser that already
+      // completed a sign-in to the account (the preset's known device) skips only the account-wide bucket, so failures
+      // from other clients cannot lock its owner out.
+      const limits: PasswordSignInLimits = {
+        source: ({ email, source }) => counted(async () => {
+          clientAccount = 'client-email:' + digest(JSON.stringify([source, email]));
+          await limit(source, signInLimits.client);
           await limit(clientAccount, signInLimits.clientAccount);
-          // When #140 adds knownDevice, a known device skips only this account-wide bucket: `if (!knownDevice)` here.
-          await limit('email:' + digest(email), signInLimits.account);
-          return true;
-        } catch (error) { if (error instanceof HttpError && error.status === 429) return false; throw error; }
+        }),
+        account: ({ email, knownDevice }) => knownDevice || counted(() => limit('email:' + digest(email), signInLimits.account)),
       };
-      const signedIn = await signIn(req, res, body.email, body.password, allow);
+      const signedIn = await signIn(req, res, body.email, body.password, limits);
       if (!signedIn) throw new HttpError(401, 'Email or password is incorrect.');
       await db.execute(sql`DELETE FROM login_limits WHERE key = ${clientAccount}`);
       return signedIn;
@@ -366,7 +385,7 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
           if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.', 'OIDC_NOT_PROVISIONED');
           if (invited && invited.email !== email) throw new HttpError(403, `This invitation is for ${invited.email}. Sign in with that identity to accept it.`, 'OIDC_INVITE_EMAIL_MISMATCH');
           if (!invited && !config.oidcAllowedEmails.includes(email)) throw new HttpError(403, 'This identity is not provisioned. Ask the operator for access.', 'OIDC_NOT_PROVISIONED');
-          await advisoryLock(tx, 'email:' + email);
+          await lockEmail(tx, email);
           if (await accountByEmail(tx, email)) throw new HttpError(403, 'This email already has an account. Automatic identity linking is disabled.', 'OIDC_ACCOUNT_EXISTS');
           const id = randomUUID(), workspace = randomUUID();
           await insertAccount(tx, { id, name: typeof claims.name === 'string' ? claims.name.slice(0, 120) : email, email, passwordHash: null });

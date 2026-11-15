@@ -167,6 +167,7 @@ export async function createApp(options: AppOptions = {}) {
     setImmediate(() => { sendDirect({ channel: 'email', campaign: { emailPurpose: 'transactional', subject: 'Reset your ten98 Campaign password', text }, contact: { email: reset.email }, env: sendEnv }).catch(error => { console.error('Password reset email was not sent:', error?.code || error?.message || 'unknown error'); }); });
   };
   const auth = createAuth(db, config, { sendResetPassword }), dist = resolve(options.distDir || 'dist');
+  await auth.assertSchema();
   const integrationSettings = await createIntegrationSettings({ db, env, secret: config.sessionSecret });
   const direct = createDirectCampaigns({ db, env, appUrl, secret: config.sessionSecret, store });
   const smsInbox = createSmsInbox({ db, env, appUrl, contacts: direct.contacts });

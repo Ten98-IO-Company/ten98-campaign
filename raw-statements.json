@@ -59,13 +59,9 @@
     "count": 36,
     "reason": "Raw SQL over tables the Drizzle schema does not cover yet (the JSONB records store and per-feature tables). Converts to typed Drizzle queries in the relational redesign of records (unified-stack step 4); its FOR UPDATE row locks and advisory locks must keep their order in the typed version."
   },
-  "server/locked-auth.ts": {
-    "count": 2,
-    "reason": "The stand-in for @ten98/runtime/auth locked transactions (code-system PR #140 at 7eb5d7e): the lock_timeout set_config every locked transaction starts with, and the email advisory lock pg_advisory_xact_lock(109859, hashtext(email)). Drizzle has no builder for either. The entry goes when Campaign adopts the release with ten98-code-system#131 and #132."
-  },
   "server/locks.ts": {
-    "count": 3,
-    "reason": "Transaction locks shared by every module (advisory, account row and workspace row FOR UPDATE), moved out of server/auth.ts unchanged. They become typed Drizzle .for(\"update\") selects and a typed advisory-lock helper with the team controller on Drizzle (ten98-code-system#116)."
+    "count": 4,
+    "reason": "Transaction locks shared by every module (advisory, account row and workspace row FOR UPDATE), moved out of server/auth.ts unchanged, and the shared email lock pg_advisory_xact_lock(109859, hashtext(email)) that @ten98/runtime/auth's sign-in by email takes (the runtime exports no standalone lockEmail yet). They become typed Drizzle .for(\"update\") selects and a typed advisory-lock helper with the team controller on Drizzle (ten98-code-system#116)."
   },
   "server/native-google-ads.ts": {
     "count": 4,

@@ -103,6 +103,8 @@ test('OIDC sign-in completes against an Authentik-shaped issuer with the real cl
   assert.equal(returned.status, 302);
   assert.equal((await db.$client.query('SELECT count(*)::int AS count FROM "user"')).rows[0].count, 2);
   assert.equal(idp.issued.tokenRequests, 2);
+  // Each OIDC session records the provider configuration it began through, so revokeProviderSessions can end it.
+  assert.deepEqual((await db.$client.query('SELECT DISTINCT "oidcProvider" FROM session')).rows, [{ oidcProvider: 'deployment' }]);
 });
 
 test('OIDC callback refuses ID tokens with the wrong nonce, audience or issuer', pg, async t => {

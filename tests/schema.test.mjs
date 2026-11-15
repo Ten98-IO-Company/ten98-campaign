@@ -15,7 +15,7 @@ test('every Drizzle table and column is created by the SQL migrations', async ()
   const sql = await migrationSql(), type = '(?:text|bigint|integer|boolean|json|bytea|timestamptz)\\b', name = '"?(\\w+)"?';
   // Statements apply in order, so a table or column a later migration drops (or drops and recreates) is tracked.
   const created = new Map();
-  for (const [statement, table, body, added, addedColumn, altered, droppedColumn, dropped, renamed, renamedTo] of sql.matchAll(new RegExp(`^CREATE TABLE ${name} \\((.*)\\);$|^ALTER TABLE ${name} ADD COLUMN ${name} ${type}|^ALTER TABLE ${name} DROP COLUMN ${name};$|^DROP TABLE ${name};$|^ALTER TABLE ${name} RENAME TO ${name};$`, 'gm'))) {
+  for (const [statement, table, body, added, addedColumn, altered, droppedColumn, dropped, renamed, renamedTo] of sql.matchAll(new RegExp(`^CREATE TABLE ${name} \\((.*)\\);$|^ALTER TABLE ${name} ADD COLUMN (?:IF NOT EXISTS )?${name} ${type}|^ALTER TABLE ${name} DROP COLUMN ${name};$|^DROP TABLE ${name};$|^ALTER TABLE ${name} RENAME TO ${name};$`, 'gm'))) {
     if (table) created.set(table, [...body.matchAll(new RegExp(`(?:^|, )${name} ${type}`, 'g'))].map(match => match[1]));
     else if (added) created.get(added).push(addedColumn);
     else if (altered) created.set(altered, created.get(altered).filter(column => column !== droppedColumn));

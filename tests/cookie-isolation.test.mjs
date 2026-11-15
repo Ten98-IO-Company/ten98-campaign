@@ -19,7 +19,10 @@ test('same-host instances keep session and OIDC cookies isolated, and an OIDC si
   const firstA = await signIn(authA, 'alice@example.test'), firstB = await signIn(authB, 'bob@example.test');
   const sessionCookie = res => setCookies(res).find(cookie => /\.session_token=/.test(cookie)), nameA = sessionCookie(firstA).split('=')[0], nameB = sessionCookie(firstB).split('=')[0];
   // Each installation names its session cookie from its own origin, and the cookie is HttpOnly and SameSite=Lax (Secure on https).
-  assert.notEqual(nameA, nameB); assert.match(nameA, /^ten98-campaign-[a-f0-9]{16}\.session_token$/); assert.equal(jar.size, 2);
+  assert.notEqual(nameA, nameB); assert.match(nameA, /^ten98-campaign-[a-f0-9]{16}\.session_token$/);
+  // The preset's known-device cookie is scoped by the same prefix, so each installation keeps its own.
+  const known = name => name.replace(/session_token$/, 'known_device');
+  assert.deepEqual([...jar.keys()].sort(), [nameA, nameB, known(nameA), known(nameB)].sort());
   assert.match(sessionCookie(firstA), /; HttpOnly; SameSite=Lax$/); assert.doesNotMatch(sessionCookie(firstA), /Secure/);
   assert.equal((await authA.user(request())).id, 'alice'); assert.equal((await authB.user(request())).id, 'bob');
   // Another installation's cookie is never accepted, under its own name or under this installation's.

@@ -42,7 +42,6 @@ test('a reset link resets the password once, within the hour, and ends every ses
   assert.deepEqual([asked.status, asked.data], [200, { ok: true }]);
   const [mail] = await f.delivered(1), token = tokenOf(mail);
   assert.deepEqual(mail.to, ['owner@example.test']); assert.match(mail.subject, /Reset your ten98 Campaign password/); assert.ok(token, mail.text);
-  // Expected to fail until runtime #131 (keyed-hash verification identifiers): Better Auth 1.7.7 stores the raw identifier.
   assert.equal((await f.app.sql.get("SELECT count(*)::int AS n FROM verification WHERE identifier LIKE 'reset-password:%'")).n, 1, 'The link is stored.');
   assert.equal((await f.app.sql.get('SELECT count(*)::int AS n FROM verification WHERE identifier = ?', 'reset-password:' + token)).n, 0, 'Only a keyed hash of the token is stored.');
 

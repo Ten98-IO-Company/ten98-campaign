@@ -15,7 +15,7 @@ function response() {
 }
 const count = async (db, table) => (await db.$client.query(`SELECT count(*) AS count FROM ${table}`)).rows[0].count;
 async function seedUser(db, id, email, password) { await addUsers(db.$client, [{ id: id, name: 'Fixture', email: email, password: password }]); }
-// P1 and P2: every credential and session change takes the account row lock first (server/locked-auth.ts), so a change
+// P1 and P2: every credential and session change takes the account row lock first (the preset's withLockedAuth), so a change
 // that races a sign-in or a password change is ordered against it. Each test drives both orders through a real locking
 // path (CLI reset-password, or signing out other sessions) and holds the racing write at a table lock until both wait.
 const raceConfig = { sessionSecret: 'auth-race-fixture-session-secret-32-characters', authSecret: 'better-auth fixture secret of at least 32 characters', appUrl: 'https://campaign.example' };

@@ -1,8 +1,8 @@
--- Development only: undoes migrations/0013_better_auth.sql. The migration ledger never runs this file (it is not in
--- server/database.ts's list); tests/identity-better-auth.test.ts applies 0013, runs this, and applies 0013 again.
+-- Development only: undoes migrations/0014_better_auth.sql. The migration ledger never runs this file (it is not in
+-- server/database.ts's list); tests/identity-better-auth.test.ts applies 0014, runs this, and applies 0014 again.
 -- users comes back with its ids and every foreign key. Each credential hash returns to users.password; one that Better Auth
 -- has already rehashed stays in Better Auth's format, which the pre-move code cannot verify. Emails stay lower-case, and
--- sessions, reset links and second factors are not restored (0013 ended them).
+-- sessions, reset links and second factors are not restored (0014 ended them).
 DROP TABLE "twoFactor";
 DROP TABLE verification;
 DROP TABLE session;
@@ -17,4 +17,4 @@ ALTER INDEX user_pkey RENAME TO users_pkey;
 ALTER TABLE "user" RENAME TO users;
 CREATE TABLE sessions (token text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at bigint NOT NULL);
 CREATE TABLE password_resets (token_hash text PRIMARY KEY, user_id text NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE, expires_at bigint NOT NULL, created_at bigint NOT NULL);
-DELETE FROM schema_version WHERE version = '0013';
+DELETE FROM schema_version WHERE version = '0014';
