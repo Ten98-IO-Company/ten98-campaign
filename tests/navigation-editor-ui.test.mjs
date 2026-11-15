@@ -49,6 +49,18 @@ test('an unknown path or an unknown campaign in the address shows Page not found
   assert.match(source, /showsNotFound\(navigation, state\.campaigns, state\.projectId\) \? <Card as="section"><EmptyState icon="search" title="Page not found"/, 'The shell renders the one Page not found state for both.');
 });
 
+test('deleting the campaign whose page is open ends on the Campaigns list, not on Page not found', async () => {
+  const ui = app('https://campaign.example/?view=campaigns&item=c1&project=a');
+  assert.equal(ui.navigationRef.current.item, 'c1');
+  await ui.remove('campaigns', { id: 'c1' });
+  assert.deepEqual([ui.navigationRef.current.page, ui.navigationRef.current.item, ui.navigationRef.current.notFound], ['Campaigns', undefined, undefined]);
+  assert.doesNotMatch(ui.window.location.search, /item=/, 'The address drops the deleted campaign.');
+  // Another record, or a campaign that is not the open one, leaves the address alone.
+  const other = app('https://campaign.example/?view=campaigns&item=c1&project=a');
+  await other.remove('campaigns', { id: 'c2' }); assert.equal(other.navigationRef.current.item, 'c1');
+  await other.remove('posts', { id: 'c1' }); assert.equal(other.navigationRef.current.item, 'c1');
+});
+
 test('outcome checks preserve the original key without creating a first send and editor wrappers forward the check', async () => {
   const pendingKeys = { current: new Map() }, calls = []; let mode = 'lost';
   const invoke = new Function('state', 'activeProject', 'pendingKeys', 'crypto', 'api', 'endpoint', 'DOMException', `return (${stripTypeScriptTypes(declaration('integrate'))});`)(
@@ -198,7 +210,7 @@ function app(href = 'https://campaign.example/?view=overview&project=a', initial
     inboxDirty: false, inboxDraft: { current: { dirty: false, revision: 0 } }, discardSwitch: { current: false }, pendingKeys: { current: new Map() },
     campaignEditor: { current: null }, campaignDirty: false, creationIntent: null, addIntent: null, creationSerial: { current: 0 }, canWrite: true, busy: false,
     loadVersion: { current: 0 }, activeProject: { current: initial?.projectId || '' }, workspace: { id: 'workspace-a' }, FormData: class { constructor(form) { return new Map(Object.entries(form)); } }, error: '', calls: [],
-    api: async path => { context.calls.push(path); return stateFor(path.includes('projectId=b') ? 'b' : 'a'); },
+    endpoint: path => path, api: async path => { context.calls.push(path); return stateFor(path.includes('projectId=b') ? 'b' : 'a'); },
     setState: value => { context.state = value; }, setNavigation: value => { context.navigation = value; }, setLoading: value => { context.loading = value; },
     setDraftDirty: value => { context.draftDirty = value; }, setInboxDirty: value => { context.inboxDirty = value; }, setModal: value => { context.modal = value; context.modalRef.current = value; }, setError: value => { context.error = value; }, setNotice: value => { context.notice = value; }, setRemote: () => {}, setSession: value => { context.session = typeof value === 'function' ? value(context.session) : value; }, setPublishing: value => { context.publishing = value; },
     setCampaignDirty: value => { context.campaignDirty = value; }, setCreationIntent: value => { context.creationIntent = typeof value === 'function' ? value(context.creationIntent) : value; }, setAddIntent: value => { context.addIntent = value; },
@@ -217,7 +229,7 @@ function app(href = 'https://campaign.example/?view=overview&project=a', initial
   const guardCallback = source.match(/^  const campaignGuardChanged = (.+)$/m)[1];
   context.campaignGuardChanged = new Function(...Object.keys(context), 'useCallback', stripTypeScriptTypes('const callback = ' + guardCallback) + '; return callback;')(...Object.values(context), callback => callback);
   const invoke = (name, ...args) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(declaration(name))});`)(...Object.values(context))(...args);
-  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'clearSignedInState', 'signOut', 'sessionExpired', 'submitForm', 'saveEditor', 'startCampaignCreation', 'continueCampaignCreation', 'creationHandled', 'addToCampaign']) context[name] = (...args) => invoke(name, ...args);
+  for (const name of ['writeNavigation', 'reload', 'leaveEditor', 'closeEditor', 'cancelEditor', 'navigate', 'setPage', 'changeProject', 'markEditorDirty', 'editorSaved', 'watchEditorButtons', 'inboxDraftChanged', 'clearSignedInState', 'signOut', 'sessionExpired', 'submitForm', 'saveEditor', 'startCampaignCreation', 'continueCampaignCreation', 'creationHandled', 'addToCampaign', 'remove']) context[name] = (...args) => invoke(name, ...args);
   const popStart = source.indexOf('    const onPop = () =>'), popEnd = source.indexOf('\n  }, [state, draftDirty]);', popStart);
   context.listen = () => new Function(...Object.keys(context), `return (${stripTypeScriptTypes('function listen(){' + source.slice(popStart, popEnd) + '}')})();`)(...Object.values(context));
   context.unload = event => listeners.get('beforeunload')?.(event);

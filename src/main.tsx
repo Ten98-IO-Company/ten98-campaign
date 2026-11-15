@@ -522,7 +522,9 @@ function App() {
   }
   async function remove(collection: string, item: Row) {
     const requestProject = state!.projectId, requestModal = modal;
-    await run(async () => { if (activeProject.current !== requestProject) throw new DOMException('Project changed', 'AbortError'); await api(endpoint(collection + '/' + item.id), 'DELETE'); if (activeProject.current === requestProject) { if (modalRef.current === requestModal) setModal(null); await reload(requestProject); } }, 'Record deleted');
+    await run(async () => { if (activeProject.current !== requestProject) throw new DOMException('Project changed', 'AbortError'); await api(endpoint(collection + '/' + item.id), 'DELETE'); if (activeProject.current === requestProject) { if (modalRef.current === requestModal) setModal(null);
+      // The deleted campaign's own page has nothing left to show, so the person lands on the Campaigns list, not on Page not found.
+      const current = navigationRef.current; await reload(requestProject, collection === 'campaigns' && current.page === 'Campaigns' && current.item === item.id ? { page: 'Campaigns', section: '', projectId: requestProject } : undefined); } }, 'Record deleted');
   }
   async function clearSampleData() {
     const requestProject = state!.projectId;
