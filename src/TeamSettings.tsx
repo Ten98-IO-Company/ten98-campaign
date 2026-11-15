@@ -28,21 +28,26 @@ export default function TeamSettings({ workspaceId, role, currentUserId, request
   }, [workspaceId, role]);
   const rememberFocus = useFocusReturn(busy);
   // Every write invalidates older reads first, then reloads; a change to your own membership reloads the app instead.
-  async function act(work: () => Promise<any>, message: string, self = false, after?: (result: any) => void) {
-    if (busy) return;
+  // A role change passes `rethrow`: TeamFlow confirms it, announces success when the promise resolves and shows a rejection itself.
+  async function act(work: () => Promise<any>, message: string, self = false, after?: (result: any) => void, rethrow = false) {
+    if (busy) { if (rethrow) throw new Error('Another team change is still saving.'); return; }
     rememberFocus();
     const generation = version.current; readVersion.current++; setBusy(true); setError(''); setNotice(undefined);
+    let saved = false;
     try {
       const result = await work();
       if (generation !== version.current) return;
       if (self) { window.location.reload(); return; }
-      after?.(result); setNotice({ tone: 'success', text: message }); await load(generation);
-    } catch (err) { if (generation === version.current) setError((err as Error).message || 'This team change could not be saved.'); }
+      saved = true; after?.(result); if (message) setNotice({ tone: 'success', text: message }); await load(generation);
+    } catch (err) {
+      if (rethrow && !saved) throw err;
+      if (generation === version.current) setError((err as Error).message || 'This team change could not be saved.');
+    }
     finally { if (generation === version.current) setBusy(false); }
   }
   const invite = ({ email, role: requested }: { email: string; role: string }) => act(() => { setLink(undefined); return request(base + '/invitations', 'POST', { email, role: requested }); }, 'Invitation link created. Share it directly with the invited person.', false, result => setLink({ id: result.invitation.id, url: result.url }));
   const revoke = ({ id }: { id: string }) => act(() => request(base + '/invitations/' + encodeURIComponent(id), 'DELETE'), 'Invitation revoked.', false, () => setLink(current => current?.id === id ? undefined : current));
-  const changeRole = ({ id, role: requested }: { id: string; role: string }) => act(() => request(base + '/members/' + encodeURIComponent(id), 'PATCH', { role: requested }), 'Role updated.', id === currentUserId);
+  const changeRole = ({ id, role: requested }: { id: string; role: string }) => act(() => request(base + '/members/' + encodeURIComponent(id), 'PATCH', { role: requested }), '', id === currentUserId, undefined, true);
   const remove = ({ id }: { id: string }) => act(() => request(base + '/members/' + encodeURIComponent(id), 'DELETE'), 'Member removed.', id === currentUserId);
   // The server refuses to demote the last owner, so the sole owner's own role is shown read-only instead of offering a change that fails.
   const soleOwner = role === 'owner' && members.some(member => member.id === currentUserId && member.role === 'owner') && members.filter(member => member.role === 'owner').length === 1;
