@@ -4,15 +4,17 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { postDisplayStatus } from '../shared/post-schedule.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 // The campaign page with controlled hook state; it only calls the callbacks the app passes in.
 type Row = { id: string; [key: string]: any };
 const raw = await readFile(new URL('../src/CampaignDetail.tsx', import.meta.url), 'utf8');
 const body = raw.replace(/^import .*;\r?\n/gm, '').replace(/^export type .*;\r?\n/gm, '').replace(/^export (default )?function/gm, 'function');
 const { code } = await transformWithOxc(body, 'CampaignDetail.tsx', { jsx: { runtime: 'classic' }, lang: 'tsx' });
-const names = ['Button', 'Card', 'DataTable', 'EmptyState', 'Heading', 'Icon', 'Inline', 'MetricCard', 'MetricGrid', 'Popover', 'SegmentedControl', 'Stack', 'Tabs', 'Text'] as const;
+const names = ['Button', 'Card', 'DataTable', 'EmptyState', 'Heading', 'Icon', 'Inline', 'MetricCard', 'MetricGrid', 'Popover', 'SegmentedControl', 'Stack', 'Tabs', 'Text', 'useDisplayFormat'] as const;
 const { CampaignDetail, campaignItems, campaignResults } = new Function('React', 'useState', 'useEffect', 'postDisplayStatus', ...names, code + '; return { CampaignDetail, campaignItems, campaignResults };')(
   React, (initial: unknown) => [initial, () => {}], () => {}, postDisplayStatus, ...names.map(name => (ui as Record<string, unknown>)[name]));
 

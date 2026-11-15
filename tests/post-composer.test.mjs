@@ -5,9 +5,11 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { testDisplayFormat, withTestDisplayFormat } from './display-format.ts';
 import * as social from '../shared/social-posts.ts';
 import { PLATFORM_RULES, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant } from '../shared/social-posts.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 const source = await readFile(new URL('../src/PostComposer.tsx', import.meta.url), 'utf8');
 
@@ -117,7 +119,7 @@ test('group recipient selection copies reviewed IDs, blocks unavailable members 
   const picker = source.slice(source.indexOf('function AccountGroupPicker('), source.indexOf('function previewUrl(')), compile = (code, context) => new Function(...Object.keys(context), `return (${stripTypeScriptTypes(code)});`)(...Object.values(context));
   const members = [{ _id: 'first', platform: 'facebook', displayName: 'First page' }, { _id: 'second', platform: 'facebook', displayName: 'Second page' }], copied = [], notices = [], group = { _id: 'group', name: 'Launch pages', accountIds: ['first', 'second'] }, data = { groups: [group], accounts: members };
   const choose = picker.slice(picker.indexOf('function choose()'), picker.indexOf('\n  return <', picker.indexOf('function choose()')));
-  const context = { disabled: false, busy: false, canChoose: true, members, data, group, onChoose: (...args) => copied.push(args), setNotice: value => notices.push(value) };
+  const context = { disabled: false, busy: false, canChoose: true, members, data, group, onChoose: (...args) => copied.push(args), setNotice: value => notices.push(value), format: testDisplayFormat };
   compile(choose, context)(); members[0].displayName = 'Changed group directory'; group.accountIds.push('later-account');
   assert.deepEqual(copied[0][0].map(row => row._id), ['first', 'second']); assert.equal(copied[0][0][0].displayName, 'First page'); assert.match(notices[0], /Later group changes will not change/);
   compile(choose, { ...context, canChoose: false })(); assert.equal(copied.length, 1, 'A group with any unavailable member cannot be partly applied.');

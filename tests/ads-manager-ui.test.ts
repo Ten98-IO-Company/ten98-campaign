@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { transformWithOxc } from 'vite';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import * as adsView from '../src/ads-view.ts';
+const ui = withTestDisplayFormat(uiExports);
 
 // Issue #126: one ads table with level tabs (Campaigns · Ad sets · Ads), one period, network and status filters,
 // a totals footer and row-click details. The actual component runs with ordered hook stubs and a stub transport.

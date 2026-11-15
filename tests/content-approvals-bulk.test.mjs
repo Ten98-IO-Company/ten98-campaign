@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
+import { useTestDisplayFormat } from './display-format.ts';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');
@@ -13,7 +14,7 @@ function view(request, { selected = [], notes = {}, comment = '', posts }) {
   const initial = { 0: { requireApproval: true, posts }, 5: notes, 7: selected, 15: comment };
   const context = {
     useState(value) { const index = state.length; state.push(Object.hasOwn(initial, index) ? initial[index] : value); return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next; }]; },
-    useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {},
+    useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {}, useDisplayFormat: useTestDisplayFormat,
     ...Object.fromEntries(['approveBlocked', 'postName', 'reviewItem'].map(name => [name, new Function('return ' + stripTypeScriptTypes(source.match(new RegExp(`^const ${name} = (.+);$`, 'm'))[1]))()])),
   };
   const component = new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(start, end).replace('export default ', '') + 'return { bulkReview };\n}')});`)(...Object.values(context));

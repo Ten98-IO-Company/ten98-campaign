@@ -1,4 +1,7 @@
 // The project approvals summary (GET /projects/:id/approvals/summary): read once per state load, no provider calls.
+import { createDisplayFormatter } from '@ten98/ui';
+// Not a component, so it formats with the browser's locale and time zone, as the app's DisplayFormatProvider does.
+const format = createDisplayFormatter();
 export type ApprovalSummary = { requireApproval: boolean; pending: number; statuses: Record<string, string>; pendingAdSpend?: number };
 
 export const approvalLabels: Record<string, string> = { not_requested: 'Approval not requested', pending: 'Awaiting approval', approved: 'Approved', rejected: 'Changes requested', stale: 'Changed since approval', submitted: 'Submitted to provider' };
@@ -12,7 +15,7 @@ export function readableApprovalSummary(value: any): value is ApprovalSummary {
 export function approvalBadge(summary: ApprovalSummary | null | undefined) {
   const posts = summary?.pending || 0, spend = summary?.pendingAdSpend || 0;
   if (!posts && !spend) return null;
-  const parts = [posts && `${posts} post${posts === 1 ? '' : 's'}`, spend && `${spend} ad spend change${spend === 1 ? '' : 's'}`].filter(Boolean);
+  const parts = [posts && format.count(posts, { one: 'post', other: 'posts' }), spend && format.count(spend, { one: 'ad spend change', other: 'ad spend changes' })].filter(Boolean);
   return { count: posts + spend, label: `${parts.join(' and ')} awaiting review` };
 }
 
@@ -39,8 +42,10 @@ export const adSpendPlatformLabel = (platform: string) => adPlatforms[platform] 
 export function formatMinorUnits(amount: unknown, currency: unknown) {
   if (typeof amount !== 'number' || !Number.isSafeInteger(amount) || typeof currency !== 'string') return 'Not available';
   try {
+    // Reads the currency's minor-unit digits to place the decimal point in the exact string; this formats nothing.
     const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2;
-    return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(amount / 10 ** digits);
+    const units = String(Math.abs(amount)).padStart(digits + 1, '0'), whole = digits ? units.slice(0, -digits) : units;
+    return format.currency(`${amount < 0 ? '-' : ''}${whole}${digits ? '.' + units.slice(-digits) : ''}`, currency);
   } catch { return `${amount} minor units of ${currency}`; }
 }
 

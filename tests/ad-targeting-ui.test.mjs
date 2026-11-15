@@ -4,9 +4,11 @@ import { readFile } from 'node:fs/promises';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { AppField } from '@ten98/ui/app';
-import * as ui from '@ten98/ui';
+import * as uiExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { Checkbox } from '@ten98/ui';
 import { transformWithOxc } from 'vite';
+const ui = withTestDisplayFormat(uiExports);
 
 // Exercise the complete composer with its actual JSX, fields and mocked request boundary.
 const source = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8');

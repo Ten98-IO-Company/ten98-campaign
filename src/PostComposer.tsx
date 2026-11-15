@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Alert, Badge, Button, Checkbox, ContentPreview, DateTimeField, DestinationPicker, Disclosure, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Image as MediaImage, Inline, Input, List, ListItem, MediaPlayer, MediaStrip, MultiCombobox, Option, Popover, ReviewConfirm, SegmentedControl, Select, Stack, StatusLine, Tabs, Text, Textarea, ValidationSummary, VisuallyHidden, type MediaItem as StripItem, type ValidationMessage } from '@ten98/ui';
+import { Alert, Badge, Button, Checkbox, ContentPreview, DateTimeField, DestinationPicker, Disclosure, Field, Fieldset, Form, FormActions, FormGrid, Grid, Heading, Image as MediaImage, Inline, Input, List, ListItem, MediaPlayer, MediaStrip, MultiCombobox, Option, Popover, ReviewConfirm, SegmentedControl, Select, Stack, StatusLine, Tabs, Text, Textarea, ValidationSummary, VisuallyHidden, type MediaItem as StripItem, type ValidationMessage, useDisplayFormat } from '@ten98/ui';
 import { PLATFORM_RULES, sentenceCaseLabel, captionLimitForVariant, captionUsage, countCaption, normalizePostVariants, normalizePostTags, normalizeAccountVariants, publicMediaUrl, resolveVariant, validatePostForPlatforms, providerPostMediaUrls } from '../shared/social-posts.ts';
 import InstagramPublishingTools from './InstagramPublishingTools';
 import TikTokPublishingTools from './TikTokPublishingTools';
@@ -35,6 +35,7 @@ const own = Object.hasOwn;
 const localTime = (value = '') => value && Number.isFinite(Date.parse(value)) ? new Date(Date.parse(value) - new Date(value).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '';
 const accountId = (account: Row) => String(account._id || account.id);
 export const accountLabel = (account: Row) => account.displayName || account.username || account.name || accountId(account);
+// Names the browser zone that the datetime-local inputs edit; this reads the zone, it formats nothing.
 const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 // Quick schedule presets ported from zernio-dev/latewiz@28dd018063b955769de11f881acd03bb64c61cd4 src/app/dashboard/compose/_components/schedule-picker.tsx:91-137 (MIT).
 // Like the datetime-local input, they are wall-clock times in the browser's time zone; next Monday is never today.
@@ -49,6 +50,7 @@ function presetTime(preset: string, now = new Date()) {
 // latewiz asks the provider; this reads only the loaded weekly slots, so it cannot know which slots other posts already hold.
 function nextQueueSlot(slots: { dayOfWeek: number; time: string }[], timeZone: string, now = new Date()) {
   const week = 7 * 1440, base = new Date(Math.floor(now.getTime() / 60000) * 60000);
+  // Reads the wall clock in the queue's own time zone (not the viewer's), so slots match the provider's weekly times.
   let clock: Intl.DateTimeFormat;
   try { clock = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); } catch { return null; }
   const wall = (date: Date) => { const parts = Object.fromEntries(clock.formatToParts(date).map(part => [part.type, part.value])); return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday) * 1440 + Number(parts.hour) * 60 + Number(parts.minute); };
@@ -70,7 +72,7 @@ const noDestination = 'Choose at least one social platform.';
 const issueMessages = (errors: { message: string }[], warnings: { message: string }[]): ValidationMessage[] => [...errors.map((item, index) => ({ id: 'error' + index, text: item.message })), ...warnings.map((item, index) => ({ id: 'warning' + index, text: 'To verify: ' + item.message }))];
 function AccountGroupPicker({ load, onChoose, disabled }: { load: NonNullable<Props['onLoadGroups']>; onChoose: (members: Row[], directory: Row[]) => void; disabled: boolean }) {
   const [data, setData] = useState<any>(null), [selectedId, setSelectedId] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
-  const active = useRef(true), generation = useRef(0), pending = useRef(false);
+  const active = useRef(true), generation = useRef(0), pending = useRef(false), format = useDisplayFormat();
   useEffect(() => { active.current = true; return () => { active.current = false; generation.current++; }; }, []);
   async function refresh() {
     if (disabled || pending.current) return; const read = ++generation.current; pending.current = true; setBusy(true); setError('');
@@ -86,7 +88,7 @@ function AccountGroupPicker({ load, onChoose, disabled }: { load: NonNullable<Pr
   function choose() {
     if (disabled || busy || !canChoose) return;
     onChoose(members.map(row => ({ ...row })), data.accounts.map((row: Row) => ({ ...row })));
-    setNotice(`Copied ${members.length} account${members.length === 1 ? '' : 's'} from ${group.name}. Later group changes will not change this draft’s recipients.`);
+    setNotice(`Copied ${format.count(members.length, { one: 'account', other: 'accounts' })} from ${group.name}. Later group changes will not change this draft’s recipients.`);
   }
   return <Stack gap={3}>
     <Inline><Button variant="secondary" size="sm" disabled={disabled || busy} onClick={refresh}>{busy ? 'Loading account groups…' : 'Load account groups'}</Button></Inline>
@@ -236,6 +238,7 @@ export function PostVariantPreview({ platform, variant, accountName = 'Your bran
 
 export default function PostComposer({ post, assets = [], campaigns = [], accounts: connectedAccounts = [], canWrite, onSubmit, onCancel, onDelete, onValidate, onLoadAccounts, onInspectMedia, onTikTokInfo, onLookupDestinations, onLoadQueues, onLoadGroups, onShortenLinks, providerPost = false, connected = providerPost || !!onLoadAccounts, onOpenIntegrations, onSchedule, publishBlock, busy = false, readOnly = false, initialScheduledAt, initialCampaignId, actionsHost }: Props) {
   const [content, setContent] = useState(post?.content || ''), [platforms, setPlatforms] = useState<string[]>(post?.platforms || []), [selectedAccounts, setAccounts] = useState<string[]>(post?.accounts || []);
+  const format = useDisplayFormat();
   const [assetId, setAssetId] = useState(post?.assetId || ''), [campaignId, setCampaignId] = useState(post?.campaignId || initialCampaignId || ''), [scheduledAt, setScheduledAt] = useState(localTime(post?.scheduledAt) || initialScheduledAt || '');
   const [baseMode, setBaseMode] = useState(Array.isArray(post?.mediaItems) ? post.mediaItems.length ? 'custom' : 'none' : post?.assetId ? 'asset' : 'none'), [baseMedia, setBaseMedia] = useState<MediaItem[]>(post?.mediaItems || []);
   const [overrides, setOverrides] = useState<Record<string, Override>>(post?.platformOverrides || {}), [activePlatform, setActivePlatform] = useState(post?.platforms?.[0] || ''), [error, setError] = useState(''), [saving, setSaving] = useState(false);
@@ -368,7 +371,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
       if (!permissions) return null;
       return <Stack key={accountId(account)} gap={1}><Text><Text as="strong" weight="semibold">{permissions.creator?.nickname || accountLabel(account)}</Text>{saved.mediaType !== (resolveVariant(values, 'tiktok', assets, accountId(account)).mediaItems.some((item: MediaItem) => item.type === 'video') ? 'video' : 'photo') ? ' · Media type changed; load permissions again.' : ''}</Text>{permissions.creator?.canPostMore === false && <Alert tone="danger" variant="inline">This creator has reached its posting limit.</Alert>}<Text>Allowed privacy: {(permissions.privacyLevels || []).map((level: any) => level.label || level.value).join(', ') || 'Not reported'}</Text>{permissions.postingLimits?.maxVideoDurationSec && <Text>Maximum video duration: {permissions.postingLimits.maxVideoDurationSec} seconds.</Text>}<List>{Object.entries(permissions.postingLimits?.interactionSettings || {}).map(([key, setting]: [string, any]) => setting && <ListItem key={key}>{setting.label || sentenceCaseLabel(key)}: {setting.enabled === false ? 'Unavailable for this creator' : setting.required ? 'Choose explicitly' : 'Available'}</ListItem>)}</List></Stack>;
     })}</Stack>}
-    <Text tone="muted" size="sm">{rule.mediaTypes.join(', ')} · {rule.maxMedia} media item{rule.maxMedia === 1 ? '' : 's'} maximum{rule.minMedia ? ` · At least ${rule.minMedia} required` : ''}. Restrictions can change with the format and account.</Text>
+    <Text tone="muted" size="sm">{rule.mediaTypes.join(', ')} · {format.count(rule.maxMedia, { one: 'media item', other: 'media items' })} maximum{rule.minMedia ? ` · At least ${rule.minMedia} required` : ''}. Restrictions can change with the format and account.</Text>
     {editingAccountId && <Stack gap={2}><Checkbox label="Separate account publishing options" checked={own(override, 'options')} onChange={event => event.target.checked ? changeOverride({ options: { ...variant.options } }) : changeOverride({}, ['options'])}/>{own(override, 'options') && <Inline><Button variant="secondary" size="sm" onClick={() => changeOverride({ options: {} })}>Clear account options</Button></Inline>}<Text tone="muted" size="sm">Changing any option creates a separate set for this account. Clear account options uses provider defaults; turn off separate options to inherit platform settings.</Text></Stack>}
     {onLookupDestinations && destinationFields[selected] && <PublishingDestinations key={editKey + ':' + selectedAccounts.join(',')} platform={selected} accounts={editingAccount ? [editingAccount] : selected === 'googlebusiness' ? accountChoices : socialAccounts.filter(account => account.platform === selected && selectedAccounts.includes(accountId(account)))} options={locationAccount ? resolveVariant(values, selected, assets, accountId(locationAccount)).options : variant.options} lookup={onLookupDestinations} disabled={disabled} onChange={options => { if (selected === 'googlebusiness') { if (disabled || !locationAccount) return; const id = accountId(locationAccount); setAccountOverrides(previous => ({ ...previous, [id]: { ...previous[id], platform: selected, options } })); } else changeOverride({ options }); }}/>}
     {onLookupDestinations && selected === 'instagram' && <InstagramPublishingTools key={editKey + ':' + selectedAccounts.join(',')} account={instagramAccount} mediaItems={instagramAccount ? resolveVariant(values, selected, assets, accountId(instagramAccount)).mediaItems : variant.mediaItems} options={instagramAccount ? resolveVariant(values, selected, assets, accountId(instagramAccount)).options : variant.options} disabled={disabled} lookup={onLookupDestinations} onChange={options => { if (disabled || !instagramAccount) return; const id = accountId(instagramAccount); setAccountOverrides(previous => ({ ...previous, [id]: { ...previous[id], platform: 'instagram', options } })); }}/>}
@@ -380,7 +383,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
     })}</Stack></Disclosure>}
     <ValidationSummary title={`${rule.label} restriction checks`} items={[{ id: editKey, target: editingAccount ? `${accountLabel(editingAccount)} · ${rule.label}` : rule.label, status: errors.length ? 'error' : warnings.length ? 'warning' : 'ok', messages: errors.length || warnings.length ? issueMessages(errors, warnings) : [{ id: 'ok', text: 'No known caption or media restriction failed.' }] }]}/>
     {editingAccountId && <DateTimeField label="Separate account time (your local timezone, optional)" timeZoneLabel={browserTimeZone} disabled={!!queueId || !scheduledAt} value={localTime(accountOverrides[editingAccountId]?.scheduledAt)} onValueChange={value => { setAccountOverrides(previous => ({ ...previous, [editingAccountId]: { ...previous[editingAccountId], platform: selected, scheduledAt: value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : '' } })); }} description="Leave empty to use the planned post time. Choose a fixed post time first. Separate times are unavailable for immediate publishing and queues."/>}
-    {editingAccountId && accountOverrides[editingAccountId]?.scheduledAt && <Text tone="muted" size="sm">This account: {new Date(accountOverrides[editingAccountId].scheduledAt!).toLocaleString()}</Text>}
+    {editingAccountId && accountOverrides[editingAccountId]?.scheduledAt && <Text tone="muted" size="sm">This account: {format.dateTime(accountOverrides[editingAccountId].scheduledAt!)}</Text>}
   </Stack>;
   const usage = captionUsage(values, platforms, assets), unmatched = platforms.filter(platform => !socialAccounts.some(account => account.platform === platform));
   // Problems read "Network (Account): message", once per destination.
@@ -394,7 +397,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   // Schedule submits to the networks only when nothing blocks publishing; otherwise the same step saves the plan and says why.
   const publishReason = !connected ? 'Connect your social accounts in Settings › Connections to publish.' : publishBlock || problems[0]?.text || (!onSchedule ? 'Publishing is not available from this editor.' : undefined);
   const primaryLabel = publishReason ? 'Save to calendar' : 'Schedule';
-  const when = queueId ? `Next free slot${selectedQueue ? ' in ' + selectedQueue.name : ''}` : plannedAt ? `Planned for ${plannedAt.toLocaleString()}` : 'Not scheduled';
+  const when = queueId ? `Next free slot${selectedQueue ? ' in ' + selectedQueue.name : ''}` : plannedAt ? `Planned for ${format.dateTime(plannedAt)}` : 'Not scheduled';
   const destinationNames = [...selectedAccounts.map(id => { const account = accounts.find(row => accountId(row) === id); return account ? `${accountLabel(account)} · ${PLATFORM_RULES[account.platform]?.label || account.platform}` : id; }), ...platforms.filter(platform => !selectedAccounts.some(id => accounts.find(row => accountId(row) === id)?.platform === platform)).map(platform => PLATFORM_RULES[platform]?.label || platform)];
   function primaryAction() { if (providerPost) void save(); else if (!scheduleMenu) setScheduleMenu(true); else if (!scheduleBlocked && !saving && !busy) void save(!publishReason); }
   const timing = <Stack gap={3}>
@@ -404,7 +407,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
       <Field label="Queue"><Select value={queueId} onChange={event => { const selected = queues.find(row => row._id === event.target.value); setQueueId(selected?._id || ''); setQueueVersion(selected?.version || ''); if (selected) setScheduledAt(''); setProviderCheck(null); }}><Option value="">No queue · use the time above</Option>{queueId && !queues.some(row => row._id === queueId) && <Option value={queueId}>Saved queue · {queueId} (load to verify)</Option>}{queues.map(row => <Option key={row._id} value={row._id} disabled={!row.active || !row.slots?.length}>{row.name} · {row.timezone}{row.isDefault ? ' · Default' : ''}{!row.active ? ' · Paused' : ''}</Option>)}</Select></Field>
       {onLoadQueues && !queues.length && <Inline><Button variant="ghost" size="sm" disabled={disabled || loadingQueues || !connected} onClick={() => void loadQueues()}>{loadingQueues ? 'Loading queues…' : 'Load queues'}</Button></Inline>}
       {queueId && queues.some(row => row._id === queueId && row.version !== queueVersion) && <ReviewConfirm title="This queue changed since you selected it" reviewKey={`${queueId}:${selectedQueue?.version}`} acknowledgements={[]} confirmLabel="Use reviewed queue settings" onConfirm={() => { setQueueVersion(queues.find(row => row._id === queueId)?.version || ''); setProviderCheck(null); }}><Text>Review its schedule, then save the new queue settings and obtain approval again if required.</Text></ReviewConfirm>}
-      {queueId && selectedQueue && nextSlot && <StatusLine>Next weekly slot: {new Intl.DateTimeFormat(undefined, { timeZone: selectedQueue.timezone, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(nextSlot)} ({selectedQueue.timezone}). The queue takes its next free slot when the post is sent, so this time may already be taken.</StatusLine>}
+      {queueId && selectedQueue && nextSlot && <StatusLine>{/* The queue's own time zone, not the viewer's: the slot is a weekly time the queue keeps. */}Next weekly slot: {new Intl.DateTimeFormat(undefined, { timeZone: selectedQueue.timezone, weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(nextSlot)} ({selectedQueue.timezone}). The queue takes its next free slot when the post is sent, so this time may already be taken.</StatusLine>}
     </Stack>}
   </Stack>;
   const postCheck = onValidate && <Stack gap={2}>
@@ -452,7 +455,7 @@ export default function PostComposer({ post, assets = [], campaigns = [], accoun
   const editor = <Stack as="fieldset" gap={6} disabled={disabled}>
     <Stack gap={2}>
       <Field label="Caption"><Textarea rows={8} value={content} maxLength={100000} onChange={event => setContent(event.target.value)} placeholder="Write your post…"/></Field>
-      {usage.length > 0 && <Inline gap={3}>{usage.map(row => <Text key={row.platform} size="sm" numeric tone={row.tone === 'error' ? 'danger' : row.tone === 'warning' ? 'warning' : 'muted'}>{`${row.label} ${row.count.toLocaleString()}/${row.limit.toLocaleString()}`}</Text>)}</Inline>}
+      {usage.length > 0 && <Inline gap={3}>{usage.map(row => <Text key={row.platform} size="sm" numeric tone={row.tone === 'error' ? 'danger' : row.tone === 'warning' ? 'warning' : 'muted'}>{`${row.label} ${format.number(row.count)}/${format.number(row.limit)}`}</Text>)}</Inline>}
       {problems.map(item => <Text key={item.text} size="sm" tone="danger">{item.text}</Text>)}
       {usage.filter(row => row.tone === 'warning' && row.message).map(row => <Text key={'warning:' + row.platform} size="sm" tone="warning">{`${row.label}: ${row.message}`}</Text>)}
       {!!platforms.length && <Disclosure variant="plain" summary="Customize per network" defaultOpen={customised}>

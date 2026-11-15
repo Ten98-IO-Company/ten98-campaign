@@ -4,13 +4,16 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import * as designSystem from '@ten98/ui';
+import * as designSystemExports from '@ten98/ui';
+import { testDisplayFormat, withTestDisplayFormat } from './display-format.ts';
 import { transformWithOxc } from 'vite';
 import * as adsView from '../src/ads-view.ts';
+const designSystem = withTestDisplayFormat(designSystemExports);
 
 const main = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), details = await readFile(new URL('../src/AdDetails.tsx', import.meta.url), 'utf8');
 const compile = async (source, name) => (await transformWithOxc(source, name, { jsx: { runtime: 'classic' } })).code;
-const helpers = ['numeric', 'money', 'compact', 'title'].map(name => main.match(new RegExp(`^const ${name} = .+$`, 'm'))[0]).join('\n');
+// money and compact sit inside App, on the formatter useDisplayFormat gives it.
+const helpers = ['numeric', 'money', 'compact', 'title'].map(name => main.match(new RegExp(`^(?:  )?const ${name} = .+$`, 'm'))[0]).join('\n');
 const now = new Date('2026-10-21T15:30:00Z');
 
 function adsLoader(range = 'default') {
@@ -51,7 +54,7 @@ test('the account filter narrows loaded rows and falls back to all accounts', ()
 async function campaignColumns(hideAmounts) {
   const source = main.match(/  const adsFigure = [^\n]+\n  const adsColumns = [\s\S]*?\n  \];/)[0];
   const code = await compile(`${helpers}\n${source}\nreturn adsColumns;`, 'AdsColumns.tsx');
-  return new Function('React', 'Stack', 'Text', 'Badge', 'campaignFigure', 'campaignSortValue', 'hiddenAmount', 'hideAmounts', code)(React, designSystem.Stack, designSystem.Text, ({ value }) => value, adsView.campaignFigure, adsView.campaignSortValue, adsView.hiddenAmount, hideAmounts);
+  return new Function('React', 'Stack', 'Text', 'Badge', 'campaignFigure', 'campaignSortValue', 'hiddenAmount', 'hideAmounts', 'format', code)(React, designSystem.Stack, designSystem.Text, ({ value }) => value, adsView.campaignFigure, adsView.campaignSortValue, adsView.hiddenAmount, hideAmounts, testDisplayFormat);
 }
 const cell = (columns, key, row) => renderToStaticMarkup(React.createElement(React.Fragment, null, columns.find(column => column.key === key).render(row)));
 
@@ -109,7 +112,7 @@ test('the creative pane renders safe creative fields or an empty note', () => {
 });
 
 test('the metrics grid shows only reported metrics, preferring the listed date-scoped figures', () => {
-  assert.deepEqual(adsView.adMetricCells({ spend: 1234.5, impressions: 15400, ctr: 1.234, roas: 2.5 }, 'USD').map(item => [item.label, item.value]), [['Spend', '$1,235'], ['Impressions', '15.4K'], ['CTR', '1.23%'], ['ROAS', '2.50×']]);
+  assert.deepEqual(adsView.adMetricCells({ spend: 1234.5, impressions: 15400, ctr: 1.234, roas: 2.5 }, 'USD').map(item => [item.label, item.value]), [['Spend', '$1,235'], ['Impressions', '15.4K'], ['CTR', '1.23%'], ['ROAS', '2.5×']]);
   assert.deepEqual(adsView.adMetricCells({ videoPlayActions: 900, videoP25WatchedActions: 400, videoP100WatchedActions: 50 }).map(item => item.label), ['Video plays', '25% watched', '100% watched']);
   assert.deepEqual(adsView.adMetricCells({ videoP25WatchedActions: 400 }), [], 'The video funnel needs reported plays.');
   assert.deepEqual(adsView.adMetricCells(undefined), []);

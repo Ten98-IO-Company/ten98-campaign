@@ -5,10 +5,12 @@ import { stripTypeScriptTypes } from 'node:module';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { AppField } from '@ten98/ui/app';
-import * as designSystem from '@ten98/ui';
+import * as designSystemExports from '@ten98/ui';
+import { withTestDisplayFormat } from './display-format.ts';
 import { transformWithOxc } from 'vite';
 import * as adsView from '../src/ads-view.ts';
 import { adSpendBlock } from '../src/approval-status.ts';
+const designSystem = withTestDisplayFormat(designSystemExports);
 
 const composer = await readFile(new URL('../src/AdComposer.tsx', import.meta.url), 'utf8'), details = await readFile(new URL('../src/AdDetails.tsx', import.meta.url), 'utf8'), analytics = await readFile(new URL('../src/SocialAnalytics.tsx', import.meta.url), 'utf8');
 const javascript = value => stripTypeScriptTypes(value);

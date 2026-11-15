@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { workspaceRoles as roles, mayGrantWorkspaceRole } from '@ten98/runtime';
-import { advisoryLock, hashPassword, HttpError, lockWorkspace, memberRole, publicUser } from './auth.ts';
+import { advisoryLock, hashPassword, HttpError, insertAccount, lockWorkspace, memberRole, publicUser } from './auth.ts';
 import type { Database, Executor } from './database.ts';
 import type { ProviderRecord } from './provider-core.ts';
 
@@ -99,7 +99,7 @@ export async function handleInvitations(context: ProviderRecord) {
       const target = await account(tx, current.email);
       if ((!existing && target) || (existing && (!target || target.id !== existing.id))) fail(409, 'The invited account changed. Sign in with that account and open the invitation again.');
       const joined = target || { id: randomUUID(), name: name!, email: current.email, isOperator: false };
-      if (!target) await tx.execute(sql`INSERT INTO users VALUES (${joined.id}, ${joined.name}, ${joined.email}, ${hash})`);
+      if (!target) await insertAccount(tx, { id: joined.id, name: joined.name, email: joined.email, passwordHash: hash! });
       const role = await joinInvitation(tx, current, joined.id);
       if (!target) await establish(joined.id, tx);
       return { user: publicUser(joined), workspaceId: current.workspace_id, role: role || current.role, alreadyMember: Boolean(role), created: !target };

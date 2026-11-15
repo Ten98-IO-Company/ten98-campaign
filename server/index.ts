@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { oidcEndpoint, workspaceRoles as roles, mayManageWorkspaceMember } from '@ten98/runtime';
 import { assertSchema, closeDatabase, createStore, collections, getDatabase, type Connection, type Executor, type Store } from './database.ts';
-import { createAuth, sessionSecret, hashPassword, HttpError, lockWorkspace, memberRole, publicUser, type AuthConfig, type PublicUser } from './auth.ts';
+import { createAuth, sessionSecret, hashPassword, HttpError, insertAccount, lockWorkspace, memberRole, publicUser, type AuthConfig, type PublicUser } from './auth.ts';
 import { setInstanceOperator } from './instance-operators.ts';
 import { seedSample } from './seed.ts';
 import { handleIntegration } from './integrations.ts';
@@ -223,7 +223,7 @@ export async function createApp(options: AppOptions = {}) {
           // The installation row lock makes setup single use under parallel requests.
           await db.transaction(async tx => {
             if ((await first<{ claimed: boolean }>(tx.execute(sql`SELECT claimed FROM installation WHERE id = 1 FOR UPDATE`)))?.claimed) throw new HttpError(409, 'Setup is complete. Sign in with the owner account.');
-            await tx.execute(sql`INSERT INTO users VALUES (${id}, ${name}, ${mail}, ${hash})`);
+            await insertAccount(tx, { id, name, email: mail, passwordHash: hash });
             await setInstanceOperator(tx, id, true, 'bootstrap');
             await tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspaceId}, ${workspace})`); await tx.execute(sql`INSERT INTO memberships VALUES (${workspaceId}, ${id}, 'owner')`);
             await tx.execute(sql`UPDATE installation SET claimed = true WHERE id = 1`);
@@ -373,7 +373,7 @@ export async function createApp(options: AppOptions = {}) {
           // Errors keep their precedence: session ended, then project unavailable, then role changed, then credentials.
           type CurrentAccess = { session: boolean; role: string | null; zernio_profile_id: string | null; drive_folder_id: string | null; project: string | null };
           const readAccess = async (executor: Executor): Promise<CurrentAccess> => {
-            const current = (await first<CurrentAccess>(executor.execute(sql`SELECT EXISTS (SELECT 1 FROM sessions WHERE token = ${auth.sessionKey(req)} AND expires_at > ${Date.now()} AND user_id = ${user.id}) AS session,
+            const current = (await first<CurrentAccess>(executor.execute(sql`SELECT ${auth.liveSession(req, user.id)} AS session,
               (SELECT m.role FROM memberships m WHERE m.workspace_id = p.workspace_id AND m.user_id = ${user.id}) AS role, p.id AS project, p.zernio_profile_id, p.drive_folder_id
               FROM (SELECT 1) one LEFT JOIN projects p ON p.id = ${project.id}`)))!;
             if (!current.session) throw new HttpError(403, 'Your sign-in session ended. Sign in again.');

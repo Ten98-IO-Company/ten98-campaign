@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
+import { useTestDisplayFormat } from './display-format.ts';
 
 const app = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8'), source = await readFile(new URL('../src/ContentApprovals.tsx', import.meta.url), 'utf8');
 
@@ -13,7 +14,7 @@ test('the composer offers account auto-loading only when the project has a Zerni
 test('a failed keyboard review forgets its pending focus move, while a saved one keeps it for the next card', async () => {
   const start = source.indexOf('export default function '), end = source.indexOf('  return <', start);
   function view(request) {
-    const state = [], context = { useState(value) { const index = state.length; state.push(index === 0 ? { requireApproval: true, posts: [] } : value); return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next; }]; }, useRef: value => ({ current: value }), useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {} };
+    const state = [], context = { useState(value) { const index = state.length; state.push(index === 0 ? { requireApproval: true, posts: [] } : value); return [state[index], next => { state[index] = typeof next === 'function' ? next(state[index]) : next; }]; }, useRef: value => ({ current: value }), useDisplayFormat: useTestDisplayFormat, useEffect() {}, document: { getElementById: () => null }, useFocusReturn: () => () => {} };
     return new Function(...Object.keys(context), `return (${stripTypeScriptTypes(source.slice(start, end).replace('export default ', '') + 'return { review, advance };\n}')});`)(...Object.values(context))({ projectId: 'project', role: 'owner', request, onChanged: async () => {} });
   }
   const item = { post: { id: 'post' }, review: { id: 'review' }, status: 'pending' };
