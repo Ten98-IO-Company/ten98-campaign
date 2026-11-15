@@ -361,6 +361,8 @@ export function createContacts({ db }: { db: Database }) {
   }
   return { list, get, byDestination, save, capture, fromMessenger, findMessenger, import: importCsv, assessDNS, suppress, suppressUntil, suppressDestination, suppressSmsGlobally, liftSmsOptOut, smsSuppression, async remove(projectId: string, id: string, { audit }: { audit?: ContactAudit } = {}) {
     return db.transaction(async tx => {
+      // Under the contacts lock, like every edit: an edit that read the contact before this delete cannot write it back.
+      await lockContacts(tx, projectId);
       const removed = Boolean((await tx.execute(sql`DELETE FROM direct_contacts WHERE project_id = ${projectId} AND id = ${id}`)).rowCount);
       if (removed) await audit?.(tx);
       return removed;
