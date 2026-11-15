@@ -203,6 +203,9 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       return db.transaction(async tx => {
         if ((await lockUser(tx, found!.id))?.password !== found!.password) throw new HttpError(401, 'Your password changed. Sign in again.');
         await tx.execute(sql`DELETE FROM login_limits WHERE key = ${clientAccount}`);
+        // A successful sign-in gives back the one per-client attempt it used, so many people behind one address can sign
+        // in; failed attempts keep counting in full, and a success refunds only itself. The account-wide count is kept.
+        await tx.execute(sql`UPDATE login_limits SET count = count - 1 WHERE key = ${client} AND count > 0`);
         await establish(res, found!.id, req, tx); return publicUser(found);
       });
     },
