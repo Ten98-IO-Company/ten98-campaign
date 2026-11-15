@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
 import * as ui from '@ten98/ui';
 import * as shared from '../shared/offline-activations.ts';
+import { readText } from './read-text.ts';
 
 type Row = Record<string, any>;
 const source = await readFile(new URL('../src/OfflineActivations.tsx', import.meta.url), 'utf8');
@@ -132,7 +133,7 @@ test('the When column wraps, so a two-day range fits a 375px-wide stacked row', 
   const cells = [...markup.matchAll(/<td([^>]*data-label="When"[^>]*)>([^]*?)<\/td>/g)];
   assert.equal(cells.length, 2);
   const format = ui.createDisplayFormatter(), clock = new Intl.DateTimeFormat(undefined, { timeStyle: 'short' });
-  assert.deepEqual(cells.map(([, , text]) => plain(text.replace(/<[^>]+>/g, ''))), [
+  assert.deepEqual(cells.map(([, , text]) => plain(readText(text, ''))), [
     plain(`${format.dateTime(rows[0].startAt)} – ${clock.format(new Date(rows[0].endAt))}`),
     plain(`${format.dateTime(rows[1].startAt)} – ${format.dateTime(rows[1].endAt)}`),
   ]);
