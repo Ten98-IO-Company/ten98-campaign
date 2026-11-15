@@ -10,7 +10,7 @@ import { clientLimitKey, parseTrustedProxies, resolveClientAddress } from '@ten9
 import type { Database, Executor } from './database.ts';
 import { joinInvitation, lockInvitation } from './invitations.ts';
 import { advisoryLock } from './locks.ts';
-import { authDatabase, createCampaignAuth, LockedAuthUserNotFoundError, retireResetLinks, signInWithPassword, type CampaignAuth } from './locked-auth.ts';
+import { authDatabase, createCampaignAuth, LockedAuthUserNotFoundError, retireResetLinks, type CampaignAuth, type SignInLimit } from './locked-auth.ts';
 import { accounts, instanceOperators, sessions, users, verifications } from './schema.ts';
 
 export { advisoryLock, lockUser, lockWorkspace } from './locks.ts';
@@ -159,23 +159,25 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
     const counted = await db.execute(sql`INSERT INTO login_limits VALUES (${key}, 1, ${now + 900000}) ON CONFLICT (key) DO UPDATE SET count = login_limits.count + 1 WHERE login_limits.count < ${maximum}`);
     if (!counted.rowCount) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
   }
-  /** Signs in with a password, verified first outside any transaction and then under the account lock; null when the email or password is wrong. */
-  async function signIn(req: IncomingMessage, res: ServerResponse, email: string, password: string): Promise<PublicUser | null> {
-    return await signInWithPassword(identity, db, email, password, async (auth, tx, userId) => {
-      // No account under the lock (removed, or its email changed since the pre-check): refuse before Better Auth reads one
-      // that commits a moment later without this lock.
-      if (!userId) return null;
-      const response = await auth.api.signInEmail({ body: { email, password }, headers: headers(req), asResponse: true });
-      if (!response.ok) return null;
-      const signedIn = await response.clone().json() as { twoFactorRedirect?: boolean; user?: { id?: string } };
-      // Campaign offers no two-factor enrolment yet (#285), so no account can reach Better Auth's second-factor challenge.
-      if (signedIn.twoFactorRedirect) throw new HttpError(403, 'Two-factor sign-in is not available in Campaign yet.');
-      // The session must belong to the account this transaction locked; throwing rolls the session back.
-      if (signedIn.user?.id !== userId) throw new HttpError(401, 'Email or password is incorrect.');
-      forward(res, response);
-      const row = (await tx.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, userId)))[0];
-      return publicUser({ ...row, isOperator: await isOperator(tx, userId) });
-    });
+  /**
+   * Signs in with a password through the preset's signInWithPassword (verified outside any transaction, then again under
+   * the account lock, where the session is created); null when the email or password is wrong. `allow` is the attempt's
+   * rate limit; setup and invitation acceptance sign in an account they just created, so theirs always allows.
+   */
+  async function signIn(req: IncomingMessage, res: ServerResponse, email: string, password: string, allow: SignInLimit = () => true): Promise<PublicUser | null> {
+    const response = await identity.signInWithPassword(db, { email, password, headers: headers(req) }, allow);
+    if (response.status === 429) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
+    if (response.status === 503) throw new HttpError(503, 'Sign-in is busy. Try again shortly.');
+    if (!response.ok) return null;
+    const signedIn = await response.clone().json() as { twoFactorRedirect?: boolean; user?: { id?: string } };
+    // Campaign offers no two-factor enrolment yet (#285), so no account can reach Better Auth's second-factor challenge.
+    if (signedIn.twoFactorRedirect) throw new HttpError(403, 'Two-factor sign-in is not available in Campaign yet.');
+    const userId = signedIn.user?.id;
+    if (!userId) return null;
+    forward(res, response);
+    // The account the new session belongs to.
+    const row = (await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, userId)))[0];
+    return row ? publicUser({ ...row, isOperator: await isOperator(db, userId) }) : null;
   }
   /** Issues a session for an account the OIDC flow verified (after its transaction committed). */
   async function signInVerified(req: IncomingMessage, res: ServerResponse, userId: string): Promise<void> {
@@ -270,9 +272,20 @@ export function createAuth(db: Database, config: AuthConfig, { openidClient = ()
       });
     },
     async login(req: IncomingMessage, res: ServerResponse, body: { email: string; password: string }): Promise<PublicUser | null> {
-      const client = clientKey(req, 'ip'), account = body.email.toLowerCase(), clientAccount = 'client-email:' + digest(JSON.stringify([client, account]));
-      await limit(client, signInLimits.client); await limit(clientAccount, signInLimits.clientAccount); await limit('email:' + digest(account), signInLimits.account);
-      const signedIn = await signIn(req, res, body.email, body.password);
+      const client = clientKey(req, 'ip');
+      let clientAccount = '';
+      // Campaign's three buckets, which the preset counts before any read or hash; the first one that is full refuses (429).
+      const allow: SignInLimit = async ({ email }) => {
+        clientAccount = 'client-email:' + digest(JSON.stringify([client, email]));
+        try {
+          await limit(client, signInLimits.client);
+          await limit(clientAccount, signInLimits.clientAccount);
+          // When #140 adds knownDevice, a known device skips only this account-wide bucket: `if (!knownDevice)` here.
+          await limit('email:' + digest(email), signInLimits.account);
+          return true;
+        } catch (error) { if (error instanceof HttpError && error.status === 429) return false; throw error; }
+      };
+      const signedIn = await signIn(req, res, body.email, body.password, allow);
       if (!signedIn) throw new HttpError(401, 'Email or password is incorrect.');
       await db.execute(sql`DELETE FROM login_limits WHERE key = ${clientAccount}`);
       return signedIn;
