@@ -270,7 +270,7 @@ test('Settings shows one section at a time, keeps scoped receipt recovery, and h
   const activeProject = { current: 'project-a' }, pendingKeys = { current: new Map([['retained', 'key']]) };
   const render = (section, isOperator = true) => {
     const context = { React, page: 'Settings', section, project: { id: 'project-a', name: 'Campaign project' }, state: { projectId: 'project-a', user: { id: 'viewer-a', isOperator } }, workspace: { id: 'workspace-a', role: 'admin', name: 'Workspace' }, session: { oidcEnabled: false }, canAdmin: true, sample: false, busy: false, activeProject, pendingKeys, api,
-      Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, Link, Grid, Stack, Card, DangerZoneFlow, Inline, Text, Button, FormActions, AccountSettings, OperationRecovery, TeamSettings, title: value => value, settingsFrame: content => React.createElement(Frame, null, content),
+      Field: () => React.createElement('input', { name: 'name' }), Icon: () => null, Link, Grid, Stack, Card, DangerZoneFlow, Inline, Text, Button, FormActions, AccountSettings, OperationRecovery, TeamSettings, appearance: { theme: 'system' }, title: value => value, settingsFrame: content => React.createElement(Frame, null, content),
       run: () => assert.fail('Rendering must not run an action'), reload: () => assert.fail('Rendering must not reload'), setPage: () => {}, setModal: () => {}, clearSampleData: () => {}, leaveWorkspace: () => {} };
     return new Function(...Object.keys(context), code + '; return render();')(...Object.values(context));
   };
