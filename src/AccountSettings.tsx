@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AccountProfileFlow, Alert, Button, Card, PasswordChangeFlow, Stack, StatusLine, Text, useDisplayFormat, type AccountProfileValues, type AccountTheme, type AuthNotice, type ThemeState } from '@ten98/ui';
+import { AccountProfileFlow, Alert, Button, Card, PasswordChangeFlow, Stack, StatusLine, Text, useConfirmDialog, useDisplayFormat, type AccountProfileValues, type AccountTheme, type AuthNotice, type ThemeState } from '@ten98/ui';
 
 // Settings shows Profile and Security as separate sections; without a part both render together. `appearance` is the
 // shell's useTheme state: the theme is a per-browser preference, and only the display name is stored on the account.
@@ -9,7 +9,7 @@ type Section = 'profile' | 'password' | 'sessions';
 export default function AccountSettings({ request, onChanged, part, appearance }: Props) {
   const [account, setAccount] = useState<any>(null), [busy, setBusy] = useState<Section | ''>(''), [error, setError] = useState(''), [feedback, setFeedback] = useState<{ section: Section; error?: string; notice?: AuthNotice }>();
   const [passwordForm, setPasswordForm] = useState(0);
-  const format = useDisplayFormat();
+  const format = useDisplayFormat(), [confirm, confirmDialog] = useConfirmDialog();
   async function changeAppearance(value: string) {
     if (!['system', 'light', 'dark'].includes(value)) return '';
     return await appearance.setTheme(value as AccountTheme) ? 'Appearance saved for this browser.' : 'Appearance changed for this tab. Your browser could not save this preference.';
@@ -36,7 +36,7 @@ export default function AccountSettings({ request, onChanged, part, appearance }
     {account && security && <PasswordChangeFlow key={passwordForm} {...state('password')} hasPassword={account.localPassword} policy={{ minLength: 12, maxLength: 128 }} messages={{ noPassword: 'Your identity provider manages your password.' }} onSubmit={values => action('password', async () => { await request('/account/password', 'POST', values); setPasswordForm(value => value + 1); }, 'Password changed. Other sessions have been signed out.')}/>}
     {account && security && <Stack gap={2}>
       <Text tone="muted">{format.count(account.activeSessions, { one: 'active session', other: 'active sessions' })}</Text>
-      <Button variant="secondary" disabled={!!busy || account.activeSessions < 2} loading={sessions.busy} onClick={() => action('sessions', async () => { await request('/account/sessions/revoke', 'POST', {}); }, 'Other sessions signed out.')}>Sign out other sessions</Button>
+      <Button variant="secondary" disabled={!!busy || account.activeSessions < 2} loading={sessions.busy} onClick={async () => { if (await confirm({ title: 'Sign out other sessions?', description: 'Every other browser and device signed in to this account is signed out and must sign in again. This one stays signed in.', confirmLabel: 'Sign out other sessions', initialFocus: 'cancel' })) action('sessions', async () => { await request('/account/sessions/revoke', 'POST', {}); }, 'Other sessions signed out.'); }}>Sign out other sessions</Button>{confirmDialog}
       {sessions.error && <Alert tone="danger" title={sessions.error}/>}
       {sessions.notice && <StatusLine tone="success">{sessions.notice.text}</StatusLine>}
     </Stack>}
