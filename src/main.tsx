@@ -274,7 +274,8 @@ function App() {
       if (campaignEditor.current?.busy) throw new Error('Wait for the current campaign operation to finish before leaving.');
       campaignEditor.current?.discard(); campaignGuardChanged(null);
     }
-    const url = navigationUrl(next, window.location.href), current = window.location.pathname + window.location.search + window.location.hash;
+    // While "Page not found" shows, the address stays the unknown one, so a refresh shows the same page.
+    const current = window.location.pathname + window.location.search + window.location.hash, url = next.notFound ? current : navigationUrl(next, window.location.href);
     if (mode === 'push' && url !== current) window.history.pushState({ ...window.history.state, campaignIndex: ++historyIndex.current }, '', url);
     else if (mode !== 'pop') window.history.replaceState({ ...window.history.state, campaignIndex: historyIndex.current }, '', url);
     if (navigationRef.current.page === 'Unified inbox' && (next.page !== 'Unified inbox' || next.projectId !== navigationRef.current.projectId)) inboxDraftChanged(false);
@@ -324,7 +325,8 @@ function App() {
     event?.preventDefault(); if (leaveGuard.pending) leaveGuard.cancel(); else closeEditor();
   }
   function navigate(next: Navigation, mode: 'push' | 'replace' | 'pop' = 'push', popDelta = 0, discardConfirmed = false) {
-    if (next.page === navigationRef.current.page && next.section === navigationRef.current.section && next.projectId === navigationRef.current.projectId && (next.item || '') === (navigationRef.current.item || '')) {
+    // Leaving "Page not found" for the page it fell back to is still a move: the not-found state has to clear.
+    if (next.page === navigationRef.current.page && next.section === navigationRef.current.section && next.projectId === navigationRef.current.projectId && (next.item || '') === (navigationRef.current.item || '') && !next.notFound === !navigationRef.current.notFound) {
       if (activeProject.current !== next.projectId) { ++loadVersion.current; activeProject.current = next.projectId; setLoading(false); }
       return;
     }
