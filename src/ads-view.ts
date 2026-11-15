@@ -1,9 +1,10 @@
 // Display helpers for the Ads manager campaign list and ad detail. Pure: no React, no requests.
-import { createDisplayFormatter, type DisplayFormatter } from '@ten98/ui';
+import type { DisplayFormatter } from '@ten98/ui';
+import { appFormat } from './display-locale.ts';
 type Row = Record<string, any>;
-// Not a component, so by default it formats with the browser's locale and time zone, as the app's DisplayFormatProvider
-// does; a caller (a test) may pass its own formatter.
-const browserFormat = createDisplayFormatter();
+// Not a component, so by default it formats as the app's DisplayFormatProvider does (en-US, the viewer's time zone); a
+// caller (a test) may pass its own formatter.
+const browserFormat = appFormat;
 const present = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 
 // Ported from zernio-dev/ads-dashboard@4386edd lib/date-range.ts (MIT); 'default' keeps the provider's own window.

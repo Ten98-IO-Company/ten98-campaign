@@ -9,6 +9,7 @@ import React from 'react';
 import { Button, Card, DangerZoneFlow, FormActions, Grid, Inline, Link, SegmentedControl, Stack, Text, createDisplayFormatter } from '@ten98/ui';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { transformWithOxc } from 'vite';
+import { testDisplayFormat } from './display-format.ts';
 
 const source = () => readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
 
@@ -173,10 +174,11 @@ test('local campaign results distinguish missing metrics from zero and never dis
   assert.equal(cells.length, 5);
   const declaration = appSource.match(/^const numeric = .+;$/m)[0].replace('(value: unknown): value is number', '(value)');
   const numeric = runInNewContext(declaration + '; numeric');
-  const render = campaign => cells.map(expression => new Function('c', 'numeric', 'compact', 'money', `return (${expression});`)(campaign, numeric, value => String(value), value => `AED ${value}`));
+  const render = campaign => cells.map(expression => new Function('c', 'numeric', 'compact', 'money', 'format', `return (${expression});`)(campaign, numeric, value => String(value), value => `AED ${value}`, testDisplayFormat));
   assert.deepEqual(render({}), ['—', '—', '—', '—', '—']);
   assert.deepEqual(render({ impressions: 100, conversions: 2 }), ['100', '—', '—', 2, '—']);
-  assert.deepEqual(render({ impressions: 100, clicks: 0, conversions: 2, spent: 0 }), ['100', '0', '0.00%', 2, 'AED 0']);
+  assert.deepEqual(render({ impressions: 100, clicks: 0, conversions: 2, spent: 0 }), ['100', '0', '0%', 2, 'AED 0']);
+  assert.deepEqual(render({ impressions: 300, clicks: 1, conversions: 0, spent: 0 }), ['300', '1', '0.33%', 0, '—'], 'CTR rounds to two decimals and drops trailing zeros, as the Ads metrics do.');
   assert.deepEqual(render({ impressions: 0, clicks: 0, conversions: 0, spent: 0 }), ['0', '0', '—', 0, '—']);
   assert.deepEqual(render({ impressions: Infinity, clicks: NaN, conversions: null, spent: undefined }), ['—', '—', '—', '—', '—']);
 });

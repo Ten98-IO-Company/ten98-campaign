@@ -6,6 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import * as design from '@ten98/ui';
 import { transformWithOxc } from 'vite';
+import { displayLocale } from '../src/display-locale.ts';
 
 const source = (await readFile(new URL('../src/ZernioBlogDrafts.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
 const section = (start, end, from = 0) => source.slice(source.indexOf(start, from), source.indexOf(end, source.indexOf(start, from)));
@@ -27,7 +28,7 @@ function browser(kind, initialProps) {
   const useMemo = (make, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) hooks[index] = { value: make(), dependencies }; return hooks[index].value; };
   const useEffect = (run, dependencies) => { const index = cursor++, old = hooks[index]; if (!old || dependencies.some((value, key) => !Object.is(value, old.dependencies[key]))) { hooks[index] = { dependencies, close: old?.close }; queued.push(() => { hooks[index].close?.(); hooks[index].close = run(); }); } };
   const request = async (...args) => { calls.push(args); return props.request(...args); };
-  const components = new Function('React', ...Object.keys(design), 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', componentCode + ';return { ZernioBlogDrafts, BlogDraftComposer, BlogPublicationReview };')(React, ...Object.values(design), useState, useRef, useEffect, useEffect, useMemo);
+  const components = new Function('React', 'displayLocale', ...Object.keys(design), 'useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useMemo', componentCode + ';return { ZernioBlogDrafts, BlogDraftComposer, BlogPublicationReview };')(React, displayLocale, ...Object.values(design), useState, useRef, useEffect, useEffect, useMemo);
   function paint() { for (let pass = 0; dirty; pass++) { assert.ok(pass < 20, 'Rendering settles.'); dirty = false; cursor = 0; tree = components[kind]({ ...props, request }); while (queued.length) queued.shift()(); } }
   const tick = async () => { await new Promise(resolve => setImmediate(resolve)); paint(); };
   const find = predicate => nodes(tree).find(predicate), button = text => find(node => node.type === design.Button && React.Children.toArray(node.props.children).join('') === text);

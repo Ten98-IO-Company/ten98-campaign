@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Card, Checkbox, CheckboxGroup, ConfirmDialog, CopyButton, DataTable, DateTimeField, Dialog, EmptyState, Field, FormGrid, Image, Inline, Input, Link, MetricCard, MetricGrid, Select, Stack, Text, Textarea, useConfirmDialog, useDisplayFormat, type DisplayFormatter } from '@ten98/ui';
 import { ACTIVATION_TYPES, ACTIVATION_TYPE_LABELS, CONSENT_CHANNELS, CONSENT_LABELS, consentChannelList, consentWording, type ActivationType, type ConsentChannel } from '../shared/offline-activations.ts';
 import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
+import { displayLocale } from './display-locale.ts';
 
 type Row = { id: string; [key: string]: any };
 type Material = { label: string; done: boolean };
@@ -17,8 +18,8 @@ const instant = (local: string) => local ? new Date(local).toISOString() : '';
 const amount = (value: string, label: string, whole = false) => { const number = value.trim() === '' ? 0 : Number(value); if (!Number.isFinite(number) || number < 0 || whole && !Number.isInteger(number)) throw new Error(`${label} must be ${whole ? 'a whole number' : 'a number'} of zero or more.`); return number; };
 // Field budgets and spend are shown in whole currency units; the stored amounts are unchanged.
 export const money = (format: DisplayFormatter, value: number, currency = 'AED') => format.currency(value || 0, currency, { wholeUnits: true });
-// The shared formatter has no time-only part, so a same-day end time uses the browser's locale and zone, as the provider does.
-const browserClock = new Intl.DateTimeFormat(undefined, { timeStyle: 'short' });
+// The shared formatter has no time-only part, so a same-day end time uses the app's locale and the viewer's zone, as the provider does.
+const browserClock = new Intl.DateTimeFormat(displayLocale, { timeStyle: 'short' });
 // A same-day activation shows its date once ("Oct 3, 2026, 10:00 AM – 2:00 PM"); one over several days shows both in full.
 export function when(format: DisplayFormatter, activation: Row, clock = browserClock) {
   const start = new Date(activation.startAt), end = new Date(activation.endAt);

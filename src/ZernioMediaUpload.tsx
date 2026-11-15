@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Card, createDisplayFormatter, Disclosure, FileField, FormActions, Inline, Progress, StatusLine, Stack, Text, useDisplayFormat } from '@ten98/ui';
+import { displayLocale } from './display-locale.ts';
 
 type Format = { contentType: string; extensions: string[]; kind: 'image' | 'video' | 'document' };
 type Options = { maxSize: number; formats: Format[]; asset?: { id: string; name?: string; url?: string }; assetVersion?: string; attempts?: Attempt[] };
@@ -11,7 +12,7 @@ const labels: Record<string, string> = { preparing: 'Preparing upload', awaiting
 export function mediaFileMetadata(file: Pick<File, 'name' | 'type' | 'size'>, options: Options) {
   const filename = file.name;
   if (!filename.trim() || filename.length > 255 || /[\u0000-\u001f\u007f/\\]/.test(filename) || ['.', '..'].includes(filename)) throw new Error('Choose a file with a plain filename of up to 255 characters.');
-  if (!Number.isSafeInteger(file.size) || file.size < 1 || file.size > options.maxSize) throw new Error(`Choose a non-empty file no larger than ${createDisplayFormatter().number(options.maxSize / 1_000_000_000)} GB.`);
+  if (!Number.isSafeInteger(file.size) || file.size < 1 || file.size > options.maxSize) throw new Error(`Choose a non-empty file no larger than ${createDisplayFormatter({ locale: displayLocale }).number(options.maxSize / 1_000_000_000)} GB.`);
   const matches = options.formats.filter(format => format.extensions.some(extension => filename.toLowerCase().endsWith('.' + extension.replace(/^\./, '').toLowerCase())));
   const format = file.type ? matches.find(item => item.contentType === file.type.toLowerCase()) : matches[0];
   if (!format) throw new Error('The filename and file type must match a supported image, video or PDF format.');

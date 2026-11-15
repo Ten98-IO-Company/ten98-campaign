@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Disclosure, Field, FormActions, FormGrid, Heading, Inline, Input, Link, Option, Select, Stack, StatusLine, Text, useDisplayFormat, type DataColumn, type DisplayFormatter } from '@ten98/ui';
 import { adSpendBlock, type AdSpendBlock } from './approval-status';
-import { formatMicros, minorDigits } from './google-micros';
+import { formatMicros } from './google-micros';
+import { minorDigits } from './display-locale.ts';
 import AdProviderFrame from './AdProviderFrame';
 import AdSpendNotice from './AdSpendNotice';
 import type { CampaignCreationIntent, CampaignEditorGuard } from './campaign-creation';
