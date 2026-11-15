@@ -59,6 +59,21 @@ test('failed sign-ins from one client behind a trusted proxy leave other clients
   await assert.rejects(auth.login(request('198.51.100.50', '192.0.2.200'), response(), { email: 'other-final@example.test', password: 'wrong password guess' }), error => error.status === 429);
 });
 
+test('successful sign-ins do not use up the per-client limit, while failed ones still do', pg, async t => {
+  const { db } = await testDatabase(t), password = 'shared office fixture password';
+  const people = Array.from({ length: signInLimits.client + 5 }, (_, index) => ({ id: `person-${index}`, name: `Person ${index}`, email: `person-${index}@example.test` }));
+  const hash = await hashPassword(password);
+  await addUsers(db.$client, people.map(person => ({ ...person, password: hash })));
+  const auth = createAuth(db, { sessionSecret: secret, appUrl: 'https://campaign.example' }), office = () => request('198.51.100.20');
+  // More colleagues than the per-client limit sign in from one address: every one succeeds.
+  for (const person of people) assert.equal((await auth.login(office(), response(), { email: person.email, password }))?.id, person.id);
+  // Failed guesses from that address still use the limit up, and a success in between refunds only itself.
+  for (let attempt = 0; attempt < signInLimits.client - 1; attempt++) await assert.rejects(auth.login(office(), response(), { email: `guess-${attempt}@example.test`, password: 'wrong password guess' }), error => error.status === 401);
+  assert.equal((await auth.login(office(), response(), { email: people[0].email, password }))?.id, people[0].id);
+  await assert.rejects(auth.login(office(), response(), { email: 'guess-last@example.test', password: 'wrong password guess' }), error => error.status === 401);
+  await assert.rejects(auth.login(office(), response(), { email: people[1].email, password }), error => error.status === 429, 'The limit holds once failed attempts reach it.');
+});
+
 test('the per-account sign-in limit trips across client addresses, and one client alone cannot reach it', pg, async t => {
   const { db } = await testDatabase(t), password = 'account fixture password 2026';
   await addUsers(db.$client, [{ id: 'member', name: 'Member', email: 'member@example.test', password: await hashPassword(password) }]);
