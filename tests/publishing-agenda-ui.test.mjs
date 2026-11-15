@@ -65,7 +65,7 @@ test('verified Google copies stay deduplicated while cross-month all-day and unr
   const events = [copy, { ...copy, id: 'manual', managed: false }, { id: 'all-day', summary: 'Carry over', start: { date: '2026-09-30' }, end: { date: '2026-10-02' } }, { id: 'expired', summary: 'Ends before month', start: { date: '2026-09-29' }, end: { date: '2026-10-01' } }, { id: 'next-month', summary: 'Later', start: { date: '2026-11-01' }, end: { date: '2026-11-02' } }];
   const component = Agenda({ posts, googleEvents: overlay(events, posts, 'project'), month: new Date(2026, 9, 1), canWrite: false, postLabel, onSelect() {} }), shared = find(component, ofType(PublishingAgenda));
   assert.deepEqual(shared.props.entries.map(entry => entry.id), ['google:all-day', 'post:post', 'google:manual']);
-  assert.equal(shared.props.entries[0].when, '2026-09-30 – 2026-10-02');
+  assert.equal(shared.props.entries[0].when, 'Sep 30, 2026 – Oct 2, 2026', 'All-day dates are calendar days in every time zone.');
   assert.equal(shared.props.entries[0].status, 'All day · End date exclusive');
   assert.equal(shared.props.entries[0].actions, undefined);
   assert.equal(shared.props.onSelect, undefined, 'Google records must not become dead selection buttons.');

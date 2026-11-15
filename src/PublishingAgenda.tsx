@@ -124,7 +124,7 @@ export default function CampaignPublishingAgenda({ posts: scheduled, records = [
     // The Google overlay toggle hides events without changing what was loaded.
     if (filters.googleHidden) { googleHidden++; continue; }
     entries.push({ id: `google:${event.id}`, title: `Google · ${event.summary}`, dateTime, order: date.getTime(),
-      when: allDay ? `${event.start.date} – ${event.end.date}` : format.dateTime(date),
+      when: allDay ? `${format.date(event.start.date)} – ${format.date(event.end.date)}` : format.dateTime(date),
       status: allDay ? 'All day · End date exclusive' : 'Google Calendar event', actions: googleEventActions?.(event),
     });
     // Google entries stay plain text in the grid: their actions live in the list and week views.
