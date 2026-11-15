@@ -1,4 +1,5 @@
 import React, { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { AppIcon as Icon, AppBrand as Brand, AppField as Field, AppBadge, AppStat as Stat, AppSelect } from '@ten98/ui/app';
 import { ActivityFeed, Avatar, Badge as UiBadge, Icon as UiIcon, BarList, Image, DataTable, type DataColumn, Grid, Meter, ProportionBar, SegmentedControl, Select as UiSelect, SelectableList, Skeleton, Stack, Text } from '@ten98/ui';
@@ -218,7 +219,13 @@ function App() {
   function markEditorDirty(target: Element) {
     if (modalRef.current?.type === 'campaign-start') return;
     const scope = target.closest('form') || target.closest('section') || dialogRef.current;
-    if (scope && dialogRef.current?.contains(scope)) { dirtyScopes.current.set(scope, (dirtyScopes.current.get(scope) || 0) + 1); setDraftDirty(true); }
+    if (!scope || !dialogRef.current?.contains(scope)) return;
+    dirtyScopes.current.set(scope, (dirtyScopes.current.get(scope) || 0) + 1);
+    // The flag follows in a new task, after React has committed the field's own update: re-rendering the editor shell from
+    // this capture-phase handler dropped the first change of a controlled field, such as the post caption (#334). Editor
+    // exits (leaveEditor, Back) decide from the scope map, which is current at once, and render the flag into the shared
+    // guard before asking it; a scope cleared by closing the editor meanwhile stays clean.
+    setTimeout(() => { if (dirtyScopes.current.has(scope)) setDraftDirty(true); });
   }
   function editorSaved(scope: Element, revision = dirtyScopes.current.get(scope)) {
     if (dirtyScopes.current.get(scope) === revision) { dirtyScopes.current.delete(scope); setDraftDirty(dirtyScopes.current.size > 0); }
@@ -316,7 +323,12 @@ function App() {
       }
       action();
     };
-    if (modalRef.current && draftDirty || includeInbox && inboxDraft.current.dirty || guard?.dirty) { discardSwitch.current = includeInbox; void leaveGuard.leave(() => proceed(true), includeInbox ? { confirmLabel: 'Discard and switch' } : undefined); }
+    const editorDirty = !!modalRef.current && (draftDirty || dirtyScopes.current.size > 0);
+    if (editorDirty || includeInbox && inboxDraft.current.dirty || guard?.dirty) {
+      // The shared guard answers from its last render; an edit whose dirty flag is still queued (markEditorDirty) is
+      // rendered into it first, so the exit asks rather than closing the editor.
+      if (editorDirty && !draftDirty) flushSync(() => setDraftDirty(true));
+      discardSwitch.current = includeInbox; void leaveGuard.leave(() => proceed(true), includeInbox ? { confirmLabel: 'Discard and switch' } : undefined); }
     else proceed();
   }
   // The discard prompt is a second modal dialog, so the editor's native focus return lands on a closed dialog; refocus its opener.
@@ -453,7 +465,7 @@ function App() {
         return;
       }
       const route = { ...next, projectId: next.projectId || state?.projectId || '' }, current = navigationRef.current;
-      if ((modalRef.current && draftDirty || inboxDraft.current.dirty || campaignEditor.current?.dirty || campaignEditor.current?.busy) && delta && (route.page !== current.page || route.section !== current.section || route.projectId !== current.projectId)) {
+      if ((modalRef.current && (draftDirty || dirtyScopes.current.size > 0) || inboxDraft.current.dirty || campaignEditor.current?.dirty || campaignEditor.current?.busy) && delta && (route.page !== current.page || route.section !== current.section || route.projectId !== current.projectId)) {
         restoringPop.current = () => leaveEditor(() => {
           restoringPop.current = () => { historyIndex.current = targetIndex; navigate(route, 'pop', delta, true); };
           window.history.go(delta);
